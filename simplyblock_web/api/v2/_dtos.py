@@ -1,0 +1,1012 @@
+from datetime import UTC, datetime, timedelta
+from ipaddress import IPv4Address
+from typing import Literal, cast
+from uuid import UUID
+
+from fastapi import Request
+from pydantic import BaseModel, SecretStr, field_serializer
+
+from simplyblock_core.controllers import migration_controller
+from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup_config import (
+    BackupConfig,
+    BackupLocation,
+    UnresolvedBackupConfig,
+)
+from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.events import EventObj
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.stats import StatsObject
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils import hexa_to_cpu_list
+from simplyblock_core.utils.nvme import NvmeConnectEntry
+
+from . import util
+
+AlertSeverity = Literal[
+    "critical",
+    "warning",
+]
+
+
+AlertStatus = Literal[
+    "firing",
+    "resolved",
+]
+
+
+ClusterStatus = Literal[
+    "active",
+    "read_only",
+    "inactive",
+    "suspended",
+    "degraded",
+    "unready",
+    "in_activation",
+    "in_expansion",
+    "in_shrink",
+]
+
+StoragePoolStatus = Literal["active", "inactive"]
+
+StorageNodeStatus = Literal[
+    "online",
+    "offline",
+    "suspended",
+    "in_shutdown",
+    "removed",
+    "in_restart",
+    "in_creation",
+    "unreachable",
+    "schedulable",
+    "down",
+    "in_removal",
+    "pending_removal",
+]
+
+TaskStatus = Literal["new", "running", "suspended", "done"]
+
+ReplicationTargetStatus = Literal["active", "inactive"]
+
+ReplicationPolicyStatus = Literal["active", "inactive"]
+
+ReplicationMode = Literal["failover", "migration"]
+
+FailoverStatus = Literal["failed_over", "skipped", "failed"]
+
+ReplicationState = Literal["replicating", "cutover_pending", "cutover_done", "failed_over"]
+
+ReplicationDirection = Literal["to_target", "to_source"]
+
+TaskFunctionName = Literal[
+    "device_restart",
+    "node_restart",
+    "device_migration",
+    "failed_device_migration",
+    "new_device_migration",
+    "node_add",
+    "port_allow",
+    "balancing_on_restart",
+    "balancing_on_dev_rem",
+    "balancing_on_dev_add",
+    "jc_comp_resume",
+    "snapshot_replication",
+    "lvol_sync_del",
+    "lvol_migration",
+    "s3_backup",
+    "s3_backup_restore",
+    "s3_backup_merge",
+]
+
+
+class CapacityStatDTO(BaseModel):
+    date: int
+    size_total: int
+    size_prov: int
+    size_used: int
+    size_free: int
+    size_util: int
+
+    @staticmethod
+    def from_model(model: StatsObject):
+        return CapacityStatDTO(
+            date=model.date,
+            size_total=model.size_total,
+            size_prov=model.size_prov,
+            size_used=model.size_used,
+            size_free=model.size_free,
+            size_util=model.size_util,
+        )
+
+
+class ClusterDTO(BaseModel):
+    id: UUID
+    name: str | None
+    nqn: str
+    status: ClusterStatus
+    is_re_balancing: bool
+    block_size: util.Unsigned
+    distr_ndcs: int
+    distr_npcs: int
+    ha: bool
+    utilization_critical: util.Percent
+    utilization_warning: util.Percent
+    provisioned_capacity_critical: util.Unsigned
+    provisioned_capacity_warning: util.Unsigned
+    node_affinity: bool
+    anti_affinity: bool
+    enable_failure_domain: bool
+    device_mode: str
+    inline_checksum: bool
+    atomic_4k: bool
+    secret: SecretStr
+    tls_enabled: bool
+    max_fault_tolerance: int
+    backup_enabled: bool
+    capacity: CapacityStatDTO
+
+    @field_serializer('secret', when_used='json')
+    def _unwrap_secret_for_json(self, value: SecretStr) -> str:
+        return value.get_secret_value()
+
+    @staticmethod
+    def from_model(model: Cluster, stat_obj: StatsObject | None = None):
+        return ClusterDTO(
+            id=UUID(model.get_id()),
+            name=model.cluster_name,
+            nqn=model.nqn,
+            status=cast(ClusterStatus, model.status),
+            is_re_balancing=model.is_re_balancing,
+            block_size=model.blk_size,
+            distr_ndcs=model.distr_ndcs,
+            distr_npcs=model.distr_npcs,
+            ha=model.ha_type == "ha",
+            utilization_warning=model.cap_warn,
+            utilization_critical=model.cap_crit,
+            provisioned_capacity_warning=model.prov_cap_warn,
+            provisioned_capacity_critical=model.prov_cap_crit,
+            node_affinity=model.enable_node_affinity,
+            anti_affinity=model.strict_node_anti_affinity,
+            enable_failure_domain=model.enable_failure_domain,
+            device_mode=model.device_mode,
+            inline_checksum=model.inline_checksum,
+            atomic_4k=model.atomic_4k,
+            secret=model.secret,
+            tls_enabled=model.tls,
+            max_fault_tolerance=model.max_fault_tolerance,
+            backup_enabled=bool(model.backup_config),
+            capacity=CapacityStatDTO.from_model(
+                stat_obj if stat_obj else StatsObject()
+            ),
+        )
+
+
+class ClusterLogEntryDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    date: datetime
+    node_id: str
+    event: str
+    level: str
+    message: str
+    storage_id: util.OptionalIndex
+    vuid: int | None
+    status: str
+
+    @staticmethod
+    def from_model(model: EventObj):
+        storage_id = (
+            model.storage_id if model.storage_id >= 0
+            else model.object_dict.get('cluster_device_order')
+        )
+
+        message = model.message
+        if model.event in ("device_status", "node_status"):
+            message = f"{message} ({model.count})"
+
+        return ClusterLogEntryDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_uuid),
+            date=datetime.fromtimestamp(model.date / 1000, tz=UTC),
+            node_id=model.node_id,
+            event=model.event,
+            level=model.event_level,
+            message=message,
+            storage_id=storage_id,
+            vuid=model.vuid if model.vuid > 0 else None,
+            status=model.status,
+        )
+
+
+class DeviceDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    storage_node_id: UUID
+    model: str
+    serial_number: str
+    nvme_controller: str
+    pcie_address: str
+    bdev_type: str = "nvme"
+    device_path: str = ""
+    status: str
+    # None => health check not applicable (owning node not ONLINE/DOWN)
+    health_check: bool | None
+    retries_exhausted: bool
+    size: int
+    # None until the device joins the cluster map (i.e. while it is `new`)
+    cluster_device_order: util.OptionalIndex
+    io_error: bool
+    is_partition: bool
+    nvmf_ips: list[IPv4Address]
+    nvmf_nqn: str = ""
+    nvmf_port: int = 0
+    capacity: CapacityStatDTO
+
+    @staticmethod
+    def from_model(model: NVMeDevice, storage_node_id: str, stat_obj: StatsObject | None = None):
+        return DeviceDTO(
+            id=UUID(model.get_id()),
+            cluster_id=UUID(model.cluster_id),
+            storage_node_id=UUID(storage_node_id),
+            model=model.model_id,
+            serial_number=model.serial_number,
+            nvme_controller=model.nvme_controller,
+            pcie_address=model.pcie_address,
+            bdev_type=model.bdev_type,
+            device_path=model.device_path,
+            status=model.status,
+            health_check=model.health_check,
+            retries_exhausted=model.retries_exhausted,
+            size=model.size,
+            cluster_device_order=model.cluster_device_order,
+            io_error=model.io_error,
+            is_partition=model.is_partition,
+            # Empty until the device stack is created, so a `new` device has none
+            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",") if ip],
+            nvmf_nqn=model.nvmf_nqn,
+            nvmf_port=model.nvmf_port,
+            capacity=CapacityStatDTO.from_model(
+                stat_obj if stat_obj else StatsObject()
+            ),
+        )
+
+
+class ManagementNodeDTO(BaseModel):
+    id: UUID
+    status: str
+    hostname: str
+    ip: IPv4Address
+
+    @staticmethod
+    def from_model(model: MgmtNode):
+        return ManagementNodeDTO(
+            id=UUID(model.get_id()),
+            status=model.status,
+            hostname=model.hostname,
+            ip=IPv4Address(model.mgmt_ip),
+        )
+
+
+class StoragePoolDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    name: str
+    status: StoragePoolStatus
+    max_size: util.Unsigned
+    volume_max_size: util.Unsigned
+    max_rw_iops: util.Unsigned
+    max_rw_mbytes: util.Unsigned
+    max_r_mbytes: util.Unsigned
+    max_w_mbytes: util.Unsigned
+    capacity: CapacityStatDTO | None
+    dhchap: bool = False
+    allowed_hosts: list[util.NQN] = []
+
+    @staticmethod
+    def from_model(model: Pool, stat_obj: StatsObject | None = None):
+        return StoragePoolDTO(
+            id=UUID(model.get_id()),
+            cluster_id=UUID(model.cluster_id),
+            name=model.pool_name,
+            status=cast(StoragePoolStatus, model.status),
+            max_size=model.pool_max_size,
+            volume_max_size=model.lvol_max_size,
+            max_rw_iops=model.max_rw_ios_per_sec,
+            max_rw_mbytes=model.max_rw_mbytes_per_sec,
+            max_r_mbytes=model.max_r_mbytes_per_sec,
+            max_w_mbytes=model.max_w_mbytes_per_sec,
+            dhchap=getattr(model, 'dhchap', False),
+            allowed_hosts=list(getattr(model, 'allowed_hosts', [])),
+            capacity=CapacityStatDTO.from_model(stat_obj) if stat_obj else None,
+        )
+
+
+class SnapshotDTO(BaseModel):
+    id: UUID
+    name: str
+    status: str
+    health_check: bool
+    size: util.Unsigned
+    used_size: util.Unsigned
+    migrating: bool
+    lvol: util.UrlPath | None
+    created_at: datetime
+    group_id: str
+    group_seq: int
+
+
+    @staticmethod
+    def from_model(
+        model: SnapShot, request: Request, cluster_id, pool_id
+    ):
+        is_migrating = False
+        if model.lvol is not None:
+            active_mig = migration_controller.get_active_migration_for_lvol(
+                model.lvol.uuid
+            )
+            is_migrating = active_mig is not None
+
+        return SnapshotDTO(
+            id=model.get_id(),
+            name=model.snap_name,
+            status=model.status,
+            health_check=model.health_check,
+            size=model.size,
+            used_size=model.used_size,
+            migrating=is_migrating,
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
+            lvol=str(
+                request.url_for(
+                    #"clusters:pools:volumes:detail",
+                    "clusters:storage-pools:volumes:detail",
+                    cluster_id=cluster_id,
+                    pool_id=pool_id,
+                    volume_id=model.lvol.get_id(),
+                )
+            )
+            if model.lvol is not None
+            else None,
+        )
+
+
+class StorageNodeDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    secondary_node_id: UUID | None
+    status: StorageNodeStatus
+    uptime: timedelta | None
+    hostname: str
+    host_nqn: str
+    cpu_total_count: util.Unsigned
+    cpu_spdk_count: util.Unsigned
+    cpu_poller_count: util.Unsigned
+    memory: util.Unsigned
+    hugepage_memory: util.Unsigned
+    spdk_mem: int
+    lvols: int
+    lvols_max: util.Unsigned
+    snapshots_max: util.Unsigned
+    rpc_port: util.Port
+    lvol_subsys_port: util.Port
+    hublvol_port: util.Port
+    nvmf_port: util.Port
+    mgmt_ip: IPv4Address
+    # None => health check not applicable (node not ONLINE/DOWN)
+    health_check: bool | None
+    device_count: int
+    online_device_count: int
+    failure_domain: int
+    capacity: CapacityStatDTO
+
+    @staticmethod
+    def from_model(model: StorageNode, stat_obj: StatsObject | None = None):
+        return StorageNodeDTO(
+            id=UUID(model.get_id()),
+            cluster_id=UUID(model.cluster_id),
+            secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
+            status=cast(StorageNodeStatus, model.status),
+            uptime=model.uptime(),
+            hostname=model.hostname,
+            host_nqn=model.host_nqn,
+            cpu_total_count=model.cpu,
+            cpu_spdk_count=len(hexa_to_cpu_list(model.spdk_cpu_mask)),
+            cpu_poller_count=len(model.poller_cpu_cores),
+            memory=model.memory,
+            hugepage_memory=model.hugepages,
+            spdk_mem=model.spdk_mem,
+            lvols=model.lvols,
+            lvols_max=model.max_lvol,
+            snapshots_max=model.max_snap,
+            rpc_port=model.rpc_port,
+            lvol_subsys_port=model.lvol_subsys_port,
+            hublvol_port=model.get_hublvol_port(),
+            nvmf_port=model.nvmf_port,
+            mgmt_ip=IPv4Address(model.mgmt_ip),
+            health_check=model.health_check,
+            device_count=len(model.nvme_devices),
+            online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
+            failure_domain=model.failure_domain,
+            capacity=CapacityStatDTO.from_model(
+                stat_obj if stat_obj else StatsObject()
+            ),
+        )
+
+
+class TaskDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    device_id: UUID | None
+    storage_node_id: UUID | None
+    status: TaskStatus
+    canceled: bool
+    function_name: TaskFunctionName
+    function_params: dict
+    function_result: str
+    max_retry: util.Unsigned | None
+    retry: util.Unsigned
+
+    @staticmethod
+    def from_model(model: JobSchedule):
+        return TaskDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            device_id=UUID(model.device_id) if model.device_id != "" else None,
+            storage_node_id=UUID(model.node_id)
+            if model.node_id != ""
+            else None,
+            status=cast(TaskStatus, model.status),
+            canceled=model.canceled,
+            function_name=cast(TaskFunctionName, model.function_name),
+            function_params=model.function_params,
+            function_result=model.function_result,
+            max_retry=model.max_retry if model.max_retry >= 0 else None,
+            retry=model.retry,
+        )
+
+
+class VolumeDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    storage_node_id: UUID
+    name: str
+    status: str
+    health_check: bool
+    io_error: bool
+    migrating: bool
+    nqn: str
+    hostname: str
+    priority_class: util.Unsigned
+    namespace: str
+    fabric: str
+    nodes: list[util.UrlPath]
+    port: util.Port
+    size: util.Unsigned
+    ndcs: int
+    npcs: int
+    pool_uuid: str
+    pool_name: str
+    pvc_name: str = ""
+    snapshot_name: str = ""
+    blobid: int
+    ns_id: int
+    cloned_from: util.UrlPath | None
+    high_availability: bool
+    do_replicate: bool = False
+    max_namespace_per_subsys: int
+    max_rw_iops: util.Unsigned
+    max_rw_mbytes: util.Unsigned
+    max_r_mbytes: util.Unsigned
+    max_w_mbytes: util.Unsigned
+    allowed_hosts: list[util.NQN]
+    policy: str
+    capacity: CapacityStatDTO
+    rep_info: dict | None = None
+    from_source: bool = True
+    group_id: str = ""
+    group_seq: int = 0
+
+    @staticmethod
+    def from_model(
+        model: LVol,
+        request: Request,
+        cluster_id: str,
+        stat_obj: StatsObject | None = None,
+        rep_info=None,
+    ):
+        active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
+        _db = DBController()
+        eff_policy = _db.get_policy_for_lvol(model)
+        # Surface consistency-group membership (design §10): the migration
+        # webhook (§9.5) reads group_id to decide whether a volume is a member.
+        # group_id is the denormalized field on the volume; group_seq is the
+        # group's latest generation, resolved only for an actual member.
+        _grp_seq = 0
+        if model.group_id:
+            try:
+                _grp_seq = _db.get_consistency_group_by_id(model.group_id).last_group_seq
+            except KeyError:
+                # Missing/deleted consistency-group record is tolerated here;
+                # keep default group_seq=0 for non-resolvable membership.
+                _grp_seq = 0
+        return VolumeDTO(
+            id=UUID(model.get_id()),
+            cluster_id=UUID(cluster_id),
+            storage_node_id=UUID(model.node_id),
+            name=model.lvol_name,
+            status=model.status,
+            health_check=model.health_check,
+            io_error=model.io_error,
+            migrating=active_mig is not None,
+            nqn=model.nqn,
+            hostname=model.hostname,
+            priority_class=model.lvol_priority_class,
+            namespace=model.namespace,
+            fabric=model.fabric,
+            nodes=[
+                str(
+                    request.url_for(
+                        "clusters:storage-nodes:detail",
+                        cluster_id=cluster_id,
+                        storage_node_id=node_id,
+                    )
+                )
+                for node_id in model.nodes
+            ],
+            port=model.subsys_port,
+            size=model.size,
+            cloned_from=str(
+                request.url_for(
+                    "clusters:storage-pools:snapshots:detail",
+                    cluster_id=cluster_id,
+                    pool_id=model.pool_uuid,
+                    snapshot_id=model.cloned_from_snap,
+                )
+            )
+            if model.cloned_from_snap
+            else None,
+            high_availability=model.ha_type == "ha",
+            pool_uuid=model.pool_uuid,
+            pool_name=model.pool_name,
+            pvc_name=model.pvc_name,
+            snapshot_name=model.snapshot_name,
+            ndcs=model.ndcs,
+            npcs=model.npcs,
+            blobid=model.blobid,
+            ns_id=model.ns_id,
+            do_replicate=model.do_replicate,
+            max_namespace_per_subsys=model.max_namespace_per_subsys,
+            max_rw_iops=model.rw_ios_per_sec,
+            max_rw_mbytes=model.rw_mbytes_per_sec,
+            max_r_mbytes=model.r_mbytes_per_sec,
+            max_w_mbytes=model.w_mbytes_per_sec,
+            allowed_hosts=[h["nqn"] for h in (model.allowed_hosts or [])],
+            policy=eff_policy.policy_name if eff_policy else "",
+            capacity=CapacityStatDTO.from_model(
+                stat_obj if stat_obj else StatsObject()
+            ),
+            rep_info=rep_info,
+            from_source=model.from_source,
+            group_id=model.group_id,
+            group_seq=_grp_seq,
+        )
+
+
+#: A resolved backup configuration as the API exchanges it, in both directions:
+#: the response body of the backup-config GET, and the request body of discover.
+#: Both name a bucket -- one reads back what a cluster resolved, and the other
+#: points at somebody else's bucket, which only the caller can name.
+#:
+#: An alias rather than a hand-copied duplicate, because the two shapes are
+#: identical today and a copy would only drift. It is still a name of its own, so
+#: the wire format can diverge from ``BackupConfig`` later by turning this into a
+#: real class, without touching a single route signature.
+BackupConfigDTO = BackupConfig
+
+#: The same configuration as the cluster-create request body takes it, where the
+#: bucket is the one field a caller cannot supply: it is derived from the id of
+#: the cluster the request is asking to create. ``Cluster.set_backup_config``
+#: resolves it, so this shape reaches nothing beyond that call.
+UnresolvedBackupConfigDTO = UnresolvedBackupConfig
+
+#: Where a set of backups lives, without the credentials to reach it. Carried
+#: inside an export rather than named beside one: the manifests describe objects
+#: and not where they are, so the document that collects them says instead.
+BackupLocationDTO = BackupLocation
+
+#: A backup's manifest as the API exchanges it: the response body of
+#: export/discover and the entries of an inline import.
+#:
+#: An alias for the same reason ``BackupConfigDTO`` is one -- except that here the
+#: shapes have a reason to stay locked together, since the wire form of a manifest
+#: is also its form in the bucket. Naming it separately still lets the API grow a
+#: field the stored document does not have.
+BackupManifestDTO = BackupManifest
+
+#: Backups as export and inline import exchange them: manifests grouped by the
+#: bucket they live in. Grouped because one cluster can hold backups in several
+#: -- its own and any it imported -- so a single location cannot describe them.
+BackupExportDTO = BackupExport
+
+
+class BackupDTO(BaseModel):
+    id: UUID
+    s3_id: int
+    lvol_id: UUID
+    lvol_name: str
+    snapshot_id: UUID
+    snapshot_name: str
+    node_id: UUID
+    status: str
+
+    #: Absent for a full backup, which is the root of its chain. The record
+    #: spells that "", as it does every unset id; the wire says null, the way
+    #: ``DeviceDTO`` and ``LVolDTO`` already do for theirs.
+    prev_backup_id: UUID | None = None
+
+    size: int
+    created_at: int
+    completed_at: int
+    encrypted: bool
+
+    @staticmethod
+    def from_model(model: Backup):
+        return BackupDTO(
+            id=UUID(model.uuid),
+            s3_id=model.s3_id,
+            lvol_id=UUID(model.lvol_id),
+            lvol_name=model.lvol_name,
+            snapshot_id=UUID(model.snapshot_id),
+            snapshot_name=model.snapshot_name,
+            node_id=UUID(model.node_id),
+            status=model.status,
+            prev_backup_id=UUID(model.prev_backup_id) if model.prev_backup_id else None,
+            size=model.size,
+            created_at=model.created_at,
+            completed_at=model.completed_at,
+            encrypted=model.encrypted,
+        )
+
+
+class BackupPolicyDTO(BaseModel):
+    id: UUID
+    name: str
+    max_versions: int
+    max_age: str
+    backup_schedule: str
+    status: str
+
+    @staticmethod
+    def from_model(model: BackupPolicy):
+        return BackupPolicyDTO(
+            id=UUID(model.uuid),
+            name=model.policy_name,
+            max_versions=model.max_versions,
+            max_age=model.max_age_display,
+            backup_schedule=model.backup_schedule or "",
+            status=model.status,
+        )
+
+
+def _record_uuid(record_id: str) -> UUID:
+    """Replication records carry a composite ``cluster_id/uuid`` id."""
+    return UUID(record_id.split('/')[-1])
+
+
+class ReplicationTargetDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    target_name: str
+    target_cluster_id: UUID
+    target_pool_uuid: util.OptionalUUID
+    timeout_sec: util.Unsigned
+    status: ReplicationTargetStatus
+
+    @staticmethod
+    def from_model(model: ReplicationTarget):
+        return ReplicationTargetDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            target_name=model.target_name,
+            target_cluster_id=UUID(model.target_cluster_id),
+            target_pool_uuid=UUID(model.target_pool_uuid) if model.target_pool_uuid else None,
+            timeout_sec=model.timeout_sec,
+            status=cast(ReplicationTargetStatus, model.status),
+        )
+
+
+class ReplicationPolicyDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    policy_name: str
+    target_id: UUID
+    interval_min: util.Unsigned
+    mode: ReplicationMode
+    keep_replicated: int
+    status: ReplicationPolicyStatus
+    consistency_group: bool = False
+    #: Pinned placement of the policy's consistency group, set by its first
+    #: member: every further member volume must be created on this node/LVS.
+    #: The operator reads these to place new volumes; null until the first
+    #: member joins (or for a policy without a consistency group).
+    group_node_id: util.OptionalUUID = None
+    group_lvs_name: str = ""
+    group_last_seq: int = 0
+
+    @staticmethod
+    def from_model(model: ReplicationPolicy, group: ConsistencyGroup | None = None):
+        return ReplicationPolicyDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            policy_name=model.policy_name,
+            target_id=_record_uuid(model.target_id),
+            interval_min=model.interval_min,
+            mode=cast(ReplicationMode, model.mode),
+            keep_replicated=model.keep_replicated,
+            status=cast(ReplicationPolicyStatus, model.status),
+            consistency_group=bool(getattr(model, 'consistency_group', False)),
+            group_node_id=UUID(group.node_id) if group is not None and group.node_id else None,
+            group_lvs_name=group.lvs_name if group is not None else "",
+            group_last_seq=group.last_group_seq if group is not None else 0,
+        )
+
+
+class ConsistencyGroupDTO(BaseModel):
+    """A standalone consistency group summary (design §10)."""
+    id: UUID
+    cluster_id: UUID
+    name: str
+    node_id: util.OptionalUUID = None
+    lvs_name: str = ""
+    member_count: int
+    last_group_seq: int
+
+    @staticmethod
+    def from_model(model: ConsistencyGroup):
+        current = sum(1 for m in (model.members or {}).values()
+                      if m.get("removed_seq", 0) == 0)
+        return ConsistencyGroupDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            name=model.group_name,
+            node_id=UUID(model.node_id) if model.node_id else None,
+            lvs_name=model.lvs_name,
+            member_count=current,
+            last_group_seq=model.last_group_seq,
+        )
+
+
+class ConsistencyGroupMemberDTO(BaseModel):
+    """One current member of a consistency group (design §10 /members)."""
+    lvol_id: str
+    joined_seq: int
+    removed_seq: int
+    node_id: str
+    lvs_name: str
+    online: bool
+
+
+class ConsistencyGroupMemberJoinDTO(BaseModel):
+    """Request body for the late join of an existing volume (design §4.5)."""
+    lvol_id: str
+
+
+class ConsistencyGroupGenerationMemberDTO(BaseModel):
+    lvol_id: str
+    snapshot_id: str
+    ready: bool
+
+
+class ConsistencyGroupGenerationDTO(BaseModel):
+    """One generation of a consistency group (design §6.3)."""
+    group_seq: int
+    created_at: int
+    expected: int
+    present: int
+    complete: bool
+    members: list[ConsistencyGroupGenerationMemberDTO]
+
+
+class ReplicationRelationshipDTO(BaseModel):
+    replication_id: UUID
+    source_lvol_id: util.OptionalUUID
+    target_lvol_id: util.OptionalUUID
+    source_cluster_id: util.OptionalUUID
+    target_cluster_id: util.OptionalUUID
+    target_pool_id: util.OptionalUUID = None
+    mode: ReplicationMode
+    state: ReplicationState
+    direction: ReplicationDirection
+    target_nqn: str
+    target_ns_id: int
+    is_source: bool
+    active: str | None = None
+    active_lvol_id: util.OptionalUUID = None
+
+
+class FailoverResultDTO(BaseModel):
+    lvol_id: UUID
+    status: FailoverStatus
+    detail: str | None = None
+    target_lvol_id: util.OptionalUUID = None
+    connection_strings: list[NvmeConnectEntry] = []
+
+
+class MigrationDTO(BaseModel):
+    id: UUID
+    lvol_id: str
+    source_node_id: str
+    target_node_id: str
+    phase: str
+    status: str
+    snaps_total: int
+    snaps_migrated: int
+    intermediate_snap_rounds: int
+    max_intermediate_snap_rounds: int
+    retry_count: int
+    max_retries: int
+    error_message: str
+    started_at: int
+    completed_at: int
+    connect_strings: list[NvmeConnectEntry] = []
+
+    @staticmethod
+    def from_model(model: LVolMigration, connect_strings: list[NvmeConnectEntry] | None = None):
+        return MigrationDTO(
+            id=UUID(model.uuid),
+            lvol_id=model.lvol_id,
+            source_node_id=model.source_node_id,
+            target_node_id=model.target_node_id,
+            phase=model.phase,
+            status=model.status,
+            snaps_total=len(model.snap_migration_plan),
+            snaps_migrated=len(model.snaps_migrated),
+            intermediate_snap_rounds=model.intermediate_snap_rounds,
+            max_intermediate_snap_rounds=model.max_intermediate_snap_rounds,
+            retry_count=model.retry_count,
+            max_retries=model.max_retries,
+            error_message=model.error_message or "",
+            started_at=model.started_at,
+            completed_at=model.completed_at,
+            connect_strings=connect_strings or [],
+        )
+
+
+class BatchMigrationDTO(BaseModel):
+    id: UUID
+    cluster_id: str
+    source_node_id: str
+    target_node_id: str
+    target_nqn: str
+    phase: str
+    status: str
+    member_count: int
+    error_message: str
+    connect_strings: list[NvmeConnectEntry] = []
+
+    @staticmethod
+    def from_model(model: LVolMigrationGroup, connect_strings: list[NvmeConnectEntry] | None = None):
+        return BatchMigrationDTO(
+            id=UUID(model.uuid),
+            cluster_id=model.cluster_id,
+            source_node_id=model.source_node_id,
+            target_node_id=model.target_node_id,
+            target_nqn=model.target_nqn,
+            phase=model.phase,
+            status=model.status,
+            member_count=model.member_count(),
+            error_message=model.error_message or "",
+            connect_strings=connect_strings or [],
+        )
+
+
+class DeviceHealthInfoDTO(BaseModel):
+    id: UUID
+    model_number: str
+    serial_number: str
+    firmware_revision: str
+    traddr: str
+    critical_warning: int
+    temperature_celsius: int
+    available_spare_percentage: int
+    available_spare_threshold_percentage: int
+    percentage_used: int
+    data_units_read: int
+    data_units_written: int
+    host_read_commands: int
+    host_write_commands: int
+    controller_busy_time: int
+    power_cycles: int
+    power_on_hours: int
+    unsafe_shutdowns: int
+    media_errors: int
+    num_err_log_entries: int
+    warning_temperature_time_minutes: int
+    critical_composite_temperature_time_minutes: int
+
+
+    @staticmethod
+    def from_model(model: NVMeDevice, health_info: dict):
+        return DeviceHealthInfoDTO(
+            id=UUID(model.get_id()),
+            model_number=health_info["model_number"],
+            serial_number=health_info["serial_number"],
+            firmware_revision=health_info["firmware_revision"],
+            traddr=health_info["traddr"],
+            critical_warning=health_info["critical_warning"],
+            temperature_celsius=health_info["temperature_celsius"],
+            available_spare_percentage=health_info["available_spare_percentage"],
+            available_spare_threshold_percentage=health_info["available_spare_threshold_percentage"],
+            percentage_used=health_info["percentage_used"],
+            data_units_read=health_info["data_units_read"],
+            data_units_written=health_info["data_units_written"],
+            host_read_commands=health_info["host_read_commands"],
+            host_write_commands=health_info["host_write_commands"],
+            controller_busy_time=health_info["controller_busy_time"],
+            power_cycles=health_info["power_cycles"],
+            power_on_hours=health_info["power_on_hours"],
+            unsafe_shutdowns=health_info["unsafe_shutdowns"],
+            media_errors=health_info["media_errors"],
+            num_err_log_entries=health_info["num_err_log_entries"],
+            warning_temperature_time_minutes=health_info["warning_temperature_time_minutes"],
+            critical_composite_temperature_time_minutes=health_info["critical_composite_temperature_time_minutes"],
+        )
+
+
+class AlertDTO(BaseModel):
+    """One condition that currently needs an operator.
+
+    Deliberately NOT an EventObj. An event is a journal entry -- it happened,
+    it is kept forever, and nothing ever retracts it. An alert is a claim
+    about the present that goes away by itself when it stops being true, so
+    it carries the object it is about and the time the condition started
+    rather than the time something was logged. ``id`` is derived from the
+    kind and the object, so it is stable across polls and a consumer can
+    dedupe on it without keeping state.
+    """
+    id: str
+    kind: str
+    severity: AlertSeverity
+    status: AlertStatus
+    message: str
+    cluster_id: UUID
+    node_id: UUID | None
+    device_id: UUID | None
+    since: str | None
+    first_seen: str | None
+    resolved_at: str | None
+    details: dict
+
+    @staticmethod
+    def from_alert(alert: dict):
+        # Not from_model: alerts are computed, not stored, so there is no core
+        # model to convert -- alerts_controller yields these dicts directly.
+        return AlertDTO(
+            id=alert['id'],
+            kind=alert['kind'],
+            severity=cast(AlertSeverity, alert['severity']),
+            status=cast(AlertStatus, alert.get('status', 'firing')),
+            message=alert['message'],
+            cluster_id=UUID(alert['cluster_id']),
+            node_id=UUID(alert['node_id']) if alert.get('node_id') else None,
+            device_id=UUID(alert['device_id']) if alert.get('device_id') else None,
+            since=alert.get('since') or None,
+            first_seen=alert.get('first_seen') or None,
+            resolved_at=alert.get('resolved_at') or None,
+            details=alert.get('details') or {},
+        )

@@ -1,28 +1,40 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "matplotlib",
+#     "paramiko",
+#     "ping3",
+#     "requests>=2.34.0",
+#     "urllib3>=2.7.0",
+# ]
+# ///
 ### simplyblock Stress tests
 import argparse
-import traceback
 import os
-import time
-import subprocess
 import shutil
-from __init__ import get_stress_tests
-from logger_config import setup_logger
-from exceptions.custom_exception import (
-    TestNotFoundException,
-    MultipleExceptions,
-    SkippedTestsException
-)
+import subprocess
+import time
+import traceback
+
+from __init__ import get_backup_stress_tests, get_stress_tests
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.sbcli_utils import SbcliUtils
-from utils.ssh_utils import SshUtils
+from exceptions.custom_exception import (
+    MultipleExceptions,
+    SkippedTestsException,
+    TestNotFoundException,
+)
+from logger_config import setup_logger
 from utils.common_utils import CommonUtils
 from utils.manage_portal_util import (
+    FAILURE_REASON_OTHER,
     TestRunsAPI,
     detect_fe_be_tags,
-    FAILURE_REASON_OTHER,
-    resolve_environment_id_from_ip
+    resolve_environment_id_from_ip,
 )
-
+from utils.sbcli_utils import SbcliUtils
+from utils.ssh_utils import SshUtils
 
 PROFILE_KEY = "stress"         # fixed
 JIRA_TICKET = ""            # always empty, per your note
@@ -45,19 +57,24 @@ def main():
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
     parser.add_argument('--upload_logs', type=bool, help="Upload Logs", default=False)
     parser.add_argument('--tls_enabled', type=str, help="TLS enabled", default="false")
-
+    parser.add_argument('--preserve_resources_on_failure', type=bool,
+                        help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
+                        default=False)
     args = parser.parse_args()
     
-    tests = get_stress_tests()
+    tests = get_stress_tests() + get_backup_stress_tests()
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
         test_class_run = tests
     else:
-        for cls in tests:
-            needle = args.testname.lower().replace("_", "")
-            if needle in cls.__name__.lower():
-                test_class_run.append(cls)
+        needles = [n.strip().lower().replace("_", "") for n in args.testname.split(",") if n.strip()]
+        seen = set()
+        for needle in needles:
+            for cls in tests:
+                if needle == cls.__name__.lower().replace("_", "") and cls not in seen:
+                    test_class_run.append(cls)
+                    seen.add(cls)
 
     if not test_class_run:
         available_tests = ', '.join(cls.__name__ for cls in tests)
@@ -111,9 +128,20 @@ def main():
                         bs=args.bs,
                         chunk_bs=args.chunk_bs,
                         k8s_run=args.run_k8s,
-                        tls_enabled=args.tls_enabled)
+                        tls_enabled=args.tls_enabled,
+                        preserve_resources_on_failure=args.preserve_resources_on_failure)
         try:
             test_obj.setup()
+            # After setup(), not inside it: eleven test classes replace
+            # setup() wholesale without calling super(), so anything wired
+            # into the base setup silently does not run for them. Guarded
+            # because a diagnostic collector must never fail the test it
+            # is only there to observe.
+            try:
+                test_obj.start_alert_collection()
+            except Exception:
+                logger.error("Error starting alert collection")
+                logger.error(traceback.format_exc())
             if i == 0:
                 test_obj.cleanup_logs()
                 test_obj.configure_sysctl_settings()
@@ -134,12 +162,24 @@ def main():
             if not args.run_k8s:
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
             test_obj.export_graylog_logs()
-            test_obj.teardown(delete_lvols=False, close_ssh=True)
+            test_obj.extract_delay_qpair_logs()
+            _test_failed = f"{test.__name__}" in errors
+            _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
+            if _skip_k8s:
+                logger.info(f"[cleanup] Test {test.__name__} failed — preserving K8s resources for debugging (--preserve_resources_on_failure)")
+            test_obj.teardown(delete_lvols=False, close_ssh=True, skip_k8s_cleanup=_skip_k8s)
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # In finally, so the samples and summary survive a teardown that
+            # threw before reaching its own stop call.
+            try:
+                test_obj.stop_alert_collection()
+            except Exception:
+                logger.error("Error stopping alert collection")
+                logger.error(traceback.format_exc())
             if log_path:
                 logger.info(f"Test logs saved at: {log_path}")
             # Copy e2e/logs/ folder to NFS share so automation logs are accessible post-run
@@ -150,13 +190,33 @@ def main():
                     try:
                         shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
                         logger.info(f"Automation logs copied to: {logs_dest}")
+                        # Do NOT remove local log files here — RotatingFileHandlers
+                        # hold open FDs. Deleting the directory entry causes
+                        # subsequent tests to log into an unreachable inode,
+                        # producing empty logs for tests 2+. Runner disk cleanup
+                        # is handled by the CI workflow.
                     except Exception as _copy_err:
                         logger.warning(f"Failed to copy automation logs to NFS: {_copy_err}")
-            if check_for_dumps():
-                logger.info("Found a core dump during test execution. "
-                            "Cannot execute more tests as cluster is not stable. Exiting")
-                test_obj.collect_management_details()
-                break
+            # Copy the tee'd output.log to the test's NFS folder for
+            # easy access to full raw stdout/stderr per test.
+            if log_path:
+                output_log = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "output.log"
+                )
+                if os.path.isfile(output_log):
+                    try:
+                        shutil.copy2(
+                            output_log,
+                            os.path.join(log_path, "github_raw_output.log"),
+                        )
+                    except Exception:
+                        pass
+
+        if check_for_dumps():
+            logger.info("Found a core dump during test execution. "
+                        "Cannot execute more tests as cluster is not stable. Exiting")
+            test_obj.collect_management_details()
+            break
 
     failed_cases = list(errors.keys())
     skipped_cases = len(test_class_run) - (len(passed_cases) + len(failed_cases))

@@ -1,88 +1,32 @@
-#!/usr/bin/env python
-# encoding: utf-8
 import json
 import math
 import os
-from pathlib import Path
-import time
-from typing import List, Optional, Union
-
-import cpuinfo
-import docker
-import psutil
-import requests
 import socket
+import subprocess
+import time
+from pathlib import Path
+from typing import Annotated, Any
+
+import psutil
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
 
-from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
-import simplyblock_core.utils.pci as pci_utils
+import docker
 import simplyblock_core.utils as init_utils
-from simplyblock_web import utils, node_utils
+import simplyblock_core.utils.pci as pci_utils
+from simplyblock_core import constants, scripts
+from simplyblock_core import utils as core_utils
+from simplyblock_core.utils import shell as shell_utils
+from simplyblock_web import node_utils, utils
+
+from .._node_info import get_static_node_info
 
 logger = core_utils.get_logger(__name__)
 
 api = APIBlueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
-
-
-def get_google_cloud_info():
-    try:
-        headers = {'Metadata-Flavor': 'Google'}
-        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true",
-                                headers=headers, timeout=3)
-        data = response.json()
-        return {
-            "id": str(data["id"]),
-            "type": data["machineType"].split("/")[-1],
-            "cloud": "google",
-            "ip": data["networkInterfaces"][0]["ip"],
-            "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
-        }
-    except Exception:
-        pass
-
-
-def get_equinix_cloud_info():
-    try:
-        response = requests.get("https://metadata.platformequinix.com/metadata", timeout=3)
-        data = response.json()
-        public_ip = ""
-        ip = ""
-        for interface in data["network"]["addresses"]:
-            if interface["address_family"] == 4:
-                if interface["enabled"] and interface["public"]:
-                    public_ip = interface["address"]
-                elif interface["enabled"] and not interface["public"]:
-                    public_ip = interface["address"]
-        return {
-            "id": str(data["id"]),
-            "type": data["class"],
-            "cloud": "equinix",
-            "ip": public_ip,
-            "public_ip": ip
-        }
-    except Exception:
-        pass
-
-
-def get_amazon_cloud_info():
-    try:
-        import ec2_metadata
-        import requests
-        session = requests.session()
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document  # type: ignore[call-arg]
-        return {
-            "id": data["instanceId"],
-            "type": data["instanceType"],
-            "cloud": "amazon",
-            "ip": data["privateIp"],
-            "public_ip": "",
-        }
-    except Exception:
-        pass
 
 
 def get_docker_client(timeout=60):
@@ -132,20 +76,21 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: Optional[List[str]] = Field(None)
-    spdk_debug: Optional[bool] = Field(False)
-    l_cores: Optional[str] = Field(None)
+    ssd_pcie: list[str] | None = Field(None)
+    spdk_debug: bool | None = Field(False)
+    l_cores: str | None = Field(None)
     spdk_mem: int = Field(core_utils.parse_size('4GiB'))
-    total_mem: Optional[Union[int, str]] = Field('')
-    multi_threading_enabled: Optional[bool] = Field(False)
-    timeout: Optional[int] = Field(5 * 60)
-    spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-    cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
+    total_mem: int | str | None = Field('')
+    multi_threading_enabled: bool | None = Field(False)
+    timeout: int | None = Field(5 * 60)
+    spdk_image: str | None = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    cluster_ip: str | None = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
-    socket: Optional[int] = Field(None, ge=0)
+    socket: int | None = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)
     cluster_id: str
+    mcp_max_unavailable: int | None = Field(None)  # OpenShift-only (MCP); ignored here
 
 
 @api.post('/spdk_process_start', responses={
@@ -299,6 +244,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
     teardown.
     """
     import threading
+
     from docker.errors import NotFound
 
     client = get_docker_client()
@@ -358,6 +304,70 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
+@api.get('/spdk_process_cleanup', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_cleanup(query: utils.RPCPortParams):
+    """Synchronous, resurrection-proof teardown of ``spdk_<port>`` and its
+    proxy, VERIFIED at the container level.
+
+    spdk_process_kill is deliberately fast (detached remove) for the peer-
+    termination paths — but that leaves two gaps for the add-node/restart
+    FAILURE cleanup: the containers run with a restart policy that can
+    resurrect them after the SIGKILL if the detached remove loses the race
+    against a loaded dockerd, and spdk_process_is_up probes the RPC Unix
+    socket, so an SPDK that never brought its RPC up reads as "down" while
+    its container lives on holding all hugepages (2026-08-05 incident: the
+    zombie starved every add-node retry on the host). This endpoint is the
+    slow, authoritative sibling: disable the restart policy first, remove
+    synchronously, and only report success when the containers are GONE.
+    """
+    from docker.errors import NotFound
+
+    client = get_docker_client()
+    names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
+    ok = True
+    for name in names:
+        try:
+            container = client.containers.get(name)
+        except NotFound:
+            continue
+        except Exception as exc:
+            logger.error("cleanup: resolving %s failed: %s", name, exc)
+            ok = False
+            continue
+        try:
+            # No restart policy => dockerd cannot resurrect it between the
+            # kill and the (synchronous) remove below.
+            client.api.update_container(container.id,
+                                        restart_policy={"Name": "no"})
+        except Exception as exc:
+            logger.warning("cleanup: clearing restart policy on %s failed: %s",
+                           container.id[:12], exc)
+        try:
+            container.remove(force=True)
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.error("cleanup: remove(%s) failed: %s", container.id[:12], exc)
+            ok = False
+    # Verification: success means the names resolve to nothing.
+    for name in names:
+        try:
+            client.containers.get(name)
+            ok = False
+            logger.error("cleanup: %s still present after remove", name)
+        except NotFound:
+            pass
+        except Exception:
+            ok = False
+    if not ok:
+        return utils.get_response(None, "spdk container cleanup incomplete")
+    return utils.get_response(True)
+
+
 # Tight client timeout for the dockerd fall-through in spdk_process_is_up.
 # The docker-py default is 60s, which under post-outage Swarm reconciliation
 # (incident 2026-04-24, vm205) caused this endpoint to take 76-80s. The
@@ -398,12 +408,99 @@ def _spdk_unix_socket_alive(rpc_port, timeout=1.0):
     if not os.path.exists(sock_path):
         return False
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:  # type: ignore[attr-defined]  # AF_UNIX: Linux-only, absent on Windows
             s.settimeout(timeout)
             s.connect(sock_path)
             return True
     except OSError:
         return False
+
+
+def _spdk_thread_sample(pid):
+    """One sample of every thread's name / state / wchan / utime from /proc."""
+    out = []
+    try:
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            t = f"/proc/{pid}/task/{tid}"
+            entry: dict[str, Any] = {"tid": tid}
+            for field, path in (("comm", "comm"), ("wchan", "wchan")):
+                try:
+                    with open(f"{t}/{path}") as fh:
+                        entry[field] = fh.read().strip()
+                except OSError:
+                    entry[field] = ""
+            try:
+                with open(f"{t}/stat") as fh:
+                    # comm can contain spaces/parens; everything after ") " is stable
+                    fields = fh.read().rsplit(") ", 1)[-1].split()
+                entry["state"] = fields[0]
+                entry["utime"] = int(fields[11])
+                entry["stime"] = int(fields[12])
+            except (OSError, IndexError, ValueError):
+                entry["state"], entry["utime"], entry["stime"] = "?", -1, -1
+            out.append(entry)
+    except OSError as e:
+        logger.warning(f"spdk_thread_state: cannot read /proc/{pid}/task: {e}")
+    return out
+
+
+@api.get('/spdk_thread_state', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object'
+    })}}},
+})
+def spdk_thread_state(query: utils.RPCPortParams):
+    """Per-thread state of the SPDK process, sampled twice ~1s apart.
+
+    Exists to answer one question when the RPC channel is wedged but the
+    process is alive: is the app thread (reactor_0, which runs the JSON-RPC
+    poller) BLOCKED or SPINNING? Those need opposite fixes and the logs cannot
+    tell them apart -- on 2026-09-01 node 22f365ef served zero RPCs for 15
+    minutes while its pollers kept printing normally, and the control plane
+    killed it without ever learning why.
+
+    utime frozen across the two samples => the thread is not running (blocked,
+    e.g. on a lock taken with an unbounded wait). utime advancing while RPCs
+    go unanswered => it is running but never returns to the RPC poller.
+
+    Deliberately NOT folded into spdk_process_kill: that path is tuned to
+    ~50-200ms for peer termination and must not grow a 1s sampling delay.
+    """
+    pid = None
+    try:
+        for proc in os.listdir("/proc"):
+            if not proc.isdigit():
+                continue
+            try:
+                with open(f"/proc/{proc}/cmdline", "rb") as fh:
+                    cmdline = fh.read().decode(errors="replace")
+            except OSError:
+                continue
+            if f"spdk_{query.rpc_port}/spdk.sock" in cmdline:
+                pid = int(proc)
+                break
+    except OSError as e:
+        return utils.get_response(None, f"cannot scan /proc: {e}")
+
+    if pid is None:
+        return utils.get_response(None,
+            f"no SPDK process found for rpc_port {query.rpc_port}")
+
+    first = _spdk_thread_sample(pid)
+    time.sleep(1)
+    second = _spdk_thread_sample(pid)
+
+    by_tid = {sample["tid"]: sample for sample in first}
+    threads = []
+    for sample in second:
+        prev = by_tid.get(sample["tid"], {})
+        threads.append({
+            "tid": sample["tid"], "comm": sample["comm"], "state": sample["state"],
+            "wchan": sample["wchan"],
+            "utime_delta": sample["utime"] - prev.get("utime", sample["utime"]),
+            "stime_delta": sample["stime"] - prev.get("stime", sample["stime"]),
+        })
+    return utils.get_response({"pid": pid, "threads": threads})
 
 
 @api.get('/spdk_process_is_up', responses={
@@ -510,13 +607,11 @@ def write_key_file(body: WriteKeyFileBody):
 
 
 def set_cluster_id(cluster_id):
-    ret = os.popen(f"echo {cluster_id} > {cluster_id_file}").read().strip()
-    return ret
+    Path(cluster_id_file).write_text(cluster_id)
 
 
 def delete_cluster_id():
-    out, _, _ = shell_utils.run_command(f"rm -f {cluster_id_file}")
-    return out
+    Path(cluster_id_file).unlink(missing_ok=True)
 
 
 def get_node_lsblk():
@@ -528,6 +623,36 @@ def get_node_lsblk():
     data = json.loads(out)
     logger.debug("function:get_node_lsblk end")
     return data
+
+
+@api.get('/blockdevices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def get_blockdevices():
+    """Whole-disk inventory for the lblk cluster mode (eligibility fields,
+    serial/WWN identity, by-id path, NUMA)."""
+    return utils.get_response(node_utils.get_block_devices_info())
+
+
+class _WipeBlockDeviceParams(BaseModel):
+    device_name: str
+
+
+@api.post('/wipe_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def wipe_block_device(body: _WipeBlockDeviceParams):
+    """--force-format for lblk add-node: wipe partition/FS signatures from a
+    whole disk. Refuses busy devices (mounts/holders/root disk)."""
+    ok, reason = node_utils.wipe_block_device_signatures(body.device_name)
+    if not ok:
+        return utils.get_response(None, reason)
+    return utils.get_response(True)
 
 
 def get_nodes_config():
@@ -567,14 +692,20 @@ def get_nodes_config():
 })
 def get_info():
     logger.debug("function:get_info start")
+    node_info = get_static_node_info()
     resp = utils.get_response({
         "cluster_id": get_cluster_id(),
 
-        "hostname": HOSTNAME,
-        "system_id": SYSTEM_ID,
+        "hostname": node_info["hostname"],
+        "system_id": node_info["system_id"],
 
-        "cpu_count": CPU_INFO['count'],
-        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
+        "cpu_count": node_info["cpu_info"]['count'],
+        "cpu_hz": node_info["cpu_info"]['hz_advertised'][0] if 'hz_advertised' in node_info["cpu_info"] else 1,
+        # Per-NUMA-node core ids, keyed by socket id as a string (JSON has no
+        # int keys). Read-only topology -- add_node uses it to resize a
+        # node's isolated-core set to the cluster's spdk_vcpu_count; nothing
+        # here is persisted.
+        "cpu_topology": {str(k): v for k, v in init_utils.get_numa_cores().items()},
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -588,7 +719,7 @@ def get_info():
 
         "network_interface": core_utils.get_nics_data(),
 
-        "cloud_instance": CLOUD_INFO,
+        "cloud_instance": node_info["cloud_info"],
 
         "lsblk": get_node_lsblk(),
         "nodes_config": get_nodes_config(),
@@ -718,22 +849,6 @@ def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     return utils.get_response(ret_code == 0, error=err)
 
 
-CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
-SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
-CLOUD_INFO = {}
-if not os.environ.get("WITHOUT_CLOUD_INFO"):
-    CLOUD_INFO = get_amazon_cloud_info()
-    if not CLOUD_INFO:
-        CLOUD_INFO = get_google_cloud_info()
-
-    if not CLOUD_INFO:
-        CLOUD_INFO = get_equinix_cloud_info()
-
-    if CLOUD_INFO:
-        SYSTEM_ID = CLOUD_INFO["id"]
-
-
 @api.post('/format_device_with_4k')
 def format_device_with_4k(body: utils.DeviceParams):
     pci_utils.ensure_driver(body.device_pci, 'nvme')
@@ -763,6 +878,123 @@ def bind_device_to_spdk(body: utils.DeviceParams):
         )
 
     pci_utils.ensure_driver(body.device_pci, driver_name, override=True)
+    return utils.get_response(True)
+
+
+def _node_config_device_ids(node_config: dict) -> set[str]:
+    """Identity of a node-config entry's device set, whichever device mode the
+    host is in: PCI addresses (nvme) or block-device serials (lblk). A valid
+    entry carries exactly one non-empty list, so the union identifies the
+    entry without this endpoint having to know the cluster's mode.
+    """
+    return (set(node_config.get("ssd_pcis") or [])
+            | core_utils.lblk_device_serials(node_config.get("lblk_devices")))
+
+
+class PersistNodeConfigParams(BaseModel):
+    max_lvol: Annotated[int | None, Field(ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)] = None
+    huge_page_memory: Annotated[int | None, Field(ge=0)] = None
+    # small/large_pool_count are written alongside huge_page_memory whenever
+    # add_node recalculates it against the cluster's real max_lvol/core count
+    # -- they are what that memory figure was derived from (calculate_pool_count
+    # -> calculate_minimum_hp_memory), so they must never drift from it.
+    small_pool_count: Annotated[int | None, Field(ge=0)] = None
+    large_pool_count: Annotated[int | None, Field(ge=0)] = None
+    # Which node slot to write. A host can carry several (one per socket, and
+    # more than one per socket when nodes_per_socket > 1), so the socket alone
+    # does not identify one -- the slot's device set is what tells them apart.
+    # Whichever device list this host's mode uses is the one that arrives:
+    # PCI addresses in nvme mode, lblk device serials in lblk mode. Both empty
+    # means "don't filter on devices", NOT "match nothing".
+    numa_node: Annotated[int | None, Field(ge=0)] = None
+    ssd_list: list[str] | None = None
+    lblk_serials: list[str] | None = None
+    # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
+    # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
+    # the same caller -- never partially, so the file never holds a mask from
+    # one layout next to a distribution from another.
+    cpu_mask: str | None = None
+    isolated: list[int] | None = None
+    l_cores: str | None = None
+    distribution: dict | None = None
+    core_to_index: dict | None = None
+    number_of_distribs: Annotated[int | None, Field(ge=0)] = None
+
+
+@api.post('/persist_node_config', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def persist_node_config(body: PersistNodeConfigParams):
+    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+    if not node_info.get("nodes"):
+        return utils.get_response(False, "Config not found")
+
+    # An EMPTY device list means the caller is not filtering on devices, the
+    # same as sending none at all -- never "match nothing". lblk-mode configs
+    # always carry ssd_pcis == [] (generate_configs seeds it, validate_config
+    # requires exactly one of the two lists to be non-empty), so treating []
+    # as a filter made every lblk node unmatchable and failed every add-node
+    # that reached here.
+    requested_devices = set(body.ssd_list or []) | set(body.lblk_serials or [])
+    matched = False
+    for node_config in node_info["nodes"]:
+        if body.numa_node is not None and node_config["socket"] != body.numa_node:
+            continue
+        if requested_devices and not requested_devices.intersection(
+                _node_config_device_ids(node_config)):
+            continue
+        if body.max_lvol is not None:
+            node_config["max_lvol"] = body.max_lvol
+        if body.huge_page_memory is not None:
+            node_config["huge_page_memory"] = body.huge_page_memory
+        if body.small_pool_count is not None:
+            node_config["small_pool_count"] = body.small_pool_count
+        if body.large_pool_count is not None:
+            node_config["large_pool_count"] = body.large_pool_count
+        if body.cpu_mask is not None:
+            node_config["cpu_mask"] = body.cpu_mask
+        if body.isolated is not None:
+            node_config["isolated"] = body.isolated
+        if body.l_cores is not None:
+            node_config["l-cores"] = body.l_cores
+        if body.distribution is not None:
+            node_config["distribution"] = body.distribution
+        if body.core_to_index is not None:
+            node_config["core_to_index"] = body.core_to_index
+        if body.number_of_distribs is not None:
+            node_config["number_of_distribs"] = body.number_of_distribs
+        matched = True
+        break
+
+    if not matched:
+        return utils.get_response(
+            False,
+            f"No node config entry matches numa_node={body.numa_node} and "
+            f"devices={sorted(requested_devices)}")
+
+    # isolated_cores/host_cpu_mask are the union of every node's "isolated"
+    # list, computed once at configure time (generate_configs/regenerate_
+    # config) -- nothing reads them back today (the one consumer,
+    # validate_config, always recomputes the union fresh from the nodes
+    # themselves), but leaving them silently stale after a per-node isolated
+    # list changes here is exactly the kind of drift that bites whoever
+    # trusts them next. Recompute unconditionally; cheap, and correct
+    # regardless of which field this call actually changed.
+    all_isolated_cores: set[int] = set()
+    for n in node_info["nodes"]:
+        all_isolated_cores.update(n.get("isolated") or [])
+    node_info["isolated_cores"] = sorted(all_isolated_cores)
+    node_info["host_cpu_mask"] = core_utils.generate_mask(all_isolated_cores)
+
+    # get_nodes_config() refuses (both here and on k8s) whenever the live file
+    # differs from its "_read_only" sibling -- that is the drift check meant
+    # to catch a hand-edited config. This write is sanctioned, not drift, so
+    # it must refresh the read-only baseline too, or the very next /info call
+    # (this same add_node's own idempotent retry included) sees a mismatch
+    # and refuses with "run sbcli sn configure-upgrade".
+    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE, create_read_only_file=True)
     return utils.get_response(True)
 
 
@@ -964,11 +1196,12 @@ class PingQuery(BaseModel):
 })
 def ping_ip(query: PingQuery):
     try:
-        ping_response = os.system(f"ping -c 3 -W 1 {query.ip} > /dev/null 2>&1")
-        link_is_up = False
-        with open(f"/sys/class/net/{query.ifname}/carrier") as f:
-            link_is_up = f.read().strip() == "1"
-        return utils.get_response(ping_response == 0 and link_is_up)
+        subprocess.check_call(
+            ["ping", "-c", "3", "-W", "1", query.ip],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return utils.get_response(Path(f"/sys/class/net/{query.ifname}/carrier").read_text().strip() == "1")
     except Exception as e:
         logger.error(e)
         return utils.get_response(False, str(e))
@@ -990,8 +1223,8 @@ def read_allowed_list():
 
 
 class CoresParams(BaseModel):
-    cores: Optional[List[int]] = Field(default=None)
-    number_of_alceml_devices: Optional[int] = Field(None, ge=0)
+    cores: list[int] | None = Field(default=None)
+    number_of_alceml_devices: int | None = Field(None, ge=0)
 
 
 @api.post('/recalculate_cores_distribution', responses={

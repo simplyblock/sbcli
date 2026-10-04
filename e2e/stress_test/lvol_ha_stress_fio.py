@@ -1,12 +1,14 @@
 import random
 import re
 import threading
-from utils.common_utils import sleep_n_sec
-from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
-from logger_config import setup_logger
+import time
 from datetime import datetime
-from exceptions.custom_exception import LvolNotConnectException
 from pathlib import Path
+
+from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
+from exceptions.custom_exception import LvolNotConnectException
+from logger_config import setup_logger
+from utils.common_utils import sleep_n_sec
 
 
 class TestLvolHACluster(FioWorkloadTest):
@@ -23,8 +25,11 @@ class TestLvolHACluster(FioWorkloadTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.lvol_size = "25G"
-        self.fio_size = "18G"
+        self.lvol_size = "100G"
+        self.int_lvol_size = 100
+        self.fio_size = "8G"  # default; overridden by _compute_fio_size()
+        self.fio_numjobs = 1
+        self.TARGET_DATA_PER_NODE_GB = 200
         self.total_lvols = 10
         self.snapshot_per_lvol = 2
         self.lvol_name = "lvl"
@@ -33,25 +38,267 @@ class TestLvolHACluster(FioWorkloadTest):
         self.lvol_node = None
         self.mount_path = "/mnt/"
         self.lvol_mount_details = {}
+        self.clone_mount_details = {}
+        self.sn_nodes = []
         self.log_path = Path.home()
         self.dump_validation_errors = []
+        # Deletes that could not complete during an outage, reconciled later by
+        # validate_pending_deletions(). Lives here rather than on one subclass
+        # so every failover test can defer a delete the same way.
+        self.pending_deletions = {
+            "lvols": dict(),
+            "snapshots": dict()
+        }
+
+    def _pick_client(self, index=0):
+        """Return a client node for NVMe connect / mount / FIO.
+
+        Distributes across ``self.fio_node`` list round-robin using
+        *index*.  Falls back to the management node when no dedicated
+        client is available.
+        """
+        fio = getattr(self, "fio_node", None)
+        if isinstance(fio, list) and fio:
+            return fio[index % len(fio)]
+        if fio:
+            return fio
+        return self.mgmt_nodes[0]
+
+    def _is_namespaced_lvol(self, lvol_name):
+        """True when this lvol shares its subsystem with another volume."""
+        det = self.lvol_mount_details.get(lvol_name) or {}
+        return bool(det.get("is_parent") or det.get("parent"))
+
+    def _assert_subsystem_sharing(self):
+        """Fail if no two volumes ended up sharing a subsystem.
+
+        Without this the test passes identically whether namespacing worked or
+        every lvol quietly got its own subsystem. Nothing else in the suite
+        checks it.
+        """
+        groups = {}
+        for name, det in self.lvol_mount_details.items():
+            try:
+                nqn = self.sbcli_utils.get_lvol_details(lvol_id=det["ID"])[0].get("nqn")
+            except Exception:
+                continue
+            if nqn:
+                groups.setdefault(nqn, []).append(name)
+        shared = {n: v for n, v in groups.items() if len(v) > 1}
+        for nqn, vols in shared.items():
+            self.logger.info(f"[namespace] {nqn[-28:]} -> {sorted(vols)}")
+        if not shared:
+            raise AssertionError(
+                f"No subsystem is shared by more than one volume: {len(groups)} "
+                f"distinct NQNs across {sum(len(v) for v in groups.values())} lvols. "
+                f"Namespaced children were requested but each got its own subsystem."
+            )
+        self.logger.info(
+            f"[namespace] sharing confirmed: {len(shared)} shared subsystem(s), "
+            f"largest holds {max(len(v) for v in shared.values())} volumes")
+
+    def record_pending_lvol_delete(self, lvol, lvol_id):
+        self.logger.warning(f"[DEFERRED] Adding lvol to pending delete: {lvol}")
+        self.pending_deletions["lvols"][lvol] = lvol_id
+
+    def record_pending_snapshot_delete(self, snapshot, snapshot_id):
+        self.logger.warning(f"[DEFERRED] Adding snapshot to pending delete: {snapshot}")
+        self.pending_deletions["snapshots"][snapshot] = snapshot_id
+
+    def _delete_stall_diag(self, lvol_id):
+        """Collect the state that explains why a delete is not completing.
+
+        A stalled delete is nearly always explained by the object's own
+        ``status``/``deletion_status`` plus the state of the nodes it lives on,
+        and all of it is already on the API record. Read it while we are waiting
+        so a converge failure reports a diagnosis instead of a bare name.
+        """
+        diag = {}
+        try:
+            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            record = details[0] if details else {}
+            for field in ("status", "deletion_status", "io_error", "node_id"):
+                diag[field] = record.get(field)
+            node_status = {}
+            for node_id in {record.get("node_id"), *(record.get("nodes") or [])}:
+                if not node_id:
+                    continue
+                try:
+                    node = self.sbcli_utils.get_storage_node_details(node_id)
+                    node_status[node_id[:8]] = (node[0] if node else {}).get("status")
+                except Exception as exc:
+                    node_status[node_id[:8]] = f"<unreadable: {exc}>"
+            diag["node_status"] = node_status
+        except Exception as exc:
+            diag["error"] = f"could not read lvol details: {exc}"
+        return diag
+
+    def validate_pending_deletions(self, timeout=600, interval=30):
+        if not self.pending_deletions["lvols"] and not self.pending_deletions["snapshots"]:
+            self.logger.info("No deferred deletions pending")
+            return
+
+        self.logger.info("Validating deferred deletions after recovery")
+        start = time.time()
+        retry_interval = 60  # re-issue delete every 60s if still stuck (~10 retries in 600s)
+        last_lvol_retry = {}
+        last_snap_retry = {}
+        last_lvol_diag = {}
+
+        while time.time() - start < timeout:
+            # --- Check and retry pending lvols (clones) FIRST ---
+            # Lvols/clones must be deleted before their parent snapshots,
+            # because snapshots cannot be deleted while clones still exist.
+            self.logger.info(f"Checking for deferred lvols: {self.pending_deletions['lvols']}")
+            for lvol in list(self.pending_deletions["lvols"]):
+                lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
+                if not lvol_id or lvol_id != self.pending_deletions["lvols"][lvol]:
+                    self.logger.info(f"Deferred lvol '{lvol}' no longer visible, removing from pending")
+                    del self.pending_deletions["lvols"][lvol]
+                    last_lvol_retry.pop(lvol, None)
+                    last_lvol_diag.pop(lvol, None)
+                    continue
+
+                # Record why it is still here. Logged only when it changes, so a
+                # long stall leaves one explanatory line rather than hundreds.
+                diag = self._delete_stall_diag(lvol_id)
+                if diag != last_lvol_diag.get(lvol):
+                    self.logger.info(f"Deferred lvol '{lvol}' (id={lvol_id}) state: {diag}")
+                    last_lvol_diag[lvol] = diag
+
+                # Re-issue delete if enough time has passed since last retry.
+                # Kept deliberately: a stalled delete does complete once the
+                # owning node comes back, and this loop is what lets it.
+                now = time.time()
+                if now - last_lvol_retry.get(lvol, 0) >= retry_interval:
+                    self.logger.info(f"Re-issuing delete for deferred lvol '{lvol}' (id={lvol_id})")
+                    try:
+                        self.sbcli_utils.delete_request(api_url=f"/lvol/{lvol_id}")
+                    except Exception as exc:
+                        self.logger.warning(f"Re-issue delete failed for lvol '{lvol}': {exc}")
+                    last_lvol_retry[lvol] = now
+
+            # --- Reconcile pending snapshots ---
+            # Snapshots with associated clones will fail to delete, so the
+            # *retry* waits until all pending lvol/clone deletes have cleared.
+            # The visibility check must not wait: a snapshot that went away on
+            # its own has to be noticed even while a clone is stuck, or it is
+            # carried to the end and reported as un-converged alongside it.
+            lvols_pending = list(self.pending_deletions["lvols"])
+            self.logger.info(f"Checking for deferred snapshots: {self.pending_deletions['snapshots']}")
+            for snap in list(self.pending_deletions["snapshots"]):
+                if self.k8s_test:
+                    snap_id = self.sbcli_utils.get_snapshot_id(snap)
+                else:
+                    snap_id = self.ssh_obj.get_snapshot_id_delete(self.mgmt_nodes[0], snap)
+                if not snap_id or snap_id != self.pending_deletions["snapshots"][snap]:
+                    self.logger.info(f"Deferred snapshot '{snap}' no longer visible, removing from pending")
+                    del self.pending_deletions["snapshots"][snap]
+                    last_snap_retry.pop(snap, None)
+                    continue
+
+                if lvols_pending:
+                    continue
+
+                # Re-issue delete if enough time has passed since last retry
+                now = time.time()
+                if now - last_snap_retry.get(snap, 0) >= retry_interval:
+                    self.logger.info(f"Re-issuing delete for deferred snapshot '{snap}' (id={snap_id})")
+                    try:
+                        if self.k8s_test:
+                            self.sbcli_utils.delete_snapshot(snap_id=snap_id, skip_error=True)
+                        else:
+                            self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snap_id, skip_error=True)
+                    except Exception as exc:
+                        self.logger.warning(f"Re-issue delete failed for snapshot '{snap}': {exc}")
+                    last_snap_retry[snap] = now
+
+            if lvols_pending and self.pending_deletions["snapshots"]:
+                self.logger.info(
+                    f"Not retrying snapshot deletes -- {len(lvols_pending)} lvol(s) still "
+                    f"pending (snapshots cannot be deleted while clones exist): {lvols_pending}"
+                )
+
+            if not self.pending_deletions["lvols"] and not self.pending_deletions["snapshots"]:
+                self.logger.info("All deferred deletions completed")
+                return
+
+            sleep_n_sec(interval)
+
+        observed = {
+            name: last_lvol_diag.get(name, "<never observed>")
+            for name in self.pending_deletions["lvols"]
+        }
+        blocked = bool(self.pending_deletions["lvols"]) and bool(self.pending_deletions["snapshots"])
+        raise Exception(
+            f"Deletion did not converge after {timeout}s. "
+            f"Lvols: {self.pending_deletions['lvols']}, "
+            f"Snapshots: {self.pending_deletions['snapshots']}. "
+            f"Last observed lvol state: {observed}."
+            + (
+                " Snapshots were never retried because a lvol/clone was still pending, "
+                "so they are blocked by the above rather than failing on their own."
+                if blocked else ""
+            )
+        )
+
+    def _compute_fio_size(self, extra_lvols: int = 0) -> str:
+        """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
+
+        As lvol + clone count varies across iterations, fio_size adjusts
+        so total disk usage per node stays approximately constant.
+
+        Args:
+            extra_lvols: Number of lvols about to be created (not yet tracked).
+
+        Returns:
+            The computed fio_size string (e.g. ``"6G"``).  Also updates
+            ``self.fio_size`` in place.
+        """
+        num_nodes = len(self.sn_nodes) or 4
+        current_lvols = len(self.lvol_mount_details) + len(self.clone_mount_details)
+        total_lvols = current_lvols + extra_lvols
+        if total_lvols < 1:
+            total_lvols = self.total_lvols
+
+        lvols_per_node = total_lvols / num_nodes
+        # Each lvol runs fio_numjobs parallel FIO jobs, each writing fio_size
+        jobs_per_node = lvols_per_node * self.fio_numjobs
+        fio_size_gb = int(self.TARGET_DATA_PER_NODE_GB / max(1, jobs_per_node))
+
+        # Cap: all numjobs × fio_size must fit in the formatted filesystem.
+        # Usable capacity ≈ 80% of lvol_size (ext4/xfs overhead ~5-15%).
+        max_fio_gb = int(self.int_lvol_size * 0.80) // max(1, self.fio_numjobs)
+        fio_size_gb = min(fio_size_gb, max_fio_gb)
+        fio_size_gb = max(fio_size_gb, 1)
+
+        self.fio_size = f"{fio_size_gb}G"
+        self.logger.info(
+            f"[fio_size] Computed fio_size={self.fio_size} "
+            f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
+            f"total_lvols={total_lvols}, nodes={num_nodes}, "
+            f"jobs/node={jobs_per_node:.1f})"
+        )
+        return self.fio_size
     
     def create_lvols(self):
-        """Create 500 lvols with mixed crypto and non-crypto."""
-        self.logger.info("Creating 500 lvols.")
+        """Create lvols distributed round-robin across client (fio) nodes."""
+        self.logger.info(f"Creating {self.total_lvols} lvols.")
         for i in range(1, self.total_lvols + 1):
             # fs_type = random.choice(["xfs", "ext4"])
             fs_type = "ext4"
             is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
-            self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
+            client = self._pick_client(i - 1)
+            self.logger.info(
+                f"Creating lvol {lvol_name}, fs={fs_type}, "
+                f"crypto={is_crypto}, client={client}"
+            )
             self.sbcli_utils.add_lvol(
                 lvol_name=lvol_name,
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=is_crypto,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
                 host_id=self.lvol_node
             )
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
@@ -62,18 +309,19 @@ class TestLvolHACluster(FioWorkloadTest):
                    "Device": None,
                    "MD5": None,
                    "FS": fs_type,
+                   "Client": client,
                    "Log": f"{self.log_path}/{lvol_name}.log",
                    "snapshots": []
             }
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
-            initial_devices = self.ssh_obj.get_devices(node=self.node)
+            initial_devices = self.ssh_obj.get_devices(node=client)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+                self.ssh_obj.exec_command(node=client, command=connect_str)
 
             self.lvol_mount_details[lvol_id]["Command"] = connect_ls
             sleep_n_sec(3)
-            final_devices = self.ssh_obj.get_devices(node=self.node)
+            final_devices = self.ssh_obj.get_devices(node=client)
             lvol_device = None
             for device in final_devices:
                 if device not in initial_devices:
@@ -82,13 +330,13 @@ class TestLvolHACluster(FioWorkloadTest):
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.lvol_mount_details[lvol_id]["Device"] = lvol_device
-            self.ssh_obj.format_disk(node=self.node, device=lvol_device, fs_type=fs_type)
+            self.ssh_obj.format_disk(node=client, device=lvol_device, fs_type=fs_type)
 
-            # Mount and Run FIO
+            # Mount
             mount_point = f"{self.mount_path}/{lvol_name}"
-            self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=mount_point)
+            self.ssh_obj.mount_path(node=client, device=lvol_device, mount_path=mount_point)
             self.lvol_mount_details[lvol_id]["Mount"] = mount_point
-            
+
         self.logger.info("Completed lvol creation.")
 
     def create_snapshots(self):
@@ -155,11 +403,12 @@ class TestLvolHACluster(FioWorkloadTest):
 
             # Run dd in parallel for the current batch
             for _, lvol in batch:
-                self.logger.info(f"Running dd for lvol: {lvol['Name']}")
+                client = lvol.get("Client", self.node)
+                self.logger.info(f"Running dd for lvol: {lvol['Name']} on {client}")
                 mount_path = lvol["Mount"]
                 thread = threading.Thread(
                     target=self.ssh_obj.create_random_files,
-                    args=(self.node, mount_path, self.fio_size),
+                    args=(client, mount_path, self.fio_size),
                 )
                 thread.start()
                 dd_threads.append(thread)
@@ -175,9 +424,10 @@ class TestLvolHACluster(FioWorkloadTest):
     def calculate_md5(self):
         "Calculate Checksums"
         for lvol_id, lvol in self.lvol_mount_details.items():
+            client = lvol.get("Client", self.node)
             self.logger.info(f"Generating checksums for files in base volume: {lvol['Mount']}")
-            base_files = self.ssh_obj.find_files(node=self.node, directory=lvol['Mount'])
-            base_checksums = self.ssh_obj.generate_checksums(node=self.node, files=base_files)
+            base_files = self.ssh_obj.find_files(node=client, directory=lvol['Mount'])
+            base_checksums = self.ssh_obj.generate_checksums(node=client, files=base_files)
             self.logger.info(f"Base Checksum for lvol {lvol['Name']}: {base_checksums}")
             self.lvol_mount_details[lvol_id]["MD5"] = base_checksums
 
@@ -195,31 +445,11 @@ class TestLvolHACluster(FioWorkloadTest):
     
     def validate_checksums(self):
         "Validating checksums"
-        # existing_devices = []
-        # for lvol_id, lvol in self.lvol_mount_details.items():
-        #     self.ssh_obj.unmount_path(node=self.node, device=lvol["Mount"])
-        #     existing_devices.append(lvol["Device"][5:-1])
-
-        # self.wait_for_all_devices(existing_devices)
-        
-        # for lvol_id, lvol in self.lvol_mount_details.items():
-        #     device = lvol["Device"][5:-1]
-        #     final_devices = self.ssh_obj.get_devices(node=self.node)
-        #     lvol_device = None
-        #     for cur_device in final_devices:
-        #         if device in cur_device:
-        #             lvol_device = cur_device
-        #             break
-        #     if lvol_device:
-        #         self.lvol_mount_details[lvol_id]["Device"] = f"/dev/{lvol_device}"
-        #     self.ssh_obj.mount_path(node=self.node, 
-        #                             device=self.lvol_mount_details[lvol_id]["Device"],
-        #                             mount_path=lvol["Mount"])
-                
         for _, lvol in self.lvol_mount_details.items():
-            final_files = self.ssh_obj.find_files(node=self.node, directory=lvol['Mount'])
-            final_checksums = self.ssh_obj.generate_checksums(node=self.node, files=final_files)
-            
+            client = lvol.get("Client", self.node)
+            final_files = self.ssh_obj.find_files(node=client, directory=lvol['Mount'])
+            final_checksums = self.ssh_obj.generate_checksums(node=client, files=final_files)
+
             assert final_checksums == lvol["MD5"], f"Checksum validation for {lvol['Name']} is not successful. Intial: {lvol['MD5']}, Final: {final_checksums}"
 
 
@@ -262,7 +492,7 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-1: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -328,7 +558,7 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-2: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -386,7 +616,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-3: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -470,7 +700,7 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-4: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -553,7 +783,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         
         # Setup performed only once
         self.logger.info("Performing initial setup.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()

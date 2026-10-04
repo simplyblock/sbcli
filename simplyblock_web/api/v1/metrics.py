@@ -1,23 +1,16 @@
-#!/usr/bin/env python
-# encoding: utf-8
 import logging
 
-from flask import Blueprint
+from flask import Blueprint, Response
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
+
+from simplyblock_core import db_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core import db_controller
-
-
-from prometheus_client import generate_latest
-from flask import Response
-from prometheus_client import Gauge, CollectorRegistry
-
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("metrics", __name__)
 
-registry = CollectorRegistry()
 db = db_controller.DBController()
 
 io_stats_keys = [
@@ -51,69 +44,71 @@ io_stats_keys = [
     "write_latency_ticks",
 ]
 
-ng: dict[str, Gauge] = {}
-cg: dict[str, Gauge] = {}
-dg: dict[str, Gauge] = {}
-lg: dict[str, Gauge] = {}
-pg: dict[str, Gauge] = {}
+def get_device_metrics(registry: CollectorRegistry):
+    labels = ['cluster', "cluster_name", "snode", "device"]
+    return {
+        "device_" + k: Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
+        for k in
+        io_stats_keys + ["status_code", "health_check"]
+    }
 
-def get_device_metrics():
-    global dg
-    if not dg:
-        labels = ['cluster', "cluster_name", "snode", "device"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            dg["device_" + k] = Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
-    return dg
 
-def get_snode_metrics():
-    global ng
-    if not ng:
-        labels = ['cluster', "cluster_name", "snode", "hostname"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            ng["snode_" + k] = Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
-
-        # Additional SPDK-specific metrics
-        ng["snode_cpu_busy_percentage"] = Gauge(
+def get_snode_metrics(registry: CollectorRegistry):
+    labels = ['cluster', "cluster_name", "snode", "hostname"]
+    return {
+        **{
+            "snode_" + k: Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
+            for k in
+            io_stats_keys + ["status_code", "health_check"]
+        },
+        "snode_cpu_busy_percentage": Gauge(
             "snode_cpu_busy_percentage",
             "Per-thread CPU Busy %",
             labelnames=['cluster', "cluster_name", 'snode', 'hostname', 'thread_name'],
             registry=registry
-        )
-        ng["snode_cpu_core_utilization"] = Gauge(
+        ),
+        "snode_cpu_core_utilization": Gauge(
             "snode_cpu_core_utilization",
             "Per-core CPU Utilization %",
             labelnames=['cluster', "cluster_name", 'snode', 'hostname', 'core_id', 'thread_names'],
             registry=registry
-        )
-    return ng
+        ),
+    }
 
-def get_cluster_metrics():
-    global cg
-    if not cg:
-        labels = ['cluster', "cluster_name"]
-        for k in io_stats_keys + ["status_code", "prov_cap_crit", "cap_crit"]:
-            cg["cluster_" + k] = Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
-    return cg
 
-def get_lvol_metrics():
-    global lg
-    if not lg:
-        labels = ['cluster', "cluster_name", "pool", "lvol", "lvol_name", "pvc_name"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            lg["lvol_" + k] = Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
-    return lg
+def get_cluster_metrics(registry: CollectorRegistry):
+    labels = ['cluster', "cluster_name"]
+    return {
+        "cluster_" + k: Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
+        for k in io_stats_keys + ["status_code", "prov_cap_crit", "cap_crit"]
+    }
 
-def get_pool_metrics():
-    global pg
-    if not pg:
-        labels = ['cluster', "cluster_name", "pool", "name"]
-        for k in io_stats_keys + ["status_code"]:
-            pg["pool_" + k] = Gauge("pool_" + k, "pool_" + k, labelnames=labels, registry=registry)
-    return pg
+
+def get_lvol_metrics(registry: CollectorRegistry):
+    labels = ['cluster', "cluster_name", "pool", "lvol", "lvol_name", "pvc_name"]
+    return {
+        "lvol_" + k: Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
+        for k in io_stats_keys + ["status_code", "health_check"]
+    }
+
+
+def get_pool_metrics(registry: CollectorRegistry):
+    labels = ['cluster', "cluster_name", "pool", "name"]
+    return {
+        "pool_" + k: Gauge("pool_" + k, "pool_" + k, labelnames=labels, registry=registry)
+        for k in io_stats_keys + ["status_code"]
+    }
 
 
 @bp.route('/cluster/metrics', methods=['GET'])
 def get_data():
+
+    registry = CollectorRegistry()
+    cluster_gauges = get_cluster_metrics(registry)
+    snode_gauges = get_snode_metrics(registry)
+    device_gauges = get_device_metrics(registry)
+    pool_gauges = get_pool_metrics(registry)
+    lvol_gauges = get_lvol_metrics(registry)
 
     clusters = db.get_clusters()
     for cl in clusters:
@@ -123,7 +118,7 @@ def get_data():
             data = records[0].get_clean_dict()
             object_data =  cl.get_clean_dict()
 
-            ng = get_cluster_metrics()
+            ng = cluster_gauges
             for g in ng:
                 v = g.replace("cluster_", "")
                 if v in data:
@@ -156,7 +151,7 @@ def get_data():
             node_records = db.get_node_stats(node, 1)
             if node_records:
                 data = node_records[0].get_clean_dict()
-                ng = get_snode_metrics()
+                ng = snode_gauges
                 for g in ng:
                     v = g.replace("snode_", "")
                     if v in data:
@@ -206,7 +201,7 @@ def get_data():
                 device_records = db.get_device_stats(device, 1)
                 if device_records:
                     data = device_records[0].get_clean_dict()
-                    ng = get_device_metrics()
+                    ng = device_gauges
                     for g in ng:
                         v = g.replace("device_", "")
                         if v in data:
@@ -220,12 +215,12 @@ def get_data():
                                 hc)
 
 
-        for pool in db.get_pools():
+        for pool in db.get_pools(cl.get_id()):
 
             pool_records = db.get_pool_stats(pool, 1)
             if pool_records:
                 data = pool_records[0].get_clean_dict()
-                ng = get_pool_metrics()
+                ng = pool_gauges
                 for g in ng:
                     v = g.replace("pool_", "")
                     if v in data:
@@ -238,7 +233,7 @@ def get_data():
             lvol_records = db.get_lvol_stats(lvol, limit=1)
             if lvol_records:
                 data = lvol_records[0].get_clean_dict()
-                ng = get_lvol_metrics()
+                ng = lvol_gauges
                 for g in ng:
                     v = g.replace("lvol_", "")
                     if v in data:
@@ -251,4 +246,4 @@ def get_data():
                             lvol.health_check)
 
 
-    return Response(generate_latest(registry), mimetype=str('text/plain; version=0.0.4; charset=utf-8'))
+    return Response(generate_latest(registry), mimetype='text/plain; version=0.0.4; charset=utf-8')

@@ -1,11 +1,10 @@
-# coding=utf-8
 import json
 import logging
 import random
 import threading
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
+from typing import ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ class NamespaceNodeState:
         self.failures = {}
         self.random_failures = {}
         self.random_failure_probability = 0.0
-        self.random = random.Random(0)
+        self.random = random.Random(random.getrandbits(64))
         self.thread_stats = {"threads": [{"name": "app_thread", "id": 1}]}
 
     def next_nsid(self, nqn, requested_nsid=None):
@@ -47,16 +46,17 @@ class NamespaceNodeState:
         self.next_namespace[nqn] += 1
         return nsid
 
-    def configure_random_failures(self, mapping, probability=1.0, seed=0):
+    def configure_random_failures(self, mapping, probability=1.0, seed=None):
         self.random_failures = mapping
         self.random_failure_probability = probability
-        self.random = random.Random(seed)
+        self.random = random.Random(
+            seed if seed is not None else random.getrandbits(64))
 
     def configure_failures(self, mapping):
         self.failures = {method: list(codes) for method, codes in mapping.items()}
 
     def maybe_fail(self, method):
-        if method in self.failures and self.failures[method]:
+        if self.failures.get(method):
             code = self.failures[method].pop(0)
             raise _RpcError(code, f"Scripted failure for {method}")
         if method in self.random_failures and self.random.random() < self.random_failure_probability:
@@ -65,7 +65,7 @@ class NamespaceNodeState:
 
 
 class _Registry:
-    servers = {}
+    servers: ClassVar[dict] = {}
 
     @classmethod
     def register(cls, host, port, server):
@@ -410,6 +410,6 @@ class NamespaceMockRpcServer:
         with self.state.lock:
             self.state.configure_failures(mapping)
 
-    def configure_random_failures(self, mapping, probability=1.0, seed=0):
+    def configure_random_failures(self, mapping, probability=1.0, seed=None):
         with self.state.lock:
             self.state.configure_random_failures(mapping, probability=probability, seed=seed)

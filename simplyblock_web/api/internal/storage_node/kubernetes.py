@@ -1,27 +1,24 @@
-#!/usr/bin/env python
-# encoding: utf-8
 import json
 import logging
 import os
 import time
 import traceback
-from typing import List, Optional, Union
 
-import cpuinfo
-import requests
-from flask_openapi3 import APIBlueprint
-from kubernetes.client import ApiException, V1DeleteOptions
-from jinja2 import Environment, PackageLoader
 import yaml
+from flask_openapi3 import APIBlueprint
+from jinja2 import Environment, PackageLoader
+from kubernetes.client import ApiException, V1DeleteOptions
 from pydantic import BaseModel, Field
 
-from simplyblock_core import constants, shell_utils, utils as core_utils
+from simplyblock_core import constants
+from simplyblock_core import utils as core_utils
 from simplyblock_core.settings import Settings
-from simplyblock_web import utils, node_utils, node_utils_k8s
+from simplyblock_core.utils import shell as shell_utils
+from simplyblock_web import node_utils, node_utils_k8s, utils
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
+from .._node_info import get_static_node_info
 from . import docker as snode_ops
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -40,45 +37,6 @@ def set_namespace(namespace):
     with open(namespace_id_file, "w+") as f:
         f.write(namespace)
     return True
-
-
-def get_google_cloud_info():
-    try:
-        headers = {'Metadata-Flavor': 'Google'}
-        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers, timeout=2)
-        data = response.json()
-        return {
-            "id": str(data["id"]),
-            "type": data["machineType"].split("/")[-1],
-            "cloud": "google",
-            "ip": data["networkInterfaces"][0]["ip"],
-            "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
-        }
-    except Exception:
-        pass
-
-
-def get_equinix_cloud_info():
-    try:
-        response = requests.get("https://metadata.platformequinix.com/metadata", timeout=2)
-        data = response.json()
-        public_ip = ""
-        ip = ""
-        for interface in data["network"]["addresses"]:
-            if interface["address_family"] == 4:
-                if interface["enabled"] and interface["public"]:
-                    public_ip = interface["address"]
-                elif interface["enabled"] and not interface["public"]:
-                    public_ip = interface["address"]
-        return {
-            "id": str(data["id"]),
-            "type": data["class"],
-            "cloud": "equinix",
-            "ip": public_ip,
-            "public_ip": ip
-        }
-    except Exception:
-        pass
 
 
 @api.get('/scan_devices', responses={
@@ -152,14 +110,20 @@ def get_nodes_config():
     })}}},
 })
 def get_info():
+    node_info = get_static_node_info()
     return utils.get_response({
         "cluster_id": get_cluster_id(),
 
-        "hostname": HOSTNAME,
-        "system_id": SYSTEM_ID,
+        "hostname": node_info["hostname"],
+        "system_id": node_info["system_id"],
 
-        "cpu_count": CPU_INFO['count'],
-        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
+        "cpu_count": node_info["cpu_info"]['count'],
+        "cpu_hz": node_info["cpu_info"]['hz_advertised'][0] if 'hz_advertised' in node_info["cpu_info"] else 1,
+        # Per-NUMA-node core ids, keyed by socket id as a string (JSON has no
+        # int keys). Read-only topology -- add_node uses it to resize a
+        # node's isolated-core set to the cluster's spdk_vcpu_count; nothing
+        # here is persisted.
+        "cpu_topology": {str(k): v for k, v in core_utils.get_numa_cores().items()},
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -173,9 +137,39 @@ def get_info():
 
         "network_interface": core_utils.get_nics_data(),
 
-        "cloud_instance": CLOUD_INFO,
+        "cloud_instance": node_info["cloud_info"],
         "nodes_config": get_nodes_config(),
     })
+
+
+@api.get('/blockdevices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def get_blockdevices():
+    """Whole-disk inventory for the lblk cluster mode (eligibility fields,
+    serial/WWN identity, by-id path, NUMA)."""
+    return utils.get_response(node_utils.get_block_devices_info())
+
+
+class _WipeBlockDeviceParams(BaseModel):
+    device_name: str
+
+
+@api.post('/wipe_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def wipe_block_device(body: _WipeBlockDeviceParams):
+    """--force-format for lblk add-node: wipe partition/FS signatures from a
+    whole disk. Refuses busy devices (mounts/holders/root disk)."""
+    ok, reason = node_utils.wipe_block_device_signatures(body.device_name)
+    if not ok:
+        return utils.get_response(None, reason)
+    return utils.get_response(True)
 
 
 @api.post('/join_swarm', responses={
@@ -238,20 +232,45 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
 api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
 
 
-CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-CLOUD_INFO = snode_ops.get_amazon_cloud_info()
-if not CLOUD_INFO:
-    CLOUD_INFO = get_google_cloud_info()
+# How long a stale Job of a previous spdk_process_start attempt may take to
+# disappear after its deletion was requested.
+_STALE_JOB_GONE_TIMEOUT_S = 120
 
-if not CLOUD_INFO:
-    CLOUD_INFO = get_equinix_cloud_info()
 
-if CLOUD_INFO:
-    SYSTEM_ID = CLOUD_INFO["id"]
-else:
-    SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
+def _create_job_replacing_stale(batch_v1, namespace: str, job_yaml: dict):
+    """Create a node-preparation Job, replacing one of the same name that a
+    previous attempt left behind.
+
+    A Job of a failed attempt is not deleted on the failure path, and the
+    node-add task retries spdk_process_start: without this, every retry fails
+    at create with 409 AlreadyExists and the node is never added. A Foreground
+    delete is asynchronous, so the Job is waited for until it is gone before
+    the new one is created.
+    """
+    name = job_yaml['metadata']['name']
+    try:
+        batch_v1.delete_namespaced_job(
+            name=name,
+            namespace=namespace,
+            body=V1DeleteOptions(propagation_policy='Foreground', grace_period_seconds=0)
+        )
+        logger.info(f"Deleted stale job '{name}' left from a previous attempt")
+    except ApiException as e:
+        if e.status != 404:
+            raise
+    else:
+        deadline = time.monotonic() + _STALE_JOB_GONE_TIMEOUT_S
+        while True:
+            try:
+                batch_v1.read_namespaced_job(name=name, namespace=namespace)
+            except ApiException as e:
+                if e.status == 404:
+                    break
+                raise
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"stale job '{name}' was not gone {_STALE_JOB_GONE_TIMEOUT_S}s after its deletion")
+            time.sleep(1)
+    return batch_v1.create_namespaced_job(namespace=namespace, body=job_yaml)
 
 
 class SPDKParams(BaseModel):
@@ -259,20 +278,21 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(ge=1, lt=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: List[str] = Field([])
+    ssd_pcie: list[str] = Field([])
     l_cores: str
-    namespace: Optional[str]
-    total_mem: Union[int, str] = Field('')
+    namespace: str | None
+    total_mem: int | str = Field('')
     spdk_mem: int = Field(core_utils.parse_size('64GiB'))
     system_mem: int = Field(core_utils.parse_size('4GiB'))
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
-    socket: Optional[int] = Field(None, ge=0)
-    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
+    socket: int | None = Field(None, ge=0)
+    firewall_port: int | None = Field(constants.FW_PORT_START)
     cluster_id: str
+    mcp_max_unavailable: int | None = Field(None)
 
 
 @api.post('/spdk_process_start', responses={
@@ -333,6 +353,20 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(skip_kubelet_configuration, str):
        skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
     reserved_system_cpus = os.environ.get("RESERVED_SYSTEM_CPUS", "0,1")
+    # Initial storage-MCP maxUnavailable when it's first created for CPU-topology
+    # apply = the configured parallel-add count, so the first-time,
+    # pre-activation reboots roll in one wave instead of a one-at-a-time queue.
+    # Source order: the value the control plane read from the StorageCluster CR
+    # (spec.storageNodes.maxParallelNodeAdds) and passed in; then the
+    # MAX_PARALLEL_NODE_ADDS
+    # env (if an operator injects it); then constants.NODE_ADD_MAX_PARALLEL.
+    # cluster_activate later narrows the pool to the cluster's fault tolerance.
+    mcp_max_unavailable = (
+        body.mcp_max_unavailable
+        or os.environ.get("MAX_PARALLEL_NODE_ADDS")
+        or str(constants.NODE_ADD_MAX_PARALLEL)
+    )
+    openshift_mcp = os.environ.get("OPENSHIFT_MCP")
 
     node_prepration_core_name = "snode-spdk-core-isolate-"
     if cpu_topology_enabled:
@@ -374,6 +408,8 @@ def spdk_process_start(body: SPDKParams):
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
+            'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
+            'OPENSHIFT_MCP': openshift_mcp,
             'TLS_SERVE': settings.tls_serve,
             'TLS_CONNECT': settings.tls_connect,
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
@@ -384,7 +420,7 @@ def spdk_process_start(body: SPDKParams):
             ubuntu_template = env.get_template('ubuntu_kernel_extra.yaml.j2')
             ubuntu_yaml = yaml.safe_load(ubuntu_template.render(values))
             batch_v1 = core_utils.get_k8s_batch_client()
-            ubuntu_resp = batch_v1.create_namespaced_job(namespace=namespace, body=ubuntu_yaml)
+            ubuntu_resp = _create_job_replacing_stale(batch_v1, namespace, ubuntu_yaml)
             msg = f"Job created: '{ubuntu_resp.metadata.name}' in namespace '{namespace}"
             logger.info(msg)
 
@@ -405,18 +441,7 @@ def spdk_process_start(body: SPDKParams):
         job_template = env.get_template('storage_init_job.yaml.j2')
         job_yaml = yaml.safe_load(job_template.render(values))
         batch_v1 = core_utils.get_k8s_batch_client()
-        existing_job_name = job_yaml['metadata']['name']
-        try:
-            batch_v1.delete_namespaced_job(
-                name=existing_job_name,
-                namespace=namespace,
-                body=V1DeleteOptions(propagation_policy='Foreground', grace_period_seconds=0)
-            )
-            logger.info(f"Deleted stale job '{existing_job_name}' left from a previous attempt")
-        except ApiException as e:
-            if e.status != 404:
-                raise
-        job_resp = batch_v1.create_namespaced_job(namespace=namespace, body=job_yaml)
+        job_resp = _create_job_replacing_stale(batch_v1, namespace, job_yaml)
         msg = f"Job created: '{job_resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
 
@@ -493,14 +518,70 @@ def spdk_process_start(body: SPDKParams):
             logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
         k8s_core_v1 = core_utils.get_k8s_core_client()
-        for attempt in range(56):
-            node_obj = k8s_core_v1.read_node(node_name)
-            if not node_obj.spec.unschedulable:
-                break
-            if attempt == 55:
-                return utils.get_response(False, f"Node '{node_name}' remained cordoned after 6 minutes")
-            logger.info(f"Node '{node_name}' is cordoned, waiting for uncordon... attempt {attempt + 1}/36")
-            time.sleep(10)
+        if cpu_topology_enabled and not skip_kubelet_configuration and openshift:
+            # Gate SPDK on the CPU-topology reboot ACTUALLY landing on this node.
+            # The topology Job completing is not proof of that: MCO cordons/reboots
+            # asynchronously (queued by the MCP maxUnavailable), so when the Job
+            # returns the node often isn't even cordoned yet. Starting SPDK then
+            # brings it up before cpuManagerPolicy=static is in effect (unpinned),
+            # only to be killed by the reboot moments later.
+            #
+            # Converge check compares the rendered-config CONTENT HASH
+            # (rendered-<pool>-<hash>), not the full name: a node still under an
+            # older pool (e.g. a previous cluster id) with byte-identical config
+            # has a different name but the same hash and must pass immediately —
+            # no false wait, no needless pool migration/reboot.
+            mcp_name = f"storage-{first_six_cluster_id}"
+
+            def _cfg_hash(name):
+                return name.rsplit("-", 1)[-1] if name else None
+
+            co = core_utils.get_k8s_custom_objects_client()
+            for attempt in range(240):  # ~40 min: reboots queue under MCP maxUnavailable
+                try:
+                    mcp = co.get_cluster_custom_object(
+                        group="machineconfiguration.openshift.io", version="v1",
+                        plural="machineconfigpools", name=mcp_name)
+                except ApiException as e:
+                    if e.status == 404:
+                        # No MCP to gate on (should not happen once the Job ensures
+                        # membership). Degrade to the old behaviour rather than hang:
+                        # proceed as soon as the node is uncordoned.
+                        logger.warning(f"MCP '{mcp_name}' not found; cannot gate on "
+                                       f"topology rollout — proceeding once uncordoned")
+                        node_obj = k8s_core_v1.read_node(node_name)
+                        if not node_obj.spec.unschedulable:
+                            break
+                        time.sleep(10)
+                        continue
+                    raise
+                target = (mcp.get("status", {}).get("configuration", {}) or {}).get("name")
+                node_obj = k8s_core_v1.read_node(node_name)
+                ann = node_obj.metadata.annotations or {}
+                cur = ann.get("machineconfiguration.openshift.io/currentConfig")
+                state = ann.get("machineconfiguration.openshift.io/state")
+                if (target and state == "Done" and not node_obj.spec.unschedulable
+                        and _cfg_hash(cur) and _cfg_hash(cur) == _cfg_hash(target)):
+                    logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
+                                f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
+                    break
+                logger.info(f"Waiting for '{node_name}' to converge on MCP '{mcp_name}' "
+                            f"(cur={cur} target={target} state={state} "
+                            f"cordoned={node_obj.spec.unschedulable})... {attempt + 1}/240")
+                time.sleep(10)
+            else:
+                return utils.get_response(
+                    False, f"Node '{node_name}' did not converge on MCP '{mcp_name}' config in time")
+        else:
+            # Non-topology / non-OpenShift: keep the original uncordon wait.
+            for attempt in range(56):
+                node_obj = k8s_core_v1.read_node(node_name)
+                if not node_obj.spec.unschedulable:
+                    break
+                if attempt == 55:
+                    return utils.get_response(False, f"Node '{node_name}' remained cordoned after 6 minutes")
+                logger.info(f"Node '{node_name}' is cordoned, waiting for uncordon... attempt {attempt + 1}/36")
+                time.sleep(10)
 
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
@@ -523,43 +604,66 @@ def spdk_process_start(body: SPDKParams):
 })
 def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
+    namespace = node_utils_k8s.get_namespace()
+    if not query.cluster_id:
+        return utils.get_response(False, "param required: cluster_id")
+
+    first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+    pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
     try:
-        namespace = node_utils_k8s.get_namespace()
-        if not query.cluster_id:
-            return utils.get_response(False, "param required: cluster_id")
-
-        first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
-        pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
-        resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
-
-        fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
-        try:
-            k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
-            logger.info(f"Deleting fluent pod {fluent_pod_name}")
-            k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
-        except ApiException as e:
-            if e.status != 404:
-                raise
-
-        retries = 10
-        while retries > 0:
-            resp = k8s_core_v1.list_namespaced_pod(namespace)
-            found = False
-            for pod in resp.items:
-                if pod.metadata.name.startswith(pod_name):
-                    found = True
-
-            if found:
-                logger.info("Container found, waiting...")
-                retries -= 1
-                time.sleep(3)
-            else:
-                break
-
+        k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
     except ApiException as e:
-        logger.info(e.body)
+        if e.status != 404:
+            # A genuine delete failure (not "already gone") must be reported
+            # to the caller — add_node()'s stale-record cleanup only drops
+            # its DB record once this call confirms the pod is dead; treating
+            # a swallowed failure as success orphans the pod (it keeps
+            # holding the host's CPU/hugepages/memory, silently starving
+            # every later add-node attempt on that host — worker-3,
+            # 2026-07-28).
+            logger.error(f"Failed to delete pod {pod_name}: {e.body}")
+            return utils.get_response(False, f"Failed to delete pod {pod_name}: {e.body}")
+
+    fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
+    try:
+        k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
+        logger.info(f"Deleting fluent pod {fluent_pod_name}")
+        k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
+    except ApiException as e:
+        if e.status != 404:
+            # Best-effort companion log pod; don't fail the whole call over it.
+            logger.warning(f"Failed to delete fluent pod {fluent_pod_name}: {e.body}")
+
+    max_retries = 10
+    found = True
+    for attempt in range(max_retries):
+        resp = k8s_core_v1.list_namespaced_pod(namespace)
+        found = any(pod.metadata.name.startswith(pod_name) for pod in resp.items)
+        if not found:
+            break
+        logger.info("Container found, waiting...")
+        if attempt < max_retries - 1:
+            time.sleep(3)
+
+    if found:
+        logger.error(f"Pod {pod_name} still present {max_retries * 3}s after delete")
+        return utils.get_response(False, f"Pod {pod_name} did not terminate in time")
 
     return utils.get_response(True)
+
+
+@api.get('/spdk_process_cleanup', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_cleanup(query: utils.RPCPortParams):
+    """Authoritative SPDK teardown for failure-cleanup paths. Pod deletion in
+    this deployment mode is already synchronous and verified (see
+    spdk_process_kill's poll-until-gone), so this is an alias kept for parity
+    with the docker agent, where kill (fast, detached remove) and cleanup
+    (slow, verified remove) are distinct."""
+    return spdk_process_kill(query)
 
 
 def _is_pod_up(rpc_port, cluster_id):
@@ -668,6 +772,15 @@ def firewall_set_port(body: _FirewallParams):
 })
 def get_firewall():
     return utils.get_response(False, "deprecated bath get snode/get_firewall")
+
+
+@api.post('/persist_node_config', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def persist_node_config(body: snode_ops.PersistNodeConfigParams):
+    return snode_ops.persist_node_config(body)
 
 
 @api.post('/set_hugepages', responses={

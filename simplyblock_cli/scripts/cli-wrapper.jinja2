@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-# PYTHON_ARGCOMPLETE_OK
 
 import logging
 import sys
 import traceback
+
+from pydantic import SecretStr
 
 from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type, list_type
 from simplyblock_core import utils, constants
@@ -56,7 +57,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- for parameter in subcommand.parameters %}
 {%- if parameter.private %}
         if self.developer_mode:
-            argument = subcommand.add_argument('{{ parameter.name }}'
+            subcommand.add_argument('{{ parameter.name }}'
 {%- if parameter.aliases -%}
 {%- for alias in parameter.aliases -%}
 , '{{ alias }}'
@@ -72,7 +73,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- else %}
-        argument = subcommand.add_argument('{{ parameter.name }}'
+        subcommand.add_argument('{{ parameter.name }}'
 {%- if parameter.aliases -%}
 {%- for alias in parameter.aliases -%}
 , '{{ alias }}'

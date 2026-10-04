@@ -1,0 +1,57 @@
+name: API Parity Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      STORAGE_PRIVATE_IPS:
+        type: string
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+        description: "Space-separated storage node IPs"
+      API_INVOKE_URL:
+        type: string
+        default: "http://192.168.10.210/"
+        description: "Management API URL"
+      BASTION_IP:
+        type: string
+        default: "192.168.10.210"
+        description: "Bastion / management node IP"
+      MNODES:
+        type: string
+        default: "192.168.10.210"
+        description: "Management node IPs"
+      sbcli_branch:
+        description: "sbcli branch to test"
+        required: false
+        default: main
+        type: string
+      CUSTOM_IMAGES:
+        type: string
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
+        description: "Custom SPDK/Docker images (space-separated key=value)"
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: false
+        type: boolean
+  # schedule:
+  #   - cron: '0 6 * * 1'  # Weekly on Monday 6am UTC — disabled to avoid interfering with other runs
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    with:
+      TEST_CLASS: TestAPIParityAudit
+      RUN_LABEL: api-parity
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204' }}
+      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      MNODES: ${{ inputs.MNODES || '192.168.10.210' }}
+      SBCLI_BRANCH: ${{ inputs.sbcli_branch || 'main' }}
+      CUSTOM_IMAGES: ${{ inputs.CUSTOM_IMAGES || 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"' }}
+      send_slack_notification: ${{ inputs.send_slack_notification || github.event_name == 'schedule' }}
+      BOOTSTRAP_MAX_SUBSYS: "40"
+    secrets: inherit

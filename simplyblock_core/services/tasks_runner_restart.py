@@ -1,13 +1,25 @@
-# coding=utf-8
 import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
+from simplyblock_core.controllers import (
+    device_controller,
+    health_controller,
+    tasks_controller,
+)
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskAbort,
+    TaskDefer,
+    TaskRetry,
+    checkpoint,
+    serve,
+    set_result,
+)
 from simplyblock_core.snode_client import SNodeClientException
-
 
 logger = utils.get_logger(__name__)
 
@@ -15,6 +27,43 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 utils.init_sentry_sdk()
+
+
+def _parallel_restart_allowed(node):
+    """The two sanctioned cases for restarting nodes in parallel: a drained
+    suspension (full-cluster recovery — every node offline, no client IO), and
+    a fully-dead failure domain (no domain member ONLINE, so parallel recovery
+    cannot touch served IO).
+
+    Decides both the dispatch mode and whether the peer-exclusion pre-check in
+    task_runner_node applies. The two must agree: a task fanned out in parallel
+    would otherwise immediately defer on the very peers it was dispatched
+    alongside.
+    """
+    cluster = db.get_cluster_by_id(node.cluster_id)
+    if cluster.status == Cluster.STATUS_SUSPENDED and cluster.suspend_drain_complete:
+        return True
+    return storage_node_ops.fd_dead_recovery_allowed(db, node)
+
+
+def _is_eligible(task, cluster):
+    """Suspend recovery: while a SUSPENDED cluster is still being drained to
+    all-offline, pause node restarts. Executing one now would fight the
+    auto-shutdown and re-create the wedged half-restarted state we are fixing.
+    The task re-polls without consuming a retry and runs once the drain
+    completes."""
+    if task.function_name != JobSchedule.FN_NODE_RESTART:
+        return True
+    return not tasks_controller.is_auto_restart_paused(db.get_cluster_by_id(cluster.get_id()))
+
+
+def _serialize(task, cluster):
+    if task.function_name != JobSchedule.FN_NODE_RESTART or not task.node_id:
+        return True
+    try:
+        return not _parallel_restart_allowed(db.get_storage_node_by_id(task.node_id))
+    except KeyError:
+        return True
 
 
 def _get_node_unavailable_devices_count(node_id):
@@ -182,53 +231,24 @@ def task_runner(task):
 def task_runner_device(task):
     device = _get_device(task)
 
-    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
-        task.function_result = "max retry reached"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        device_controller.device_set_unavailable(device.get_id())
-        device_controller.device_set_retries_exhausted(device.get_id(), True)
-        return True
-
     if not _validate_no_task_node_restart(task.cluster_id, task.node_id):
-        task.function_result = "canceled: node restart found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
+        # The node-level restart supersedes this device-level one.
         device_controller.device_set_unavailable(device.get_id())
-        return True
-
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        device_controller.device_set_retries_exhausted(device.get_id(), True)
-        return True
+        raise TaskAbort("canceled: node restart found")
 
     node = db.get_storage_node_by_id(task.node_id)
     if node.status != StorageNode.STATUS_ONLINE:
         logger.error(f"Node is not online: {node.get_id()}, retry")
-        task.function_result = "Node is offline"
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+        raise TaskRetry("Node is offline")
 
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
         logger.info(f"Device is online: {device.get_id()}")
-        task.function_result = "Device is online"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
+        set_result(task, "Device is online")
+        return
 
     if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
         logger.info(f"Device is not unavailable: {device.get_id()}, {device.status} , stopping task")
-        task.function_result = f"stopped because dev is {device.status}"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
-
-    if task.status != JobSchedule.STATUS_RUNNING:
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
+        raise TaskAbort(f"stopped because dev is {device.status}")
 
     # set device online for the first 3 retries
     if task.retry < 3:
@@ -242,61 +262,81 @@ def task_runner_device(task):
     # check device status
     time.sleep(5)
     device = _get_device(task)
-    if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
-        logger.info(f"Device is online: {device.get_id()}")
-        task.function_result = "done"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
+    if device.status != NVMeDevice.STATUS_ONLINE or device.io_error is not False:
+        raise TaskRetry(f"Device is {device.status}, retry")
 
-        tasks_controller.add_device_mig_task_for_node(task.node_id)
+    logger.info(f"Device is online: {device.get_id()}")
+    set_result(task, "done")
+    tasks_controller.add_device_mig_task_for_node(task.node_id)
 
-        return True
 
-    task.retry += 1
-    task.write_to_db(db.kv_store)
-    return False
+def _give_up_on_device(task):
+    """The retry ceiling has terminated a device-restart task."""
+    device = _get_device(task)
+    if device is None:
+        return
+    device_controller.device_set_unavailable(device.get_id())
+    device_controller.device_set_retries_exhausted(device.get_id(), True)
+
+
+def _abandon_task(task):
+    """Driver on_finish: the terminal paths a handler never reaches.
+
+    Only two need anything. The retry ceiling gives up on the target, which for
+    a node means parking it OFFLINE and re-queueing, and for a device means
+    marking it unavailable and out of retries. A cancellation stops a device
+    task retrying forever. Everything else — success, the aborts the handler
+    raises itself — leaves the target alone.
+    """
+    ceiling_reached = 0 <= task.max_retry <= task.retry
+
+    if task.function_name == JobSchedule.FN_NODE_RESTART:
+        if ceiling_reached and not task.canceled:
+            _give_up_on_node(task)
+        return
+
+    if task.canceled:
+        device = _get_device(task)
+        if device is not None:
+            device_controller.device_set_retries_exhausted(device.get_id(), True)
+    elif ceiling_reached:
+        _give_up_on_device(task)
+
+
+def _give_up_on_node(task):
+    """The retry ceiling has terminated a node-restart task. Reached through
+    the driver's on_finish, since the handler never sees that path."""
+    # restart_cleanup: this task ran try_set_node_restarting earlier
+    # and is the lock owner; tagging unblocks the RESTARTING-lock
+    # guard so the giving-up flip lands.
+    storage_node_ops.set_node_status(
+        task.node_id, StorageNode.STATUS_OFFLINE, caused_by="restart_cleanup")
+    # Re-queue a fresh auto-restart task so the node does not get
+    # stranded in OFFLINE forever. Without this, the legitimate
+    # auto-restart trigger (set_node_offline) won't fire either —
+    # it skips when status is already OFFLINE — so the only path
+    # back is operator intervention. Hours-of-backoff exhaustion
+    # almost always means a long peer-side recovery is in flight;
+    # once it clears, the new task can succeed.
+    try:
+        node_obj = db.get_storage_node_by_id(task.node_id)
+        tasks_controller.add_node_to_auto_restart(node_obj)
+    except KeyError:
+        logger.debug(
+            f"Node {task.node_id} no longer exists, skipping auto-restart re-queue")
+    except Exception as exc:
+        logger.error(f"Failed to re-queue auto-restart for {task.node_id}: {exc}")
 
 
 def task_runner_node(task):
     try:
         node = db.get_storage_node_by_id(task.node_id)
     except KeyError:
-        task.function_result = "node not found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
-
-    if task.retry >= task.max_retry:
-        task.function_result = "max retry reached"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        # restart_cleanup: this task ran try_set_node_restarting earlier
-        # and is the lock owner; tagging unblocks the RESTARTING-lock
-        # guard so the giving-up flip lands.
-        storage_node_ops.set_node_status(
-            task.node_id, StorageNode.STATUS_OFFLINE, caused_by="restart_cleanup")
-        # Re-queue a fresh auto-restart task so the node does not get
-        # stranded in OFFLINE forever. Without this, the legitimate
-        # auto-restart trigger (set_node_offline) won't fire either —
-        # it skips when status is already OFFLINE — so the only path
-        # back is operator intervention. Hours-of-backoff exhaustion
-        # almost always means a long peer-side recovery is in flight;
-        # once it clears, the new task can succeed.
-        try:
-            node_obj = db.get_storage_node_by_id(task.node_id)
-            tasks_controller.add_node_to_auto_restart(node_obj)
-        except KeyError:
-            pass
-        except Exception as exc:
-            logger.error(f"Failed to re-queue auto-restart for {task.node_id}: {exc}")
-        return True
+        raise TaskAbort("node not found")
 
     if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE]:
         logger.info(f"Node is {node.status}, stopping task")
-        task.function_result = f"Node is {node.status}, stopping"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
+        raise TaskAbort(f"Node is {node.status}, stopping")
     # DOWN used to short-circuit here too. After removing the monitor's
     # set_node_online (which previously did DOWN -> ONLINE on health-check
     # pass), DOWN must be handled by this runner: shutdown + restart drives
@@ -328,47 +368,50 @@ def task_runner_node(task):
     # a still-False health_check from auxiliary checks.
     if node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
-        task.function_result = "Node is online"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
+        set_result(task, "Node is online")
+        return
 
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
-
-    if task.status != JobSchedule.STATUS_RUNNING:
-        if node.status == StorageNode.STATUS_RESTARTING:
-            logger.info("Node is restarting, stopping task")
-            task.function_result = "Node is restarting"
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db(db.kv_store)
-            return True
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
+    # A restart already in flight makes this task redundant — unless it is our
+    # own from an earlier attempt. This used to be inferred from the task still
+    # being NEW/SUSPENDED, which no longer distinguishes anything now that the
+    # driver moves the task to RUNNING before calling; the marker below records
+    # the fact directly, and also covers an attempt that issued the restart and
+    # then died, whose RESTARTING is ours to finish rather than defer to.
+    if (node.status == StorageNode.STATUS_RESTARTING
+            and not task.function_params.get("restart_issued")):
+        logger.info("Node is restarting, stopping task")
+        raise TaskAbort("Node is restarting")
 
     # Peer-restart mutual-exclusion pre-check: if any peer is RESTARTING
     # or IN_SHUTDOWN we cannot proceed (try_set_node_restarting in the
     # restart impl uses an FDB-tx with the same predicate and would fail
     # acquisition). This is purely transient — burning a retry on a lock
-    # we know we can't acquire just collapses the backoff budget. Return
-    # False without incrementing task.retry; the runner's outer loop
-    # will sleep with exponential backoff and re-call us. Once the peer
-    # finishes its transition, this check passes and we proceed with a
-    # fresh budget.
-    for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if peer.get_id() == node.get_id():
-            continue
-        if peer.status in (StorageNode.STATUS_RESTARTING,
-                           StorageNode.STATUS_IN_SHUTDOWN):
-            msg = (f"Peer {peer.get_id()[:8]} is {peer.status}; "
-                   f"deferring (no retry consumed)")
-            logger.info(msg)
-            task.function_result = msg
-            task.write_to_db(db.kv_store)
-            return False
+    # we know we can't acquire just collapses the backoff budget, so it
+    # defers instead: no retry consumed, re-polled on the next short pass.
+    # Once the peer finishes its transition, this check passes and we
+    # proceed with a fresh budget.
+    #
+    # Skipped only for a SUSPENDED **and drained** cluster: recovery restarts
+    # run in parallel then (see the dispatch loop below) so peers in
+    # RESTARTING / IN_SHUTDOWN are expected, not a conflict. The FDB guard in
+    # restart_storage_node is relaxed the same way (allow_concurrent_peers).
+    # An operator-caused suspension never drains — its survivors still serve
+    # IO — so it keeps the full pre-check.
+    if not _parallel_restart_allowed(node):
+        # Strict one-restart-at-a-time outside the two sanctioned cases:
+        # drained suspension, and a fully-dead failure domain
+        # (fd_dead_recovery_allowed — no domain member ONLINE, so parallel
+        # recovery cannot touch served IO; see the predicate's docstring).
+        # The former relaxation that fanned out same-domain restarts while
+        # the domain was still SERVING (2026-07-16 violation: parallel
+        # in_restart while DEGRADED) remains removed.
+        for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+            if peer.get_id() == node.get_id():
+                continue
+            if peer.status in (StorageNode.STATUS_RESTARTING,
+                               StorageNode.STATUS_IN_SHUTDOWN):
+                raise TaskDefer(f"Peer {peer.get_id()[:8]} is {peer.status}; "
+                                f"deferring (no retry consumed)")
 
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
@@ -380,52 +423,157 @@ def task_runner_node(task):
         if data_nic.ip4_address:
             data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
-            node_data_nic_ping_check |= data_ping_check
+            # data_ping_check is tri-state (True/False/None): None means the
+            # SnodeAPI call itself errored/timed out (inconclusive), not that
+            # the ping failed. `|=` against None raises TypeError and crashes
+            # task processing every retry, wedging the task in a non-DONE
+            # state forever. Only an explicit True should flip this to True.
+            if data_ping_check is True:
+                node_data_nic_ping_check = True
     if not ping_check or not node_api_check or not node_data_nic_ping_check:
-        # node is unreachable, retry
         logger.info(f"Node is not reachable: {task.node_id}, retry")
-        task.function_result = "Node is unreachable, retry"
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+        raise TaskRetry("Node is unreachable, retry")
 
+    # Last-line defense before the destructive shutdown/restart sequence:
+    # everything above ran against reads taken seconds ago (the reachability
+    # checks alone take a while). A cancellation committed meanwhile
+    # (set_node_status(ONLINE) -> cancel_pending_node_restart_tasks) must stop
+    # this entry HERE — in the 2026-07-29 double restart the second entry never
+    # re-checked and force-shut a node that was back up and serving.
+    fresh = db.get_task_by_id(task.uuid)
+    if fresh is None or fresh.canceled or fresh.status == JobSchedule.STATUS_DONE:
+        logger.info(
+            f"Task {task.uuid} was canceled/finished concurrently; "
+            f"stopping before shutdown")
+        raise TaskAbort("canceled")
+    task = fresh
 
-    shutdown_succeeded = False
+    # Cross-actor claim check on a fresh node read: a live driver (e.g. a
+    # manual `sn restart`) mid-transition on this node holds the per-node
+    # restart claim. Proceeding would shutdown+restart over its in-flight
+    # work (2026-08-06 iter-50: this exact path destroyed a CLI restart's
+    # SPDK container at finalization). The shutdown/restart guards below
+    # would refuse anyway — but only after burning a retry; defer like the
+    # peer-exclusion pre-check instead, without consuming the budget. When
+    # the driver finishes (node ONLINE cancels this task) or dies (claim
+    # expires within RESTART_CLAIM_TTL_SEC), the next cycle proceeds.
     try:
-        try:
-            # shutting down node
-            logger.info(f"Shutdown node {node.get_id()}")
-            ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-            if ret:
-                logger.info("Node shutdown succeeded")
-                shutdown_succeeded = True
-            else:
-                logger.error("Node shutdown returned False; will retry after reset")
-            time.sleep(3)
-        except Exception as e:
-            logger.error(e)
-            return False
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        raise TaskAbort("node not found")
+    if node.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+        claim_holder = db_controller.restart_claim_active(node)
+        if claim_holder:
+            raise TaskDefer(f"Node restart claim held by {claim_holder}; "
+                            f"deferring (no retry consumed)")
+
+    # Cleanup shutdown before the restart — but only when there is something
+    # to clean: a node that is already OFFLINE had SPDK confirmed gone (that
+    # is what put it in OFFLINE), so force-shutting it down again only walks
+    # it through a pointless offline -> in_shutdown -> offline cycle. And run
+    # it at most ONCE per task: re-running the full shutdown on every retry
+    # multiplied the state churn during whole-cluster recovery (2026-07-13:
+    # every FDB-contention retry replayed in_shutdown -> offline -> in_restart
+    # on all 32 nodes). The once-flag is persisted on the task so it survives
+    # runner restarts. A node stuck in a non-OFFLINE state from a dead
+    # attempt (e.g. RESTARTING) still gets exactly one cleanup shutdown.
+    shutdown_needed = (node.status != StorageNode.STATUS_OFFLINE
+                       and not task.function_params.get("cleanup_shutdown_done"))
+    shutdown_succeeded = not shutdown_needed
+    try:
+        if shutdown_needed:
+            try:
+                # shutting down node
+                logger.info(f"Shutdown node {node.get_id()}")
+                # task.uuid so check_node_shutdown_preconditions recognizes
+                # this task as the shutdown's own driver instead of reporting
+                # it as a competing restart task.
+                ret = storage_node_ops.shutdown_storage_node(
+                    node.get_id(), force=True, current_restart_task_id=task.uuid)
+                if ret:
+                    logger.info("Node shutdown succeeded")
+                    shutdown_succeeded = True
+                    updated = checkpoint(task, cleanup_shutdown_done=True)
+                    if updated is None:
+                        # Canceled under us right after the shutdown; do not
+                        # drive the restart of a canceled task. The monitor's
+                        # offline re-queue scan picks the node up again.
+                        raise TaskAbort("canceled during cleanup shutdown")
+                    task = updated
+                else:
+                    logger.error("Node shutdown returned False; will retry after reset")
+                time.sleep(3)
+            except (TaskAbort, TaskDefer, TaskRetry):
+                raise
+            except Exception as e:
+                logger.error(e)
+                # Preserved as a defer, not a failure: this branch never
+                # consumed a retry, and restart's give-up has side effects
+                # (OFFLINE flip + re-queue) that a changed verdict would start
+                # triggering where it previously could not.
+                raise TaskDefer(f"cleanup shutdown raised: {e}")
+        else:
+            logger.info(
+                f"Skipping cleanup shutdown for {node.get_id()}: "
+                f"status={node.status}, "
+                f"already_done={bool(task.function_params.get('cleanup_shutdown_done'))}")
 
         # Skip the restart step if shutdown did not succeed — restarting on top
         # of a half-shutdown node produced the in_restart hang we're guarding
         # against. Let the outer retry reattempt the whole cycle.
         if not shutdown_succeeded:
-            task.retry += 1
-            task.write_to_db(db.kv_store)
-            return False
+            raise TaskRetry("Node shutdown did not succeed")
 
         try:
             # resetting node
             logger.info(f"Restart node {node.get_id()}")
-            ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+            # task.uuid, NOT task.get_id(): get_active_node_restart_task (the
+            # guard restart_storage_node compares this against) returns the
+            # bare uuid, while JobSchedule.get_id() is the composite
+            # "cluster/date/uuid" FDB key. Passing the composite here meant
+            # the comparison could never match, so this call's own task was
+            # never recognized as "ours" — masked only because this call
+            # uses force=True, which proceeds past the guard regardless and
+            # just logged a spurious "Restart task found" error every time.
+            # Recorded before the call: a restart that starts and then loses
+            # this process still owns the node's RESTARTING state, and the next
+            # attempt must recognise it as ours rather than stopping for it.
+            updated = checkpoint(task, restart_issued=True)
+            if updated is None:
+                raise TaskAbort("canceled before restart")
+            task = updated
+            ret = storage_node_ops.restart_storage_node(node.get_id(), force=True, current_restart_task_id=task.uuid)
             if ret:
                 logger.info("Node restart succeeded")
+        except (TaskAbort, TaskDefer, TaskRetry):
+            raise
         except Exception as e:
             logger.error(e)
-            return False
+            raise TaskDefer(f"restart raised: {e}")
 
         time.sleep(3)
         node = db.get_storage_node_by_id(task.node_id)
+        if ret and node.status == StorageNode.STATUS_RESTARTING:
+            # Self-heal for the silent stale-write race (2026-07-21,
+            # d3fc2c16): the restart impl SUCCEEDED and committed the
+            # in_restart->online CAS, but within ~2.5s a stale full-object
+            # node write resurrected status=in_restart — no event, no log
+            # (the [NODE-WRITE] tripwire in BaseModel.write_to_db names the
+            # writer on the next occurrence). Without this branch the
+            # re-read below declares the successful restart failed and the
+            # finally-guard kills SPDK on a healthy, serving node — a
+            # 2-minute self-inflicted outage per hit. Re-assert ONLINE
+            # (atomic CAS; the FSM allows RESTARTING->ONLINE) and continue.
+            # A genuinely new concurrent restart would have logged its own
+            # guard acquisition + event; none existed in the incident.
+            logger.warning(
+                "Node %s reads in_restart although its restart just "
+                "succeeded — stale-write resurrection suspected; "
+                "re-asserting ONLINE (see [NODE-WRITE] tripwire)",
+                task.node_id)
+            storage_node_ops.set_node_status(
+                task.node_id, StorageNode.STATUS_ONLINE, caused_by="restart")
+            node = db.get_storage_node_by_id(task.node_id)
         # Mirrors the task-entry short-circuit: success of THIS task is
         # "node is ONLINE". health_check / residual device UNAVAILABLE flags
         # are the responsibility of other recovery paths (FN_DEV_RESTART,
@@ -435,14 +583,10 @@ def task_runner_node(task):
         # False at the moment we re-read the DB.
         if node.status == StorageNode.STATUS_ONLINE:
             logger.info(f"Node is online: {node.get_id()}")
-            task.function_result = "done"
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db(db.kv_store)
-            return True
+            set_result(task, "done")
+            return
 
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+        raise TaskRetry("Node did not come back online")
     finally:
         # On any non-success exit from the shutdown/restart sequence, make sure
         # we don't leave the node pinned in STATUS_IN_SHUTDOWN or
@@ -458,53 +602,134 @@ def task_runner_node(task):
             logger.error(f"Post-task status reset check failed: {exc}")
 
 
-logger.info("Starting Tasks runner...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
-                    # Restart tasks start at a short cadence and cap the
-                    # exponential backoff at RESTART_TASK_EXEC_INTERVAL_MAX_SEC
-                    # so recovery time is bounded even after several retries.
-                    delay_seconds = constants.RESTART_TASK_EXEC_INTERVAL_SEC
-                    # Per-task isolation: an unhandled exception in task_runner
-                    # must not escape to the outer `while True`, which would kill
-                    # the whole restart service and block recovery of every other
-                    # node. Log it and move on to the next task.
-                    try:
-                        while task.status != JobSchedule.STATUS_DONE:
-                            # get new task object because it could be changed from cancel task
-                            task = db.get_task_by_id(task.uuid)
-                            # Lease gate: refuse to drive a task another live runner
-                            # host already owns (prevents a second replica issuing a
-                            # concurrent shutdown/restart). Re-checked every iteration
-                            # so the lease stays fresh while we hold it.
-                            if not tasks_controller.claim_task(task):
-                                logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
-                                break
-                            res = task_runner(task)
-                            if res:
-                                if task.status == JobSchedule.STATUS_DONE:
-                                    break
-                            else:
-                                delay_seconds = min(
-                                    delay_seconds * 2,
-                                    constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
-                                )
-                            time.sleep(delay_seconds)
-                    except Exception as e:
-                        logger.error(f"Restart task {task.uuid} processing crashed: {e}")
-                        logger.exception(e)
+# A genuine restart FAILURE first retries at a steady 1-minute cadence for a few
+# attempts (so a node that just needs a moment to come back recovers quickly),
+# then falls back to exponential backoff capped at
+# RESTART_TASK_EXEC_INTERVAL_MAX_SEC. A DEFER (peer-restart mutual exclusion) is
+# NOT a failure and does not back off at all — the driver re-polls it next pass.
+RESTART_LEAD_IN_RETRIES = 3
+RESTART_LEAD_IN_INTERVAL_SEC = 60
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+
+def _restart_backoff_seconds(retry):
+    """Delay before the next attempt of a FAILED restart (one that consumed a
+    retry). First RESTART_LEAD_IN_RETRIES attempts use a constant 1-minute
+    cadence; after that exponential backoff applies, continuing upward from the
+    lead-in interval and capped at the configured maximum."""
+    if retry <= RESTART_LEAD_IN_RETRIES:
+        return RESTART_LEAD_IN_INTERVAL_SEC
+    exp = RESTART_LEAD_IN_INTERVAL_SEC * (2 ** (retry - RESTART_LEAD_IN_RETRIES))
+    return min(exp, constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC)
+
+
+# Watchdog for orphaned transitional states. A node whose restart/shutdown
+# flow is interrupted (this runner's pod evicted mid-restart during a node
+# drain, node crash, ...) is left in STATUS_RESTARTING / STATUS_IN_SHUTDOWN
+# with no pending task and no live process owning the transition. Those
+# states are locked against outside writers (set_node_status) and the only
+# sanctioned cleanup, _reset_if_transient, runs solely while a task for that
+# node is being processed — so an ownerless node is wedged forever. The k8s
+# operator's nodedrain controller then holds its drain slot waiting for the
+# node to come online, deadlocking MachineConfig rollouts cluster-wide
+# (incident 2026-07-04: every MCO reboot wedged the rollout until the node
+# was manually reset).
+#
+# First-seen tracking is in-memory: a runner restart resets the clock, which
+# only delays recovery by one grace period. Two grace tiers: when the node's
+# SPDK pod is absent, nothing can be mid-flight on the data plane and we
+# recover fast; when a pod exists, an unseen foreground CLI restart (which
+# holds no task and looks ownerless to this check) may be driving it, and
+# resetting under it would kill the SPDK it just started — so wait long
+# enough for any legitimate restart to finish.
+_transitional_first_seen: dict = {}
+ORPHANED_STATE_GRACE_SEC = 20 * 60
+ORPHANED_STATE_FAST_GRACE_SEC = 5 * 60
+
+
+def _spdk_pod_exists(node):
+    """Whether the node's SPDK pod exists (kubernetes mode). Used only to
+    pick the watchdog grace tier — on any doubt return True so the
+    conservative (long) tier applies."""
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+        if cluster.mode != "kubernetes":
+            return True
+        utils.load_kube_config_with_fallback()
+        from kubernetes import client as k8s_client
+        namespace = getattr(node, "cr_namespace", "") or constants.K8S_NAMESPACE
+        prefix = f"snode-spdk-pod-{node.rpc_port}-"
+        for pod in k8s_client.CoreV1Api().list_namespaced_pod(namespace=namespace).items:
+            if pod.metadata.name.startswith(prefix):
+                return True
+        return False
+    except Exception as e:
+        logger.debug(f"SPDK pod lookup failed for {node.get_id()}: {e}")
+        return True
+
+
+def _watchdog_orphaned_transitional_nodes(cluster_id):
+    """Detect nodes stuck in a transitional CP state with no restart task
+    owning them, and route them through the sanctioned recovery: verify the
+    data plane is down, reset to OFFLINE (_reset_if_transient), then queue a
+    normal auto-restart task."""
+    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+        node_id = node.get_id()
+        if node.status not in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+            _transitional_first_seen.pop(node_id, None)
+            continue
+        # An unfinished restart task owns this state; its own flow calls
+        # _reset_if_transient when appropriate.
+        if not _validate_no_task_node_restart(cluster_id, node_id):
+            _transitional_first_seen.pop(node_id, None)
+            continue
+        first_seen = _transitional_first_seen.setdefault(node_id, time.time())
+        elapsed = time.time() - first_seen
+        grace = ORPHANED_STATE_GRACE_SEC if _spdk_pod_exists(node) else ORPHANED_STATE_FAST_GRACE_SEC
+        if elapsed < grace:
+            continue
+        logger.warning(
+            f"Node {node_id} stuck in {node.status} for {int(elapsed)}s with no "
+            f"restart task owning it; attempting reset to OFFLINE")
+        _reset_if_transient(node_id)
+        node = db.get_storage_node_by_id(node_id)
+        if node.status == StorageNode.STATUS_OFFLINE:
+            _transitional_first_seen.pop(node_id, None)
+            if tasks_controller.add_node_to_auto_restart(node):
+                logger.info(f"Queued auto-restart for recovered node {node_id}")
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-restart",
+    function_names=[JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART],
+    handler=task_runner,
+    on_finish=_abandon_task,
+    on_cycle=lambda cluster: _watchdog_orphaned_transitional_nodes(cluster.get_id()),
+    is_eligible=_is_eligible,
+    interval=constants.TASK_EXEC_INTERVAL_SEC,
+    # Parallel restart execution for SUSPENDED clusters: during full-cluster
+    # recovery every node is offline and no client IO flows, so node restarts
+    # cannot violate FTT and are fanned out (~70 s each; strictly sequential
+    # recovery of a 32-node cluster took ~38 min, 2026-07-08). The per-primary
+    # consistency of the cross-node connect section is preserved by
+    # storage_node_ops._remote_connect_gate, and the peer-exclusion guards
+    # (the pre-check in task_runner_node + try_set_node_restarting) are relaxed
+    # under exactly the same condition. Online clusters stay sequential.
+    concurrency=constants.NODE_RESTART_MAX_PARALLEL_SUSPENDED,
+    serialize=_serialize,
+    # Never two restart tasks for the same node at once: multiple node_restart
+    # tasks can be queued for one node (escalation + requeue paths), and
+    # excluding by task alone let them run concurrently — each kill-and-
+    # restarting the same SPDK out from under the other, flipping the node
+    # offline/in_restart in a loop (2026-07-10 mass-reboot recovery: 79
+    # concurrent same-node dispatches, nodes bouncing for 10+ minutes).
+    exclusion_key=lambda task: task.node_id or None,
+    backoff=_restart_backoff_seconds,
+)
+
+
+def main():
+    serve(SPEC)
+
+
+if __name__ == "__main__":
+    main()

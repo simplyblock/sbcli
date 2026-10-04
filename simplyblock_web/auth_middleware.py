@@ -1,13 +1,12 @@
-#!/usr/bin/env python
-# encoding: utf-8
 
 import base64
 import hmac
 import logging
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable, Dict, Tuple, TypeVar, Union, cast
+from typing import Any, TypeVar, Union, cast
 
-from flask import request, Response
+from flask import Response, request
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from simplyblock_core.db_controller import DBController
@@ -16,7 +15,7 @@ from simplyblock_core.db_controller import DBController
 F = TypeVar('F', bound=Callable[..., Any])
 
 # Type alias for the response type
-AuthResponse = Tuple[Dict[str, Any], int, Dict[str, str]]
+AuthResponse = tuple[dict[str, Any], int, dict[str, str]]
 ResponseType = Union[Response, WerkzeugResponse, AuthResponse]
 
 
@@ -56,12 +55,13 @@ def token_required(f: F) -> Callable[..., ResponseType]:
                         decoded_auth = base64.b64decode(cluster_secret).decode('utf-8')
                         if ":" in decoded_auth:
                             cluster_id, cluster_secret = decoded_auth.split(":", 1)
-                    except Exception as e:
-                        # Log the error but continue with empty credentials
-                        logging.warning(f"Failed to decode Basic Auth: {e}")
+                    except Exception:
+                        # The exception message itself can carry the b64
+                        # payload — log only the traceback.
+                        logging.exception("Failed to decode Basic Auth")
 
         # Authentication headers
-        headers: Dict[str, str] = {"WWW-Authenticate": 'Basic realm="Login Required"'}
+        headers: dict[str, str] = {"WWW-Authenticate": 'Basic realm="Login Required"'}
         
         # Validate credentials presence
         if not cluster_id or not cluster_secret:
@@ -83,7 +83,7 @@ def token_required(f: F) -> Callable[..., ResponseType]:
                 cluster = db_controller.get_cluster_by_id(cluster_id)
                 
                 # Validate cluster secret
-                if not hmac.compare_digest(cluster.secret, cluster_secret):
+                if not hmac.compare_digest(cluster.secret.get_secret_value(), cluster_secret):
                     return (
                         {
                             "message": "Invalid Cluster secret",
@@ -108,13 +108,15 @@ def token_required(f: F) -> Callable[..., ResponseType]:
             # Authentication successful, proceed with the request
             return cast(ResponseType, f(*args, **kwargs))
             
-        except Exception as e:
-            logging.error(f"Authentication error: {e}", exc_info=True)
+        except Exception:
+            # The exception message can carry decoded credentials — keep the
+            # traceback for ops, drop the message from the client response.
+            logging.exception("Authentication error")
             return (
                 {
                     "message": "Something went wrong",
                     "data": None,
-                    "error": str(e)
+                    "error": "Internal error"
                 },
                 500,
                 {}

@@ -1,11 +1,11 @@
-from pathlib import Path
-import threading
-from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec, convert_bytes_to_gb_tb
-from logger_config import setup_logger
-from datetime import datetime
 import random
+import threading
+from datetime import datetime
+from pathlib import Path
 
+from e2e_tests.cluster_test_base import TestClusterBase
+from logger_config import setup_logger
+from utils.common_utils import convert_bytes_to_gb_tb, sleep_n_sec
 
 
 class FioWorkloadTest(TestClusterBase):
@@ -33,7 +33,7 @@ class FioWorkloadTest(TestClusterBase):
             pool_name=self.pool_name
         )
 
-        for i in range(0, len(self.storage_nodes)):
+        for i in range(len(self.storage_nodes)):
             node_uuid = self.sbcli_utils.get_node_without_lvols()
             sn_lvol_data[node_uuid] = []
             self.logger.info(f"Creating 2 lvols on node {node_uuid}.")
@@ -256,6 +256,8 @@ class FioWorkloadTest(TestClusterBase):
 
 )
 
+        data_nics = affected_node_details[0].get("data_nics", [])
+        data_nic = data_nics[0]["if_name"] if data_nics else None
         self.ssh_obj.add_storage_node(
             node=self.mgmt_nodes[0],
             cluster_id=self.cluster_id,
@@ -268,7 +270,8 @@ class FioWorkloadTest(TestClusterBase):
             # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
             spdk_debug=affected_node_details[0]["spdk_debug"],
             spdk_image=affected_node_details[0]["spdk_image"],
-            spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
+            spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"],
+            data_nic=data_nic,
         )
         sleep_n_sec(200)
         new_node = self.sbcli_utils.get_node_without_lvols()

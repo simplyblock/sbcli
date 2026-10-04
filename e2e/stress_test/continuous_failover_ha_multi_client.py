@@ -1,14 +1,15 @@
-from utils.common_utils import sleep_n_sec
-from datetime import datetime
-from collections import defaultdict
-from stress_test.lvol_ha_stress_fio import TestLvolHACluster
-from exceptions.custom_exception import LvolNotConnectException
-import threading
-import string
-import random
 import os
+import random
+import re
+import string
+import threading
 import time
+from collections import defaultdict
+from datetime import datetime
 
+from exceptions.custom_exception import LvolNotConnectException
+from stress_test.lvol_ha_stress_fio import TestLvolHACluster
+from utils.common_utils import sleep_n_sec
 
 generated_sequences = set()
 
@@ -36,9 +37,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
-        self.fio_size = "1G"
+        self.lvol_size = "60G"
+        self.int_lvol_size = 60
+        self.TARGET_DATA_PER_NODE_GB = 200
+        self.fio_numjobs = 5
+        self.fio_size = "6G"  # default; overridden by _compute_fio_size()
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -59,10 +62,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.lvols_without_sec_connect = []
         self.lvols_without_sec_connect = []
         self.failed_nvme_connects = defaultdict(list)
-        self.pending_deletions = {
-            "lvols": dict(),
-            "snapshots": dict()
-        }
         self.test_name = "continuous_random_failover_multi_client_ha"
         # self.outage_types = ["interface_full_network_interrupt", interface_partial_network_interrupt,
         #                       "partial_nw", "partial_nw_single_port",
@@ -114,10 +113,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             log.write(f"{timestamp},{node},{outage_type},{event}\n")
 
     
-    def record_failed_nvme_connect(self, name, connect_cmd, client=None):
+    def record_failed_nvme_connect(self, name, connect_cmd, client=None, error=None):
+        # Always log the stderr. The old message asserted "expected during
+        # outage" with no evidence, which sent a real investigation at the
+        # product for a connect that had merely returned "already connected".
         self.logger.warning(
-            f"[DEFERRED] NVMe connect failed (expected during outage)"
-            f" client={client}: {connect_cmd}"
+            f"[DEFERRED] NVMe connect failed for {name} client={client}"
+            f" reason={(error or '').strip() or 'unknown (empty stderr)'}"
+            f" cmd={connect_cmd}"
         )
         self.failed_nvme_connects[name].append(connect_cmd)
 
@@ -151,8 +154,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 client = details["Client"]
                 for cmd in list(self.failed_nvme_connects[name]):
                     _, err = self.ssh_obj.exec_command(node=client, command=cmd)
-                    if not err:
-                        self.logger.info(f"NVMe reconnect successful: {name}")
+                    # "already connected" means the path is up: with
+                    # --ctrl-loss-tmo=-1 the kernel restores it on its own, so
+                    # this is the expected reply here and must count as success.
+                    if self.nvme_connect_ok(err):
+                        self.logger.info(
+                            f"NVMe reconnect successful: {name}"
+                            + (f" ({err.strip()})" if err else "")
+                        )
                         self.failed_nvme_connects[name].remove(cmd)
 
                 if not self.failed_nvme_connects[name]:
@@ -200,93 +209,44 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             "All remaining NVMe connect failures within fault tolerance — continuing"
         )
 
-    def record_pending_lvol_delete(self, lvol, lvol_id):
-        self.logger.warning(f"[DEFERRED] Adding lvol to pending delete: {lvol}")
-        self.pending_deletions["lvols"][lvol] = lvol_id
+    def _compute_fio_size(self, extra_lvols: int = 0) -> str:
+        """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
 
-    def record_pending_snapshot_delete(self, snapshot, snapshot_id):
-        self.logger.warning(f"[DEFERRED] Adding snapshot to pending delete: {snapshot}")
-        self.pending_deletions["snapshots"][snapshot] = snapshot_id
+        As lvol + clone count varies across iterations, fio_size adjusts
+        so total disk usage per node stays approximately constant.
 
-    def validate_pending_deletions(self, timeout=600, interval=30):
-        if not self.pending_deletions["lvols"] and not self.pending_deletions["snapshots"]:
-            self.logger.info("No deferred deletions pending")
-            return
+        Args:
+            extra_lvols: Number of lvols about to be created (not yet tracked).
 
-        self.logger.info("Validating deferred deletions after recovery")
-        start = time.time()
-        retry_interval = 60  # re-issue delete every 60s if still stuck (~10 retries in 600s)
-        last_lvol_retry = {}
-        last_snap_retry = {}
+        Returns:
+            The computed fio_size string (e.g. ``"6G"``).  Also updates
+            ``self.fio_size`` in place.
+        """
+        num_nodes = len(self.sn_nodes) or 4
+        current_lvols = len(self.lvol_mount_details) + len(self.clone_mount_details)
+        total_lvols = current_lvols + extra_lvols
+        if total_lvols < 1:
+            total_lvols = self.total_lvols
 
-        while time.time() - start < timeout:
-            # --- Check and retry pending lvols (clones) FIRST ---
-            # Lvols/clones must be deleted before their parent snapshots,
-            # because snapshots cannot be deleted while clones still exist.
-            self.logger.info(f"Checking for deferred lvols: {self.pending_deletions['lvols']}")
-            for lvol in list(self.pending_deletions["lvols"]):
-                lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
-                if not lvol_id or lvol_id != self.pending_deletions["lvols"][lvol]:
-                    self.logger.info(f"Deferred lvol '{lvol}' no longer visible, removing from pending")
-                    del self.pending_deletions["lvols"][lvol]
-                    last_lvol_retry.pop(lvol, None)
-                    continue
+        lvols_per_node = total_lvols / num_nodes
+        # Each lvol runs fio_numjobs parallel FIO jobs, each writing fio_size
+        jobs_per_node = lvols_per_node * self.fio_numjobs
+        fio_size_gb = int(self.TARGET_DATA_PER_NODE_GB / max(1, jobs_per_node))
 
-                # Re-issue delete if enough time has passed since last retry
-                now = time.time()
-                if now - last_lvol_retry.get(lvol, 0) >= retry_interval:
-                    self.logger.info(f"Re-issuing delete for deferred lvol '{lvol}' (id={lvol_id})")
-                    try:
-                        self.sbcli_utils.delete_request(api_url=f"/lvol/{lvol_id}")
-                    except Exception as exc:
-                        self.logger.warning(f"Re-issue delete failed for lvol '{lvol}': {exc}")
-                    last_lvol_retry[lvol] = now
+        # Cap: all numjobs × fio_size must fit in the formatted filesystem.
+        # Usable capacity ≈ 80% of lvol_size (ext4/xfs overhead ~5-15%).
+        max_fio_gb = int(self.int_lvol_size * 0.80) // max(1, self.fio_numjobs)
+        fio_size_gb = min(fio_size_gb, max_fio_gb)
+        fio_size_gb = max(fio_size_gb, 1)
 
-            # --- Check and retry pending snapshots ONLY after all lvols are gone ---
-            # Snapshots with associated clones will fail to delete, so we only
-            # retry snapshot deletes once all pending lvol/clone deletes have cleared.
-            if not self.pending_deletions["lvols"]:
-                self.logger.info(f"Checking for deferred snapshots: {self.pending_deletions['snapshots']}")
-                for snap in list(self.pending_deletions["snapshots"]):
-                    if self.k8s_test:
-                        snap_id = self.sbcli_utils.get_snapshot_id(snap)
-                    else:
-                        snap_id = self.ssh_obj.get_snapshot_id_delete(self.mgmt_nodes[0], snap)
-                    if not snap_id or snap_id != self.pending_deletions["snapshots"][snap]:
-                        self.logger.info(f"Deferred snapshot '{snap}' no longer visible, removing from pending")
-                        del self.pending_deletions["snapshots"][snap]
-                        last_snap_retry.pop(snap, None)
-                        continue
-
-                    # Re-issue delete if enough time has passed since last retry
-                    now = time.time()
-                    if now - last_snap_retry.get(snap, 0) >= retry_interval:
-                        self.logger.info(f"Re-issuing delete for deferred snapshot '{snap}' (id={snap_id})")
-                        try:
-                            if self.k8s_test:
-                                self.sbcli_utils.delete_snapshot(snap_id=snap_id, skip_error=True)
-                            else:
-                                self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snap_id, skip_error=True)
-                        except Exception as exc:
-                            self.logger.warning(f"Re-issue delete failed for snapshot '{snap}': {exc}")
-                        last_snap_retry[snap] = now
-            else:
-                self.logger.info(
-                    f"Skipping snapshot retry -- {len(self.pending_deletions['lvols'])} "
-                    f"lvol(s) still pending (snapshots cannot be deleted while clones exist)"
-                )
-
-            if not self.pending_deletions["lvols"] and not self.pending_deletions["snapshots"]:
-                self.logger.info("All deferred deletions completed")
-                return
-
-            sleep_n_sec(interval)
-
-        raise Exception(
-            f"Deletion did not converge. "
-            f"Lvols: {self.pending_deletions['lvols']}, "
-            f"Snapshots: {self.pending_deletions['snapshots']}"
+        self.fio_size = f"{fio_size_gb}G"
+        self.logger.info(
+            f"[fio_size] Computed fio_size={self.fio_size} "
+            f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
+            f"total_lvols={total_lvols}, nodes={num_nodes}, "
+            f"jobs/node={jobs_per_node:.1f})"
         )
+        return self.fio_size
 
     def create_lvols_with_fio(self, count):
         """Create lvols and start FIO with random configurations."""
@@ -314,8 +274,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=host_id[0]
                     )
                 elif self.current_outage_node:
@@ -328,8 +286,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=host_id[0]
                     )
                 else:
@@ -338,11 +294,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                     )
             except Exception as e:
-                self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Lvol creation fails with {e!s}. Retrying with different name.")
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
                 try:
@@ -358,8 +312,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             pool_name=self.pool_name,
                             size=self.lvol_size,
                             crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1],
                             host_id=host_id[0]
                         )
                     else:
@@ -368,11 +320,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             pool_name=self.pool_name,
                             size=self.lvol_size,
                             crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1],
                         )
                 except Exception as exp:
-                    self.logger.warning(f"Retry Lvol creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Lvol creation fails with {exp!s}.")
                     continue
 
             self.lvol_mount_details[lvol_name] = {
@@ -415,15 +365,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             #     self.lvols_without_sec_connect.append(lvol_name)
 
             initial_devices = self.ssh_obj.get_devices(node=client_node)
+            already_connected = False
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client_node, command=connect_str)
-                if error:
-                    # lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.lvol_mount_details[lvol_name]["ID"])
-                    # nqn = lvol_details[0]["nqn"]
-                    # self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
-                    # self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
-                    # self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=120, skip_error=True)
-                    self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        lvol_name, connect_str, client=client_node, error=error)
+                elif error:
+                    already_connected = True
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client_node)
@@ -432,6 +381,17 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if device not in initial_devices:
                     lvol_device = f"/dev/{device.strip()}"
                     break
+            if not lvol_device and already_connected:
+                # Path was already up, so no NEW device appears in the diff.
+                # Resolve it by NQN instead of declaring a connect failure.
+                lvol_nqn = self._nqn_from_connect_cmds(connect_ls)
+                if lvol_nqn:
+                    lvol_device = self.ssh_obj.get_nvme_device_for_nqn(
+                        client_node, lvol_nqn)
+                    if lvol_device:
+                        self.logger.info(
+                            f"[lvol_connect] {lvol_name} was already connected;"
+                            f" resolved by NQN to {lvol_device}")
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.lvol_mount_details[lvol_name]["Device"] = lvol_device
@@ -662,7 +622,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
         node_ip = node_details[0]["mgmt_ip"]
         self.logger.info(f"Performing/Waiting for {outage_type} restart on node {self.current_outage_node}.")
-        if outage_type == "graceful_shutdown":
+        if outage_type in ("graceful_shutdown", "forced_shutdown", "storage_node_reboot"):
             max_retries = 4
             retry_delay = 10  # seconds
 
@@ -1003,7 +963,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     if "(False," in error:
                         raise Exception(error)
             except Exception as e:
-                self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Snap creation fails with {e!s}. Retrying with different name.")
                 try:
                     snapshot_name = f"snap_{lvol}"
                     temp_name = generate_random_sequence(5)
@@ -1013,7 +973,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     else:
                         self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
-                    self.logger.warning(f"Retry Snap creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Snap creation fails with {exp!s}.")
                     continue
 
             self.snapshot_names.append(snapshot_name)
@@ -1035,7 +995,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 else:
                     self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
             except Exception as e:
-                self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Clone creation fails with {e!s}. Retrying with different name.")
                 try:
                     clone_name = f"clone_{generate_random_sequence(15)}"
                     temp_name = generate_random_sequence(5)
@@ -1045,7 +1005,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     else:
                         self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
                 except Exception as exp:
-                    self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Clone creation fails with {exp!s}.")
                     continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
             client = self.lvol_mount_details[lvol]["Client"]
@@ -1071,17 +1031,52 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                           command=f"{self.base_cmd} lvol list")
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            # Force ctrl-loss-tmo=-1 so NVMe controllers never time out
+            # during storage-node outages (matches lvol connect behaviour).
+            connect_ls = [
+                re.sub(r"--ctrl-loss-tmo[=\s]\S+", "--ctrl-loss-tmo=-1", cmd)
+                for cmd in connect_ls
+            ]
             self.clone_mount_details[clone_name]["Command"] = connect_ls
 
             # if self.secondary_outage:
             #     connect_ls = [connect_ls[0]]
             #     self.lvols_without_sec_connect.append(clone_name)
 
+            # Clone shares its parent's NQN (subsystem). If that NQN is
+            # already connected on a different client, we MUST connect the
+            # clone from the same client — otherwise two hosts access the
+            # same subsystem, which causes data corruption.
+            clone_nqn = None
+            for _cs in connect_ls:
+                if '--nqn=' in _cs:
+                    clone_nqn = _cs.split('--nqn=')[1].split()[0]
+                    break
+            if clone_nqn:
+                for _lname, _ldetails in self.lvol_mount_details.items():
+                    _lcmds = _ldetails.get("Command") or []
+                    if any(clone_nqn in str(c) for c in _lcmds):
+                        existing_client = _ldetails.get("Client")
+                        if existing_client and existing_client != client:
+                            self.logger.info(
+                                f"[clone_connect] NQN {clone_nqn} already "
+                                f"connected on {existing_client} (via lvol "
+                                f"{_lname}); switching clone {clone_name} "
+                                f"from {client} to {existing_client}"
+                            )
+                            client = existing_client
+                            self.clone_mount_details[clone_name]["Client"] = client
+                        break
+
             initial_devices = self.ssh_obj.get_devices(node=client)
+            clone_already_connected = False
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
-                if error:
-                    self.record_failed_nvme_connect(clone_name, connect_str, client=client)
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        clone_name, connect_str, client=client, error=error)
+                elif error:
+                    clone_already_connected = True
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client)
@@ -1090,6 +1085,29 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if device not in initial_devices:
                     lvol_device = f"/dev/{device.strip()}"
                     break
+            if not lvol_device and clone_already_connected:
+                # Clone joined a subsystem the host already holds a controller
+                # for, so no NEW device shows up in the diff. Resolve by NQN
+                # AND ns_id: the subsystem holds one namespace per lvol, so the
+                # NQN alone can resolve to a sibling volume's device.
+                clone_nqn = self._nqn_from_connect_cmds(connect_ls)
+                clone_ns_id = None
+                try:
+                    _cd = self.sbcli_utils.get_lvol_details(
+                        lvol_id=self.clone_mount_details[clone_name]["ID"])
+                    if _cd:
+                        clone_ns_id = _cd[0].get("ns_id")
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[clone_connect] could not read ns_id for "
+                        f"{clone_name}: {exc}")
+                if clone_nqn:
+                    lvol_device = self.ssh_obj.get_nvme_device_for_nqn(
+                        client, clone_nqn, ns_id=clone_ns_id)
+                    if lvol_device:
+                        self.logger.info(
+                            f"[clone_connect] {clone_name} was already connected;"
+                            f" resolved by NQN to {lvol_device}")
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.clone_mount_details[clone_name]["Device"] = lvol_device
@@ -1108,7 +1126,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+            # Delete ALL inherited data from parent so the clone has enough
+            # free space for its own FIO run (not just *fio* — catches all files).
+            self.ssh_obj.exec_command(client, f"sudo rm -rf {mount_point}/*")
             self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
             self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog*"])
 
@@ -1225,13 +1245,19 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             for snapshot in snapshots:
                 if self.k8s_test:
                     snapshot_id = self.sbcli_utils.get_snapshot_id(snapshot)
-                    self.sbcli_utils.delete_snapshot(snap_id=snapshot_id, skip_error=True)
+                    deleted = self.sbcli_utils.delete_snapshot(snap_id=snapshot_id, skip_error=True)
                 else:
                     snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot)
                     # snapshot_node = self.snap_vs_node[snapshot]
                     # if snapshot_node not in skip_nodes:
-                    self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id, skip_error=True)
-                self.record_pending_snapshot_delete(snapshot, snapshot_id)
+                    deleted = self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id,
+                                                           skip_error=True)
+                # Defer only what actually survived the delete. Recording
+                # unconditionally reports snapshots that were verifiably removed
+                # as un-converged, which is how an unrelated snapshot ended up in
+                # a converge failure that a single stuck clone caused.
+                if not deleted:
+                    self.record_pending_snapshot_delete(snapshot, snapshot_id)
                 self.snapshot_names.remove(snapshot)
 
             self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
@@ -1299,6 +1325,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 self.runner_k8s_log.restart_logging()
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
             self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
+            self._compute_fio_size(extra_lvols=5)
             self.create_lvols_with_fio(5)
             if not self.k8s_test:
                 for node in self.storage_nodes:
@@ -1358,7 +1385,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
                 sleep_n_sec(300)  # Sleep for 60 seconds before the next validation
             except Exception as e:
-                self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
+                self.logger.error(f"Error in continuous I/O stats validation: {e!s}")
                 break  # Exit the thread on failure
 
     def restart_fio(self, iteration):
@@ -1480,6 +1507,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
@@ -1507,6 +1535,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
+                self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
@@ -1523,6 +1552,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.runner_k8s_log.restart_logging()
 
                 self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
+                self._compute_fio_size(extra_lvols=3)
                 self.create_lvols_with_fio(3)
                 if not self.k8s_test:
                     for node in self.storage_nodes:

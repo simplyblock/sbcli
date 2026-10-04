@@ -1,0 +1,293 @@
+"""Verifies that secrets never reach log records but do reach the wire body."""
+import json
+import logging
+from unittest.mock import MagicMock, patch
+
+import pytest
+from pydantic import SecretStr
+
+from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.snode_client import SNodeClient
+from simplyblock_core.utils.secrets import MASK
+
+
+def _make_json_response(payload):
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = payload
+    response.content = json.dumps(payload).encode()
+    response.text = json.dumps(payload)
+    return response
+
+
+def _captured_logs_text(caplog) -> str:
+    return "\n".join(record.getMessage() for record in caplog.records)
+
+
+@pytest.fixture
+def rpc_client():
+    with patch("simplyblock_core.rpc_client.requests.session") as session_factory:
+        session = MagicMock()
+        session_factory.return_value = session
+        client = RPCClient("host", 9999, "user", SecretStr("ctor-secret"))
+        client._fake_session = session  # expose for assertions
+        yield client
+
+
+def test_rpc_client_session_auth_carries_unwrapped_password(rpc_client):
+    user, password = rpc_client._fake_session.auth
+    assert user == "user"
+    assert password == "ctor-secret"
+
+
+def test_rpc_client_request_body_carries_unwrapped_param(rpc_client, caplog):
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": {"ok": True},
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client._request2("nvmf_subsystem_add_host", {
+            "nqn": "nqn.example",
+            "dhchap_key": SecretStr("DHCHAPVALUE"),
+        })
+
+    posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
+    parsed = json.loads(posted_body)
+    assert parsed["params"]["dhchap_key"] == "DHCHAPVALUE"
+
+    assert "DHCHAPVALUE" not in _captured_logs_text(caplog)
+    assert "ctor-secret" not in _captured_logs_text(caplog)
+
+
+def test_rpc_client_response_body_hidden_when_flag_off(rpc_client, caplog, monkeypatch):
+    monkeypatch.setenv("SB_LOG_RESPONSE_BODIES", "false")
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": {"sensitive": "RESPVALUE"},
+    })
+    with caplog.at_level(logging.DEBUG):
+        rpc_client._request2("some_method", {})
+
+    assert "RESPVALUE" not in _captured_logs_text(caplog)
+
+
+def test_rpc_client_response_body_logged_when_flag_on(rpc_client, caplog, monkeypatch):
+    monkeypatch.setenv("SB_LOG_RESPONSE_BODIES", "true")
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": {"sensitive": "RESPVALUE"},
+    })
+    with caplog.at_level(logging.DEBUG):
+        rpc_client._request2("some_method", {})
+
+    assert "RESPVALUE" in _captured_logs_text(caplog)
+
+
+def test_rpc_client_masks_plaintext_crypto_keys_by_param_name(rpc_client, caplog):
+    """``lvol_crypto_key_create`` is now typed on ``SecretStr``, but the v1 API
+    hands controllers plain ``str`` from raw JSON. The name-based redactor is
+    what covers the values the type system cannot see."""
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client._request2("accel_crypto_key_create", {
+            "cipher": "AES_XTS",
+            "name": "key_lvol_1",
+            "key": "DEKPLAINONE",
+            "key2": "DEKPLAINTWO",
+        })
+
+    posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
+    parsed = json.loads(posted_body)
+    assert parsed["params"]["key"] == "DEKPLAINONE"
+    assert parsed["params"]["key2"] == "DEKPLAINTWO"
+
+    logs = _captured_logs_text(caplog)
+    assert "DEKPLAINONE" not in logs
+    assert "DEKPLAINTWO" not in logs
+    assert MASK in logs
+    assert "accel_crypto_key_create" in logs
+    assert "AES_XTS" in logs
+
+
+def _sent_params(client):
+    return json.loads(client._fake_session.post.call_args.kwargs["data"])["params"]
+
+
+def test_bdev_s3_create_keys_reach_the_wire_but_not_the_log(rpc_client, caplog):
+    # bdev_s3_create is the only RPC carrying S3 keys, and it goes through
+    # _request3, which logs its parameter dict directly -- only a SecretStr
+    # masks there.
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client.bdev_s3_create(
+            name="s3_lvs_test", bucket_name="bucket", region="eu-central-1",
+            secondary_target=0, with_compression=False, snapshot_backups=True,
+            access_key_id=SecretStr("AKIAEXAMPLE"),
+            secret_access_key=SecretStr("s3cr3t"),
+        )
+
+    params = _sent_params(rpc_client)
+    assert params["access_key_id"] == "AKIAEXAMPLE"
+    assert params["secret_access_key"] == "s3cr3t"
+
+    logged = _captured_logs_text(caplog)
+    assert "AKIAEXAMPLE" not in logged
+    assert "s3cr3t" not in logged
+    assert "**********" in logged
+
+
+def test_bdev_s3_create_omits_absent_credentials(rpc_client):
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    rpc_client.bdev_s3_create(
+        name="s3_lvs_test", bucket_name="bucket", region="eu-central-1",
+        secondary_target=0, with_compression=False, snapshot_backups=True)
+
+    params = _sent_params(rpc_client)
+    assert "access_key_id" not in params
+    assert "secret_access_key" not in params
+
+    # Same for every other optional: the data plane reads 0 as "unset" for the
+    # masks and the pool size, so sending one would be indistinguishable from
+    # omitting it while reading as a deliberate choice.
+    for absent in (
+        "endpoint", "bdb_lcpu_mask", "s3_lcpu_mask", "s3_thread_pool_size",
+        "s3_request_timeout_ms", "s3_request_hard_abort_ms",
+        "s3_request_max_attempts", "s3_retry_burst", "s3_retry_refill_ms",
+    ):
+        assert absent not in params
+
+    # ... and what is not optional is always present.
+    assert params["region"] == "eu-central-1"
+
+
+def test_bdev_s3_create_forwards_retry_and_timeout_params(rpc_client):
+    # Regression test: these five were accepted by the method signature but
+    # dropped before the RPC body was built, so callers configuring the S3
+    # watchdog's timeouts (e.g. restore's create_restore_s3_bdev) silently
+    # got the data plane's defaults instead.
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    rpc_client.bdev_s3_create(
+        name="s3_lvs_test", bucket_name="bucket",
+        secondary_target=0, with_compression=False, snapshot_backups=True,
+        s3_request_timeout_ms=4000,
+        s3_request_hard_abort_ms=6000,
+        s3_request_max_attempts=2,
+        s3_retry_burst=16,
+        s3_retry_refill_ms=1000,
+    )
+
+    params = _sent_params(rpc_client)
+    assert params["s3_request_timeout_ms"] == 4000
+    assert params["s3_request_hard_abort_ms"] == 6000
+    assert params["s3_request_max_attempts"] == 2
+    assert params["s3_retry_burst"] == 16
+    assert params["s3_retry_refill_ms"] == 1000
+
+
+@pytest.fixture
+def snode_client():
+    with patch("simplyblock_core.snode_client.requests.session") as session_factory:
+        session = MagicMock()
+        session_factory.return_value = session
+        session.headers = {}
+        client = SNodeClient("snode.host")
+        client._fake_session = session
+        yield client
+
+
+def test_snode_request_wire_unwraps_secrets(snode_client, caplog):
+    snode_client._fake_session.request.return_value = _make_json_response({"results": "ok"})
+
+    with caplog.at_level(logging.DEBUG):
+        snode_client._request("POST", "spdk_process_start", {
+            "rpc_username": "u",
+            "rpc_password": SecretStr("PWVALUE"),
+        })
+
+    posted_body = snode_client._fake_session.request.call_args.kwargs["data"]
+    parsed = json.loads(posted_body)
+    assert parsed["rpc_password"] == "PWVALUE"
+
+    assert "PWVALUE" not in _captured_logs_text(caplog)
+
+
+def test_snode_response_body_hidden_when_flag_off(snode_client, caplog, monkeypatch):
+    monkeypatch.setenv("SB_LOG_RESPONSE_BODIES", "false")
+    snode_client._fake_session.request.return_value = _make_json_response({"results": {"x": "RESPVAL"}})
+    with caplog.at_level(logging.DEBUG):
+        snode_client._request("GET", "info")
+    assert "RESPVAL" not in _captured_logs_text(caplog)
+
+
+def test_snode_write_key_file_masks_pool_key(snode_client, caplog):
+    """The pool path passes the model's ``SecretStr`` through rather than unwrapping it."""
+    from simplyblock_core.controllers import host_auth
+
+    pool = MagicMock()
+    pool.get_id.return_value = "pool-1"
+    pool.dhchap_key = SecretStr("DHHC-1:00:POOLKEY:")
+    pool.dhchap_ctrlr_key = SecretStr("")
+
+    snode = MagicMock()
+    snode.get_id.return_value = "node-1"
+    snode.client.return_value = snode_client
+    snode_client._fake_session.request.return_value = _make_json_response(
+        {"results": "/etc/simplyblock/dhchap/pool_key"})
+
+    rpc_client = MagicMock()
+    rpc_client._request2.return_value = ({"ok": True}, None)
+
+    with caplog.at_level(logging.DEBUG):
+        key_names = host_auth._register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+
+    assert key_names == {"dhchap_key": "pool_pool_1_dhchap_key"}
+
+    posted_body = snode_client._fake_session.request.call_args.kwargs["data"]
+    assert json.loads(posted_body)["content"] == "DHHC-1:00:POOLKEY:"
+
+    logs = _captured_logs_text(caplog)
+    assert "POOLKEY" not in logs
+    assert "pool_pool_1_dhchap_key" in logs
+
+
+def test_snode_write_key_file_masks_per_host_key(snode_client, caplog):
+    """The per-host path reads key material out of ``lvol.allowed_hosts``, a list of
+    plain dicts, so nothing wraps it for us — ``host_auth`` has to."""
+    from simplyblock_core.controllers import host_auth
+
+    snode = MagicMock()
+    snode.get_id.return_value = "node-1"
+    snode.client.return_value = snode_client
+    snode_client._fake_session.request.return_value = _make_json_response(
+        {"results": "/etc/simplyblock/dhchap/host_key"})
+
+    rpc_client = MagicMock()
+    rpc_client._request2.return_value = ({"ok": True}, None)
+
+    with caplog.at_level(logging.DEBUG):
+        key_names = host_auth._register_dhchap_keys_on_node(
+            snode, "nqn.2014-08.org.nvmexpress:uuid:host1",
+            {"dhchap_key": "DHHC-1:00:HOSTKEY:", "psk": "NVMeTLSkey-1:01:PSKPLAIN:"},
+            rpc_client,
+        )
+
+    assert set(key_names) == {"dhchap_key", "psk"}
+
+    posted = [json.loads(call.kwargs["data"])
+              for call in snode_client._fake_session.request.call_args_list]
+    assert {entry["content"] for entry in posted} == {
+        "DHHC-1:00:HOSTKEY:", "NVMeTLSkey-1:01:PSKPLAIN:"}
+
+    logs = _captured_logs_text(caplog)
+    assert "HOSTKEY" not in logs
+    assert "PSKPLAIN" not in logs

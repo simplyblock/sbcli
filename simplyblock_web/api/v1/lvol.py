@@ -1,18 +1,13 @@
 
-#!/usr/bin/env python
-# encoding: utf-8
-
 import logging
 
-from flask import Blueprint
-from flask import request
+from flask import Blueprint, request
 
+from simplyblock_core import db_controller
+from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.exceptions import PreconditionError
-
 from simplyblock_web import utils
-
-from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +23,9 @@ def list_lvols(uuid):
     if uuid:
         try:
             lvol = db.get_lvol_by_id(uuid)
-            node = db.get_storage_node_by_id(lvol.node_id)
-            if node.cluster_id == cluster_id:
+            # Same relation `get_lvols(cluster_id)` below lists by, so the
+            # single-volume and the collection form of this route agree.
+            if db.get_cluster_id_by_lvol(lvol) == cluster_id:
                 lvols = [lvol]
         except KeyError:
             pass
@@ -109,7 +105,6 @@ def add_lvol():
     """""
 
     cl_data = request.get_json()
-    logger.debug(cl_data)
     if 'size' not in cl_data:
         return utils.get_response(None, "missing required param: size", 400)
     if 'name' not in cl_data:
@@ -121,18 +116,14 @@ def add_lvol():
     pool_id_or_name = cl_data['pool']
     size = core_utils.parse_size(cl_data['size'])
 
-    pool = None
-    for p in db.get_pools():
-        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
-            pool = p
-            break
-    if not pool:
+    try:
+        pool = db.get_pool_by_id_or_name(pool_id_or_name)
+    except KeyError:
         return utils.get_response(None, f"Pool not found: {pool_id_or_name}", 400)
 
-    for lvol in db.get_mini_lvols():  # pass
-        if lvol.pool_uuid == pool.get_id():
-            if lvol.lvol_name == name:
-                return utils.get_response(lvol.get_id())
+    existing = db.lvol_name_lookup(pool.get_id(), name)
+    if existing is not None:
+        return utils.get_response(existing.get_id())
 
     rw_iops = utils.get_int_value_or_default(cl_data, "max_rw_iops", 0)
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
@@ -146,7 +137,9 @@ def add_lvol():
     namespaced = utils.get_value_or_default(cl_data, "namespaced", False)
     uid = utils.get_value_or_default(cl_data, "uid", None)
     pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
-    max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", 1)
+    # None → resolved by add_lvol_ha: a shareable default for namespaced
+    # lvols, 1 otherwise.
+    max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", None)
     ndcs = utils.get_value_or_default(cl_data, "ndcs", 0)
     npcs = utils.get_value_or_default(cl_data, "npcs", 0)
     fabric = utils.get_value_or_default(cl_data, "fabric", "tcp")
@@ -239,9 +232,14 @@ def delete_lvol(uuid):
     if pool.status == pool.STATUS_INACTIVE:
         return utils.get_response_error("Pool is disabled", 400)
 
-    ret = lvol_controller.delete_lvol(uuid)
+    try:
+        lvol_controller.delete_lvol(lvol)
+        return utils.get_response(True)
+    except PreconditionError as e:
+        return utils.get_response_error(str(e), 400)
+    except RuntimeError as e:
+        return utils.get_response_error(str(e), 500)
 
-    return utils.get_response(ret)
 
 
 @bp.route('/lvol/resize/<string:uuid>', methods=['PUT'])
@@ -277,7 +275,7 @@ def connect_lvol(uuid):
     ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
     if err:
         return utils.get_response_error(err, 400)
-    return utils.get_response(ret)
+    return utils.get_response([e.model_dump(by_alias=True) for e in ret])
 
 
 @bp.route('/lvol/create_snapshot', methods=['POST'])

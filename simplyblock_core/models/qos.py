@@ -1,9 +1,14 @@
-# coding=utf-8
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.indices import Index
 
 
 class QOSClass(BaseModel):
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+    )
 
     cluster_id: str = ""
     class_id: int = 0

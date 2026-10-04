@@ -1,0 +1,238 @@
+name: Cross-Cluster Restore Test (Docker)
+run-name: "Cross-Cluster Restore | ${{ inputs.SBCLI_BRANCH || 'main' }} | ${{ inputs.MNODES || '192.168.10.210' }} | ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}+${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # =========================
+      # Node inputs
+      # =========================
+      STORAGE_NODE_IPS:
+        description: "Space-separated storage node IPs (split evenly between 2 clusters; min 2*(NDCS+NPCS) nodes)"
+        required: true
+        type: string
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+
+      MNODES:
+        description: "Management node IP (shared by both clusters)"
+        required: true
+        type: string
+        default: "192.168.10.210"
+
+      # =========================
+      # Bootstrap params
+      # =========================
+      BOOTSTRAP_DATA_CHUNKS:
+        description: "Data chunks per stripe (NDCS) — min nodes per cluster = NDCS + NPCS"
+        required: true
+        type: string
+        default: "1"
+
+      BOOTSTRAP_PARITY_CHUNKS:
+        description: "Parity chunks per stripe (NPCS)"
+        required: true
+        type: string
+        default: "2"
+
+      BOOTSTRAP_JOURNAL_PARTITION:
+        description: "Journal partition index"
+        required: false
+        type: string
+        default: "1"
+
+      BOOTSTRAP_HA_JM_COUNT:
+        description: "HA journal manager count"
+        required: false
+        type: string
+        default: "4"
+
+      BOOTSTRAP_DATA_NIC:
+        description: "Data NIC interface"
+        required: false
+        type: string
+        default: "eth1"
+
+      BOOTSTRAP_MAX_SUBSYS:
+        description: "Max NVMe-oF subsystems per node"
+        required: false
+        type: string
+        default: "300"
+
+      # =========================
+      # Cluster / lab
+      # =========================
+      SBCLI_BRANCH:
+        description: "sbcli repo branch to clone for tests"
+        required: false
+        type: string
+        default: "main"
+
+      CUSTOM_IMAGES:
+        description: 'Image overrides: spdk="..." docker="..."'
+        required: false
+        type: string
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
+
+      CLIENTNODES:
+        description: "Space-separated client/FIO node IPs"
+        required: false
+        type: string
+        default: "192.168.10.165 192.168.10.166"
+
+      SSH_USER:
+        description: "SSH user for all nodes"
+        required: false
+        type: string
+        default: "root"
+
+      KEY_PATH:
+        description: "SSH private key path on runner"
+        required: false
+        type: string
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+
+      NFS_MOUNTPOINT:
+        description: "NFS mount path"
+        required: false
+        type: string
+        default: "/mnt/nfs_share"
+
+      EXTRA_CLUSTER_ARGS:
+        description: "Additional args for sbcli cluster create"
+        required: false
+        type: string
+
+      EXTRA_SN_ARGS:
+        description: "Additional args for sbcli storage-node add-node"
+        required: false
+        type: string
+
+      send_slack_notification:
+        description: "Send Slack notification on completion"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: simplyblock-lab-cross-cluster-${{ inputs.MNODES || '192.168.10.210' }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # Job 1: Validate node count and split IPs between 2 clusters
+  # ============================================================
+  validate-and-split:
+    name: Validate nodes & split for 2 clusters
+    runs-on: [self-hosted]
+    outputs:
+      cluster1_nodes: ${{ steps.split.outputs.cluster1_nodes }}
+      cluster2_nodes: ${{ steps.split.outputs.cluster2_nodes }}
+      total_nodes: ${{ steps.split.outputs.total_nodes }}
+      c1_count: ${{ steps.split.outputs.c1_count }}
+      c2_count: ${{ steps.split.outputs.c2_count }}
+
+    steps:
+      - name: Validate node count and split IPs
+        id: split
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Parse input IPs into array
+          read -ra IPS <<< "${{ inputs.STORAGE_NODE_IPS }}"
+          TOTAL=${#IPS[@]}
+
+          NDCS=${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
+          NPCS=${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
+          MIN_PER_CLUSTER=$((NDCS + NPCS))
+          MIN_TOTAL=$((MIN_PER_CLUSTER * 2))
+
+          echo "=== Cross-Cluster Node Validation ==="
+          echo "Total storage node IPs provided: ${TOTAL}"
+          echo "NDCS=${NDCS}, NPCS=${NPCS}"
+          echo "Min nodes per cluster (n+k): ${MIN_PER_CLUSTER}"
+          echo "Min total nodes needed: ${MIN_TOTAL}"
+
+          if [[ ${TOTAL} -lt ${MIN_TOTAL} ]]; then
+            echo "ERROR: Need at least ${MIN_TOTAL} nodes for 2 clusters with ${NDCS}+${NPCS} configuration, but only got ${TOTAL}."
+            echo "Provide at least ${MIN_PER_CLUSTER} nodes per cluster."
+            exit 1
+          fi
+
+          # Split evenly: first half → cluster-1, second half → cluster-2
+          HALF=$((TOTAL / 2))
+
+          C1_IPS=""
+          C2_IPS=""
+          for i in "${!IPS[@]}"; do
+            if [[ $i -lt $HALF ]]; then
+              C1_IPS="${C1_IPS:+${C1_IPS} }${IPS[$i]}"
+            else
+              C2_IPS="${C2_IPS:+${C2_IPS} }${IPS[$i]}"
+            fi
+          done
+
+          C1_COUNT=$(echo "${C1_IPS}" | wc -w)
+          C2_COUNT=$(echo "${C2_IPS}" | wc -w)
+
+          echo ""
+          echo "=== Split Result ==="
+          echo "Cluster-1 nodes (${C1_COUNT}): ${C1_IPS}"
+          echo "Cluster-2 nodes (${C2_COUNT}): ${C2_IPS}"
+
+          # Validate both halves have enough nodes
+          if [[ ${C1_COUNT} -lt ${MIN_PER_CLUSTER} ]]; then
+            echo "ERROR: Cluster-1 has ${C1_COUNT} nodes but needs at least ${MIN_PER_CLUSTER}"
+            exit 1
+          fi
+          if [[ ${C2_COUNT} -lt ${MIN_PER_CLUSTER} ]]; then
+            echo "ERROR: Cluster-2 has ${C2_COUNT} nodes but needs at least ${MIN_PER_CLUSTER}"
+            exit 1
+          fi
+
+          echo "cluster1_nodes=${C1_IPS}" >> "$GITHUB_OUTPUT"
+          echo "cluster2_nodes=${C2_IPS}" >> "$GITHUB_OUTPUT"
+          echo "total_nodes=${TOTAL}" >> "$GITHUB_OUTPUT"
+          echo "c1_count=${C1_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "c2_count=${C2_COUNT}" >> "$GITHUB_OUTPUT"
+
+  # ============================================================
+  # Job 2: Bootstrap cluster-1 + run cross-cluster restore test
+  #
+  # Uses e2e-bootstrap.yml which:
+  #   - Cleans all nodes (STORAGE_PRIVATE_IPS + NEW_NODE_IPS)
+  #   - Bootstraps cluster-1 from STORAGE_PRIVATE_IPS
+  #   - Passes NEW_NODE_IPS to the test as spare nodes
+  #   - TestBackupCrossClusterRestore auto-bootstraps cluster-2
+  #     from spare nodes (installs sbcli, creates cluster, adds
+  #     nodes, activates, creates pool)
+  # ============================================================
+  cross-cluster-restore:
+    name: Bootstrap C1 + Cross-Cluster Restore Test
+    needs: validate-and-split
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    with:
+      STORAGE_PRIVATE_IPS: ${{ needs.validate-and-split.outputs.cluster1_nodes }}
+      NEW_NODE_IPS: ${{ needs.validate-and-split.outputs.cluster2_nodes }}
+      MNODES: ${{ inputs.MNODES }}
+      API_INVOKE_URL: "http://${{ inputs.MNODES }}/"
+      BASTION_IP: ${{ inputs.MNODES }}
+      GRAFANA_ENDPOINT: "http://${{ inputs.MNODES }}/grafana"
+      TEST_CLASS: "TestBackupCrossClusterRestore"
+      CLUSTER_SECURITY: "backup"
+      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'main' }}
+      CUSTOM_IMAGES: ${{ inputs.CUSTOM_IMAGES || 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"' }}
+      CLIENTNODES: ${{ inputs.CLIENTNODES || '192.168.10.165 192.168.10.166' }}
+      SSH_USER: ${{ inputs.SSH_USER || 'root' }}
+      KEY_PATH: ${{ inputs.KEY_PATH || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
+      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
+      BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '300' }}
+      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
+      BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
+      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
+      BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
+      BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
+      EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
+      send_slack_notification: ${{ inputs.send_slack_notification }}
+    secrets: inherit

@@ -1,13 +1,15 @@
 import argparse
-import subprocess
-import matplotlib.pyplot as plt
-import os
-import time
-import numpy as np
-import threading
-import psutil
 import csv
+import os
+import subprocess
+import threading
+import time
 from collections import defaultdict
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import psutil
 
 
 class ManagementStressUtils:
@@ -820,7 +822,9 @@ class TestLvolMemory:
         # Read milestones
         try:
             self.milestones = [
-                tuple(map(float, line.split())) for line in open("milestones.txt").readlines()
+                tuple(map(float, line.split()))
+                for line
+                in Path("milestones.txt").read_text().splitlines()
             ]
         except OSError:
             self.milestones = []

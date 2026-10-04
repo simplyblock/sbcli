@@ -1,0 +1,92 @@
+name: Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - R26.2-PRE
+      - R26.3
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (py${{ matrix.py }})
+    runs-on: ubuntu-latest
+    # 3.11 is the floor `requires-python` promises for the published wheel; 3.14t
+    # is what the container image runs. Both have to stay green -- the GIL-off
+    # build is where a previously-masked data race surfaces.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { py: "3.11",   tox_prefix: "" }
+          - { py: "3.14t", tox_prefix: "py314t-" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          cache: 'pip'
+      - name: Install tox
+        run: pip install tox tox-uv
+      - name: Run unit tests
+        run: tox run -e ${{ matrix.tox_prefix }}unit
+        env:
+          PYTEST_ADDOPTS: -v
+
+  integration:
+    name: Integration tests (py${{ matrix.py }})
+    runs-on: ubuntu-latest
+    # 3.11 is the floor `requires-python` promises for the published wheel; 3.14t
+    # is what the container image runs. Both have to stay green -- the GIL-off
+    # build is where a previously-masked data race surfaces.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { py: "3.11",   tox_prefix: "" }
+          - { py: "3.14t", tox_prefix: "py314t-" }
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          cache: 'pip'
+      - name: Install FoundationDB client library
+        run: |
+          curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb -o /tmp/fdb-clients.deb
+          sudo dpkg -i /tmp/fdb-clients.deb
+      - name: Install tox
+        run: pip install tox tox-uv
+      - name: Run integration tests
+        run: tox run -e ${{ matrix.tox_prefix }}integration
+        env:
+          PYTEST_ADDOPTS: -v
+
+  integration-slow:
+    name: Integration tests (slow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      - name: Install FoundationDB client library
+        run: |
+          curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb -o /tmp/fdb-clients.deb
+          sudo dpkg -i /tmp/fdb-clients.deb
+      - name: Install tox
+        run: pip install tox tox-uv
+      - name: Run slow integration tests
+        run: tox run -e integration-slow
+        env:
+          PYTEST_ADDOPTS: -v

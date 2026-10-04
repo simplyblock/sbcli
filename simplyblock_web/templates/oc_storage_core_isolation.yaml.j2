@@ -74,6 +74,9 @@ spec:
                       operator: In
                       values:
                         - worker
+                        {% if OPENSHIFT_MCP and OPENSHIFT_MCP != 'worker' %}
+                        - {{ OPENSHIFT_MCP }}
+                        {% endif %}
                         - worker-isolated-{{ HOSTNAME }}
                 nodeSelector:
                   matchLabels:

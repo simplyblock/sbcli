@@ -1,4 +1,6 @@
+import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -11,12 +13,71 @@ class SbcliUtils:
     def __init__(self, cluster_secret, cluster_api_url, cluster_id):
         self.cluster_id = cluster_id
         self.cluster_secret = cluster_secret
-        self.cluster_api_url = cluster_api_url
+        # Endpoints are all rooted ("/lvol", ...), so a trailing slash here would
+        # produce "//lvol". requests <2.34 silently collapsed that; it no longer does.
+        self.cluster_api_url = cluster_api_url.rstrip("/")
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"{cluster_id} {cluster_secret}"
         }
         self.logger = setup_logger(__name__)
+        # Extended API recovery: when > 0, wait up to this many seconds
+        # for the API to come back after quick retries exhaust on 503 or
+        # connection errors.  Callers (e.g. stress tests) opt-in by
+        # setting this to a positive value (e.g. 1800).
+        self.api_recovery_timeout = 0
+
+    @staticmethod
+    def _is_transient_error(exc):
+        """Return True if *exc* looks like a transient API outage (503,
+        502, connection refused, etc.) rather than a permanent failure."""
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            return True
+        if isinstance(exc, requests.exceptions.HTTPError):
+            code = getattr(getattr(exc, "response", None), "status_code", 0)
+            return code in (502, 503, 504)
+        return False
+
+    def _wait_for_api_recovery(self, interval=15):
+        """Ping GET /storagenode every *interval* seconds until the API
+        responds with 200 or *api_recovery_timeout* is exceeded.
+
+        Returns True if API recovered, False if timeout expired.
+        """
+        timeout = self.api_recovery_timeout
+        if timeout <= 0:
+            return False
+        self.logger.warning(
+            f"API appears down — entering recovery wait "
+            f"(ping every {interval}s, max {timeout}s)"
+        )
+        deadline = time.time() + timeout
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
+            time.sleep(interval)
+            try:
+                resp = requests.get(
+                    self.cluster_api_url + "/storagenode",
+                    headers=self.headers,
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    self.logger.info(
+                        f"API recovered after {attempt * interval}s — resuming"
+                    )
+                    return True
+                self.logger.info(
+                    f"API recovery ping {attempt}: HTTP {resp.status_code}"
+                )
+            except Exception as ping_exc:
+                self.logger.info(
+                    f"API recovery ping {attempt}: {ping_exc}"
+                )
+        self.logger.error(
+            f"API did not recover within {timeout}s — giving up"
+        )
+        return False
 
     def get_request(self, api_url, headers=None, expected_error_code=None):
         """Performs get request on the given API URL
@@ -44,8 +105,12 @@ class SbcliUtils:
                     data = resp.json()
                     return data
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -55,6 +120,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1  # one more attempt after recovery
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -63,6 +131,9 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -91,8 +162,12 @@ class SbcliUtils:
                     data = resp.json()
                     return data
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -101,6 +176,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -109,17 +187,22 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
                 sleep_n_sec(3)
 
-    def delete_request(self, api_url, headers=None, expected_error_code=None):
+    def delete_request(self, api_url, headers=None, expected_error_code=None, treat_404_as_success=False):
         """Performs delete request on the given API URL
 
         Args:
             api_url (str): Endpoint to request
             headers (dict, optional): Headers needed. Defaults to None.
+            treat_404_as_success (bool): If True, treat HTTP 404 as idempotent
+                success (resource already deleted). Defaults to False.
 
         Returns:
             dict: response returned
@@ -134,10 +217,17 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                     return data
+                elif resp.status_code == HTTPStatus.NOT_FOUND and treat_404_as_success:
+                    self.logger.info(f"DELETE {api_url} returned 404 — resource already deleted, treating as success")
+                    return {"status": True, "results": [], "error": None}
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
-                
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
+
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -146,6 +236,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -154,6 +247,9 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
@@ -182,8 +278,12 @@ class SbcliUtils:
                     data = resp.json()
                     return data
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -192,6 +292,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -200,6 +303,9 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -348,8 +454,12 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
-        """Adds the storage with given name
+    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0,
+                         max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
+                         dhchap=False):
+        """Adds the storage with given name.
+
+        dhchap: bool — if True, enables DH-HMAC-CHAP authentication for the pool.
         """
         pools = self.list_storage_pools()
         for name in list(pools.keys()):
@@ -367,6 +477,8 @@ class SbcliUtils:
         }
         if cluster_id:
             body["cluster_id"] = cluster_id
+        if dhchap:
+            body["dhchap"] = True
 
         self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions
@@ -405,13 +517,19 @@ class SbcliUtils:
             self.logger.info(f"Deleting pool: {name}")
             self.delete_storage_pool(pool_name=name)
 
-    def list_lvols(self):
+    def list_lvols(self, exclude_in_deletion=False):
         """Return all lvols
+
+        Args:
+            exclude_in_deletion: If True, skip lvols whose status is
+                ``in_deletion``.  Useful for verification after creation
+                where a rolled-back lvol may still be in the DB briefly.
         """
         lvol_data = dict()
         data = self.get_request(api_url="/lvol")
-        # self.logger.info(f"LVOL List: {data}")
         for lvol_info in data["results"]:
+            if exclude_in_deletion and lvol_info.get("status") == "in_deletion":
+                continue
             lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
         self.logger.debug(f"LVOL List: {lvol_data}")
         return lvol_data
@@ -440,15 +558,11 @@ class SbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None,
+                 crypto=False, fabric="tcp", cluster_id=None,
                  max_namespace_per_subsys=None, namespace=None):
         """Adds lvol with given params
         """
-
-        if crypto:
-            if not key1 or not key2:
-                raise Exception("Need two keys for crypto lvols")
-        lvols = self.list_lvols()
+        lvols = self.list_lvols(exclude_in_deletion=True)
         for name in list(lvols.keys()):
             if name == lvol_name:
                 self.logger.info(f"LVOL {lvol_name} already exists. Exiting")
@@ -473,20 +587,23 @@ class SbcliUtils:
             body["host_id"] = host_id
         if crypto:
             body["crypto"] = True
-            body["crypto_key1"] = key1
-            body["crypto_key2"] = key2
         
         if max_namespace_per_subsys is not None:
             body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
 
         if namespace:
-            # parent lvol id
-            body["namespace"] = namespace
+            # flag for auto-grouping into existing parent subsystem
+            body["namespaced"] = True
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
-    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
-        """Deletes lvol with given name
+    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False, deadline=None):
+        """Deletes lvol with given name.
+
+        Args:
+            deadline: Optional absolute time.time() deadline. Overrides the
+                default 15-minute per-lvol timeout when set by callers like
+                delete_all_lvols that enforce a shared global timeout.
         """
         try:
             lvol_id = self.get_lvol_id(lvol_name=lvol_name)
@@ -503,26 +620,51 @@ class SbcliUtils:
             raise Exception(f"Lvol {lvol_name} does not exist")
         self.logger.info(f"ledoo {lvol_name}, {lvol_id}")
 
-        data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+        try:
+            data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
+        except Exception as e:
+            if skip_error:
+                self.logger.warning(f"delete_lvol DELETE request for {lvol_name} ({lvol_id}) failed: {e}. Continuing with skip_error=True")
+                return False
+            raise
         self.logger.info(f"Delete lvol resp: {data}")
 
         lvols = self.list_lvols()
         attempt = 0
+        if deadline is None:
+            deadline = time.time() + 15 * 60  # hard 15-minute wallclock timeout
         while True:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 return True
+            if time.time() > deadline:
+                msg = f"Lvol {lvol_name} not deleted before deadline"
+                if skip_error:
+                    self.logger.warning(msg)
+                    return False
+                raise Exception(msg)
             if attempt % 12 == 0:
                 try:
                     cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
                 except Exception as _:
                     self.logger.info(f"Lvol {lvol_name} is not in the lvol list as error. Checking again!")
                     lvols = self.list_lvols()
+                    attempt += 1
+                    sleep_n_sec(5)
                     continue
                 if cur_state in ("online", "in_deletion"):
                     self.logger.info(f"Lvol {lvol_name} in {cur_state} state. Retrying Delete!")
-                    data = self.delete_request(api_url=f"/lvol/{lvol_id}")
-                    self.logger.info(f"Delete lvol resp: {data}")
+                    try:
+                        data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
+                        self.logger.info(f"Delete lvol resp: {data}")
+                    except Exception as e:
+                        if skip_error:
+                            self.logger.warning(
+                                f"delete_lvol retry DELETE for {lvol_name} ({lvol_id}) failed: {e}. "
+                                f"Continuing with skip_error=True"
+                            )
+                        else:
+                            raise
             if attempt > max_attempt:
                 if skip_error:
                     return False
@@ -533,31 +675,171 @@ class SbcliUtils:
             sleep_n_sec(5)
             lvols = self.list_lvols()
 
-    def delete_all_clones(self):
+    def delete_all_clones(self, max_workers=10, timeout=1800, stall_timeout=1800):
         """Delete all clone lvols (lvols with cloned_from_snap set).
 
         Must be called BEFORE delete_all_snapshots, because SPDK refuses
         to delete a snapshot that still has clones.
-        """
-        data = self.get_request(api_url="/lvol")
-        for lvol_info in data.get("results", []):
-            if lvol_info.get("cloned_from_snap"):
-                name = lvol_info.get("lvol_name")
-                self.logger.info(f"Deleting clone lvol: {name}")
-                try:
-                    self.delete_lvol(lvol_name=name, skip_error=True)
-                except Exception as e:
-                    self.logger.warning(
-                        f"Clone delete failed (continuing): {name}, err={e}"
-                    )
 
-    def delete_all_lvols(self):
-        """Deletes all lvols
+        Uses fire-then-bulk-wait: issues DELETE for all clones in parallel,
+        then polls list_lvols() in a single loop until all are gone.
+        Gives up if no progress is made for *stall_timeout* seconds.
+        """
+        data = None
+        for attempt in range(3):
+            try:
+                data = self.get_request(api_url="/lvol")
+                break
+            except Exception as e:
+                self.logger.warning(
+                    f"delete_all_clones: /lvol list attempt {attempt+1} failed: {e}"
+                )
+                time.sleep(5)
+        if data is None:
+            self.logger.warning("delete_all_clones: could not list lvols after 3 attempts, skipping")
+            return
+        clone_names = [
+            lvol_info.get("lvol_name")
+            for lvol_info in data.get("results", [])
+            if lvol_info.get("cloned_from_snap")
+        ]
+        if not clone_names:
+            return
+        self.logger.info(f"Deleting {len(clone_names)} clones (max_workers={max_workers})")
+
+        # Phase A: fire DELETE for every clone without waiting
+        clone_ids = {
+            lvol_info.get("lvol_name"): lvol_info.get("id")
+            for lvol_info in data.get("results", [])
+            if lvol_info.get("cloned_from_snap")
+        }
+        self._fire_delete_lvols(clone_ids, max_workers)
+
+        # Phase B: bulk-wait
+        self._wait_lvols_gone(
+            clone_names, label="clone_wait",
+            timeout=timeout, stall_timeout=stall_timeout,
+        )
+
+    def delete_all_lvols(self, max_workers=10, timeout=1800, stall_timeout=1800):
+        """Deletes all lvols using fire-then-bulk-wait.
+
+        Issues DELETE for every lvol in parallel, then polls list_lvols()
+        in a single loop until all are gone or *timeout* is reached.
+        Gives up early if no lvols are deleted for *stall_timeout* seconds
+        (indicates all nodes hosting these lvols are down).
         """
         lvols = self.list_lvols()
-        for name in list(lvols.keys()):
-            self.logger.info(f"Deleting lvol: {name}")
-            self.delete_lvol(lvol_name=name)
+        if not lvols:
+            return
+        names = list(lvols.keys())
+        self.logger.info(f"Deleting {len(names)} lvols (max_workers={max_workers})")
+
+        # Phase A: fire DELETE for every lvol without waiting
+        self._fire_delete_lvols(lvols, max_workers)
+
+        # Phase B: bulk-wait
+        self._wait_lvols_gone(
+            names, label="lvol_wait",
+            timeout=timeout, stall_timeout=stall_timeout,
+        )
+
+    def _fire_delete_lvols(self, name_to_id: dict, max_workers: int = 10):
+        """Issue DELETE for each lvol without waiting for completion."""
+        def _fire(name):
+            lvol_id = name_to_id.get(name)
+            if not lvol_id:
+                return
+            try:
+                self.delete_request(
+                    api_url=f"/lvol/{lvol_id}", treat_404_as_success=True,
+                )
+            except Exception as e:
+                self.logger.warning(f"[fire_delete] {name}: {e}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(_fire, n): n for n in name_to_id}
+            for f in as_completed(futs):
+                f.result()
+
+    def _wait_lvols_gone(
+        self, names: list, label: str = "lvol_wait",
+        timeout: int = 1800, stall_timeout: int = 180,
+        re_delete_interval: int = 120,
+    ):
+        """Wait for lvols to disappear from the API.
+
+        Polls list_lvols() every 30s (single call, not per-lvol).
+        Re-issues DELETE for stuck items every *re_delete_interval* seconds.
+        Gives up early if no progress for *stall_timeout* seconds.
+        """
+        deadline = time.time() + timeout
+        remaining = set(names)
+        last_progress = time.time()
+        last_re_delete = time.time()
+
+        self.logger.info(
+            f"[{label}] Waiting for {len(remaining)} lvols to be deleted "
+            f"(timeout={timeout}s, stall_timeout={stall_timeout}s)"
+        )
+
+        while remaining and time.time() < deadline:
+            try:
+                current = self.list_lvols()
+            except Exception as exc:
+                self.logger.warning(f"[{label}] list_lvols failed: {exc}")
+                sleep_n_sec(10)
+                continue
+
+            still_present = remaining & set(current.keys())
+            just_deleted = remaining - still_present
+            if just_deleted:
+                self.logger.info(
+                    f"[{label}] {len(just_deleted)} more deleted, "
+                    f"{len(still_present)} remaining"
+                )
+                last_progress = time.time()
+            remaining = still_present
+
+            if not remaining:
+                break
+
+            # Stall detection: if no lvols were deleted for stall_timeout,
+            # the backend nodes are likely down — stop waiting.
+            if time.time() - last_progress > stall_timeout:
+                self.logger.warning(
+                    f"[{label}] No progress for {stall_timeout}s with "
+                    f"{len(remaining)} lvols remaining — giving up "
+                    f"(nodes likely down)"
+                )
+                break
+
+            # Re-issue DELETE for stuck items
+            now = time.time()
+            if now - last_re_delete >= re_delete_interval:
+                self.logger.info(
+                    f"[{label}] Re-issuing DELETE for "
+                    f"{len(remaining)} stuck lvols"
+                )
+                for name in list(remaining)[:200]:
+                    lvol_id = current.get(name)
+                    if lvol_id:
+                        try:
+                            self.delete_request(
+                                api_url=f"/lvol/{lvol_id}",
+                                treat_404_as_success=True,
+                            )
+                        except Exception:
+                            pass
+                last_re_delete = now
+
+            sleep_n_sec(30)
+
+        if remaining:
+            self.logger.warning(
+                f"[{label}] Finished with {len(remaining)}/{len(names)} "
+                f"lvols still present"
+            )
 
     def get_lvol_id(self, lvol_name):
         """Return lvol by lvol name
@@ -588,18 +870,25 @@ class SbcliUtils:
         connect_lines = []
 
         for entry in data.get("results", []):
-            connect_line = (
-                "sudo nvme connect "
-                f"--reconnect-delay={entry['reconnect-delay']} "
-                f"--ctrl-loss-tmo=-1 "
-                f"--nr-io-queues={entry['nr-io-queues']} "
-                f"--keep-alive-tmo={entry['keep-alive-tmo']} "
-                f"--transport={entry['transport']} "
-                f"--traddr={entry['ip']} "
-                f"--trsvcid={entry['port']} "
-                f"--nqn={entry['nqn']}"
-            )
-            connect_lines.append(connect_line)
+            if "connect" in entry:
+                connect_lines.append(entry["connect"])
+            else:
+                # Fallback: support both hyphenated and underscored keys
+                def _g(key):
+                    return entry.get(key) or entry.get(key.replace("-", "_"))
+
+                connect_line = (
+                    "sudo nvme connect "
+                    f"--reconnect-delay={_g('reconnect-delay')} "
+                    f"--ctrl-loss-tmo=-1 "
+                    f"--nr-io-queues={_g('nr-io-queues')} "
+                    f"--keep-alive-tmo={_g('keep-alive-tmo')} "
+                    f"--transport={entry.get('transport', 'tcp')} "
+                    f"--traddr={entry.get('ip')} "
+                    f"--trsvcid={entry.get('port')} "
+                    f"--nqn={entry.get('nqn')}"
+                )
+                connect_lines.append(connect_line)
 
         return connect_lines
 
@@ -722,25 +1011,50 @@ class SbcliUtils:
         self.logger.info(f"Value: {value_match}")
         return all(value_match)
     
-    def wait_for_device_status(self, node_id, status, timeout=60):
+    def wait_for_device_status(self, node_id, status, timeout=60, device_id=None):
+        """Wait for device(s) to reach the expected status.
+
+        Args:
+            node_id: Storage node UUID.
+            status: Expected status string or list of status strings.
+            timeout: Max seconds to wait.
+            device_id: If provided, only check this specific device.
+                       If None, check ALL devices on the node (legacy behaviour).
+        """
+        status = status if isinstance(status, list) else [status]
         device_ids = {}
         device_details = self.get_device_details(storage_node_id=node_id)
         total_devices = len(device_details)
         while timeout > 0:
             self.logger.info("Retrying Device Status check")
             device_details = self.get_device_details(storage_node_id=node_id)
-            for device in device_details:
-                device_ids[device['id']] = device['status']
-                status = status if isinstance(status, list) else [status]
+
+            if device_id:
+                # Single-device mode: only check the specified device
+                for device in device_details:
+                    if device['id'] == device_id:
+                        actual = device['status']
+                        self.logger.info(f"Device ID: {device_id} Expected Status: {status} / Actual Status: {actual}")
+                        if actual in status:
+                            return device_details
+                        break
+                else:
+                    self.logger.warning(f"Device {device_id} not found on node {node_id}")
+            else:
+                # All-devices mode (legacy): require every device to match
+                device_ids = {}
+                for device in device_details:
+                    device_ids[device['id']] = device['status']
                 self.logger.info(f"Device statuses: {device_ids}")
-                if device['status'] in status:
-                    if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
-                        return device_details
-                self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {device['status']}")
+                if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
+                    return device_details
+                for did, dstatus in device_ids.items():
+                    self.logger.info(f"Device ID: {did} Expected Status: {status} / Actual Status: {dstatus}")
+
             sleep_n_sec(1)
             timeout -= 1
-        raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {list(device_ids.keys())}"
-                            f"Expected status: {status}, Actual status: {list(device_ids.values())}")
+        raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id or list(device_ids.keys())}, "
+                            f"Expected status: {status}, Actual status: {list(device_ids.values()) if not device_id else 'see above'}")
     
     def wait_for_health_status(self, node_id, status, timeout=60, device_id=None):
         actual_status = None
@@ -782,10 +1096,10 @@ class SbcliUtils:
 
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
-        return self.get_request(f"/cluster/list-tasks/{cluster_id}?limit=0")
+        return self.get_request(f"/cluster/get-tasks/{cluster_id}?limit=0")
 
     def wait_migration_tasks_complete(self, timeout=3600):
-        """Wait until all FN_FAILED_DEV_MIG tasks finish.
+        """Wait until all failed_device_migration tasks finish.
 
         Polls ``list_migration_tasks`` every 10 seconds until no active
         failure-migration tasks remain or *timeout* seconds elapse.
@@ -803,10 +1117,15 @@ class SbcliUtils:
         start = _time.time()
         active = []
         while _time.time() - start < timeout:
-            tasks = self.list_migration_tasks(self.cluster_id)
+            try:
+                tasks = self.list_migration_tasks(self.cluster_id)
+            except Exception as exc:
+                self.logger.warning(f"list_migration_tasks API failed: {exc}")
+                sleep_n_sec(10)
+                continue
             active = [
                 t for t in tasks.get("results", [])
-                if t.get("function_name") == "FN_FAILED_DEV_MIG"
+                if t.get("function_name") == "failed_device_migration"
                 and t.get("status") not in ("done", "cancelled", "error")
             ]
             if not active:
@@ -940,6 +1259,20 @@ class SbcliUtils:
         self.logger.info(f"Node capacity for {node_id}: {data}")
         return data["results"]
 
+    def get_device_capacity(self, device_id):
+        """Get per-device capacity statistics.
+
+        Args:
+            device_id (str): Device UUID.
+
+        Returns:
+            list: Capacity records with keys *size_total*, *size_used*,
+            *size_free*, *size_util*.
+        """
+        url = f"/device/capacity/{device_id}"
+        data = self.get_request(api_url=url)
+        return data.get("results", [])
+
     def activate_cluster(self, cluster_id):
         """Activate the given cluster
 
@@ -1005,11 +1338,21 @@ class SbcliUtils:
         """
         return self.list_snapshots().get(snap_name)
 
-    def delete_snapshot(self, snap_name: str = None, snap_id: str = None, max_attempt: int = 60, skip_error: bool = False):
+    def delete_snapshot(self, snap_name: str = None, snap_id: str = None,
+                        max_attempt: int = 60, skip_error: bool = False,
+                        wait: bool = True):
         """
         Delete snapshot by name or id (API).
         Endpoint: DELETE /snapshot/{snap_id}
-        Also waits until snapshot disappears from list.
+
+        If *wait* is True (default), polls until the snapshot disappears.
+        If *wait* is False, issues the DELETE and returns immediately
+        (fire-and-forget mode for bulk deletion).
+
+        Returns True only when the snapshot is confirmed gone, False otherwise
+        -- including fire-and-forget mode, where nothing has been confirmed.
+        Callers deciding whether to defer a retry must branch on this rather
+        than assume the call failed.
         """
         if not snap_id:
             if not snap_name:
@@ -1019,11 +1362,14 @@ class SbcliUtils:
         if not snap_id:
             if skip_error:
                 self.logger.info(f"Snapshot not found (skip_error=True). snap_name={snap_name}")
-                return
+                return True
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
 
-        resp = self.delete_request(api_url=f"/snapshot/{snap_id}")
+        resp = self.delete_request(api_url=f"/snapshot/{snap_id}", treat_404_as_success=True)
         self.logger.info(f"Delete snapshot resp: {resp}")
+
+        if not wait:
+            return False
 
         # wait for removal
         attempt = 0
@@ -1032,28 +1378,108 @@ class SbcliUtils:
             # if deleting by name, use name check; else id check
             if snap_name:
                 if snap_name not in cur:
-                    return
+                    return True
             else:
                 if snap_id not in cur.values():
-                    return
+                    return True
 
             attempt += 1
             sleep_n_sec(5)
 
         if skip_error:
-            return
+            return False
         raise Exception(f"Snapshot did not get deleted in time. snap_name={snap_name}, snap_id={snap_id}")
 
-    def delete_all_snapshots(self):
+    def delete_all_snapshots(self, max_workers=10):
         """
-        Convenience cleanup via API.
+        Convenience cleanup via API — fire-and-forget parallel deletion
+        followed by a single bulk-wait loop.
         """
         snaps = self.list_snapshots()
-        for snap_name in list(snaps.keys()):
+        snap_names = list(snaps.keys())
+        if not snap_names:
+            return
+        self.logger.info(f"Deleting {len(snap_names)} snapshots (max_workers={max_workers})")
+
+        # Phase A: fire DELETE for every snapshot without waiting
+        def _fire(name):
             try:
-                self.delete_snapshot(snap_name=snap_name, skip_error=True)
+                sid = snaps.get(name)
+                self.delete_snapshot(snap_id=sid, skip_error=True, wait=False)
             except Exception as e:
-                self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
+                self.logger.info(f"Snapshot delete failed (continuing): {name}, err={e}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(_fire, n): n for n in snap_names}
+            for f in as_completed(futs):
+                f.result()
+
+        # Phase B: bulk-wait until all snapshots disappear
+        self.wait_snapshots_deleted(snap_names, timeout=1800)
+
+    def wait_snapshots_deleted(
+        self, names: list, timeout: int = 1800, re_delete_interval: int = 120,
+    ):
+        """Wait for snapshots to disappear from the API.
+
+        Polls list_snapshots() every 30s (single call, not per-snapshot)
+        and re-issues DELETE for stuck items periodically.
+        """
+        deadline = time.time() + timeout
+        remaining = set(names)
+        last_re_delete = time.time()
+
+        self.logger.info(
+            f"[snap_wait] Waiting for {len(remaining)} snapshots "
+            f"to be deleted (timeout={timeout}s)"
+        )
+
+        while remaining and time.time() < deadline:
+            try:
+                current = self.list_snapshots()
+            except Exception as exc:
+                self.logger.warning(f"[snap_wait] list_snapshots failed: {exc}")
+                sleep_n_sec(10)
+                continue
+
+            still_present = remaining & set(current.keys())
+            just_deleted = remaining - still_present
+            if just_deleted:
+                self.logger.info(
+                    f"[snap_wait] {len(just_deleted)} more deleted, "
+                    f"{len(still_present)} remaining"
+                )
+            remaining = still_present
+
+            if not remaining:
+                break
+
+            # Re-issue DELETE for stuck items
+            now = time.time()
+            if now - last_re_delete >= re_delete_interval:
+                self.logger.info(
+                    f"[snap_wait] Re-issuing DELETE for "
+                    f"{len(remaining)} stuck snapshots"
+                )
+                for name in list(remaining)[:200]:
+                    sid = current.get(name)
+                    if sid:
+                        try:
+                            self.delete_request(
+                                api_url=f"/snapshot/{sid}",
+                                treat_404_as_success=True,
+                            )
+                        except Exception:
+                            pass
+                last_re_delete = time.time()
+
+            sleep_n_sec(30)
+
+        if remaining:
+            self.logger.warning(
+                f"[snap_wait] Timed out with {len(remaining)} "
+                f"snapshots still present"
+            )
 
     # ── Pool-level host management (DHCHAP) ─────────────────────────────────
 

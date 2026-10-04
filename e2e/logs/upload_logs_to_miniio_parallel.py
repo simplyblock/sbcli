@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "paramiko",
+#     "tqdm",
+# ]
+# ///
 """
 Parallel MinIO uploader with:
 - Remote + local uploads
@@ -8,18 +16,17 @@ Parallel MinIO uploader with:
 - Remote uploader accepts [src, key] OR {"src":..., "key":...}
 """
 
-import os
-import json
 import argparse
-import time
-import subprocess
+import json
+import os
 import random
+import subprocess
 import threading
-from typing import Optional, Tuple
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import paramiko
 import boto3
+import paramiko
 from boto3.s3.transfer import TransferConfig
 
 # Optional tqdm for byte-level progress
@@ -149,7 +156,7 @@ def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5) -> paramiko.SSHC
             time.sleep(delay)
     raise Exception(f"[ERROR] Failed to connect to {target_ip} after {retries} retries.")
 
-def exec_command(ssh: paramiko.SSHClient, command: str, retries=3) -> Tuple[str, str]:
+def exec_command(ssh: paramiko.SSHClient, command: str, retries=3) -> tuple[str, str]:
     for attempt in range(retries):
         try:
             print(f"[INFO] Executing: {command}")
@@ -210,7 +217,7 @@ def _sleep_backoff(attempt: int):
     delay = delay * (0.5 + random.random())  # jitter
     time.sleep(delay)
 
-def upload_file_with_retry(local_path: str, key: str, progress: Optional[GlobalByteProgress]):
+def upload_file_with_retry(local_path: str, key: str, progress: GlobalByteProgress | None):
     last_err = None
     for attempt in range(UPLOAD_RETRIES):
         try:
@@ -428,7 +435,7 @@ def upload_from_remote(ssh: paramiko.SSHClient, node: str, node_type: str):
         stdout, _ = exec_command(ssh, f"ls -1 {remote_path} 2>/dev/null || true")
         files = [x for x in stdout.split("\n") if x.strip()]
         for remote_file in files:
-            subfolder = "dump" if (remote_file.startswith("/etc/simplyblock/") or remote_file.startswith("/var/simplyblock/")) else "root-logs"
+            subfolder = "dump" if remote_file.startswith(("/etc/simplyblock/", "/var/simplyblock/")) else "root-logs"
             key = f"{UPLOAD_FOLDER}/{node}-{node_type}/{subfolder}/{os.path.basename(remote_file)}"
             upload_pairs.append([remote_file, key])
 

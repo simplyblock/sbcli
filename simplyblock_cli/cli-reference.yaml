@@ -32,18 +32,6 @@ commands:
           Runs locally on to-be storage node hosts. Reads system information (CPUs topology, NVME devices) and prepares
           yaml config to be used when adding the storage node.
         arguments:
-          - name: "--max-subsys"
-            help: "The max number of subsystems per storage node."
-            dest: max_lvol
-            type: int
-            required: true
-          - name: "--max-size"
-            help: "The maximum amount of Huge Pages to be set on the node."
-            description: >
-              Maximum amount of Huge Pages to be set on the node, it will override the auto-calculated value.
-            dest: max_prov
-            type: str
-            required: false
           - name: "--nodes-per-socket"
             help: "The number of each node to be added per each socket. Default: `1`."
             dest: nodes_per_socket
@@ -56,16 +44,6 @@ commands:
             dest: sockets_to_use
             type: str
             default: "0"
-          - name: "--cores-percentage"
-            help: "The percentage of cores to be used for spdk (0-99). Default: `0`."
-            description: >
-              The percentage of cores to be used for spdk (0-99)
-            dest: cores_percentage
-            type:
-              range:
-                min: 0
-                max: 99
-            default: 0
           - name: "--pci-allowed"
             help: "Comma separated list of PCI addresses of Nvme devices to use for storage devices."
             description: >
@@ -83,17 +61,17 @@ commands:
             type: str
             default: ""
           - name: "--device-model"
-            help: "NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together."
+            help: "NVMe SSD model string, example: --model PM1628. Can be used alone to filter by model, or combined with --size-range to further filter by size."
             description: >
-              NVMe SSD model string, example: --model PM1628,  --device-model and --size-range must be set together
+              NVMe SSD model string, example: --model PM1628. Can be used alone to filter NVMe devices by model, or combined with --size-range: if both are given, only devices matching both filters are selected.
             dest: device_model
             required: false
             type: str
             default: ""
           - name: "--size-range"
-            help: "NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together."
+            help: "NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model."
             description: >
-              NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987,  --device-model and --size-range must be set together
+              NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter NVMe devices by size range, or combined with --device-model: if both are given, only devices matching both filters are selected.
             dest: size_range
             required: false
             type: str
@@ -106,8 +84,37 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk"
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition."
+            dest: lblk
+            type: bool
+            action: store_true
+          - name: "--blk-names"
+            help: "Comma separated list of block devices to use (requires --lblk). Each entry is a persistent /dev/disk name, such as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 or /dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba. A kernel name (sdb) or kernel path (/dev/sdb) is refused: it states a position in this boot's enumeration order, and the selection is resolved again at every node restart, so it names another disk after a reboot that probes the controllers in another order. Use --blk-serials for a device udev published no persistent name for. Requested devices must be eligible; a busy device is an error."
+            dest: blk_names
+            required: false
+            type: str
+            default: ""
+          - name: "--blk-names-exclude"
+            help: "Comma separated list of block devices to exclude (requires --lblk), spelled the way --blk-names takes them. All other eligible disks are used."
+            dest: blk_names_exclude
+            required: false
+            type: str
+            default: ""
+          - name: "--blk-serials"
+            help: "Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk)."
+            dest: blk_serials
+            required: false
+            type: str
+            default: ""
+          - name: "--jm-percent"
+            help: "Journal size in percent of the node's total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`."
+            dest: jm_percent
+            required: false
+            type: int
+            default: 3
           - name: "--force"
-            help: "Force format detected or passed nvme pci address to 4K and clean partitions."
+            help: "Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format."
             dest: force
             type: bool
             action: store_true
@@ -120,7 +127,7 @@ commands:
             type: bool
             action: store_true
           - name: "--calculate-hp-only"
-            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices."
+            help: "Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices. Subsystem count and the vCPU budget are cluster-level settings."
             dest: calculate_hp_only
             type: bool
             action: store_true
@@ -190,6 +197,12 @@ commands:
             type: bool
             default: false
             action: store_true
+          - name: "--force-format"
+            help: "lblk cluster mode only: wipe partition tables and filesystem signatures from configured block devices that carry partitions (wipefs). Without this flag, partitioned devices are not eligible."
+            dest: force_format
+            type: bool
+            default: false
+            action: store_true
           - name: "--format-4k"
             help: "Force format nvme devices with 4K."
             dest: format_4k
@@ -252,6 +265,10 @@ commands:
             help: "HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3."
             dest: ha_jm_count
             type: int
+          - name: "--failure-domain"
+            help: "The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise."
+            dest: failure_domain
+            type: int
           - name: "--namespace"
             help: "The Kubernetes namespace to deploy on."
             dest: namespace
@@ -278,6 +295,12 @@ commands:
             dest: spdk_proxy_image
             type: str
             private: true
+          - name: "--expansion"
+            help: "After adding the node, integrate it into the cluster by re-homing existing secondary/tertiary roles. Use this to add a single node to an FTT2 cluster instead of staging FTT+1 nodes at once."
+            dest: expansion
+            type: bool
+            default: false
+            action: store_true
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
@@ -295,14 +318,11 @@ commands:
             type: bool
             action: store_true
       - name: remove
-        help: "Removes a storage node from the cluster."
-        description: >
-          The storage node cannot be used or added any more. Any data residing on this storage node will be migrated to
-          the remaining storage nodes. The user must ensure that there is sufficient free space in remaining cluster to
-          allow for successful node removal.
-
-          !!! danger
-              If there isn't enough storage available, the cluster may run full and switch to read-only mode.
+        help: 'Removes a storage node from the cluster (inverse of cluster expansion). 
+        The node must be ONLINE and all other nodes ONLINE; it must host no logical 
+        volumes or snapshots (migrate those first). Runs as a background task: shuts 
+        the node down, rewires LVS replicas onto other nodes, then removes, fails and 
+        migrates its devices before marking the node removed.'
         arguments:
           - name: node_id
             help: Storage node id
@@ -310,7 +330,7 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--force-remove"
-            help: "Force remove all logical volumes and snapshots."
+            help: "Cancel any active tasks on the node before starting removal."
             dest: force_remove
             type: bool
             action: store_true
@@ -346,28 +366,11 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "--max-subsys"
-            help: "The max number of subsystems per storage node. Default: `0`."
-            dest: max_lvol
-            type: int
-            default: 0
           - name: "--max-snap"
             help: "The max snapshot per storage node. Default: `5000`."
             dest: max_snap
             type: int
             default: 5000
-            private: true
-          - name: "--max-size"
-            help: "The maximum amount of GB to be utilized on this storage node. Default: `0`."
-            description: >
-              Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
-              cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
-              storage nodes, each with 100 TiB of raw capacity and a cluster with erasure coding scheme 1+1
-              (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
-              _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
-            dest: max_prov
-            type: str
-            default: "0"
             private: true
           - name: "--node-addr"
             aliases:
@@ -432,6 +435,20 @@ commands:
             dest: spdk_proxy_image
             type: str
             private: true
+      - name: suspend
+        help: Exclude node from lvol allocation.
+        arguments:
+          - name: "node_id"
+            help: "Storage node id"
+            dest: node_id
+            type: str
+            completer: _completer_get_sn_list
+          - name: "--force"
+            help: "Force suspend"
+            dest: force
+            type: bool
+            default: false
+            action: store_true
       - name: shutdown
         help: "Initiates a storage node shutdown."
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
@@ -446,28 +463,6 @@ commands:
             dest: force
             type: bool
             action: store_true
-      - name: suspend
-        help: "DEPRECATED: the suspension phase was removed from graceful shutdown (it caused writer conflicts on sec/tert lvstores). This command is now a no-op returning success. Use `sn shutdown`."
-        usage: The node will stop accepting new IO, but will finish processing any IO, which has been received already.
-        arguments:
-          - name: node_id
-            help: Storage node id
-            dest: node_id
-            completer: _completer_get_sn_list
-            type: str
-          - name: "--force"
-            help: "Ignored (kept for backwards compatibility)."
-            dest: force
-            type: bool
-            action: store_true
-      - name: resume
-        help: "DEPRECATED: counterpart to `sn suspend`, also a no-op."
-        arguments:
-          - name: node_id
-            help: Storage node id
-            dest: node_id
-            completer: _completer_get_sn_list
-            type: str
       - name: get-io-stats
         help: "Gets storage node IO statistics."
         arguments:
@@ -531,6 +526,18 @@ commands:
               - io_error_on_unmap
               - io_error_on_read
             default: full_pass_through
+      - name: device-hang
+        help: "Make a device hang for N seconds (0 to release). Requires --enable-hang-device at cluster create."
+        private: true
+        arguments:
+          - name: "device_id"
+            help: "The storage device id."
+            dest: device_id
+            type: str
+          - name: "seconds"
+            help: "Hang duration in seconds (0 disarms)."
+            dest: seconds
+            type: int
       - name: get-device
         help: "Gets storage device by its id."
         arguments:
@@ -822,6 +829,13 @@ commands:
             help: "The storage node id."
             dest: node_id
             type: str
+      - name: get-device-health-info
+        help: "Returns the device health information from SPDK."
+        arguments:
+          - name: "device_id"
+            help: "The device node id."
+            dest: device_id
+            type: str
   - name: "cluster"
     help: "Cluster Commands"
     weight: 200
@@ -840,7 +854,7 @@ commands:
           - name: "--CLI_PASS"
             help: "The password for CLI SSH connection."
             dest: CLI_PASS
-            type: str
+            type: secret
             private: true
           - name: "--cap-warn"
             help: "The capacity warning level in percent. Default: `89`."
@@ -885,6 +899,9 @@ commands:
             type: str
             default: 7d
           - name: "--contact-point"
+            deprecated:
+              since: "26.3"
+              reason: "The alerting notification configuration got extended and uses --alerting-config-path"
             help: "The email or slack webhook url to be used for alerting."
             dest: contact_point
             type: str
@@ -957,6 +974,12 @@ commands:
             dest: enable_node_affinity
             type: bool
             action: store_true
+          - name: "--enable-hang-device"
+            help: "Insert a delay bdev per device for hang injection (chaos testing)."
+            dest: enable_hang_device
+            type: bool
+            action: store_true
+            private: true
           - name: "--fabric"
             help: "The NVMe fabric to use (specify: `tcp`, `rdma`, `tcp,rdma`). Default: `tcp`."
             dest: fabric
@@ -992,6 +1015,19 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--enable-failure-domain"
+            help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
+            dest: enable_failure_domain
+            type: bool
+            action: store_true
+          - name: "--device-mode"
+            help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
+            dest: device_mode
+            type: str
+            choices:
+              - nvme
+              - lblk
+            default: nvme
           - name: "--enable-inline-checksum"
             help: >
               Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or
@@ -1062,9 +1098,48 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--max-subsys"
+            help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
+            description: >
+              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
+              limit and larger values are rejected. Set here rather than per node so every node
+              in the cluster is sized alike; a node adopts a change on its next restart.
+            dest: max_subsys
+            type: int
+            default: 0
+          - name: "--hugepages-mem"
+            help: "Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart."
+            dest: hugepages_mem
+            type: str
+            default: ""
+          - name: "--vcpu-count"
+            help: "Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused."
+            description: >
+              Absolute core budget for SPDK on every storage node, replacing the old
+              cores-percentage: a percentage meant different things on different hardware,
+              a count does not. One core beyond this is required for the system, so a node
+              with fewer than count+1 vCPUs is refused rather than silently under-provisioned.
+            dest: vcpu_count
+            type: int
+            default: 0
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
+            type: str
+          - name: "--alerting-config-path"
+            help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
+            description: >
+              Configures the Grafana contact points from a file, so that a cluster can
+              notify Slack, Microsoft Teams, PagerDuty, Opsgenie and a generic webhook
+              at once. The file has the same shape as the
+              controlplane.observability.grafana.notifications block of the
+              simplyblock-operator Helm chart values. When given, --contact-point
+              is ignored.
+            dest: alerting_config_path
+            type: str
+          - name: "--cluster-vip"
+            help: "Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress."
+            dest: cluster_vip
             type: str
       - name: add
         help: "Adds a new cluster."
@@ -1186,6 +1261,19 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--enable-failure-domain"
+            help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
+            dest: enable_failure_domain
+            type: bool
+            action: store_true
+          - name: "--device-mode"
+            help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
+            dest: device_mode
+            type: str
+            choices:
+              - nvme
+              - lblk
+            default: nvme
           - name: "--enable-inline-checksum"
             help: >
               Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or
@@ -1233,10 +1321,50 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--max-subsys"
+            help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
+            description: >
+              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
+              limit and larger values are rejected. Set here rather than per node so every node
+              in the cluster is sized alike; a node adopts a change on its next restart.
+            dest: max_subsys
+            type: int
+            default: 0
+          - name: "--hugepages-mem"
+            help: "Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart."
+            dest: hugepages_mem
+            type: str
+            default: ""
+          - name: "--vcpu-count"
+            help: "Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused."
+            description: >
+              Absolute core budget for SPDK on every storage node, replacing the old
+              cores-percentage: a percentage meant different things on different hardware,
+              a count does not. One core beyond this is required for the system, so a node
+              with fewer than count+1 vCPUs is refused rather than silently under-provisioned.
+            dest: vcpu_count
+            type: int
+            default: 0
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
             type: str
+      - name: op-stop
+        help: "Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster's own maintenance are unaffected."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: op-start
+        help: "Resumes object lifecycle operations on the cluster."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: activate
         help: >
           Activates a cluster.
@@ -1379,7 +1507,7 @@ commands:
           - name: "secret"
             help: "The new 20 characters password."
             dest: secret
-            type: str
+            type: secret
       - name: update-fabric
         help: "Updates a cluster's fabric."
         arguments:
@@ -1430,8 +1558,88 @@ commands:
             help: "Restart the management services using the provided image."
             dest: mgmt_image
             type: str
+          - name: "--max-subsys"
+            help: "Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs."
+            dest: max_subsys
+            type: int
+          - name: "--hugepages-mem"
+            help: "Change the cluster-wide huge-page memory floor per storage node, e.g. 4G. Applied by each node on its next restart. Given alone, no image update runs."
+            dest: hugepages_mem
+            type: str
+      - name: upgrade-complete
+        help: "Completes a cluster upgrade."
+        usage: >
+          Runs the completion step of a cluster upgrade started with `cluster update`: resumes JC compression on
+          all storage nodes (deferred to a resume task on nodes with running data migrations) and stamps the
+          installed release. All storage nodes must be online.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: build-indices
+        help: "Backfills the database's secondary indices."
+        usage: >
+          Walks every indexed table and fills in the index entries of records that predate their index
+          declaration, then marks each index usable by reads. Idempotent, and safe to run against a live
+          cluster: normal writes already maintain every index, and the backfill only adds entries.
+          An upgrade runs this automatically; use the command after an interrupted run, or to fill an index
+          that `sbctl cluster index-state --set building` has just put back into service.
+      - name: index-state
+        help: "Shows or switches the state of the database's secondary indices."
+        usage: >
+          Without arguments, lists every declared index with its state (`building`, `ready` or `disabled`),
+          its backfill cursor and when the state last changed. `--set disabled` takes one index out of
+          service: writes stop maintaining it and reads fall back to a full scan, which is how a
+          misbehaving index is switched off without touching the rest of its class. Its entries are
+          left in place, so readers that have not seen the change yet still get right answers, and
+          the command waits a few seconds before returning, until every process has seen it.
+          `--set building` puts it back, waiting the same way before discarding those entries, after
+          which `sbctl cluster build-indices` refills and re-enables it. An index reaches `ready`
+          only by completing a backfill, so it cannot be set here.
+        arguments:
+          - name: "index"
+            help: "The index to act on, as <Class>.<index> (e.g. LVol.node_id). Omit to list them all."
+            dest: index
+            type: str
+            nargs: '?'
+          - name: "--set"
+            help: "Switch the named index to this state."
+            dest: state
+            type: str
+            choices:
+              - building
+              - disabled
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: check-indices
+        help: "Verifies the database's secondary indices."
+        usage: >
+          Walks every index in both directions - each record's derived keys must exist, and each index key
+          must resolve to a live record that still carries the indexed value - and reports what does not
+          match. Read-only unless `--repair` is given, and takes nothing offline. Fails while anything is
+          left unresolved: every finding of a read-only run, and the one thing a repair cannot settle -
+          a unique value that two live records both carry, which has to be resolved in the data itself.
+        arguments:
+          - name: "--repair"
+            help: "Write back the entries that can be derived from the records, and clear orphaned ones, instead of only reporting them."
+            dest: repair
+            type: bool
+            action: store_true
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: restart
+        help: "Performs a full cluster restart: shuts down every node that is not offline, restarts all nodes in parallel and reactivates the cluster."
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
@@ -1526,6 +1734,62 @@ commands:
             dest: force
             type: bool
             action: store_true
+      - name: event-alerts
+        help: "Provisions the Grafana alert rules read from the cluster event log."
+        usage: >
+          Adds eight alert rules that read the cluster event log through /api/v2/clusters/<id>/logs
+          instead of the Thanos metrics the rules in alert_rules.yaml read. The event log carries
+          the transition an entity made, which is what lets these rules tell an operator's shutdown
+          apart from a fault that ended in the same state, and lets them report a device removal
+          and the two journal-compression conditions that no metric carries.
+          Opt-in: the rules need a REST data source, so Grafana downloads a plugin (~74 MB) on the
+          next restart. Works on a running cluster -- the provisioning files are written to every
+          management node and the Grafana task is recreated, so Grafana is unavailable for a few
+          seconds. Run it once, from any management node; re-run it to change a setting.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Remove the event log alert rules and the data source."
+            dest: disable
+            type: bool
+            action: store_true
+          - name: "--log-limit"
+            help: "How many of the newest event log records each rule evaluation reads. Default: `1000`."
+            description: >
+              Too low on a cluster that produces events quickly and an alert heals itself as soon
+              as the transition that opened it scrolls out of the window.
+            dest: log_limit
+            type: int
+          - name: "--interval"
+            help: "How often the rules run, as a Grafana duration. Default: `1m`."
+            dest: interval
+            type: str
+          - name: "--pending-period"
+            help: "How long a condition must hold before it notifies, as a Grafana duration. Default: `1m`."
+            dest: pending_period
+            type: str
+          - name: "--plugin-url"
+            help: "Where to fetch the Infinity data source plugin from."
+            dest: plugin_url
+            type: str
+          - name: "--plugin-preinstalled"
+            help: "The data source plugin is already in the Grafana image; do not download it."
+            dest: plugin_preinstalled
+            type: bool
+            action: store_true
+      - name: switch-write-protection
+        help: "Activate v2 distrib write protection cluster-wide."
+        usage: "Needed once after upgrading a cluster from a release without v2; new clusters are created on v2 already. Sends the runtime distr_write_protection_v2 RPC to every ONLINE storage node -- the only way an already-created distrib gains v2, since a create parameter cannot retrofit an existing bdev. Only if every online node succeeds is the generation recorded, on the cluster row and on every node's lvstore_stack distrib entries, so later (re-)creations use the v2 parameter. Partial success records nothing, so a retry is a plain re-run. Offline nodes are not an error: they have no running bdev to migrate and come back on v2 at their next restart."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: change-name
         help: Assigns or changes a name to a cluster
         arguments:
@@ -1539,7 +1803,7 @@ commands:
             dest: name
             type: str
       - name: add-replication
-        help: Assigns the snapshot replication target cluster
+        help: "DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster."
         arguments:
           - name: "cluster_id"
             help: "Cluster id"
@@ -1559,6 +1823,143 @@ commands:
           - name: "--target-pool"
             help: "Target cluster pool ID or name"
             dest: target_pool
+            type: str
+      - name: replication-target-add
+        help: Adds a named replication destination to a cluster (several are allowed)
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name of the replication target, unique per source cluster"
+            dest: target_name
+            type: str
+          - name: "target_cluster_id"
+            help: "Destination cluster id"
+            dest: target_cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--target-pool"
+            help: "Pool on the destination cluster (ID or name). Stored as a UUID."
+            dest: target_pool
+            type: str
+          - name: "--timeout"
+            help: "Replication network timeout in seconds. Default: `600`."
+            dest: timeout
+            type: int
+      - name: replication-target-list
+        help: Lists the replication targets of a cluster
+        arguments:
+          - name: "--cluster-id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-target-remove
+        help: Removes a replication target. Refused while a policy still uses it.
+        arguments:
+          - name: "target_id"
+            help: "Replication target id"
+            dest: target_id
+            type: str
+      - name: replication-target-failover
+        help: Fails over EVERY volume replicating to this target (site loss)
+        arguments:
+          - name: "target_id"
+            help: "Replication target id"
+            dest: target_id
+            type: str
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-policy-add
+        help: Adds a replication policy on a target, defining the replication cadence
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name of the policy, unique per source cluster"
+            dest: policy_name
+            type: str
+          - name: "--target"
+            help: "Replication target id or name"
+            dest: target
+            type: str
+            required: true
+          - name: "--interval-min"
+            help: "Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`."
+            dest: interval_min
+            type: int
+          - name: "--mode"
+            help: "Replication mode. Default: `failover`."
+            dest: mode
+            type: str
+            choices:
+              - failover
+              - migration
+          - name: "--keep"
+            help: "Replicated internal snapshots to retain on each side. Minimum (and default): `2`."
+            dest: keep_replicated
+            type: int
+          - name: "--retention-schedule"
+            help: "Tiered retention, e.g. `15m:2h,1h:11h,1d:7d` - one snapshot every 15 minutes for the last 2 hours, then hourly for 11 hours, then daily for 7 days. Snapshots older than the total span are pruned. Empty (default) keeps the flat --keep behaviour."
+            dest: retention_schedule
+            type: str
+          - name: "--consistency-group"
+            help: "All volumes attached to this policy form ONE consistency group: they must share an LVS (creation pins them to it), cadence snapshots are taken as one frozen group, and fail-over generations resolve group-wide."
+            dest: consistency_group
+            type: bool
+            action: store_true
+      - name: replication-policy-list
+        help: Lists the replication policies of a cluster
+        arguments:
+          - name: "--cluster-id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-policy-remove
+        help: Removes a replication policy. Refused while a volume still follows it.
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id"
+            dest: policy_id
+            type: str
+      - name: replication-policy-failover
+        help: Fails over EVERY volume following this policy
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id"
+            dest: policy_id
+            type: str
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-policy-snapshot
+        help: "Takes ONE crash-consistent snapshot of every volume in the policy's consistency group, as a new group generation"
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id (must be a consistency-group policy)"
+            dest: policy_id
             type: str
   - name: "volume"
     help: "Logical Volume Commands"
@@ -1667,7 +2068,7 @@ commands:
             type: int
             default: 0
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`."
             dest: namespaced
             type: bool
             default: false
@@ -1696,6 +2097,14 @@ commands:
             dest: npcs
             type: int
             default: 0
+          - name: "--replication-policy"
+            help: "Replication policy (id or name) to assign at create time. Configures replication for this volume."
+            dest: replication_policy
+            type: str
+          - name: "--consistency-group"
+            help: "Consistency group name to join at create time. The volume is pinned to the group's node/LVS; the first labeled volume pins the group."
+            dest: consistency_group
+            type: str
           - name: "--replicate"
             help: "Replicate LVol snapshot"
             dest: replicate
@@ -1765,10 +2174,9 @@ commands:
           is released.
         arguments:
           - name: "volume_id"
-            help: "The logical volumes id or ids."
+            help: "The logical volumes id."
             dest: volume_id
             type: str
-            nargs: "+"
           - name: "--force"
             help: "Force delete logical volume from the cluster."
             dest: force
@@ -1837,7 +2245,7 @@ commands:
             type: size
             default: "0"
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `true`."
+            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`."
             dest: namespaced
             type: bool
             default: true
@@ -1902,6 +2310,39 @@ commands:
             help: "The logical volume id."
             dest: volume_id
             type: str
+      - name: replication-policy-set
+        help: Puts a volume under a replication policy, or changes it (a change re-replicates in full)
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+          - name: "policy"
+            help: "Replication policy id or name"
+            dest: policy
+            type: str
+      - name: replication-policy-clear
+        help: Takes a volume out of its replication policy, stopping replication and deleting the internal replication snapshots on both sides
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+      - name: replication-relationship
+        help: Shows the volume's counterpart on the other cluster (source to target volume id, and the reverse)
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
       - name: replication-start
         help: "Start snapshot replication taken from lvol"
         arguments:
@@ -1912,6 +2353,38 @@ commands:
           - name: "--replication-cluster-id"
             help: "Cluster ID of the replication target cluster"
             dest: replication_cluster_id
+            type: str
+          - name: "--mode"
+            help: "Replication mode: 'failover' (async DR, default) or 'migration' (planned cutover)"
+            dest: mode
+            type: str
+            choices: ["failover", "migration"]
+          - name: "--interval-min"
+            help: "Interval in minutes for automatic internal snapshots (0 = none)"
+            dest: interval_min
+            type: int
+      - name: replication-commit
+        help: "Commit a migration/fail-back cutover: minimize delta then fail the client over to the target"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+          - name: "--delete-source"
+            help: "Delete the source volume once the cutover has completed (migration semantics)"
+            dest: delete_source
+            type: bool
+            action: store_true
+      - name: replication-failback
+        help: "Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit."
+        arguments:
+          - name: "lvol_id"
+            help: "Failed-over logical volume id (currently on the target cluster)"
+            dest: lvol_id
+            type: str
+          - name: "--source-cluster-id"
+            help: "Fresh source cluster id. Omit to fail back (delta) to the recovered original source."
+            dest: source_cluster_id
             type: str
       - name: replication-stop
         help: "Stop snapshot replication taken from lvol"
@@ -1926,6 +2399,13 @@ commands:
           - name: "cluster_id"
             help: "Cluster UUID"
             dest: cluster_id
+            type: str
+      - name: replication-info
+        help: "Show replication progress (time lag and outstanding data) for a volume"
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id or name"
+            dest: volume_id
             type: str
       - name: replication-trigger
         help: "Start replication for lvol"
@@ -1960,16 +2440,36 @@ commands:
             dest: clone_name
             type: str
       - name: migrate
-        help: "Migrate a logical volume to a different storage node."
-        private: true
+        help: "Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID (or group ID with --batch) and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue."
         arguments:
           - name: "volume_id"
-            help: "The logical volume id."
+            help: "The volume ID to migrate. With --batch, any member of the shared-namespace subsystem."
             dest: volume_id
             type: str
           - name: "target_node_id"
-            help: "The target storage node id."
+            help: "The target storage node ID."
             dest: target_node_id
+            type: str
+          - name: "--ctrl-loss-tmo"
+            help: "NVMe ctrl-loss-tmo in seconds. Default: `3600`."
+            dest: ctrl_loss_tmo
+            type: int
+            default: 3600
+          - name: "--host-nqn"
+            help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts)."
+            dest: host_nqn
+            type: str
+          - name: "--batch"
+            help: "Migrate all lvols sharing the same NVMe-oF subsystem as a coordinated group."
+            dest: batch
+            type: bool
+            action: store_true
+      - name: migrate-continue
+        help: "Advance a pre-created migration to the snapshot-copy phase and launch the task runner."
+        arguments:
+          - name: "migration_id"
+            help: "The migration ID returned by migrate (or group ID with --batch)."
+            dest: migration_id
             type: str
           - name: "--max-retries"
             help: "Maximum retry attempts before aborting. Default: `10`."
@@ -1977,13 +2477,17 @@ commands:
             type: int
             default: 10
           - name: "--deadline"
-            help: "Migration deadline in seconds (0 = no deadline. Default: `14400`."
+            help: "Migration deadline in seconds (0 = no deadline). Default: `14400`."
             dest: deadline_seconds
             type: int
             default: 14400
+          - name: "--batch"
+            help: "ID is a batch migration group ID."
+            dest: batch
+            type: bool
+            action: store_true
       - name: migrate-list
         help: "List volume migrations."
-        private: true
         arguments:
           - name: "--cluster-id"
             help: "Filter by cluster id."
@@ -1996,12 +2500,36 @@ commands:
             action: store_true
       - name: migrate-cancel
         help: "Cancel an active volume migration."
+        arguments:
+          - name: "migration_id"
+            help: "The migration id (or group ID with --batch)."
+            dest: migration_id
+            type: str
+          - name: "--batch"
+            help: "ID is a batch migration group ID."
+            dest: batch
+            type: bool
+            action: store_true
+      - name: migrate-cleanup
+        help: "Idempotently remove all objects a migration created on the target. Safe to run at any time; already-removed objects are reported as not_found."
         private: true
         arguments:
           - name: "migration_id"
             help: "The migration id."
             dest: migration_id
             type: str
+      - name: migrate-group-list
+        help: "List batch (shared-namespace) migration groups."
+        arguments:
+          - name: "--cluster-id"
+            help: "Filter by cluster ID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
   - name: "control-plane"
     help: "Control Plane Commands"
     aliases:
@@ -2023,7 +2551,7 @@ commands:
           - name: "cluster_secret"
             help: "The cluster secret."
             dest: cluster_secret
-            type: str
+            type: secret
           - name: "--ifname"
             help: "The management interface name."
             dest: ifname
@@ -2040,6 +2568,17 @@ commands:
               - docker
               - kubernetes
             default: docker
+          - name: "--alerting-config-path"
+            help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
+            description: >
+              Configures the Grafana contact points from a file, so that a cluster can
+              notify Slack, Microsoft Teams, PagerDuty, Opsgenie and a generic webhook
+              at once. The file has the same shape as the
+              controlplane.observability.grafana.notifications block of the
+              simplyblock-operator Helm chart values. When given, --contact-point
+              is ignored.
+            dest: alerting_config_path
+            type: str
       - name: list
         help: "Lists all control plane nodes."
         arguments:
@@ -2254,25 +2793,54 @@ commands:
       - name: list
         help: "Lists all snapshots."
         arguments:
-          - name: "--all"
-            help: "List soft deleted snapshots."
-            dest: all
-            type: bool
-            action: store_true
+          - name: "--lvol-id"
+            aliases:
+              - "-l"
+            help: "List snapshots for a specific logical volume."
+            dest: lvol_id
+            type: str
+            required: false
+          - name: "--node-id"
+            aliases:
+              - "-n"
+            help: "List snapshots for a specific node uuid"
+            dest: node_id
+            type: str
+            required: false
+          - name: "--pool"
+            aliases:
+              - "-p"
+            help: "List snapshots in particular pool id or name."
+            dest: pool
+            type: str
           - name: "--cluster-id"
+            aliases:
+              - "-c"
             help: "Filter snapshots by cluster UUID"
             dest: cluster_id
             type: str
             required: false
+          - name: "--consistency-group"
+            aliases:
+              - "-g"
+            help: "Filter snapshots to one consistency group (id or uuid)."
+            dest: consistency_group
+            type: str
+            required: false
           - name: "--with-details"
+            aliases:
+              - "-w"
             help: "List snapshots with replicate and chaining details"
             dest: with_details
             type: bool
             action: store_true
-          - name: "--pool"
-            help: "List snapshots in particular pool id or name."
-            dest: pool
-            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "List snapshots in JSON format"
+            dest: json
+            type: bool
+            action: store_true
       - name: delete
         help: "Deletes a snapshot."
         arguments:
@@ -2309,7 +2877,7 @@ commands:
             type: size
             default: "0"
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`."
             dest: namespaced
             type: bool
             default: true
@@ -2357,6 +2925,110 @@ commands:
             help: "The snapshot id."
             dest: snapshot_id
             type: str
+  - name: "consistency-group"
+    help: "Consistency Group Commands"
+    aliases:
+      - cg
+    weight: 620
+    subcommands:
+      - name: list
+        help: "List the cluster's consistency groups."
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: members
+        help: "List the current members of a consistency group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: add-member
+        help: "Join an EXISTING volume to a consistency group. The volume must live on the group's pinned node/LVS and in the members' storage pool; a volume that once left the group cannot rejoin (membership is one-way)."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "lvol_id"
+            help: "The logical volume id to join."
+            dest: lvol_id
+            type: str
+      - name: remove-member
+        help: "Detach a member from a consistency group: closes its epoch one-way, preserving its snapshots in prior generations. The volume itself is untouched."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "lvol_id"
+            help: "The logical volume id to detach."
+            dest: lvol_id
+            type: str
+      - name: snapshot-take
+        help: "Take ONE crash-consistent snapshot generation across every current member."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+      - name: snapshot-list
+        help: "List a consistency group's snapshot generations with expected-versus-present member counts."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: snapshot-delete
+        help: "Delete one generation and all its member snapshots; never the group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "seq"
+            help: "The generation number (group_seq) to delete."
+            dest: seq
+            type: int
+      - name: clone
+        help: "Clone every member snapshot of a generation into a new volume, optionally forming a new group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "seq"
+            help: "The generation number (group_seq) to clone."
+            dest: seq
+            type: int
+          - name: "--into"
+            help: "Name of the new consistency group to form from the clones. When omitted, the clones are independent volumes."
+            dest: into
+            type: str
+            required: false
   - name: "backup"
     help: "Backup Commands"
     weight: 650
@@ -2396,16 +3068,24 @@ commands:
             help: "The target storage node id."
             dest: node
             type: str
-          - name: "--cluster-id"
-            help: "The cluster id."
-            dest: cluster_id
-            type: str
+          - name: "--access-key-id"
+            help: "Access key for the backup's bucket, when it is not this cluster's own."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the backup's bucket, when it is not this cluster's own."
+            dest: secret_access_key
+            type: secret
       - name: export
         help: "Export backup metadata to a JSON file for cross-cluster restore."
         arguments:
           - name: "--cluster-id"
             help: "The cluster id."
             dest: cluster_id
+            type: str
+          - name: "--backup-id"
+            help: "Export the chain ending at this backup and nothing else, which is the unit a restore needs."
+            dest: backup_id
             type: str
           - name: "--lvol"
             help: "Filter exports to a specific logical volume name."
@@ -2417,17 +3097,81 @@ commands:
             help: "The output file path."
             dest: output
             type: str
-      - name: import
-        help: "Import backup metadata from a JSON file."
+      - name: discover
+        help: "List the backups a bucket contains, reading its manifests. Needs no cluster."
         arguments:
-          - name: "metadata_file"
-            help: "The path to JSON metadata file."
-            dest: metadata_file
+          - name: "--bucket"
+            help: "The bucket holding the backups."
+            dest: bucket
             type: str
+            required: true
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
+      - name: import
+        help: "Register the backups held in a bucket into this cluster."
+        arguments:
           - name: "--cluster-id"
             help: "The target cluster to import into (required for cross-cluster restore)."
             dest: cluster_id
             type: str
+          - name: "--bucket"
+            help: "Import every backup in this bucket. Give this or --from-file, not both."
+            dest: bucket
+            type: str
+          - name: "--from-file"
+            help: "Import the backups in this file, from 'backup export'. It records which bucket each one lives in, so --bucket is neither needed nor accepted."
+            dest: from_file
+            type: str
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
       - name: policy-add
         help: "Create a new backup policy."
         arguments:
@@ -2501,24 +3245,6 @@ commands:
             help: "The target id (storage pool or logical volume id)."
             dest: target_id
             type: str
-      - name: source-list
-        help: "List backup sources (local and imported clusters)."
-        arguments:
-          - name: "--cluster-id"
-            help: "The cluster id."
-            dest: cluster_id
-            type: str
-      - name: source-switch
-        help: "Switch the active S3 backup source to a different cluster. Use 'local' or the local cluster id to switch back."
-        arguments:
-          - name: "source_cluster_id"
-            help: "The source cluster id or 'local'."
-            dest: source_cluster_id
-            type: str
-          - name: "--cluster-id"
-            help: "The cluster id."
-            dest: cluster_id
-            type: str
   - name: "qos"
     help: "QoS Commands"
     weight: 700
@@ -2567,3 +3293,61 @@ commands:
             type: str
             required: false
             default: ""
+  - name: "db-backup"
+    help: "FDB Backup operations"
+    weight: 800
+    subcommands:
+      - name: create
+        help: "Creates an fdb backup"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to create db backup for"
+            dest: cluster_id
+            type: str
+      - name: list
+        help: "Lists all fdb backups"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to restore db backup to"
+            dest: cluster_id
+            type: str
+      - name: status
+        help: "get backup status"
+      - name: restore
+        help: "restore a backup"
+        arguments:
+          - name: "name"
+            help: "backup class name"
+            dest: name
+            type: str
+          - name: "cluster_id"
+            help: "Cluster ID to restore db backup to"
+            dest: cluster_id
+            type: str
+      - name: config
+        help: "Set backup configuration"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to configure db backup for"
+            dest: cluster_id
+            type: str
+          - name: "--backup-path"
+            help: 'local backup path, defaults to /etc/foundationdb/backup'
+            dest: backup_path
+            type: str
+          - name: "--backup-frequency"
+            help: "backup frequency, can be 3h, 1d"
+            dest: backup_frequency
+            type: str
+          - name: "--s3-bucket"
+            help: 'AWS S3 bucket name'
+            dest: bucket_name
+            type: str
+          - name: "--s3-region"
+            help: 'AWS S3 region'
+            dest: region_name
+            type: str
+          - name: "--s3-credentials"
+            help: 'AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]'
+            dest: backup_credentials
+            type: str

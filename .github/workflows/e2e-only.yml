@@ -10,27 +10,27 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
 
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
 
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       MNODES:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
-        default: "R25.10-Hotfix"
+        default: "main"
 
       CLUSTER_ID:
         description: "Cluster ID to run tests on"
@@ -67,7 +67,7 @@ on:
       BOOTSTRAP_DATA_CHUNKS:
         description: "Number of data chunks (ndcs)"
         required: true
-        default: "2"
+        default: "1"
 
       BOOTSTRAP_PARITY_CHUNKS:
         description: "Number of parity chunks (npcs)"
@@ -79,6 +79,10 @@ on:
       # =========================
       TEST_CLASS:
         description: "E2E test class name (--testname); leave empty to run all tests"
+        required: false
+        type: string
+      NEW_NODE_IPS:
+        description: "Space-separated IPs of spare nodes for add-node/migration tests"
         required: false
         type: string
 
@@ -116,6 +120,7 @@ jobs:
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
       TEST_CLASS: ${{ inputs.TEST_CLASS }}
+      NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS || '' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -211,6 +216,7 @@ jobs:
       # Targets = MNODES + STORAGE_PRIVATE_IPS + CLIENTNODES
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -218,7 +224,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -237,7 +244,7 @@ jobs:
             return 0
           }
 
-          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
@@ -252,6 +259,7 @@ jobs:
           done
 
       - name: Client cleanup disconnect lvols; ensure NFS not mounted anywhere; unmount all /mnt; remove /mnt dirs
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -259,7 +267,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -274,7 +283,7 @@ jobs:
           done
 
           # fail if NFS still mounted anywhere
-          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           still=0
@@ -324,21 +333,21 @@ jobs:
           test -f sbcli/e2e/e2e.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+      - name: Install uv
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
-          fi
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before e2e
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
 
       - name: Set RUN_BASE_DIR
         shell: bash
@@ -365,13 +374,61 @@ jobs:
           if [[ -n "${TEST_CLASS:-}" ]]; then
             TESTNAME_ARGS=(--testname "${TEST_CLASS}")
           fi
-          python3 -u e2e.py \
+          NEW_NODES_ARGS=()
+          if [[ -n "${NEW_NODE_IPS:-}" ]]; then
+            NEW_NODES_ARGS=(--new_nodes "${NEW_NODE_IPS}")
+          fi
+          PYTHONUNBUFFERED=1 ./e2e.py \
             "${TESTNAME_ARGS[@]}" \
+            "${NEW_NODES_ARGS[@]}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
+            --storage_ips "${STORAGE_PRIVATE_IPS}" \
+            --mgmt_ip "$(echo "${MNODES}" | awk '{print $1}')" \
+            --client_ips "${CLIENT_IP}" \
+            --sbcli_branch "${SBCLI_BRANCH}" \
             2>&1 | tee output.log
 
+      - name: Copy raw output.log to each test's NFS folder
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="sbcli/e2e/output.log"
+          if [ ! -f "${out_log}" ]; then
+            echo "No output.log found, skipping"
+            exit 0
+          fi
+          echo "output.log size: $(stat --printf='%s' "${out_log}" 2>/dev/null || echo '?') bytes"
+
+          # Parse all per-test NFS paths from the output log
+          mapfile -t log_paths < <(
+            grep 'Logs Path:' "${out_log}" 2>/dev/null \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | sed 's/.*Logs Path: *//' \
+              | sed 's/[[:space:]]*$//' || true
+          )
+
+          if [ ${#log_paths[@]} -eq 0 ]; then
+            echo "No 'Logs Path:' entries found in output.log"
+            if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+              cp "${out_log}" "${RUN_BASE_DIR}/github_raw_output.log" || true
+              echo "Saved to ${RUN_BASE_DIR}/github_raw_output.log"
+            fi
+            exit 0
+          fi
+
+          for path in "${log_paths[@]}"; do
+            if [ -d "${path}" ]; then
+              cp "${out_log}" "${path}/github_raw_output.log" || true
+              echo "Saved output.log -> ${path}/github_raw_output.log"
+            else
+              echo "WARN: path does not exist: ${path}"
+            fi
+          done
+
       - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        timeout-minutes: 15
         if: always()
         shell: bash
         run: |
@@ -380,7 +437,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true
@@ -399,7 +457,7 @@ jobs:
             return 0
           }
 
-          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+          for ip in $MNODES $STORAGE_PRIVATE_IPS ${NEW_NODE_IPS:-}; do
             echo "---- $ip: kill tmux ----"
             run_remote_with_retry "$ip" "pkill -9 tmux || true"
           done
@@ -514,7 +572,7 @@ jobs:
           TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
           SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
 
-          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS} ${NEW_NODE_IPS:-}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for NODE in ${NODES}; do
             echo ">>> Node: ${NODE}"
@@ -591,25 +649,29 @@ jobs:
           STAGING="/tmp/distrib_host_collect_${TS}"
           mkdir -p "$STAGING"
 
-          CN="$(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' | head -n1 || true)"
-          if [[ -z "$CN" ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
-          SOCK="/mnt/ramdisk/${CN}/spdk.sock"
+          mapfile -t CONTAINERS < <(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true)
+          if [[ ${#CONTAINERS[@]} -eq 0 ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
 
-          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
-          if [[ -z "$BDEV_JSON" ]]; then echo "BDEV_EMPTY"; exit 0; fi
+          ANY_DISTRIB=0
+          for CN in "${CONTAINERS[@]}"; do
+            SOCK="/mnt/ramdisk/${CN}/spdk.sock"
 
-          if command -v jq >/dev/null 2>&1; then
-            mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
-          else
-            mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
-          fi
+            BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
+            if [[ -z "$BDEV_JSON" ]]; then continue; fi
 
-          if [[ ${#DISTRIBS[@]} -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
+            if command -v jq >/dev/null 2>&1; then
+              mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
+            else
+              mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
+            fi
 
-          for d in "${DISTRIBS[@]}"; do
-            JF="/tmp/stack_${d}.json"
+            if [[ ${#DISTRIBS[@]} -eq 0 ]]; then continue; fi
+            ANY_DISTRIB=1
 
-            python3 - "$d" "$JF" <<'PYIN'
+            for d in "${DISTRIBS[@]}"; do
+              JF="/tmp/stack_${d}.json"
+
+              python3 - "$d" "$JF" <<'PYIN'
           import json, sys
           d = sys.argv[1]
           jf = sys.argv[2]
@@ -618,17 +680,41 @@ jobs:
               f.write(json.dumps(obj))
           PYIN
 
-            sudo docker cp "$JF" "$CN:$JF" || true
-            sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
-            sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
+              sudo docker cp "$JF" "$CN:$JF" || true
 
-            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
-              sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
+              # Try with 120s timeout, retry with 600s on timeout
+              RPC_OK=0
+              for TMO in 120 600; do
+                if sudo timeout "$TMO" docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1"; then
+                  RPC_OK=1; break
+                fi
+                EC=$?
+                if [[ $EC -eq 124 || $EC -eq 137 ]]; then
+                  echo "[${CN}] ${d} RPC timed out after ${TMO}s, retrying..." >&2
+                else
+                  RPC_OK=1; break  # non-timeout failure, still collect what we can
+                fi
+              done
+
+              if [[ $RPC_OK -eq 0 ]]; then
+                echo "[${CN}] ${d} RPC timed out on all attempts — skipping" >&2
+                sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+                rm -f "$JF" || true
+                continue
+              fi
+
+              sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/${CN}__rpc_${d}.log" 2>/dev/null || true
+
+              for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
+                sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
+              done
+
+              sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+              rm -f "$JF" || true
             done
-
-            sudo docker exec "$CN" bash -lc "rm -f '$JF' '/tmp/rpc_${d}.log'" || true
-            rm -f "$JF" || true
           done
+
+          if [[ $ANY_DISTRIB -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
 
           cat /proc/meminfo | grep -i huge > "$STAGING/hugepage_meminfo.txt" 2>/dev/null || true
 
@@ -821,6 +907,8 @@ jobs:
             echo '```'
             echo ""
             echo "</details>"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack Notification
@@ -828,6 +916,8 @@ jobs:
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -837,9 +927,11 @@ jobs:
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request, urllib.error
 
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping.")
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
               sys.exit(0)
 
           out_log = "sbcli/e2e/output.log"
@@ -931,19 +1023,49 @@ jobs:
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
 
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              urllib.request.urlopen(req, timeout=15)
-              print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
           PYEOF
 
       - name: Upload logs (always)

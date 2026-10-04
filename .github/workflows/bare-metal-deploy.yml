@@ -63,6 +63,9 @@ jobs:
   k8s:
     runs-on: ${{ inputs.runs_on }}
     steps:
+    - name: Fix workspace permissions
+      run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
     - name: Checkout deployment tooling
       uses: actions/checkout@v4
       with:
@@ -89,6 +92,9 @@ jobs:
       storage_private_ips: ${{ steps.deployment.outputs.storage_private_ips }}
 
     steps:
+    - name: Fix workspace permissions
+      run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
     - name: Checkout sbcli
       uses: actions/checkout@v4
       with:
@@ -186,8 +192,8 @@ jobs:
 
         # If the cluster is running on k8s, we need to set the environment variable
         DEPLOY_CMD="./bootstrap-cluster.sh \
-            --max-lvol 10 --max-snap 10 
-            --max-size 400G --number-of-devices 1 
+            --max-subsys 10 --max-snap 10
+            --max-size 400G --number-of-devices 1
             --sbcli-cmd sbcli-dev --spdk-debug"
 
         if [ "${{ inputs.k8s_snode }}" == "true" ]; then
@@ -217,7 +223,10 @@ jobs:
     needs: [k8s, deploy]
     runs-on: ${{ inputs.runs_on }}
     if: ${{ inputs.k8s_snode == true }}
-    steps:  
+    steps:
+    - name: Fix workspace permissions
+      run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
     - name: Checkout spdk-csi
       uses: actions/checkout@v4
       with:

@@ -1,12 +1,17 @@
-# coding=utf-8
-import time
-
-
 from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import tasks_controller
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskAbort,
+    TaskDefer,
+    TaskRetry,
+    serve,
+    set_result,
+)
 
 logger = utils.get_logger(__name__)
 
@@ -14,102 +19,52 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 
-logger.info("Starting Tasks runner...")
-while True:
+def process_task(task):
+    # Release-upgrade guard (remove with the jc_compression_upgrade plugin):
+    # resumes are held until `cluster upgrade-complete`.
+    if jc_compression_upgrade.resume_is_held(db.get_cluster_by_id(task.cluster_id)):
+        raise TaskDefer("JC compression resume held: cluster upgrade in progress")
+
     try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                continue
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        raise TaskAbort("node not found")
 
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
+    if node.status != StorageNode.STATUS_ONLINE:
+        raise TaskDefer(f"Node is {node.status}, retry task")
 
-                if task.function_name == JobSchedule.FN_JC_COMP_RESUME:
-                    if task.status != JobSchedule.STATUS_DONE:
+    if tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id):
+        raise TaskDefer("Task found on same node")
 
-                        # get new task object because it could be changed from cancel task
-                        task = db.get_task_by_id(task.uuid)
+    if any(n.status != StorageNode.STATUS_ONLINE
+           for n in db.get_storage_nodes_by_cluster_id(node.cluster_id)):
+        raise TaskDefer("Not all nodes are online, can not resume JC compression")
 
-                        if task.canceled:
-                            task.function_result = "canceled"
-                            task.status = JobSchedule.STATUS_DONE
-                            task.write_to_db(db.kv_store)
-                            continue
+    logger.info("no task found on same node, resuming compression")
+    jm_vuid = task.function_params.get("jm_vuid", node.jm_vuid)
+    ret, err = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
+        jm_vuid=jm_vuid, suspend=False)
 
-                        if task.retry >= task.max_retry:
-                            task.function_result = "max retry reached, stopping task"
-                            task.status = JobSchedule.STATUS_DONE
-                            task.write_to_db(db.kv_store)
-                            continue
+    if not ret:
+        if err:
+            raise TaskAbort(f"JC {node.jm_vuid} compression not needed")
+        raise TaskRetry("JC comp resume failed, retry task")
 
-                        try:
-                            node = db.get_storage_node_by_id(task.node_id)
-                        except KeyError:
-                            task.function_result = "node not found"
-                            task.status = JobSchedule.STATUS_DONE
-                            task.write_to_db(db.kv_store)
-                            continue
+    set_result(task, f"JC {node.jm_vuid} compression resumed on node")
 
-                        if node.status != StorageNode.STATUS_ONLINE:
-                            msg = f"Node is {node.status}, retry task"
-                            logger.info(msg)
-                            task.function_result = msg
-                            task.status = JobSchedule.STATUS_SUSPENDED
-                            task.write_to_db(db.kv_store)
-                            continue
 
-                        node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
-                        if node_task:
-                            msg="Task found on same node"
-                            logger.info(msg)
-                            task.retry += 1
-                            task.function_result = msg
-                            task.status = JobSchedule.STATUS_SUSPENDED
-                            task.write_to_db(db.kv_store)
-                        else:
-                            logger.info("no task found on same node, resuming compression")
-                            node = db.get_storage_node_by_id(task.node_id)
-                            for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-                                if n.status != StorageNode.STATUS_ONLINE:
-                                    msg = "Not all nodes are online, can not resume JC compression"
-                                    logger.info(msg)
-                                    task.function_result = msg
-                                    task.status = JobSchedule.STATUS_SUSPENDED
-                                    task.write_to_db(db.kv_store)
-                                    continue
+SPEC = RunnerSpec(
+    name="tasks-runner-jc-comp",
+    function_names=[JobSchedule.FN_JC_COMP_RESUME],
+    handler=process_task,
+    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    interval=60,
+)
 
-                            rpc_client = node.rpc_client(timeout=5, retry=2)
-                            jm_vuid = node.jm_vuid
-                            if "jm_vuid" in task.function_params:
-                                jm_vuid = task.function_params["jm_vuid"]
-                            try:
-                                ret, err = rpc_client.jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
-                            except Exception as e:
-                                logger.error(e)
-                                continue
-                            if ret:
-                                task.function_result = f"JC {node.jm_vuid} compression resumed on node"
-                                task.status = JobSchedule.STATUS_DONE
-                                task.write_to_db(db.kv_store)
-                            elif err:
-                                task.function_result = f"JC {node.jm_vuid} compression not needed"
-                                task.status = JobSchedule.STATUS_DONE
-                                task.write_to_db(db.kv_store)
-                            else:
-                                msg = "JC comp resume failed, retry task"
-                                logger.info(msg)
-                                task.retry += 1
-                                task.function_result = msg
-                                task.status = JobSchedule.STATUS_SUSPENDED
-                                task.write_to_db(db.kv_store)
 
-    time.sleep(60)
+def main():
+    serve(SPEC)
+
+
+if __name__ == "__main__":
+    main()

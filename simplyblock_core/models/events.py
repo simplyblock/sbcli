@@ -1,10 +1,11 @@
-# coding=utf-8
 from datetime import datetime
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class EventObj(BaseModel):
+
+    _WATCHED = True
 
     LEVEL_DEBUG = "Debug"
     LEVEL_INFO = "Info"
@@ -22,13 +23,16 @@ class EventObj(BaseModel):
     message: str = ""
     meta_data: str = ""
     node_id: str = ""
-    object_dict: dict = {}
+    object_dict: dict = default_factory(dict)
     object_name: str = ""
     storage_id: int = -1
     vuid: int = -1
 
     def get_id(self):
         return "%s/%s/%s" % (self.cluster_uuid, self.date, self.uuid)
+
+    def watch_scope(self):
+        return (self.cluster_uuid,)
 
     def get_date_string(self):
         if self.date > 1e10:

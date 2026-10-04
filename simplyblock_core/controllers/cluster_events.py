@@ -1,10 +1,9 @@
-# coding=utf-8
 import logging
 
+from simplyblock_core import constants, utils
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.events import EventObj
-from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
 db_controller = DBController()
@@ -90,6 +89,18 @@ def cluster_delete(cluster):
         db_object=cluster,
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Cluster deleted {cluster.get_id()}")
+
+
+def cluster_object_ops_change(cluster, stopped):
+    """Record that object lifecycle operations were stopped or started."""
+    state = "stopped" if stopped else "started"
+    ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_CLI,
+        message=f"Cluster object operations {state}")
 
 
 def cluster_rebalancing_change(cluster, new_state, old_status):

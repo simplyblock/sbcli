@@ -1,12 +1,12 @@
-from utils.common_utils import sleep_n_sec
-from datetime import datetime
-from stress_test.lvol_ha_stress_fio import TestLvolHACluster
-from exceptions.custom_exception import LvolNotConnectException
-import threading
-import string
-import random
 import os
+import random
+import string
+import threading
+from datetime import datetime
 
+from exceptions.custom_exception import LvolNotConnectException
+from stress_test.lvol_ha_stress_fio import TestLvolHACluster
+from utils.common_utils import sleep_n_sec
 
 generated_sequences = set()
 
@@ -37,9 +37,9 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
-        self.fio_size = "1G"
+        self.lvol_size = "30G"
+        self.int_lvol_size = 30
+        self.fio_numjobs = 5
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -94,11 +94,9 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                     pool_name=self.pool_name,
                     size=self.lvol_size,
                     crypto=is_crypto,
-                    key1=self.lvol_crypt_keys[0],
-                    key2=self.lvol_crypt_keys[1],
                 )
             except Exception as e:
-                self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Lvol creation fails with {e!s}. Retrying with different name.")
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
                 try:
@@ -107,11 +105,9 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                     )
                 except Exception as exp:
-                    self.logger.warning(f"Retry Lvol creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Lvol creation fails with {exp!s}.")
                     continue
 
             self.lvol_mount_details[lvol_name] = {
@@ -308,14 +304,14 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                 if "(False," in error:
                     raise Exception(error)
             except Exception as e:
-                self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Snap creation fails with {e!s}. Retrying with different name.")
                 try:
                     snapshot_name = f"snap_{lvol}"
                     temp_name = generate_random_sequence(5)
                     snapshot_name = f"{snapshot_name}_{temp_name}"
                     self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
-                    self.logger.warning(f"Retry Snap creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Snap creation fails with {exp!s}.")
                     continue
 
             self.snapshot_names.append(snapshot_name)
@@ -331,14 +327,14 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
             try:
                 self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
             except Exception as e:
-                self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Clone creation fails with {e!s}. Retrying with different name.")
                 try:
                     clone_name = f"clone_{generate_random_sequence(15)}"
                     temp_name = generate_random_sequence(5)
                     clone_name = f"{clone_name}_{temp_name}"
                     self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
                 except Exception as exp:
-                    self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Clone creation fails with {exp!s}.")
                     continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
             client = self.lvol_mount_details[lvol]["Client"]
@@ -397,7 +393,9 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
 
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+            # Delete ALL inherited data from parent so the clone has enough
+            # free space for its own FIO run (not just *fio* — catches all files).
+            self.ssh_obj.exec_command(client, f"sudo rm -rf {mount_point}/*")
             self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
             self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog*"])
 
@@ -542,7 +540,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                 )
                 sleep_n_sec(300)
             except Exception as e:
-                self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
+                self.logger.error(f"Error in continuous I/O stats validation: {e!s}")
                 break
 
     def restart_fio(self, iteration):
@@ -635,6 +633,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
         iteration = 1
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()
@@ -648,10 +647,12 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
+                self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
 
             outage_type = self.perform_random_outage()
             self.delete_random_lvols(5)
+            self._compute_fio_size(extra_lvols=3)
             self.create_lvols_with_fio(3)
             self.create_snapshots_and_clones()
 

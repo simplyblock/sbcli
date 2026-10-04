@@ -1,12 +1,16 @@
-import subprocess
-import logging
 import json
+import logging
+import subprocess
 import sys
 import time
+
 from graypy import GELFTCPHandler
+
 from simplyblock_core import constants
 
 SBCLI_NAME = constants.SIMPLY_BLOCK_CLI_NAME
+
+logger = logging.getLogger()
 
 cluster_commands = [
     f"{SBCLI_NAME} cluster show",
@@ -17,15 +21,13 @@ cluster_commands = [
 ]
 
 def setup_logger():
-    """Set up the custom logger."""
+    """Attach the stdout and GELF handlers to the module logger."""
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
     gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-    logger = logging.getLogger()
     logger.addHandler(gelf_handler)
     logger.addHandler(logger_handler)
     logger.setLevel(logging.DEBUG)
-    return logger
 
 def execute_command(command):
     """Execute a shell command and return the result."""
@@ -102,8 +104,8 @@ def list_clusters():
         logger.critical(f"Exception occurred while listing clusters: {e}", exc_info=True)
         return []
 
-if __name__ == "__main__":
-    logger = setup_logger()
+def main():
+    setup_logger()
     logger.info("Starting SBCLI worker.")
 
     while True:
@@ -119,3 +121,7 @@ if __name__ == "__main__":
                 check_storage_node(node_id)
             logger.info("Sleeping for 5 minutes...")
             time.sleep(300)
+
+
+if __name__ == "__main__":
+    main()

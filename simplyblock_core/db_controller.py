@@ -1,48 +1,160 @@
-# coding=utf-8
+import datetime
+import itertools
 import json
 import logging
 import os.path
+import struct
 import time
+from typing import Any, ClassVar
 
 import fdb
-from typing import List, Optional
 
-from simplyblock_core import constants
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core import constants, index_ops, utils
+from simplyblock_core.models import indices, watches
+from simplyblock_core.models.backup import (
+    Backup,
+    BackupChainLock,
+    BackupPolicy,
+    BackupPolicyAttachment,
+)
+from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
+from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.lvol_model import LVol, LVolMini, LVolReplication
+from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.port_stat import PortStat
-from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
-from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.qos import QOSClass
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
-from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
-    PoolStatObject, CachedLVolStatObject
-from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
+from simplyblock_core.models.stats import (
+    CachedLVolStatObject,
+    ClusterStatObject,
+    DeviceStatObject,
+    LVolStatObject,
+    NodeStatObject,
+    PoolStatObject,
+)
+from simplyblock_core.models.storage_node import NodeLVolDelLock, StorageNode
+from simplyblock_core.utils import ttl_cache
+from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger(__name__)
 
 
+def restart_claim_active(node, claim_owner=""):
+    """Return the owner of a FRESH per-node restart claim on ``node``, or
+    ``None`` when there is no live conflicting claim.
+
+    Fresh = ``restart_claim_ts`` younger than
+    ``constants.RESTART_CLAIM_TTL_SEC``. The caller's own token is never a
+    conflict (returns ``None`` when the claim is held by ``claim_owner``
+    itself — re-acquisition by the same driver). An empty, unparseable or
+    expired claim also returns ``None``: the claim only defends a LIVE
+    driver; a dead one must be takeover-able (the transferable-ownership
+    resume path), mirroring task-lease staleness semantics.
+    """
+    owner = getattr(node, "restart_claim_owner", "") or ""
+    if not owner or owner == claim_owner:
+        return None
+    ts = getattr(node, "restart_claim_ts", "") or ""
+    try:
+        claimed = datetime.datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+    if claimed.tzinfo is None:
+        claimed = claimed.replace(tzinfo=datetime.UTC)
+    age = (datetime.datetime.now(datetime.UTC) - claimed).total_seconds()
+    if age > constants.RESTART_CLAIM_TTL_SEC:
+        return None
+    return owner
+
+
 class Singleton(type):
-    _instances = {}  # type: ignore
+    _instances: ClassVar[dict] = {}
     def __call__(cls, *args, **kwargs):
         if cls in cls._instances:
             return cls._instances[cls]
         else:
-            ins = super(Singleton, cls).__call__(*args, **kwargs)
+            ins = super().__call__(*args, **kwargs)
             if ins is not None and ins.kv_store is not None:
                 cls._instances[cls] = ins
             return ins
 
 
+class SubsystemCapacityError(Exception):
+    """A namespace-slot claim would need a NEW subsystem but the node is
+    already at its ``max_lvol`` subsystem cap. Raised inside the claim
+    transaction before anything is written."""
+
+
+class _NoTxnValue(bytes):
+    """Duck-types an fdb Value (``present()``) for the transactionless
+    fallback store."""
+    _present = True
+
+    def present(self):
+        return self._present
+
+
+class _NoTxnFuture:
+    def __init__(self, value):
+        self._value = value
+
+    def wait(self):
+        return self._value
+
+
+class _NoTxnStore:
+    """Duck-types the small Transaction surface the namespace-slot claim and
+    release use (``get``/``set``/``clear``/``snapshot``/``add``) over a plain
+    kv store. Used only when the store has no transactions (the unit-tier fdb
+    stub and the fake stores in tests) — NOT atomic; production stores always
+    go through ``fdb.transactional``."""
+
+    def __init__(self, kv):
+        self._kv = kv
+
+    def get(self, key):
+        raw = self._kv.get(key) if self._kv is not None and hasattr(self._kv, 'get') else None
+        if raw is None:
+            value = _NoTxnValue(b'')
+            value._present = False
+        else:
+            value = _NoTxnValue(raw)
+        return _NoTxnFuture(value)
+
+    def set(self, key, value):
+        self._kv.set(key, value)
+
+    def clear(self, key):
+        self._kv.clear(key)
+
+    def add(self, key, value):
+        """Non-atomic stand-in for FDB's atomic ADD mutation: read-modify-write
+        the little-endian counter, same encoding as ``watches.ONE_LE64``."""
+        current = watches.unpack_counter(self._kv.get(key))
+        delta = watches.unpack_counter(value)
+        self._kv.set(key, struct.pack('<q', current + delta))
+
+    @property
+    def snapshot(self):
+        return self._kv
+
+
 
 class DBController(metaclass=Singleton):
 
-    kv_store=None
+    kv_store: Any = None
 
     def __init__(self):
         try:
@@ -51,96 +163,321 @@ class DBController(metaclass=Singleton):
             fdb.api_version(constants.KVD_DB_VERSION)
             self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)  # type: ignore[func-returns-value]
             self.kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
-        except Exception as e:
-            print(e)
+        except Exception:
+            logger.exception("FDB initialization failed")
 
-    def get_storage_nodes(self) -> List[StorageNode]:
+    def watch(self, model_cls, *, scope=(), entity_id=None, select=None, ancestors=(), tail=None):
+        """Async stream of watch.ChangeEvent batches for a watched scope.
+
+        Thin pass-through to :func:`simplyblock_core.watch.watch` so controllers
+        reach the watch primitive the same way they reach every other DB op.
+        """
+        from simplyblock_core import watch as _watch
+        return _watch.watch(
+            model_cls, scope=scope, entity_id=entity_id, select=select, ancestors=ancestors,
+            tail=tail)
+
+    # ---- Secondary indices ----
+    #
+    # One read primitive over the declared indices (models/indices.py)
+    # and the state that says whether an index may be trusted yet. Everything
+    # below this class's `get_*_by_*` helpers is expressed in terms of `query`.
+
+    def index_meta(self, model_cls, index) -> dict:
+        """The raw state record of one index. ``{}`` when it has never been written."""
+        if not self.kv_store:
+            return {}
+        raw = self.kv_store.get(indices.index_meta_key(model_cls, index))
+        if raw is None:
+            return {}
+        return json.loads(bytes(raw))
+
+    def index_state(self, model_cls, index) -> str:
+        """Whether reads may trust this index, through a short-TTL cache.
+
+        Absent state means ``building``: an index that has just been declared is
+        maintained by every write from that moment on, but the records written
+        before the declaration shipped are only covered once the backfill has
+        walked them. With no DB connection there is nothing to consult and
+        nothing to maintain, so the index counts as disabled.
+        """
+        if not self.kv_store:
+            return indices.STATE_DISABLED
+        index_name = index.name if isinstance(index, indices.Index) else index
+        return str(ttl_cache.index_state_cache.get_or_compute(
+            (model_cls.__name__, index_name), ttl_cache.INDEX_STATE_TTL_SEC,
+            lambda: self.index_meta(model_cls, index_name).get(
+                'state', indices.STATE_BUILDING),
+            cache_none=True))
+
+    def set_index_state(self, model_cls, index, state, *, cursor=None) -> None:
+        """Persist an index's state (and backfill cursor) and drop the cache."""
+        if state not in indices.STATES:
+            raise ValueError(f'unknown index state {state!r}')
+        index_name = index.name if isinstance(index, indices.Index) else index
+        record = {
+            'state': state,
+            'cursor': cursor or '',
+            'updated_at': str(datetime.datetime.now(datetime.UTC)),
+        }
+        self.kv_store[indices.index_meta_key(model_cls, index_name)] = \
+            json.dumps(record).encode()
+        ttl_cache.index_state_cache.invalidate((model_cls.__name__, index_name))
+
+    def multi_get(self, model_cls, ids) -> list:
+        """Point-read many entities by ``get_id()``.
+
+        All the gets of a chunk are issued as FDB futures before any of them is
+        waited on, so N reads cost one round trip rather than N. Chunking trades
+        away single-snapshot isolation across the whole result for the same
+        reason — and with the same consequence — as
+        ``BaseModel._READ_CHUNK_SIZE``: callers whose invariants depend on
+        concurrent mutations must enforce them at claim time, not at read time.
+
+        An id with no record behind it is skipped: an entity removed between the
+        index read and the point read is ordinary concurrency, not corruption.
+        """
+        if not ids:
+            return []
+        prototype = model_cls()
+        keys = [prototype.get_db_id(entity_id).encode() for entity_id in ids]
+        objects = []
+        chunk = model_cls._READ_CHUNK_SIZE
+        pipelined = hasattr(self.kv_store, 'create_transaction')
+        for start in range(0, len(keys), chunk):
+            batch = keys[start:start + chunk]
+            if pipelined:
+                tr = self.kv_store.create_transaction()
+                raws = [future.wait() for future in [tr.snapshot.get(k) for k in batch]]
+            else:
+                raws = [self.kv_store.get(k) for k in batch]
+            for raw in raws:
+                if raw is None or (hasattr(raw, 'present') and not raw.present()):
+                    continue
+                objects.append(model_cls().from_dict(json.loads(bytes(raw))))
+        return objects
+
+    def _indexed_ids(self, model_cls, idx, values, limit, reverse) -> list[str]:
+        """Read the ids straight out of the index. Only valid once it is ready."""
+        if isinstance(idx, indices.Unique) and idx.arity == len(values):
+            raw = self.kv_store.get(idx.point_key(model_cls, values))
+            return [] if raw is None else [bytes(raw).decode()]
+        return [
+            idx.entry_id(model_cls, bytes(key), bytes(value))
+            for key, value in self.kv_store.get_range_startswith(
+                idx.prefix(model_cls, values), limit=limit, reverse=reverse)
+        ]
+
+    def query_ids(self, model_cls, index, *values, limit=0, reverse=False) -> list[str]:
+        """Entity ids matching a (prefix of the) index values.
+
+        Skips the entity reads when the index is usable — but still falls back
+        through :meth:`query` when it is not, because reading a ``building``
+        index directly would report a record the backfill has not reached yet as
+        absent, which for a uniqueness pre-check means admitting a duplicate.
+        """
+        idx = indices.get_index(model_cls, index)
+        if self.index_state(model_cls, idx) == indices.STATE_READY:
+            return self._indexed_ids(model_cls, idx, values, limit, reverse)
+        return [
+            str(obj.get_id()) for obj
+            in self.query(model_cls, idx, *values, limit=limit, reverse=reverse)
+        ]
+
+    def query(self, model_cls, index, *values, limit=0, reverse=False) -> list:
+        """Entities whose ``index`` values start with ``values``.
+
+        Falls back to a filtered table scan while the index is not ``ready``.
+        The fallback's predicate and ordering come from the same declaration the
+        index is built from — ``Index.match_paths`` — so the two paths cannot
+        drift into answering differently, which is what makes the rollout
+        switchable at all.
+
+        ``limit`` and ``reverse`` order by the index key, so they are only
+        meaningful on an ``ordered`` index.
+        """
+        idx = indices.get_index(model_cls, index)
+        if self.index_state(model_cls, idx) == indices.STATE_READY:
+            ids = self._indexed_ids(model_cls, idx, values, limit, reverse)
+            return self.multi_get(model_cls, ids)
+
+        index_ops.log_fallback(model_cls, idx, self.index_state(model_cls, idx))
+        rows = []
+        # id=" " is this codebase's spelling for "the whole class keyspace";
+        # the default renders a composite-keyed class as `object/Class//`.
+        for obj in model_cls().read_from_db(self.kv_store, id=" "):
+            paths = idx.match_paths(obj, values)
+            if not paths:
+                continue
+            path = max(paths) if reverse else min(paths)
+            rows.append((path + '/' + str(obj.get_id()), obj))
+        rows.sort(key=lambda row: row[0], reverse=reverse)
+        if limit:
+            rows = rows[:limit]
+        return [obj for _path, obj in rows]
+
+    def query_one(self, model_cls, index, *values):
+        """The single entity matching ``values``, or ``None``.
+
+        Raises ``ValueError`` when several match — the same contract as
+        ``single_or_none``, which is what the scan-and-filter helpers used.
+        """
+        return single_or_none(self.query(model_cls, index, *values))
+
+    def get_storage_nodes(self) -> list[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
         return ret
 
-    def get_storage_nodes_by_cluster_id(self, cluster_id) -> List[StorageNode]:
-        ret = StorageNode().read_from_db(self.kv_store)
-        nodes = []
-        for n in ret:
-            if n.cluster_id == cluster_id:
-                nodes.append(n)
+    def get_storage_nodes_by_cluster_id(self, cluster_id: str, *, source=None) -> list[StorageNode]:
+        # `source` is not a query plan leaking into callers here: the watch
+        # layer hands this an in-memory batch of already-read models to filter
+        # (see watch.py `select=`), which no index can serve.
+        nodes = ([n for n in source if n.cluster_id == cluster_id] if source is not None
+                 else self.query(StorageNode, 'cluster_id', cluster_id))
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_storage_nodes_by_system_id(self, system_id) -> List[StorageNode]:
-        return [
-            node for node
-            in StorageNode().read_from_db(self.kv_store)
-            if node.system_uuid == system_id
-        ]
+    def get_storage_nodes_by_system_id(self, system_id: str) -> list[StorageNode]:
+        return self.query(StorageNode, 'system_uuid', system_id)
 
-    def get_storage_nodes_by_hostname(self, hostname) -> List[StorageNode]:
-        return [
-            node for node
-            in self.get_storage_nodes()
-            if node.hostname == hostname
-        ]
+    def get_storage_nodes_by_hostname(self, hostname: str) -> list[StorageNode]:
+        return self.query(StorageNode, 'hostname', hostname)
 
-    def get_storage_node_by_id(self, id) -> StorageNode:
-        ret = StorageNode().read_from_db(self.kv_store, id)
-        if len(ret) == 0:
+    def get_storage_node_by_id(self, id: str) -> StorageNode:
+        if not id:
+            raise KeyError('StorageNode lookup with a blank id')
+        node = single_or_none(StorageNode().read_from_db(self.kv_store, id))
+        if node is None:
             raise KeyError(f'StorageNode {id} not found')
-        return ret[0]
+        return node
 
-    def get_storage_device_by_id(self, id) -> NVMeDevice:
-        nodes = self.get_storage_nodes()
-        try:
-            return next(
-                device
-                for node in nodes
-                for device in node.nvme_devices
-                if device.get_id() == id
-            )
-        except StopIteration:
+    def get_storage_device_by_id(self, id: str) -> NVMeDevice:
+        device = single_or_none(
+            device
+            for node in self.query(
+                StorageNode, 'device_id', id, StorageNode.DEVICE_KIND_NVME)
+            for device in node.nvme_devices
+            if device.get_id() == id
+        )
+        if device is None:
             raise KeyError(f'Device {id} not found')
+        return device
 
+    def get_storage_node_by_device_id(self, id: str) -> StorageNode:
+        """The node whose record holds this NVMe or JM device.
 
-    def get_pools(self, cluster_id=None) -> List[Pool]:
-        pools = []
+        Devices are not rows of their own — they live inside the StorageNode
+        record — so the index is what says which record contains one. Callers
+        that need the owning node rather than the device itself used to scan
+        every node for it.
+
+        Answers for either kind of device. A caller that means "the node whose
+        *journal* this is" must say so — see
+        :func:`device_controller.get_storage_node_by_jm_device` — because the
+        two id spaces overlap.
+
+        Raises ``ValueError`` if two nodes claim the device: that is a broken
+        invariant, not a lookup miss, and is not something a caller can
+        meaningfully recover from.
+        """
+        node = single_or_none(self.query(StorageNode, 'device_id', id))
+        if node is None:
+            raise KeyError(f'No storage node holds device {id}')
+        return node
+
+    def get_pools(self, cluster_id: str | None = None, *, source=None) -> list[Pool]:
+        if source is not None:  # in-memory watch batch; see get_storage_nodes_by_cluster_id
+            return [pool for pool in source if not cluster_id or pool.cluster_id == cluster_id]
         if cluster_id:
-            for pool in Pool().read_from_db(self.kv_store):
-                if pool.cluster_id == cluster_id:
-                    pools.append(pool)
-        else:
-            pools = Pool().read_from_db(self.kv_store)
-        return pools
+            return self.query(Pool, 'cluster_id', cluster_id)
+        return Pool().read_from_db(self.kv_store)
 
-    def get_pool_by_id(self, id) -> Pool:
-        ret = Pool().read_from_db(self.kv_store, id)
-        if not ret:
+    def get_pool_by_id(self, id: str) -> Pool:
+        if not id:
+            raise KeyError('Pool lookup with a blank id')
+        pool = single_or_none(Pool().read_from_db(self.kv_store, id))
+        if pool is None:
             raise KeyError(f'Pool {id} not found')
-        return ret[0]
+        return pool
 
-    def get_pool_by_name(self, name) -> Pool:
-        pools = Pool().read_from_db(self.kv_store)
-        for pool in pools:
-            if pool.pool_name == name:
-                return pool
-        raise KeyError(f'Pool {name} not found')
+    def get_pool_by_name(self, name: str, cluster_id: str | None = None) -> Pool:
+        """Look a pool up by name, within one cluster when one is known.
 
-    def get_lvols(self, cluster_id=None) -> List[LVol]:
-        lvols = self.get_all_lvols()
-        lvols = [lvol for lvol in lvols if lvol.status != LVol.STATUS_DELETED]
+        Pool names are unique per cluster, not globally, so the unscoped form
+        raises ``ValueError('Multiple values present')`` the moment two clusters
+        use the same name. Pass ``cluster_id`` wherever it is in scope: that
+        turns the lookup into a point read on the uniqueness constraint itself
+        and makes the ambiguity unrepresentable rather than merely unlikely.
+        """
+        pool = (self.query_one(Pool, 'cluster_id+pool_name', cluster_id, name)
+                if cluster_id else self.query_one(Pool, 'pool_name', name))
+        if pool is None:
+            raise KeyError(f'Pool {name} not found')
+        return pool
+
+    def pool_name_taken(self, cluster_id: str, name: str) -> bool:
+        """Whether this cluster already holds a pool by this name.
+
+        The user-facing pre-check for the ``Unique(cluster_id, pool_name)``
+        constraint, mirroring :meth:`lvol_name_taken` — the constraint itself
+        only ever fires on an invariant breach.
+        """
+        return bool(self.query_ids(Pool, 'cluster_id+pool_name', cluster_id, name))
+
+    def get_pool_by_id_or_name(self, id_or_name: str, cluster_id: str | None = None) -> Pool:
+        """Look a pool up by UUID, falling back to its name.
+
+        Every CLI/API surface that documents "pool ID or name" needs this; it
+        used to be copied per call site, and the copies drifted (some resolved
+        by ID only, so a valid name raised KeyError).
+        """
+        return (
+            self.get_pool_by_id(id_or_name)
+            if utils.UUID_PATTERN.match(id_or_name) is not None
+            else self.get_pool_by_name(id_or_name, cluster_id)
+        )
+
+    def get_cluster_id_by_lvol(self, lvol) -> str:
+        """The cluster ``lvol`` belongs to — the one owner of that relation.
+
+        A volume's cluster is its POOL's cluster. ``pool_uuid`` has a single
+        writer (:meth:`LVol.place_in_pool`) and a pool never moves between
+        clusters, so the relation is stable for the life of the record;
+        ``node_id`` is assigned from a dozen sites and is deliberately in flux
+        for the length of every migration and fail-over, which made a volume's
+        cluster change under readers that had asked for nothing to move.
+        :meth:`get_lvols` reads the same relation in the other direction.
+        """
+        return self.get_pool_by_id(lvol.pool_uuid).cluster_id
+
+    def get_lvols(self, cluster_id: str | None = None) -> list[LVol]:
+        """Live volumes, optionally only those of ``cluster_id``.
+
+        The bulk direction of :meth:`get_cluster_id_by_lvol`: the cluster's
+        pools, then each pool's volumes. Both sides derive membership from
+        ``pool_uuid``, so a volume can never be listed under a cluster whose
+        id the per-volume accessor would not return for it.
+
+        The index state is consulted once rather than per pool. Fanning
+        ``query(LVol, 'pool_uuid', ...)`` out over the pools would, while the
+        index is not ready, take that call's scan fallback once *per pool* —
+        turning the single table scan this had before the index existed into
+        one per pool of the cluster.
+        """
         if not cluster_id:
-            return lvols
+            return self._live_lvols(self.get_all_lvols())
 
-        node_ids=[]
-        cluster_lvols = []
-        for node in self.get_storage_nodes_by_cluster_id(cluster_id):
-            node_ids.append(node.get_id())
+        pool_ids = {pool.get_id() for pool in self.get_pools(cluster_id)}
+        state = self.index_state(LVol, 'pool_uuid')
+        if state == indices.STATE_READY:
+            return self._live_lvols(itertools.chain.from_iterable(
+                self.query(LVol, 'pool_uuid', pool_id) for pool_id in pool_ids))
 
-        for lvol in lvols:
-            if lvol.node_id in node_ids:
-                cluster_lvols.append(lvol)
+        index_ops.log_fallback(LVol, indices.get_index(LVol, 'pool_uuid'), state)
+        return self._live_lvols(
+            lvol for lvol in self.get_all_lvols() if lvol.pool_uuid in pool_ids)
 
-        return cluster_lvols
-
-    def get_all_lvols(self) -> List[LVol]:
+    def get_all_lvols(self) -> list[LVol]:
         start_time = time.time()
         lvols = LVol().read_from_db(self.kv_store)
         ret = sorted(lvols, key=lambda x: x.create_dt)
@@ -148,39 +485,39 @@ class DBController(metaclass=Singleton):
         logger.debug(f"time taken to read all LVols: {round(end_time - start_time, 2)}s")
         return ret
 
-    def get_lvols_by_node_id(self, node_id) -> List[LVol]:
-        lvols = []
-        for lvol in self.get_lvols():
-            if lvol.node_id == node_id:
-                lvols.append(lvol)
-        return sorted(lvols, key=lambda x: x.create_dt)
+    def get_lvols_by_node_id(self, node_id: str) -> list[LVol]:
+        return self._live_lvols(self.query(LVol, 'node_id', node_id))
 
-    def get_lvols_by_pool_id(self, pool_id) -> List[LVol]:
-        lvols = []
-        for lvol in self.get_lvols():
-            if lvol.pool_uuid == pool_id:
-                lvols.append(lvol)
-        return sorted(lvols, key=lambda x: x.create_dt)
+    def get_lvols_by_pool_id(self, pool_id: str, *, source=None) -> list[LVol]:
+        # `source` is an in-memory watch batch; see get_storage_nodes_by_cluster_id.
+        lvols = ([lvol for lvol in source if lvol.pool_uuid == pool_id] if source is not None
+                 else self.query(LVol, 'pool_uuid', pool_id))
+        return self._live_lvols(lvols)
 
-    def get_hostnames_by_pool_id(self, pool_id) -> List[str]:
+    @staticmethod
+    def _live_lvols(lvols) -> list[LVol]:
+        return sorted(
+            (lvol for lvol in lvols if lvol.status != LVol.STATUS_DELETED),
+            key=lambda x: x.create_dt)
+
+    def get_hostnames_by_pool_id(self, pool_id: str) -> list[str]:
         lvols = self.get_lvols_by_pool_id(pool_id)
         hostnames = []
         for lv in lvols:
-            if (lv.hostname not in hostnames):
+            if lv.hostname and lv.hostname not in hostnames:
                 hostnames.append(lv.hostname)
         return hostnames
 
-    def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
+    def get_snapshots(self, cluster_id: str | None = None) -> list[SnapShot]:
         start_time = time.time()
-        snaps = SnapShot().read_from_db(self.kv_store)
-        if cluster_id:
-            snaps = [n for n in snaps if n.cluster_id == cluster_id]
+        snaps = (self.query(SnapShot, 'cluster_id', cluster_id) if cluster_id
+                 else SnapShot().read_from_db(self.kv_store))
         ret = sorted(snaps, key=lambda x: x.created_at)
         end_time = time.time()
         logger.debug(f"time taken to read all SnapShots: {round(end_time - start_time, 2)}s")
         return ret
 
-    def get_mini_lvols(self) -> List[LVolMini]:
+    def get_mini_lvols(self) -> list[LVolMini]:
         start_time = time.time()
         lvols = LVolMini().read_from_db(self.kv_store)
         ret = sorted(lvols, key=lambda x: x.create_dt)
@@ -188,7 +525,7 @@ class DBController(metaclass=Singleton):
         logger.debug(f"time taken to read all mini lvols: {round(end_time - start_time, 2)}s")
         return ret
 
-    def get_mini_snapshots(self) -> List[SnapShotMini]:
+    def get_mini_snapshots(self) -> list[SnapShotMini]:
         start_time = time.time()
         snaps = SnapShotMini().read_from_db(self.kv_store)
         ret = sorted(snaps, key=lambda x: x.created_at)
@@ -196,207 +533,255 @@ class DBController(metaclass=Singleton):
         logger.debug(f"time taken to read all mini snapshots: {round(end_time - start_time, 2)}s")
         return ret
 
-    def get_snapshot_by_id(self, id) -> SnapShot:
-        ret = SnapShot().read_from_db(self.kv_store, id)
-        if not ret:
+    def get_snapshot_by_id(self, id: str) -> SnapShot:
+        if not id:
+            raise KeyError('Snapshot lookup with a blank id')
+        snap = single_or_none(SnapShot().read_from_db(self.kv_store, id))
+        if snap is None:
             raise KeyError(f'Snapshot {id} not found')
-        return ret[0]
+        return snap
 
-    def get_lvol_by_id(self, id) -> LVol:
-        lvols = LVol().read_from_db(self.kv_store, id=id)
-        if not lvols:
+    def get_lvol_by_id(self, id: str) -> LVol:
+        if not id:
+            raise KeyError('LVol lookup with a blank id')
+        lvol = single_or_none(LVol().read_from_db(self.kv_store, id=id))
+        if lvol is None:
             raise KeyError(f'LVol {id} not found')
-        return lvols[0]
+        return lvol
 
-    def get_lvol_replication_objects(self) -> List[LVolReplication]:
+    def get_lvol_replication_objects(self) -> list[LVolReplication]:
         ret = LVolReplication().read_from_db(self.kv_store)
         return sorted(ret, key=lambda x: x.create_dt)
 
-    def get_lvol_by_name(self, lvol_name) -> LVol:
-        for lvol in self.get_lvols():
-            if lvol.lvol_name == lvol_name:
-                return lvol
-        raise KeyError(f'LVol {lvol_name} not found')
-
-    def get_mgmt_node_by_id(self, id) -> MgmtNode:
-        ret = MgmtNode().read_from_db(self.kv_store, id)
+    def get_lvol_replication_by_id(self, uuid) -> LVolReplication:
+        ret = LVolReplication().read_from_db(self.kv_store, uuid)
         if not ret:
-            raise KeyError(f'ManagementNode {id} not found')
+            raise KeyError(f'LVolReplication {uuid} not found')
         return ret[0]
 
-    def get_mgmt_nodes(self, cluster_id=None) -> List[MgmtNode]:
+    def get_lvol_by_name(self, lvol_name: str, pool_uuid: str | None = None,
+                         *, include_deleted: bool = False) -> LVol:
+        """Look a volume up by name, within one pool when one is known.
+
+        Volume names are unique per pool, not globally: the unscoped form
+        raises ``ValueError('Multiple values present')`` when two pools use the
+        same name, and pass ``pool_uuid`` wherever it is in scope to make that
+        a point read on the uniqueness constraint instead.
+
+        ``include_deleted`` also returns tombstones — ``status == deleted``
+        records written by the pre-2026-05 force-delete path and never removed
+        (a delete now removes the record outright). A tombstone still holds the
+        pool+name uniqueness slot, so a caller about to create under that name
+        has to see it; a caller resolving a name for a user does not.
+        """
+        candidates = [
+            lvol for lvol
+            in (self.query(LVol, 'pool_uuid+lvol_name', pool_uuid, lvol_name) if pool_uuid
+                else self.query(LVol, 'lvol_name', lvol_name))
+            if include_deleted or lvol.status != LVol.STATUS_DELETED
+        ]
+        lvol = single_or_none(candidates)
+        if lvol is None:
+            raise KeyError(f'LVol {lvol_name} not found')
+        return lvol
+
+    def get_mgmt_node_by_id(self, id: str) -> MgmtNode:
+        if not id:
+            raise KeyError('MgmtNode lookup with a blank id')
+        node = single_or_none(MgmtNode().read_from_db(self.kv_store, id))
+        if node is None:
+            raise KeyError(f'ManagementNode {id} not found')
+        return node
+
+    def get_mgmt_nodes(self, cluster_id: str | None = None) -> list[MgmtNode]:
         nodes = MgmtNode().read_from_db(self.kv_store)
         if cluster_id:
             nodes = [n for n in nodes if n.cluster_id == cluster_id]
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_mgmt_node_by_hostname(self, hostname) -> MgmtNode:
-        nodes = self.get_mgmt_nodes()
-        for node in nodes:
-            if node.hostname == hostname:
-                return node
-        raise KeyError(f'No management node found for hostname {hostname}')
+    def get_mgmt_node_by_hostname(self, hostname: str) -> MgmtNode:
+        node = self.query_one(MgmtNode, 'hostname', hostname)
+        if node is None:
+            raise KeyError(f'No management node found for hostname {hostname}')
+        return node
 
-    def get_lvol_stats(self, lvol, limit=20) -> List[LVolStatObject]:
+    def get_lvol_stats(self, lvol, limit=20) -> list[LVolStatObject]:
         if isinstance(lvol, str):
             lvol = self.get_lvol_by_id(lvol)
         stats = LVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol.pool_uuid, lvol.uuid), limit=limit,
                                               reverse=True)
         return stats
 
-    def get_cached_lvol_stats(self, lvol_id, limit=20) -> List[CachedLVolStatObject]:
+    def get_cached_lvol_stats(self, lvol_id, limit=20) -> list[CachedLVolStatObject]:
         stats = CachedLVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol_id, lvol_id), limit=limit,
                                                     reverse=True)
         return stats
 
-    def get_pool_stats(self, pool, limit=20) -> List[PoolStatObject]:
+    def get_pool_stats(self, pool, limit=20) -> list[PoolStatObject]:
         stats = PoolStatObject().read_from_db(self.kv_store, id="%s/%s" % (pool.get_id(), pool.get_id()), limit=limit,
                                               reverse=True)
         return stats
 
-    def get_cluster_stats(self, cluster, limit=20) -> List[ClusterStatObject]:
+    def get_cluster_stats(self, cluster, limit=20) -> list[ClusterStatObject]:
         return self.get_cluster_capacity(cluster, limit)
 
-    def get_node_stats(self, node, limit=20) -> List[NodeStatObject]:
+    def get_node_stats(self, node, limit=20) -> list[NodeStatObject]:
         return self.get_node_capacity(node, limit)
 
-    def get_device_stats(self, device, limit=20) -> List[DeviceStatObject]:
+    def get_device_stats(self, device, limit=20) -> list[DeviceStatObject]:
         return self.get_device_capacity(device, limit)
 
-    def get_cluster_capacity(self, cl, limit=1) -> List[ClusterStatObject]:
+    def get_cluster_capacity(self, cl, limit=1) -> list[ClusterStatObject]:
         stats = ClusterStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (cl.get_id(), cl.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_node_capacity(self, node, limit=1) -> List[NodeStatObject]:
+    def get_node_capacity(self, node, limit=1) -> list[NodeStatObject]:
         stats = NodeStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (node.cluster_id, node.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_device_capacity(self, device, limit=1) -> List[DeviceStatObject]:
+    def get_device_capacity(self, device, limit=1) -> list[DeviceStatObject]:
         stats = DeviceStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (device.cluster_id, device.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_clusters(self) -> List[Cluster]:
+    def get_clusters(self) -> list[Cluster]:
         return Cluster().read_from_db(self.kv_store)
 
-    def get_cluster_by_id(self, cluster_id) -> Cluster:
-        ret = Cluster().read_from_db(self.kv_store, id=cluster_id)
+    def get_deploy_config(self) -> DeployConfig:
+        ret = DeployConfig().read_from_db(self.kv_store)
         if not ret:
-            raise KeyError(f'Cluster {cluster_id} not found')
+            raise KeyError("No deploy config found")
         return ret[0]
 
-    def get_port_stats(self, node_id, port_id, limit=20) -> List[PortStat]:
+    def get_cluster_by_id(self, cluster_id: str) -> Cluster:
+        if not cluster_id:
+            raise KeyError('Cluster lookup with a blank id')
+        cluster = single_or_none(Cluster().read_from_db(self.kv_store, id=cluster_id))
+        if cluster is None:
+            raise KeyError(f'Cluster {cluster_id} not found')
+        return cluster
+
+    def get_port_stats(self, node_id: str, port_id: str, limit: int = 20) -> list[PortStat]:
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
 
-    def get_events(self, event_id=" ", limit=0, reverse=False) -> List[EventObj]:
+    def get_events(self, event_id: str = " ", limit: int = 0, reverse: bool = False) -> list[EventObj]:
         return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
 
-    def get_job_tasks(self, cluster_id, reverse=True, limit=0) -> List[JobSchedule]:
-        ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
+    def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> list[JobSchedule]:
+        if source is not None:
+            ret = [t for t in source if t.cluster_id == cluster_id]
+        else:
+            ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
         return sorted(ret, key=lambda x: x.date)
 
 
-    def get_active_migration_tasks(self, cluster_id: str) -> List[JobSchedule]:
-        """Return all non-done FN_LVOL_MIG tasks for the given cluster (single FDB scan)."""
-        return [
-            t for t in self.get_job_tasks(cluster_id, reverse=False)
-            if t.function_name == JobSchedule.FN_LVOL_MIG
-            and t.status != JobSchedule.STATUS_DONE
-        ]
+    def get_active_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Return all non-done FN_LVOL_MIG tasks for the given cluster."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_LVOL_MIG)
 
-    def get_task_by_id(self, task_id) -> JobSchedule:
-        for task in self.get_job_tasks(" "):
-            if task.uuid == task_id:
-                return task
-        raise KeyError(f'Task {task_id} not found')
+    def _active_tasks(self, cluster_id: str, function_name: str) -> list[JobSchedule]:
+        """Tasks of one kind that have not finished.
 
-    def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
-        ret = []
-        snaps = self.get_snapshots()
-        for snap in snaps:
-            if snap.lvol.node_id == node_id:
-                ret.append(snap)
-        return sorted(ret, key=lambda x: x.create_dt)
+        The index covers (cluster, function, status); "not done" is not an
+        equality, so it stays an in-memory filter over the one function's tasks
+        rather than over the whole (never-pruned) table.
+        """
+        return sorted(
+            (task for task in self.query(JobSchedule, 'cluster_id+function_name+status',
+                                         cluster_id, function_name)
+             if task.status != JobSchedule.STATUS_DONE),
+            key=lambda x: x.date)
 
-    def get_snapshots_by_pool_id(self, pool_id) -> List[SnapShot]:
-        ret = []
-        snaps = self.get_snapshots()
-        for snap in snaps:
-            if snap.pool_uuid == pool_id:
-                ret.append(snap)
-        return sorted(ret, key=lambda x: x.create_dt)
+    def get_task_by_id(self, task_id: str) -> JobSchedule:
+        task = self.query_one(JobSchedule, 'uuid', task_id)
+        if task is None:
+            raise KeyError(f'Task {task_id} not found')
+        return task
 
-    def get_snapshots_by_lvol_id(self, lvol_id) -> List[SnapShot]:
-        return [s for s in self.get_snapshots() if s.lvol and s.lvol.get_id() == lvol_id]
+    def get_snapshots_by_node_id(self, node_id: str) -> list[SnapShot]:
+        return sorted(self.query(SnapShot, 'lvol_node_id', node_id),
+                      key=lambda x: x.create_dt)
 
-    def get_snode_size(self, node_id) -> int:
+    def get_snapshots_by_pool_id(self, pool_id: str, *, source=None) -> list[SnapShot]:
+        # `source` is an in-memory watch batch; see get_storage_nodes_by_cluster_id.
+        snaps = ([s for s in source if s.pool_uuid == pool_id] if source is not None
+                 else self.query(SnapShot, 'pool_uuid', pool_id))
+        return sorted(snaps, key=lambda x: x.create_dt)
+
+    def get_snapshots_by_lvol_id(self, lvol_id: str) -> list[SnapShot]:
+        return self.query(SnapShot, 'lvol_uuid', lvol_id)
+
+    def get_snode_size(self, node_id: str) -> int:
         snode = self.get_storage_node_by_id(node_id)
         return sum(dev.size for dev in snode.nvme_devices)
 
-    def get_jm_device_by_id(self, jm_id) -> JMDevice:
-        for node in self.get_storage_nodes():
-            if node.jm_device and node.jm_device.get_id() == jm_id:
-                return node.jm_device
-        raise KeyError(f'JMDeviec {jm_id} not found')
+    def get_jm_device_by_id(self, jm_id: str) -> JMDevice:
+        device = single_or_none(
+            node.jm_device
+            for node in self.query(
+                StorageNode, 'device_id', jm_id, StorageNode.DEVICE_KIND_JM)
+            if node.jm_device
+        )
+        if device is None:
+            raise KeyError(f'JMDevice {jm_id} not found')
+        return device
 
-    def get_primary_storage_nodes_by_cluster_id(self, cluster_id) -> List[StorageNode]:
-        ret = StorageNode().read_from_db(self.kv_store)
-        nodes = []
-        for n in ret:
-            if n.cluster_id == cluster_id and not n.is_secondary_node:  # pass
-                nodes.append(n)
-        return sorted(nodes, key=lambda x: x.create_dt)
+    def get_primary_storage_nodes_by_cluster_id(self, cluster_id: str) -> list[StorageNode]:
+        return sorted(
+            (node for node in self.query(StorageNode, 'cluster_id', cluster_id)
+             if not node.is_secondary_node),
+            key=lambda x: x.create_dt)
 
-    def get_primary_storage_nodes_by_secondary_node_id(self, node_id) -> List[StorageNode]:
-        ret = StorageNode().read_from_db(self.kv_store)
-        nodes = []
-        for node in ret:
-            if (node.secondary_node_id == node_id or node.tertiary_node_id == node_id) and node.lvstore:
-                nodes.append(node)
-        return sorted(nodes, key=lambda x: x.create_dt)
+    def get_primary_storage_nodes_by_secondary_node_id(self, node_id: str) -> list[StorageNode]:
+        return sorted(
+            (node for node in self.query(StorageNode, 'failover_for', node_id)
+             if node.lvstore),
+            key=lambda x: x.create_dt)
 
-    def get_qos(self, cluster_id=None) -> List[QOSClass]:
-        classes = []
-        if cluster_id:
-            for qos in QOSClass().read_from_db(self.kv_store):
-                if qos.cluster_id == cluster_id:
-                    classes.append(qos)
-        else:
-            classes = QOSClass().read_from_db(self.kv_store)
+    def get_qos(self, cluster_id: str | None = None) -> list[QOSClass]:
+        classes = (self.query(QOSClass, 'cluster_id', cluster_id) if cluster_id
+                   else QOSClass().read_from_db(self.kv_store))
         return sorted(classes, key=lambda x: x.class_id)
 
-    def get_migrations(self, cluster_id=None) -> List[LVolMigration]:
+    def get_migrations(self, cluster_id: str | None = None) -> list[LVolMigration]:
         """Return all LVolMigration records, optionally filtered by cluster."""
         prefix = cluster_id if cluster_id else " "
         return LVolMigration().read_from_db(self.kv_store, id=prefix)
 
-    def get_migration_by_id(self, migration_id) -> LVolMigration:
-        for m in self.get_migrations():
-            if m.uuid == migration_id:
-                return m
-        raise KeyError(f'LVolMigration {migration_id} not found')
+    def get_migration_by_id(self, migration_id: str) -> LVolMigration:
+        migration = self.query_one(LVolMigration, 'uuid', migration_id.split('/')[-1])
+        if migration is None:
+            raise KeyError(f'LVolMigration {migration_id} not found')
+        return migration
 
-    def get_migration_by_lvol_id(self, lvol_id) -> Optional[LVolMigration]:
-        for m in self.get_migrations():
-            if m.lvol_id == lvol_id and m.is_active():
-                return m
-        return None
+    def get_migration_by_lvol_id(self, lvol_id: str) -> LVolMigration | None:
+        return single_or_none(
+            m for m in self.query(LVolMigration, 'lvol_id', lvol_id) if m.is_active()
+        )
 
-    def get_lvol_del_lock(self, node_id) -> Optional[NodeLVolDelLock]:
-        ret = NodeLVolDelLock().read_from_db(self.kv_store, id=node_id)
-        if ret:
-            return ret[0]
-        else:
-            return None
+    def get_migration_groups(self, cluster_id: str | None = None) -> list[LVolMigrationGroup]:
+        """Return all LVolMigrationGroup records, optionally filtered by cluster."""
+        prefix = cluster_id if cluster_id else " "
+        return LVolMigrationGroup().read_from_db(self.kv_store, id=prefix)
 
-    def get_backup_chain_lock(self, snapshot_id) -> Optional[BackupChainLock]:
-        ret = BackupChainLock().read_from_db(self.kv_store, id=snapshot_id)
-        if ret:
-            return ret[0]
-        return None
+    def get_migration_group_by_id(self, group_id: str) -> LVolMigrationGroup:
+        group = self.query_one(LVolMigrationGroup, 'uuid', group_id.split('/')[-1])
+        if group is None:
+            raise KeyError(f'LVolMigrationGroup {group_id} not found')
+        return group
+
+    def get_active_batch_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Return all non-done FN_LVOL_BATCH_MIG tasks for the given cluster."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_LVOL_BATCH_MIG)
+
+    def get_lvol_del_lock(self, node_id: str) -> NodeLVolDelLock | None:
+        return single_or_none(NodeLVolDelLock().read_from_db(self.kv_store, id=node_id))
+
+    def get_backup_chain_lock(self, snapshot_id: str) -> BackupChainLock | None:
+        return single_or_none(BackupChainLock().read_from_db(self.kv_store, id=snapshot_id))
 
     def _acquire_backup_chain_locks_tx(self, tr, snapshot_ids, requested_snapshot_id, lvol_id):
         import time
@@ -424,7 +809,7 @@ class DBController(metaclass=Singleton):
             lock.requested_snapshot_id = requested_snapshot_id
             lock.lvol_id = lvol_id
             lock.created_at = now
-            tr[key] = json.dumps(lock.to_dict()).encode()
+            tr[key] = json.dumps(lock.to_dict(unwrap_secrets=True)).encode()
 
         return True, None
 
@@ -449,16 +834,288 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
 
+    # ---- Per-lvstore snapshot-mutation lock (Single FDB Transaction) ----
+
+    def _try_acquire_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner, now, ttl):
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if raw.present():
+            existing = LVStoreMutationLock().from_dict(json.loads(raw))
+            fresh = (now - existing.heartbeat_at) <= ttl
+            if existing.owner and existing.owner != owner and fresh:
+                return False, existing.owner
+            # Stale (holder presumed dead) or already ours: (re)take it.
+            lock.acquired_at = existing.acquired_at if existing.owner == owner else now
+        else:
+            lock.acquired_at = now
+        lock.owner = owner
+        lock.heartbeat_at = now
+        tr[key] = json.dumps(lock.to_dict()).encode()
+        return True, None
+
+    def acquire_lvstore_lock(self, cluster_id, lvs_name, owner):
+        """Atomically acquire the per-lvstore snapshot-mutation lock.
+
+        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
+        reclaimed from a dead holder whose heartbeat went stale, or already held
+        by this owner), or (False, current_owner) if a live holder owns it."""
+        if not self.kv_store:
+            return False, "No DB connection"
+        now = int(time.time())
+        ttl = constants.LVSTORE_MUTATION_LOCK_TTL_SEC
+        transactional = fdb.transactional(DBController._try_acquire_lvstore_lock_tx)
+        return transactional(self, self.kv_store, cluster_id, lvs_name, owner, now, ttl)
+
+    def _refresh_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner, now):
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return False
+        existing = LVStoreMutationLock().from_dict(json.loads(raw))
+        if existing.owner != owner:
+            return False  # lost the lock (reclaimed by someone else)
+        existing.heartbeat_at = now
+        tr[key] = json.dumps(existing.to_dict()).encode()
+        return True
+
+    def refresh_lvstore_lock(self, cluster_id, lvs_name, owner):
+        """Heartbeat the lock so a slow create→register section isn't reclaimed.
+        Returns True if still held by ``owner``, False if it was lost."""
+        if not self.kv_store:
+            return False
+        now = int(time.time())
+        transactional = fdb.transactional(DBController._refresh_lvstore_lock_tx)
+        return transactional(self, self.kv_store, cluster_id, lvs_name, owner, now)
+
+    def _release_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner):
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return
+        existing = LVStoreMutationLock().from_dict(json.loads(raw))
+        if existing.owner == owner:
+            del tr[key]
+
+    def release_lvstore_lock(self, cluster_id, lvs_name, owner):
+        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
+        late release never deletes a lock another holder has since reclaimed)."""
+        if not self.kv_store:
+            return
+        transactional = fdb.transactional(DBController._release_lvstore_lock_tx)
+        transactional(self, self.kv_store, cluster_id, lvs_name, owner)
+
+    def watch_lvstore_lock(self, cluster_id, lvs_name):
+        """Return an FDB watch future that fires when the lock key changes
+        (release, reclaim, heartbeat), or None when no DB connection exists.
+
+        Lets lock waiters block on the actual release instead of sleeping a
+        fixed poll interval: the future's ``is_ready()`` is a local check (no
+        FDB round-trip), so waiters can spin on it cheaply and re-attempt the
+        acquire the moment the holder releases."""
+        if not self.kv_store:
+            return None
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        tr = self.kv_store.create_transaction()
+        watch = tr.watch(key)
+        tr.commit().wait()
+        return watch
+
+    # ---- Node-add port reservation (Single FDB Transaction) ----
+
+    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now):
+        used = set(node_used)
+        # Read this cluster's reservations transactionally so concurrent
+        # reservers conflict-retry instead of picking the same port. Drop
+        # stale ones (abandoned by a crashed add) in the same transaction.
+        for res in PortReservation().read_from_db(tr, id=cluster_id):
+            if res.cluster_id != cluster_id:
+                continue
+            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+                del tr[res.get_db_id().encode()]
+                continue
+            used.add(res.port)
+        port = base_port
+        while port in used:
+            port += 1
+        res = PortReservation()
+        res.cluster_id = cluster_id
+        res.port = port
+        res.owner = owner
+        res.created_at = now
+        tr[res.get_db_id().encode()] = json.dumps(res.to_dict()).encode()
+        return port
+
+    def reserve_cluster_nvmf_port(self, cluster_id, owner):
+        """Atomically allocate and reserve the next free NVMe-oF port for a
+        node being added. The reservation makes the chosen port visible to
+        concurrent allocators until the node record itself is persisted (after
+        which the node's own port fields keep it reserved and the reservation
+        ages out by TTL)."""
+        from simplyblock_core import utils
+        base_port = utils.get_nvmf_base_port(cluster_id)
+        node_used = utils.get_node_nvmf_ports(cluster_id)
+        now = int(time.time())
+        transactional = fdb.transactional(DBController._reserve_next_nvmf_port_tx)
+        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now)
+
+    # ---- Namespaced-subsystem slot claim/release (Single FDB Transaction) ----
+
+    NS_SLOT_ALLOC_PREFIX = "ns_slot_alloc"
+
+    def _claim_lvol_ns_slot_tx(self, tr, lvol, host_node, namespaced,
+                               standalone_nqn, standalone_namespace,
+                               standalone_max_ns, standalone_allowed_hosts,
+                               exclude_nqns, internal=False):
+        from simplyblock_core.controllers import lvol_controller
+
+        # Read-then-write of the per-node allocator key gives every claim on
+        # this node a read conflict with every other claim's commit: two
+        # concurrent creates cannot both commit against the same occupancy
+        # snapshot — the loser retries and recounts WITH the winner's record
+        # present. Releases don't bump the key: a stale claimer at worst sees
+        # a slot as still occupied, which is conservative.
+        alloc_key = f"{self.NS_SLOT_ALLOC_PREFIX}/{host_node.get_id()}".encode()
+        raw = tr.get(alloc_key).wait()
+        seq = int(bytes(raw).decode()) if raw.present() else 0
+
+        # Snapshot read: occupancy is recounted on every attempt, but without
+        # laying a conflict range over the whole lvol table — any unrelated
+        # lvol write cluster-wide would abort this transaction otherwise.
+        minis = LVolMini().read_from_db(tr.snapshot)
+
+        target = None
+        if namespaced:
+            # Subsystem/pool alignment: only a subsystem made up solely of
+            # this lvol's pool is joinable, most-occupied first -- the pool
+            # fills one subsystem completely before a new one is opened.
+            target = lvol_controller.get_next_available_subsystem_on_node(
+                host_node.get_id(), minis, exclude_nqns=exclude_nqns,
+                pool_id=lvol.pool_uuid)
+        if target is not None:
+            lvol.nqn = target.nqn
+            lvol.namespace = target.uuid
+            lvol.max_namespace_per_subsys = target.max_namespace_per_subsys
+            if standalone_allowed_hosts is not None:
+                # A joined lvol inherits the subsystem root's host config.
+                lvol.allowed_hosts = []
+        else:
+            node_max = lvol_controller.max_subsystems_for_node(host_node)
+            # The cap is an admission limit on what a USER may place on a node.
+            # Internally created volumes (the REP_* receiving copies a
+            # replication transfer lands in) are not user placements: refusing
+            # them does not protect the node, it just stops replication and
+            # leaves the volumes that are already there to pile up. They are
+            # still counted, so user creates continue to see true occupancy.
+            if (not internal
+                    and lvol_controller.count_lvol_subsystems(host_node, minis) >= node_max):
+                raise SubsystemCapacityError(
+                    f"Too many subsystems on node: {host_node.get_id()}, "
+                    f"max subsystems reached: {node_max}")
+            lvol.nqn = standalone_nqn
+            lvol.namespace = standalone_namespace
+            # Hard per-subsystem ceiling — a caller/legacy value above the
+            # cap must not seed a new subsystem that would accept more joins.
+            lvol.max_namespace_per_subsys = min(
+                standalone_max_ns, constants.MAX_NAMESPACES_PER_SUBSYSTEM)
+            if standalone_allowed_hosts is not None:
+                lvol.allowed_hosts = standalone_allowed_hosts
+
+        tr.set(alloc_key, str(seq + 1).encode())
+        lvol.write_to_db(tr)
+        return target is not None
+
+    def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
+                           standalone_namespace="", standalone_allowed_hosts=None,
+                           exclude_nqns=None, internal=False):
+        """Pick the namespace slot for ``lvol`` AND persist its record
+        (STATUS_IN_CREATION) in ONE FDB transaction.
+
+        The record itself is the slot claim: occupancy is counted from lvol
+        records, so writing the record in the same transaction as the recount
+        closes the pick->write race where two concurrent creates/clones both
+        grabbed the last free namespace slot of a shared subsystem. Every
+        pick-dependent lvol field (nqn / namespace / max_namespace_per_subsys
+        / allowed_hosts) is (re)assigned inside the transaction so a conflict
+        retry is deterministic.
+
+        A namespaced lvol only ever joins a subsystem whose members all belong
+        to its own pool (``lvol.pool_uuid`` must be set before the claim); a
+        new subsystem is opened only once every subsystem of that pool on the
+        node is full.
+
+        Returns True when the lvol joined an existing namespaced subsystem,
+        False when it owns a new standalone subsystem. Raises
+        SubsystemCapacityError when a new subsystem would exceed the node's
+        ``max_lvol`` cap (nothing is written in that case) -- unless
+        ``internal`` is set, which exempts system-created volumes such as the
+        REP_* replication receiving copies from the admission cap.
+
+        ``exclude_nqns`` skips subsystems the DB believes have room but SPDK
+        has rejected (-32602 re-claim in ``add_lvol_on_node``). The per-pool
+        name index is maintained outside the transaction (as on every other
+        write path) — idempotent, so a conflict retry rewrites the same entry.
+        """
+        standalone_max_ns = lvol.max_namespace_per_subsys
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._claim_lvol_ns_slot_tx)
+            return transactional(self, kv, lvol, host_node, namespaced,
+                                 standalone_nqn, standalone_namespace,
+                                 standalone_max_ns, standalone_allowed_hosts,
+                                 exclude_nqns, internal)
+        # Transactionless store (unit-tier fdb stub / fake stores in tests):
+        # same logic, not atomic.
+        return self._claim_lvol_ns_slot_tx(
+            _NoTxnStore(kv), lvol, host_node, namespaced, standalone_nqn,
+            standalone_namespace, standalone_max_ns, standalone_allowed_hosts,
+            exclude_nqns, internal)
+
+    def _release_lvol_ns_slot_tx(self, tr, lvol):
+        lvol.remove(tr)
+
+    def release_lvol_ns_slot(self, lvol):
+        """Remove the lvol record (base + mini) in ONE FDB transaction. The
+        record IS the namespace-slot claim, so this releases the slot
+        atomically with the object removal — the rollback half of
+        ``claim_lvol_ns_slot`` (and the final record removal on delete)."""
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._release_lvol_ns_slot_tx)
+            return transactional(self, kv, lvol)
+        return lvol.remove(kv)
+
     # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
 
-    def _atomic_update_tx(self, tr, key, model_cls, mutate_fn):
+    def _atomic_update_tx(self, tr, key, model_cls, mutate_fn, index_list):
         raw = tr.get(key).wait()
         if not raw.present():
             return None
         obj = model_cls().from_dict(json.loads(raw))
+        # Snapshot the index keys BEFORE the mutation: this is the only record
+        # of the pre-mutation values, and re-reading would cost a second
+        # deserialization of a record already in hand.
+        old_keys = BaseModel.index_keys(model_cls, index_list, obj)
         if mutate_fn(obj) is False:
             return obj
-        tr[key] = json.dumps(obj.to_dict()).encode()
+        if index_list:
+            BaseModel._apply_index_diff(tr, model_cls, index_list, old_keys, obj)
+        tr[key] = json.dumps(obj.to_dict(unwrap_secrets=True)).encode()
+        if getattr(model_cls, '_WATCHED', False):
+            scope = obj.watch_scope()
+            tr.add(watches.watch_index_rollup_key(model_cls, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(model_cls, scope, obj.get_id()), watches.ONE_LE64)
         return obj
 
     def atomic_update(self, obj, mutate_fn):
@@ -489,48 +1146,253 @@ class DBController(metaclass=Singleton):
             return None
         key = obj.get_db_id().encode()
         transactional = fdb.transactional(DBController._atomic_update_tx)
-        return transactional(self, self.kv_store, key, type(obj), mutate_fn)
+        return transactional(self, self.kv_store, key, type(obj), mutate_fn,
+                             type(obj).active_indexes(self.kv_store))
+
+    # ---- vuid allocation (monotonic sequence) ----
+    #
+    # vuids (lvol / snapshot / clone bdev-name numbers, distrib vuid, JM jm_vuid)
+    # share one numeric space — SPDK rejects a create whose bdev-name number
+    # already exists. The old allocator picked a random number in a bounded range
+    # and rejected collisions by scanning EVERY lvol + snapshot + node lvstore
+    # stack on each create — O(N) per create, i.e. O(N^2) for a mass create
+    # (incident mass_create_delete_docker-20260629: lvol create degraded 12x as
+    # the count grew; snapshot create likewise). A single monotonic counter
+    # removes the scan: every allocation is strictly larger than all earlier
+    # ones, so a name collision is impossible by construction. vuids are plain
+    # ints (formatted at most as 64-bit :016X), so the unbounded growth is fine.
+    _VUID_SEQ_KEY = b"sequence/vuid"
+
+    def _incr_vuid_tx(self, tr):
+        raw = tr.get(DBController._VUID_SEQ_KEY).wait()
+        if not raw.present():
+            return None
+        nxt = int(json.loads(raw)) + 1
+        tr[DBController._VUID_SEQ_KEY] = json.dumps(nxt).encode()
+        return nxt
+
+    def _seed_vuid_tx(self, tr, seed):
+        # Only-if-absent CAS: the first allocator (across all API workers / mgmt
+        # nodes) seeds the counter; concurrent racers see it present and skip.
+        raw = tr.get(DBController._VUID_SEQ_KEY).wait()
+        if raw.present():
+            return
+        tr[DBController._VUID_SEQ_KEY] = json.dumps(int(seed)).encode()
+
+    def _max_existing_vuid(self) -> int:
+        """Highest vuid currently in use across every source the old allocator
+        deduped against. Read once to seed the counter on an upgraded cluster so
+        the sequence never reuses a pre-existing vuid; never read again."""
+        mx = 0
+        for lv in self.get_mini_lvols():
+            mx = max(mx, lv.vuid or 0)
+        for sn in self.get_mini_snapshots():
+            mx = max(mx, sn.vuid or 0)
+        for node in self.get_storage_nodes():
+            for bdev in (node.lvstore_stack or []):
+                if bdev.get("type") == "bdev_distr":
+                    mx = max(mx, (bdev.get("params", {}) or {}).get("vuid", 0) or 0)
+                elif bdev.get("type") == "bdev_raid" and "jm_vuid" in bdev:
+                    mx = max(mx, bdev.get("jm_vuid", 0) or 0)
+        return mx
+
+    def next_vuid(self) -> int:
+        """Allocate the next globally-unique vuid (monotonic, O(1))."""
+        val = fdb.transactional(DBController._incr_vuid_tx)(self, self.kv_store)
+        if val is not None:
+            return val
+        # Counter absent (first allocation ever / freshly upgraded cluster):
+        # seed it above any pre-existing vuid (one-time scan, outside the txn),
+        # then increment. The seed CAS is idempotent under concurrency.
+        seed = self._max_existing_vuid()
+        fdb.transactional(DBController._seed_vuid_tx)(self, self.kv_store, seed)
+        return fdb.transactional(DBController._incr_vuid_tx)(self, self.kv_store)
+
+    # ---- s3_id allocation (monotonic sequence) ----
+    #
+    # An s3_id names a backup's object keys in S3 ({s3_id}/{mid}/{extent}). The
+    # old allocator was max-plus-one over the local cluster's Backup records,
+    # which had three problems: it raced (two concurrent backups got the same
+    # id), it recycled the id of a deleted backup whose objects may still exist
+    # (nothing reclaims them -- bdev_lvol_s3_delete does not exist on the data
+    # plane), and after an import it counted foreign backups it should not have.
+    # A monotonic sequence makes reuse impossible by construction.
+    #
+    # Unlike vuid this space is NOT unbounded: the data plane packs s3_id into
+    # 30 bits and masks rather than validates, so callers must check
+    # BACKUP_MAX_S3_ID. 2^30 is ~1.07e9 backups per control plane.
+    _S3_ID_SEQ_KEY = b"sequence/s3_id"
+
+    def _incr_s3_id_tx(self, tr):
+        raw = tr.get(DBController._S3_ID_SEQ_KEY).wait()
+        if not raw.present():
+            return None
+        nxt = int(json.loads(raw)) + 1
+        tr[DBController._S3_ID_SEQ_KEY] = json.dumps(nxt).encode()
+        return nxt
+
+    def _seed_s3_id_tx(self, tr, seed):
+        # Only-if-absent CAS, as for vuid: the first allocator across all API
+        # workers seeds it; concurrent racers see it present and skip.
+        raw = tr.get(DBController._S3_ID_SEQ_KEY).wait()
+        if raw.present():
+            return
+        tr[DBController._S3_ID_SEQ_KEY] = json.dumps(int(seed)).encode()
+
+    def _max_existing_s3_id(self) -> int:
+        """Highest s3_id in use across every backup this control plane knows of.
+
+        Read once to seed the counter on an upgraded cluster so the sequence
+        never reuses an id the old max-plus-one allocator handed out; never read
+        again. Deliberately unscoped by cluster -- imported backups keep their
+        originating cluster's ids, and seeding above those too costs nothing.
+        """
+        return max((b.s3_id or 0 for b in self.get_backups()), default=0)
+
+    def next_s3_id(self) -> int:
+        """Allocate the next globally-unique s3_id (monotonic, O(1))."""
+        val = fdb.transactional(DBController._incr_s3_id_tx)(self, self.kv_store)
+        if val is None:
+            seed = self._max_existing_s3_id()
+            fdb.transactional(DBController._seed_s3_id_tx)(self, self.kv_store, seed)
+            val = fdb.transactional(DBController._incr_s3_id_tx)(self, self.kv_store)
+
+        if val > constants.BACKUP_MAX_S3_ID:
+            raise ValueError(
+                f"s3_id space exhausted: {val} exceeds the data plane's "
+                f"{constants.BACKUP_MAX_S3_ID} limit")
+        return val
+
+    # ---- name uniqueness and snapshot chaining (declared indices) ----
+    #
+    # These three lookups used to have hand-rolled key families of their own
+    # (`name_index/snapshot/`, `name_index/lvol/`, `lvol_snaps/`), each
+    # maintained from its own call sites AFTER the entity write and therefore
+    # in a separate transaction — which is what made "verify on hit"
+    # self-healing necessary, and what left a crash between the two admitting a
+    # duplicate name. They are now ordinary declared indices, maintained inside
+    # the entity's write transaction, so a hit is trustworthy.
+
+    def snap_name_taken(self, cluster_id, name) -> bool:
+        return bool(self.query_ids(SnapShot, 'cluster_id+snap_name', cluster_id, name))
+
+    def get_lvol_latest_snapshot(self, lvol_uuid, exclude_uuid=None):
+        """Newest snapshot of an lvol (chain tail) via a single reverse range
+        read of the by-lvol index. Returns the SnapShot or None."""
+        for snap in self.query(SnapShot, 'lvol_snaps', lvol_uuid, limit=2, reverse=True):
+            if exclude_uuid and snap.get_id() == exclude_uuid:
+                continue
+            return snap
+        return None
+
+    def lvol_name_lookup(self, pool_uuid, name):
+        """Return the LVol with this name in this pool, or None."""
+        return self.query_one(LVol, 'pool_uuid+lvol_name', pool_uuid, name)
+
+    def lvol_name_taken(self, pool_uuid, name) -> bool:
+        return self.lvol_name_lookup(pool_uuid, name) is not None
 
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
-    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):
+    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id, allow_concurrent_peers=False,
+                                    claim_owner=""):
         """Pre-restart check as a single FDB transaction.
 
         Opens transaction, queries status of all nodes in the cluster.
         If any node is in restart or shutdown, returns False.
         Otherwise sets this node to in_restart and commits.
 
+        ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
+        (this node is still flipped to RESTARTING atomically). Used for
+        suspended-cluster recovery, where every node is offline, no client
+        IO flows, and restarts deliberately run in parallel. This is the
+        ONLY sanctioned relaxation: the former ``same_fd_of`` carve-out
+        (same-domain non-pair peers on a DEGRADED cluster) was removed —
+        a degraded cluster still serves IO, and the operator contract
+        allows concurrent restarts only on a drained SUSPENDED cluster
+        (violation observed 2026-07-16).
+
         Returns (True, None) on success, or (False, reason) if blocked.
         """
-        all_nodes = StorageNode().read_from_db(tr)
-        for n in all_nodes:
-            if n.cluster_id != cluster_id:
-                continue
-            if n.get_id() == node_id:
-                continue
-            if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
-                return False, f"Node {n.get_id()} is {n.status}"
-
-        # Set this node to in_restart atomically within the same transaction
-        target = None
-        for n in all_nodes:
-            if n.get_id() == node_id:
-                target = n
-                break
+        if allow_concurrent_peers:
+            # Parallel suspended-recovery: the peer-exclusion predicate is
+            # skipped, so a full-table read here would only create an
+            # O(cluster) read-conflict range — with 20+ concurrent
+            # acquisitions plus monitor status writes every commit collides
+            # (FDB 1020 conflict storms / 1031 tx timeouts, whole-cluster
+            # reboot 2026-07-13). Point-read just the target row: the write
+            # set is that same single key, so acquisitions for different
+            # nodes no longer conflict with each other.
+            rows = StorageNode().read_from_db(tr, id=node_id)
+            target = rows[0] if rows else None
+        else:
+            all_nodes = StorageNode().read_from_db(tr)
+            target = None
+            for n in all_nodes:
+                if n.get_id() == node_id:
+                    target = n
+                    break
+            for n in all_nodes:
+                if n.cluster_id != cluster_id:
+                    continue
+                if n.get_id() == node_id:
+                    continue
+                if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
+                    return False, f"Node {n.get_id()} is {n.status}"
+        # Target-node mutual exclusion: the peer predicate above deliberately
+        # skips the target, so before this check TWO ACTORS (manual CLI
+        # restart and the restart task runner — which calls with force=True
+        # and sails past every pre-tx status guard) could both "acquire" and
+        # drive the same node's restart concurrently, replacing each other's
+        # SPDK container mid-flight (2026-08-06 soak iter-50). A node already
+        # mid-transition whose claim is FRESH belongs to a live driver —
+        # refuse, in BOTH modes (allow_concurrent_peers relaxes peer
+        # exclusion, never same-node exclusion). A stale or absent claim is
+        # takeover-able: that is the transferable-ownership resume path for
+        # a driver that died mid-restart (and the compatibility path for
+        # rows written by pre-claim code).
+        if target is not None and target.status in (
+                StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+            holder = restart_claim_active(target, claim_owner)
+            if holder:
+                return False, (f"Node {node_id} is {target.status} with a live "
+                               f"restart claim held by {holder}")
         if target:
+            # This path writes the record itself rather than going through
+            # write_to_db/atomic_update, so it has to maintain the indices too.
+            # None of the three fields below is indexed today, which makes the
+            # diff a no-op — the call is here so that indexing one of them
+            # later does not silently leave this writer behind.
+            index_list = StorageNode.active_indexes(tr)
+            old_keys = BaseModel.index_keys(StorageNode, index_list, target)
             target.status = StorageNode.STATUS_RESTARTING
+            target.restart_claim_owner = claim_owner
+            target.restart_claim_ts = str(datetime.datetime.now(datetime.UTC))
+            if index_list:
+                BaseModel._apply_index_diff(tr, StorageNode, index_list, old_keys, target)
             prefix = target.get_db_id()
-            data = json.dumps(target.get_clean_dict())
+            data = json.dumps(target.get_clean_dict(unwrap_secrets=True))
             tr[prefix.encode()] = data.encode()
+            scope = target.watch_scope()
+            tr.add(watches.watch_index_rollup_key(StorageNode, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(StorageNode, scope, target.get_id()), watches.ONE_LE64)
 
         return True, None
 
-    def try_set_node_restarting(self, cluster_id, node_id):
+    def try_set_node_restarting(self, cluster_id, node_id, allow_concurrent_peers=False,
+                                claim_owner=""):
         """Pre-restart check: single FDB transaction.
 
         Opens FDB transaction, queries status of all nodes.
         If any node is in restart or shutdown, returns False.
         Sets node to in_restart and commits transaction.
+        ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
+        (suspended-cluster parallel recovery) — the only sanctioned
+        relaxation; see _try_set_node_restarting_tx.
+        ``claim_owner`` is the caller's per-node restart-claim token: the tx
+        refuses when the target itself is mid-transition under a FRESH claim
+        held by anyone else, and records this token as the new claim holder
+        on success (cross-actor mutual exclusion — CLI vs task runner).
 
         On successful acquisition the status-change event and peer
         notification are emitted AFTER the commit. The FDB tx itself
@@ -558,7 +1420,19 @@ class DBController(metaclass=Singleton):
             pass
 
         transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
-        acquired, reason = transactional(self, self.kv_store, cluster_id, node_id)
+        try:
+            acquired, reason = transactional(self, self.kv_store, cluster_id, node_id,
+                                             allow_concurrent_peers, claim_owner)
+        except fdb.FDBError as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+            # Residual contention (conflict retries exhausted / tx timeout)
+            # is a transient lock-acquisition failure, not a restart failure:
+            # surface it as "not acquired" so the restart task defers and
+            # re-tries instead of burning an attempt on
+            # "restart_storage_node raised unexpectedly".
+            logger.warning(
+                "try_set_node_restarting for %s hit FDB contention: %s",
+                node_id, e)
+            return False, f"FDB contention acquiring restart lock: {e}"
 
         if acquired:
             # Emit the status-change event and peer notification AFTER commit.
@@ -567,8 +1441,8 @@ class DBController(metaclass=Singleton):
             # re-emit). Delayed imports avoid any dependency cycle between
             # db_controller and the controllers package.
             try:
-                from simplyblock_core.controllers import storage_events
                 from simplyblock_core import distr_controller
+                from simplyblock_core.controllers import storage_events
                 snode = self.get_storage_node_by_id(node_id)
                 if snode is not None and old_status != snode.status:
                     storage_events.snode_status_change(
@@ -583,65 +1457,179 @@ class DBController(metaclass=Singleton):
                 )
         return acquired, reason
 
+    def refresh_node_restart_claim(self, node_id, claim_owner):
+        """Heartbeat the per-node restart claim: bump ``restart_claim_ts``
+        iff the claim is currently held by ``claim_owner``. A no-op (False)
+        otherwise — before acquisition, after release, or after a takeover
+        by another actor (the takeover is authoritative, mirroring
+        refresh_task_lease)."""
+        if not claim_owner:
+            return False
+        refreshed = {"ok": False}
+        now = str(datetime.datetime.now(datetime.UTC))
+
+        def _mutate(n):
+            if n.restart_claim_owner != claim_owner:
+                return False
+            n.restart_claim_ts = now
+            refreshed["ok"] = True
+            return True
+
+        try:
+            node = self.get_storage_node_by_id(node_id)
+        except KeyError:
+            return False
+        if self.atomic_update(node, _mutate) is None:
+            return False
+        return refreshed["ok"]
+
+    def release_node_restart_claim(self, node_id, claim_owner):
+        """Clear the per-node restart claim iff held by ``claim_owner``.
+        Owner-matched CAS: releasing someone else's claim is impossible, so
+        every restart exit path may call this unconditionally."""
+        if not claim_owner:
+            return False
+        released = {"ok": False}
+
+        def _mutate(n):
+            if n.restart_claim_owner != claim_owner:
+                return False
+            n.restart_claim_owner = ""
+            n.restart_claim_ts = ""
+            released["ok"] = True
+            return True
+
+        try:
+            node = self.get_storage_node_by_id(node_id)
+        except KeyError:
+            return False
+        if self.atomic_update(node, _mutate) is None:
+            return False
+        return released["ok"]
+
     # ---- S3 Backup ----
 
-    def get_backups(self, cluster_id=None) -> List[Backup]:
+    def get_backups(self, cluster_id: str | None = None) -> list[Backup]:
         prefix = cluster_id if cluster_id else " "
         return Backup().read_from_db(self.kv_store, id=prefix)
 
-    def get_backup_by_id(self, backup_id) -> Backup:
-        for b in self.get_backups():
-            if b.uuid == backup_id:
-                return b
-        raise KeyError(f'Backup {backup_id} not found')
+    def get_backup_by_id(self, backup_id: str) -> Backup:
+        backup = self.query_one(Backup, 'uuid', backup_id.split('/')[-1])
+        if backup is None:
+            raise KeyError(f'Backup {backup_id} not found')
+        return backup
 
-    def get_backups_by_lvol_id(self, lvol_id) -> List[Backup]:
-        return [b for b in self.get_backups() if b.lvol_id == lvol_id]
+    def get_backups_by_lvol_id(self, lvol_id: str) -> list[Backup]:
+        return self.query(Backup, 'lvol_id', lvol_id)
 
-    def get_backups_by_snapshot_id(self, snapshot_id) -> List[Backup]:
-        return [b for b in self.get_backups() if b.snapshot_id == snapshot_id]
+    def get_backups_by_snapshot_id(self, snapshot_id: str) -> list[Backup]:
+        return self.query(Backup, 'snapshot_id', snapshot_id)
 
-    def get_backup_chain(self, backup_id) -> List[Backup]:
-        """Return the full backup chain ending at backup_id, oldest first."""
-        chain = []
-        current_id = backup_id
-        visited = set()
-        while current_id and current_id not in visited:
-            visited.add(current_id)
-            try:
-                backup = self.get_backup_by_id(current_id)
-            except KeyError:
-                break
-            chain.append(backup)
-            current_id = backup.prev_backup_id
-        chain.reverse()
-        return chain
+    def get_replication_targets(self, cluster_id: str | None = None) -> list[ReplicationTarget]:
+        prefix = cluster_id if cluster_id else " "
+        return ReplicationTarget().read_from_db(self.kv_store, id=prefix)
 
-    def get_backup_policies(self, cluster_id=None) -> List[BackupPolicy]:
+    def get_replication_target_by_id(self, target_id: str) -> ReplicationTarget:
+        if not target_id:
+            raise KeyError('ReplicationTarget lookup with a blank id')
+        # Accept the composite "cluster/uuid" as well as the bare uuid.
+        target = self.query_one(ReplicationTarget, 'uuid', target_id.split('/')[-1])
+        if target is None:
+            raise KeyError(f'ReplicationTarget {target_id} not found')
+        return target
+
+    def get_replication_target_by_name(self, cluster_id: str, name: str) -> ReplicationTarget:
+        if not cluster_id or not name:
+            raise KeyError('ReplicationTarget lookup with a blank cluster id or name')
+        target = self.query_one(ReplicationTarget, 'cluster_id+target_name', cluster_id, name)
+        if target is None:
+            raise KeyError(f'ReplicationTarget {name} not found on cluster {cluster_id}')
+        return target
+
+    def get_replication_policies(self, cluster_id: str | None = None) -> list[ReplicationPolicy]:
+        prefix = cluster_id if cluster_id else " "
+        return ReplicationPolicy().read_from_db(self.kv_store, id=prefix)
+
+    def get_replication_policy_by_id(self, policy_id: str) -> ReplicationPolicy:
+        if not policy_id:
+            raise KeyError('ReplicationPolicy lookup with a blank id')
+        policy = self.query_one(ReplicationPolicy, 'uuid', policy_id.split('/')[-1])
+        if policy is None:
+            raise KeyError(f'ReplicationPolicy {policy_id} not found')
+        return policy
+
+    def get_replication_policy_by_name(self, cluster_id: str, name: str) -> ReplicationPolicy:
+        if not cluster_id or not name:
+            raise KeyError('ReplicationPolicy lookup with a blank cluster id or name')
+        policy = self.query_one(ReplicationPolicy, 'cluster_id+policy_name', cluster_id, name)
+        if policy is None:
+            raise KeyError(f'ReplicationPolicy {name} not found on cluster {cluster_id}')
+        return policy
+
+    def get_replication_policy_for_lvol(self, lvol) -> ReplicationPolicy | None:
+        """The policy a volume follows, or None when it is not policy-managed."""
+        if not getattr(lvol, 'replication_policy_id', ''):
+            return None
+        try:
+            return self.get_replication_policy_by_id(lvol.replication_policy_id)
+        except KeyError:
+            return None
+
+    def get_consistency_groups(self, cluster_id: str | None = None) -> list[ConsistencyGroup]:
+        prefix = cluster_id if cluster_id else " "
+        return ConsistencyGroup().read_from_db(self.kv_store, id=prefix)
+
+    def get_consistency_group_by_id(self, group_id: str) -> ConsistencyGroup:
+        if not group_id:
+            raise KeyError('ConsistencyGroup lookup with a blank id')
+        group = self.query_one(ConsistencyGroup, 'uuid', group_id.split('/')[-1])
+        if group is None:
+            raise KeyError(f'ConsistencyGroup {group_id} not found')
+        return group
+
+    def get_consistency_group_by_name(self, cluster_id: str, name: str) -> ConsistencyGroup | None:
+        """Resolve a standalone group by its cluster-unique name, or None."""
+        if not name:
+            return None
+        return self.query_one(ConsistencyGroup, 'cluster_id+group_name', cluster_id, name)
+
+    def get_consistency_group_for_policy(self, policy_id: str) -> ConsistencyGroup | None:
+        wanted = policy_id.split('/')[-1] if policy_id else ""
+        if not wanted:
+            return None
+        return self.query_one(ConsistencyGroup, 'policy_id', wanted)
+
+    def get_lvols_by_replication_policy(self, policy_id: str) -> list[LVol]:
+        wanted = policy_id.split('/')[-1] if policy_id else ""
+        if not wanted:
+            return []
+        return self._live_lvols(self.query(LVol, 'replication_policy_id', wanted))
+
+    def get_backup_policies(self, cluster_id: str | None = None) -> list[BackupPolicy]:
         prefix = cluster_id if cluster_id else " "
         return BackupPolicy().read_from_db(self.kv_store, id=prefix)
 
-    def get_backup_policy_by_id(self, policy_id) -> BackupPolicy:
-        for p in self.get_backup_policies():
-            if p.uuid == policy_id:
-                return p
-        raise KeyError(f'BackupPolicy {policy_id} not found')
+    def get_backup_policy_by_id(self, policy_id: str) -> BackupPolicy:
+        policy = self.query_one(BackupPolicy, 'uuid', policy_id.split('/')[-1])
+        if policy is None:
+            raise KeyError(f'BackupPolicy {policy_id} not found')
+        return policy
 
-    def get_backup_policy_attachments(self, cluster_id=None) -> List[BackupPolicyAttachment]:
+    def get_backup_policy_attachments(self, cluster_id: str | None = None) -> list[BackupPolicyAttachment]:
         prefix = cluster_id if cluster_id else " "
         return BackupPolicyAttachment().read_from_db(self.kv_store, id=prefix)
 
-    def get_policy_for_lvol(self, lvol) -> Optional[BackupPolicy]:
+    def get_policy_for_lvol(self, lvol) -> BackupPolicy | None:
         """Get the effective backup policy for an lvol.
         LVol-level policy overrides pool-level policy."""
-        attachments = self.get_backup_policy_attachments(lvol.pool_uuid.split('/')[0] if '/' in lvol.pool_uuid else None)
-        lvol_policy_id = None
-        pool_policy_id = None
-        for att in attachments:
-            if att.target_type == "lvol" and att.target_id == lvol.get_id():
-                lvol_policy_id = att.policy_id
-            elif att.target_type == "pool" and att.target_id == lvol.pool_uuid:
-                pool_policy_id = att.policy_id
+        lvol_policy_id = next(
+            (att.policy_id for att in self.query(
+                BackupPolicyAttachment, 'target_type+target_id', 'lvol', lvol.get_id())),
+            None)
+        pool_policy_id = next(
+            (att.policy_id for att in self.query(
+                BackupPolicyAttachment, 'target_type+target_id', 'pool', lvol.pool_uuid)),
+            None)
         policy_id = lvol_policy_id or pool_policy_id
         if policy_id:
             try:

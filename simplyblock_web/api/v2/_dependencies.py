@@ -1,0 +1,250 @@
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import Depends, HTTPException
+
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.backup import Backup as BackupModel
+from simplyblock_core.models.backup import BackupPolicy
+from simplyblock_core.models.cluster import Cluster as ClusterModel
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.pool import Pool as PoolModel
+from simplyblock_core.models.replication import (
+    ConsistencyGroup as ConsistencyGroupModel,
+)
+from simplyblock_core.models.replication import (
+    ReplicationPolicy as ReplicationPolicyModel,
+)
+from simplyblock_core.models.replication import (
+    ReplicationTarget as ReplicationTargetModel,
+)
+from simplyblock_core.models.snapshot import SnapShot as SnapshotModel
+from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
+from simplyblock_web import utils
+
+_db = DBController()
+
+
+def _lookup_cluster(cluster_id: UUID) -> ClusterModel:
+    try:
+        return _db.get_cluster_by_id(str(cluster_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
+
+
+def _lookup_storage_node(storage_node_id: UUID, cluster: Cluster) -> StorageNodeModel:
+    try:
+        storage_node = _db.get_storage_node_by_id(str(storage_node_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if storage_node.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'StorageNode {storage_node_id} not found')
+    return storage_node
+
+
+StorageNode = Annotated[StorageNodeModel, Depends(_lookup_storage_node)]
+
+
+def _lookup_storage_pool(pool_id: UUID, cluster: Cluster) -> PoolModel:
+    try:
+        pool = _db.get_pool_by_id(str(pool_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if pool.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Pool {pool_id} not found')
+    return pool
+
+
+StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
+
+
+def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
+    try:
+        volume = _db.get_lvol_by_id(str(volume_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if volume.pool_uuid != pool.get_id():
+        raise HTTPException(404, f'LVol {volume_id} not found')
+    return volume
+
+
+Volume = Annotated[LVol, Depends(_lookup_volume)]
+
+
+def _lookup_snapshot(snapshot_id: UUID, pool: StoragePool) -> SnapshotModel:
+    try:
+        snapshot = _db.get_snapshot_by_id(str(snapshot_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if snapshot.pool_uuid != pool.get_id():
+        raise HTTPException(404, f'Snapshot {snapshot_id} not found')
+    return snapshot
+
+
+Snapshot = Annotated[SnapshotModel, Depends(_lookup_snapshot)]
+
+
+def _lookup_device(storage_node: StorageNode, device_id: UUID) -> NVMeDevice:
+    device = next(
+        (d for d in storage_node.nvme_devices if d.get_id() == str(device_id)),
+        None,
+    )
+    if device is None:
+        raise HTTPException(404, f'Device {device_id} not found')
+    return device
+
+
+Device = Annotated[NVMeDevice, Depends(_lookup_device)]
+
+
+def _lookup_task(task_id: UUID, cluster: Cluster) -> JobSchedule:
+    task = _db.get_task_by_id(str(task_id))
+    if task is None:
+        raise HTTPException(404, 'Task does not exist')
+    if task.cluster_id != cluster.get_id():
+        raise HTTPException(404, 'Task does not exist')
+    return task
+
+
+Task = Annotated[JobSchedule, Depends(_lookup_task)]
+
+
+def _lookup_management_node(management_node_id: UUID) -> MgmtNode:
+    management_node = _db.get_mgmt_node_by_id(str(management_node_id))
+    if management_node is None:
+        raise HTTPException(404, f'ManagementNode {management_node_id} not found')
+    return management_node
+
+
+ManagementNode = Annotated[MgmtNode, Depends(_lookup_management_node)]
+
+
+def _lookup_backup(backup_id: UUID, cluster: Cluster) -> BackupModel:
+    try:
+        backup = _db.get_backup_by_id(str(backup_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if backup.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Backup {backup_id} not found')
+    return backup
+
+
+BackupResource = Annotated[BackupModel, Depends(_lookup_backup)]
+
+
+def _lookup_backup_policy(policy_id: UUID, cluster: Cluster) -> BackupPolicy:
+    try:
+        policy = _db.get_backup_policy_by_id(str(policy_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if policy.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'BackupPolicy {policy_id} not found')
+    return policy
+
+
+Policy = Annotated[BackupPolicy, Depends(_lookup_backup_policy)]
+
+
+def _lookup_replication_target(target_id: UUID, cluster: Cluster) -> ReplicationTargetModel:
+    try:
+        target = _db.get_replication_target_by_id(str(target_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if target.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'ReplicationTarget {target_id} not found')
+    return target
+
+
+ReplicationTarget = Annotated[ReplicationTargetModel, Depends(_lookup_replication_target)]
+
+
+def _lookup_replication_policy(policy_id: UUID, cluster: Cluster) -> ReplicationPolicyModel:
+    try:
+        policy = _db.get_replication_policy_by_id(str(policy_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if policy.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'ReplicationPolicy {policy_id} not found')
+    return policy
+
+
+ReplicationPolicy = Annotated[ReplicationPolicyModel, Depends(_lookup_replication_policy)]
+
+
+def _lookup_consistency_group(group_id: UUID, cluster: Cluster) -> ConsistencyGroupModel:
+    try:
+        group = _db.get_consistency_group_by_id(str(group_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if group.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'ConsistencyGroup {group_id} not found')
+    return group
+
+
+ConsistencyGroupResource = Annotated[ConsistencyGroupModel, Depends(_lookup_consistency_group)]
+
+
+def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:
+    """Validate that `nqn` roughly looks like a real NQN and return it as-is.
+
+    NQNs are taken as an opaque, already-fully-qualified identifier rather
+    than reconstructed from cluster/lvol identity (e.g. f"{cluster.nqn}:lvol:
+    {lvol.uuid}") — there's no single reliable derivation of "the" NQN for a
+    shared subsystem across the codebase, so accepting it as-is here
+    sidesteps that inconsistency rather than fighting it.
+
+    A full existence check via _db.get_lvols() would be correct but enumerates
+    all lvols on every request; NQN_PATTERN is a cheap substitute until a
+    direct NQN index lookup is available.
+    """
+    if not utils.NQN_PATTERN.match(nqn):
+        raise HTTPException(422, f'Invalid NQN: {nqn!r}')
+    return nqn
+
+
+Subsystem = Annotated[str, Depends(_lookup_subsystem)]
+
+
+def _lookup_subsystem_migration(
+    migration_id: UUID, cluster: Cluster, subsystem: Subsystem,
+) -> LVolMigration | LVolMigrationGroup:
+    """Resolve *migration_id* under subsystem `nqn`, as either a single-lvol
+    migration or a batch (shared-namespace) migration group — whichever it
+    actually is. Group lookup is tried first since a group id and a plain
+    migration id are both UUIDs drawn from disjoint spaces, so at most one
+    lookup can ever succeed.
+    """
+    try:
+        group = _db.get_migration_group_by_id(str(migration_id))
+    except KeyError:
+        pass
+    else:
+        if group.cluster_id == cluster.get_id() and group.target_nqn == subsystem:
+            return group
+
+    try:
+        migration = _db.get_migration_by_id(str(migration_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    try:
+        lvol = _db.get_lvol_by_id(migration.lvol_id)
+    except KeyError:
+        lvol = None
+    if migration.cluster_id != cluster.get_id() or lvol is None or lvol.nqn != subsystem:
+        raise HTTPException(404, f'Migration {migration_id} not found')
+    return migration
+
+
+SubsystemMigration = Annotated[
+    LVolMigration | LVolMigrationGroup, Depends(_lookup_subsystem_migration)
+]
+
+

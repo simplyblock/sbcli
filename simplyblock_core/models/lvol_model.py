@@ -1,11 +1,30 @@
-# coding=utf-8
 
-from typing import List
+from typing import ClassVar
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index, Unique
 
 
 class LVol(BaseModel):
+
+    _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('pool_uuid'),
+        Index('node_id'),
+        # Names are unique per POOL, so the constraint below cannot answer a
+        # lookup that has only the name — which `sbctl volume get <name>` and
+        # the v1 "id or name" surfaces legitimately do.
+        Index('lvol_name'),
+        # Indexed by the bare uuid: the field holds a ReplicationPolicy
+        # get_id() ("<cluster>/<uuid>") but every caller resolves a policy from
+        # whichever half it happens to hold.
+        Index('replication_policy_id', arity=1, extract=lambda lvol: (
+            [(lvol.replication_policy_id.split('/')[-1],)]
+            if lvol.replication_policy_id else []
+        )),
+        Unique(('pool_uuid', 'lvol_name')),
+    )
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
@@ -15,7 +34,7 @@ class LVol(BaseModel):
     STATUS_DELETED = 'deleted'
     STATUS_RESTORE_FAILED = 'restore_failed'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 1,
         STATUS_OFFLINE: 2,
         STATUS_IN_DELETION: 3,
@@ -26,13 +45,13 @@ class LVol(BaseModel):
     }
 
     base_bdev: str = ""
-    bdev_stack: List = []
+    bdev_stack: list = default_factory(list)
     blobid: int = 0
+    #: The snapshot this volume's blob was created over, or empty when the blob
+    #: stands alone. Inflating folds every ancestor in and clears it.
     cloned_from_snap: str = ""
     comp_bdev: str = ""
     crypto_bdev: str = ""
-    crypto_key1: str = ""
-    crypto_key2: str = ""
     crypto_key_name: str = ""
     deletion_status: str = ""
     guid: str = ""
@@ -49,11 +68,44 @@ class LVol(BaseModel):
     max_size: int = 0
     namespace: str = ""
     node_id: str = ""
-    nodes: List[str] = []
+    nodes: list[str] = default_factory(list)
     nqn: str = ""
-    ns_id: int = 1
+    # 0 = "not assigned yet": the PRIMARY namespace add auto-assigns the real
+    # nsid and persists it here; every replica add reuses it verbatim (see
+    # add_lvol_on_node — divergent per-node nsid maps make the client kernel
+    # reject shared namespaces, mass-create incident 2026-07-06). The default
+    # must never be a legitimate nsid: a construction site that forgets to set
+    # this field would then request that nsid as if it were dictated, which
+    # hard-fails on any shared subsystem whose slot is taken (clone incident
+    # 2026-09-10).
+    ns_id: int = 0
+    # The UUID the NVMe namespace advertises on the wire when it differs from
+    # the record's uuid (migration/fail-back clones inherit another volume's
+    # identity so the client's multipath head keeps its paths). Empty means
+    # the namespace carries the record's own uuid. connect_lvol reports it as
+    # target_lvol_id so the CSI globs /dev/disk/by-id/nvme-uuid.<this>.
+    ns_uuid: str = ""
     max_namespace_per_subsys: int = 1
+
+    def get_ns_uuid(self) -> str:
+        """The UUID this volume's NVMe namespace advertises on the wire.
+
+        Every site that registers or verifies the namespace must use this,
+        never the record ``uuid``: after a fail-back the two differ, and
+        probing or re-adding by the record uuid flags a healthy volume
+        unhealthy — or re-registers the namespace under an identity the
+        client's multipath head rejects ("IDs don't match for shared
+        namespace N"), severing its paths (run 2026-09-02 ~19:40: the lvol
+        monitor's self-heal fought the fail-back identity every cycle).
+        """
+        return self.ns_uuid or self.uuid
     subsys_port: int = 9090
+    # Node ids whose sync delete already completed inline in the API delete
+    # call (lvol_controller._delete_lvol_from_all_nodes). lvol_monitor skips
+    # these when it finalises the record, so a node never receives a second
+    # sync delete — a repeat walks the replica blob tree again and errors on
+    # every entry the first pass cleaned.
+    sync_deleted_nodes: list[str] = default_factory(list)
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""
@@ -68,11 +120,50 @@ class LVol(BaseModel):
     fabric: str = "tcp"
     ndcs: int = 0
     npcs: int = 0
-    allowed_hosts: List[dict] = []
+    allowed_hosts: list[dict] = default_factory(list)
     delete_snap_on_lvol_delete: bool = False
     do_replicate: bool = False
     replication_node_id: str = ""
     from_source: bool = True
+    # Declared intent, NOT a behaviour switch: this field is only ever copied
+    # onto the LVolReplication record (lvol_controller, tasks_runner_replication
+    # _final) and nothing branches on it, so both modes share one identical
+    # replication stream and differ purely in which ending is invoked.
+    #   "failover":  async DR — the target volume is materialised by
+    #                replicate_lvol_on_target_cluster, cloned from the last
+    #                replicated snapshot, with IO already interrupted.
+    #   "migration": planned move — the target volume is materialised by
+    #                replication_commit, which shrinks the delta first and flips
+    #                ANA, so the client is not interrupted.
+    # An earlier comment claimed migration mode pre-creates the target subsystem
+    # up front; it does not. The clone is built at the ending in both paths.
+    replication_mode: str = "failover"
+    # Interval in minutes for automatic internal snapshots that drive
+    # replication. 0 disables interval snapshots (only user snaps replicate).
+    replication_interval_min: int = 0
+    # ReplicationPolicy.get_id() this volume follows, "" when it is not managed
+    # by a policy. The fields above stay as the RESOLVED effective values so the
+    # replication service keeps reading exactly what it reads today; attaching a
+    # policy derives them from policy + target.
+    replication_policy_id: str = ""
+    #: consistency group this volume was created into, "" for a non-member.
+    #: Denormalized pointer set at join and cleared on detach; the group's
+    #: members map remains the authoritative generation-membership record.
+    group_id: str = ""
+
+    def place_in_pool(self, pool) -> None:
+        """Put this volume in ``pool``.
+
+        The two fields move as one: ``pool_uuid`` is what the index and every
+        lookup key on, ``pool_name`` is what the display paths read, and a
+        record carrying one without the other shows a volume in the wrong pool
+        on exactly one of those surfaces.
+        """
+        self.pool_uuid = pool.get_id()
+        self.pool_name = pool.pool_name
+
+    def watch_scope(self):
+        return (self.pool_uuid,)
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)
@@ -93,10 +184,30 @@ class LVol(BaseModel):
 
 
 class LVolReplication(BaseModel):
+    # Lifecycle of the replication relationship.
+    STATE_REPLICATING = "replicating"        # snapshots streaming to target
+    STATE_CUTOVER_PENDING = "cutover_pending"  # final-step queued/running
+    STATE_CUTOVER_DONE = "cutover_done"      # migration cutover completed
+    STATE_FAILED_OVER = "failed_over"        # volume now live on target
+
+    DIRECTION_TO_TARGET = "to_target"
+    DIRECTION_TO_SOURCE = "to_source"
+
     source_lvol: LVol = None # type: ignore[assignment]
     target_lvol: LVol = None # type: ignore[assignment]
     source_cluster_id: str = ""
     target_cluster_id: str = ""
+    mode: str = "failover"
+    state: str = STATE_REPLICATING
+    direction: str = DIRECTION_TO_TARGET
+    # Identity of the pre-created / cut-over target subsystem. Preserved so the
+    # client keeps the same NQN/namespace across fail-over and migration.
+    target_nqn: str = ""
+    target_ns_id: int = 0
+    # Set to True by POST .../replication/cutover-proceed once the operator has
+    # connected the target NVMe paths. The task runner waits for this before
+    # calling run_cutover(); REPL_CUTOVER_PROCEED_TIMEOUT_SEC is the safety fallback.
+    cutover_proceed: bool = False
 
 class LVolMini(BaseModel):
     lvol_uuid: str = ""

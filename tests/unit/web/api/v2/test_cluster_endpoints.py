@@ -1,0 +1,389 @@
+"""Unit tests for /api/v2/clusters endpoints (cluster_ops mocked)."""
+
+import pytest
+
+from simplyblock_core.models.cluster import Cluster
+from tests.unit.web.api.v2._factories import CLUSTER_ID, EVENT_ID, make_event
+
+# max_subsys and spdk_vcpu_count are capacity decisions with real
+# consequences if silently defaulted, so every create body has to state
+# them. hugepages_mem defaults to 0 -- "compute it" (calculate_minimum_hp_
+# memory's own figure, from max_subsys/spdk_vcpu_count themselves); a
+# nonzero value is only ever a floor add_node applies on top of that, never
+# a replacement for it, so there's nothing to silently under-specify by
+# leaving it unstated.
+SIZING = {'max_subsys': 40, 'hugepages_mem': '4Gi', 'spdk_vcpu_count': 4}
+
+
+class TestListClusters:
+
+    def test_returns_clusters_from_db(self, client, db, cluster):
+        response = client.get('/api/v2/clusters/')
+
+        assert response.status_code == 200
+        (body,) = response.json()
+        assert body['id'] == CLUSTER_ID
+        assert body['name'] == 'cluster-1'
+        assert body['status'] == 'active'
+        assert body['ha'] is True
+        db.get_clusters.assert_called_once_with()
+
+    def test_unwraps_secret_in_wire_response(self, client, db, cluster):
+        (body,) = client.get('/api/v2/clusters/').json()
+
+        assert body['secret'] == 'cluster-secret'
+
+
+# ClusterDTO.status is a hand-listed Literal; every persisted status must serialize.
+ALL_CLUSTER_STATUSES = [
+    getattr(Cluster, name) for name in dir(Cluster)
+    if name.startswith('STATUS_') and isinstance(getattr(Cluster, name), str)
+    and name != 'STATUS_CODE_MAP'
+]
+
+
+class TestClusterStatusSerialization:
+
+    @pytest.mark.parametrize('status', ALL_CLUSTER_STATUSES)
+    def test_every_core_status_serializes(self, client, db, cluster, status):
+        cluster.status = status
+
+        response = client.get('/api/v2/clusters/')
+
+        assert response.status_code == 200
+        (body,) = response.json()
+        assert body['status'] == status
+
+
+class TestCreateCluster:
+
+    def test_calls_add_cluster_with_parameters(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
+        response.raise_for_status()
+        assert response.status_code == 201
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['name'] == 'cluster-1'
+        assert kwargs['distr_ndcs'] == 1
+        assert kwargs['distr_npcs'] == 2
+        assert kwargs['blk_size'] == 512
+        assert kwargs['ha_type'] == 'ha'
+        assert kwargs['max_subsys'] == 40
+        assert kwargs['hugepages_mem'] == 4 * 1024 ** 3
+        assert kwargs['spdk_vcpu_count'] == 4
+        assert response.json()['id'] == CLUSTER_ID
+        assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/')
+        db.get_cluster_by_id.assert_called_once_with(CLUSTER_ID)
+
+    def test_conflict_maps_to_409(self, client, db, cluster_ops):
+        cluster_ops.add_cluster.side_effect = ValueError('cluster exists')
+
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
+
+        assert response.status_code == 409
+
+    @pytest.mark.parametrize('ndcs,npcs', [(3, 2), (1, 5), (-1, 2)])
+    def test_invalid_erasure_coding_scheme_caught(self, client, db, cluster_ops, ndcs, npcs):
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': ndcs, 'distr_npcs': npcs, **SIZING})
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize('field', ['max_subsys', 'spdk_vcpu_count'])
+    def test_capacity_sizing_is_required(self, client, db, cluster_ops, field):
+        """max_subsys/spdk_vcpu_count have real consequences if silently
+        defaulted, so omitting either must be rejected outright."""
+        body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
+        del body[field]
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_backup_config_without_a_bucket_is_accepted(self, client, db, cluster, cluster_ops):
+        """The bucket is derived from the id of the cluster this request is
+        asking to create, so no caller can name one: the operator's
+        ``StorageCluster.spec.backup`` has no field for it at all. Requiring it
+        here rejected every backup-enabled create with a 422 before any of
+        Cluster's resolution ran."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {
+                'access_key_id': 'minioadmin',
+                'secret_access_key': 'minioadmin',
+                'local_endpoint': 'http://minio:9000',
+                'local_testing': True,
+            },
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        # Absent rather than derived: what keeps Cluster.get_backup_config's
+        # derivation live instead of frozen into the record.
+        assert 'bucket_name' not in cluster_ops.add_cluster.call_args.kwargs['backup_config']
+
+    def test_a_named_backup_bucket_is_passed_through(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {'bucket_name': 'chosen', 'region': 'eu-central-1'},
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        assert cluster_ops.add_cluster.call_args.kwargs['backup_config']['bucket_name'] == 'chosen'
+
+    def test_an_invalid_backup_config_is_still_rejected(self, client, db, cluster_ops):
+        """Dropping the bucket requirement must not drop the rest of them."""
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {'buckt_name': 'typo'},
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_omitted_hugepages_mem_defaults_to_computed(self, client, db, cluster, cluster_ops):
+        """Unlike max_subsys/spdk_vcpu_count, hugepages_mem is only ever a
+        floor on top of a figure computed from the other two -- 0 means
+        "compute it", not "invalid"."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
+        del body['hugepages_mem']
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        assert cluster_ops.add_cluster.call_args.kwargs['hugepages_mem'] == 0
+
+    def test_passes_inline_checksum_and_atomic_4k(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'inline_checksum': True, 'atomic_4k': True,
+        })
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['inline_checksum'] is True
+        assert kwargs['atomic_4k'] is True
+
+    def test_inline_checksum_and_atomic_4k_default_false(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['inline_checksum'] is False
+        assert kwargs['atomic_4k'] is False
+
+
+class TestGetCluster:
+
+    def test_returns_cluster(self, client, db, cluster):
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/')
+
+        assert response.status_code == 200
+        assert response.json()['id'] == CLUSTER_ID
+        db.get_cluster_by_id.assert_called_once_with(CLUSTER_ID)
+
+    def test_unknown_cluster_returns_404(self, client, db):
+        db.get_cluster_by_id.side_effect = KeyError('Cluster not found')
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/')
+
+        assert response.status_code == 404
+
+
+class TestUpdateCluster:
+
+    def test_sets_name(self, client, cluster, cluster_ops):
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'name': 'renamed'})
+
+        assert response.status_code == 204
+        cluster_ops.set_name.assert_called_once_with(CLUSTER_ID, 'renamed')
+
+    def test_omitted_name_is_not_set(self, client, cluster, cluster_ops):
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={})
+
+        assert response.status_code == 204
+        cluster_ops.set_name.assert_not_called()
+
+
+class TestDeleteCluster:
+
+    def test_deletes_cluster(self, client, cluster, cluster_ops):
+        response = client.delete(f'/api/v2/clusters/{CLUSTER_ID}/')
+
+        assert response.status_code == 204
+        cluster_ops.delete_cluster.assert_called_once_with(CLUSTER_ID)
+
+    def test_conflict_maps_to_409(self, client, cluster, cluster_ops):
+        cluster_ops.delete_cluster.side_effect = ValueError('cluster is not empty')
+
+        response = client.delete(f'/api/v2/clusters/{CLUSTER_ID}/')
+
+        assert response.status_code == 409
+
+
+class TestClusterLifecycleActions:
+
+    @pytest.mark.parametrize('action,operation', [
+        ('start', 'cluster_grace_startup'),
+        ('shutdown', 'cluster_grace_shutdown'),
+        ('activate', 'cluster_activate'),
+        ('expand', 'cluster_expand'),
+    ])
+    def test_runs_operation_on_cluster(self, client, cluster, cluster_ops, action, operation):
+        response = client.post(f'/api/v2/clusters/{CLUSTER_ID}/{action}')
+
+        assert response.status_code == 202
+        getattr(cluster_ops, operation).assert_called_once_with(CLUSTER_ID)
+
+
+class TestClusterStats:
+
+    def test_capacity_passes_history(self, client, cluster, cluster_ops):
+        cluster_ops.get_capacity.return_value = [{'date': 1}]
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/capacity', params={'history': '10'})
+
+        assert response.status_code == 200
+        assert response.json() == [{'date': 1}]
+        cluster_ops.get_capacity.assert_called_once_with(CLUSTER_ID, '10')
+
+    def test_iostats(self, client, cluster, cluster_ops):
+        cluster_ops.get_iostats_history.return_value = [{'date': 1}]
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/iostats')
+
+        assert response.status_code == 200
+        cluster_ops.get_iostats_history.assert_called_once_with(CLUSTER_ID, None, with_sizes=True)
+
+    def test_logs_pass_limit(self, client, cluster, cluster_ops):
+        cluster_ops.get_log_events.return_value = [make_event()]
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/logs', params={'limit': 10})
+
+        assert response.status_code == 200
+        (body,) = response.json()
+        assert body['id'] == EVENT_ID
+        assert body['message'] == 'started'
+        cluster_ops.get_log_events.assert_called_once_with(CLUSTER_ID, 10)
+
+    def test_logs_report_an_unassigned_storage_id_as_null(self, client, cluster, cluster_ops):
+        cluster_ops.get_log_events.return_value = [
+            make_event(storage_id=-1, object_dict={'cluster_device_order': -1}),
+            make_event(storage_id=-1, object_dict={'cluster_device_order': 3}),
+            make_event(storage_id=7),
+        ]
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/logs')
+
+        assert response.status_code == 200
+        assert [entry['storage_id'] for entry in response.json()] == [None, 3, 7]
+
+    def test_logs_dispatches_watch_events(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_events.return_value = watch_stream([make_event()])
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/logs?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert EVENT_ID in response.text
+        cluster_ops.watch_events.assert_called_once_with(CLUSTER_ID)
+
+
+class TestUpgradeCluster:
+
+    def test_management_only_update(self, client, cluster, cluster_ops):
+        response = client.post(
+            f'/api/v2/clusters/{CLUSTER_ID}/update',
+            json={'management_image': 'simplyblock/mgmt:2', 'spdk_image': None},
+        )
+
+        assert response.status_code == 204
+        cluster_ops.update_cluster.assert_called_once_with(
+            cluster_id=CLUSTER_ID,
+            mgmt_image='simplyblock/mgmt:2',
+            mgmt_only=True,
+            spdk_image=None,
+            restart=False,
+        )
+
+    def test_spdk_update_disables_mgmt_only(self, client, cluster, cluster_ops):
+        client.post(
+            f'/api/v2/clusters/{CLUSTER_ID}/update',
+            json={'management_image': None, 'spdk_image': 'simplyblock/spdk:2', 'restart': True},
+        )
+
+        cluster_ops.update_cluster.assert_called_once_with(
+            cluster_id=CLUSTER_ID,
+            mgmt_image=None,
+            mgmt_only=False,
+            spdk_image='simplyblock/spdk:2',
+            restart=True,
+        )
+
+
+class TestAddReplication:
+
+    def test_calls_add_replication(self, client, cluster, cluster_ops):
+        target = '11111111-1111-1111-1111-111111111112'
+
+        response = client.post(
+            f'/api/v2/clusters/{CLUSTER_ID}/addreplication',
+            json={
+                'snapshot_replication_target_cluster': target,
+                'snapshot_replication_timeout': 30,
+                'target_pool': 'pool-1',
+            },
+        )
+
+        assert response.status_code == 202
+        cluster_ops.add_replication.assert_called_once_with(
+            source_cl_id=CLUSTER_ID,
+            target_cl_id=target,
+            timeout=30,
+            target_pool='pool-1',
+        )
+
+
+class TestWatchClusters:
+
+    def test_list_dispatches_watch_clusters(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_clusters.return_value = watch_stream([cluster])
+
+        response = client.get('/api/v2/clusters/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert CLUSTER_ID in response.text
+        cluster_ops.watch_clusters.assert_called_once_with()
+
+    def test_detail_dispatches_watch_cluster(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_cluster.return_value = watch_stream([cluster])
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert CLUSTER_ID in response.text
+        cluster_ops.watch_cluster.assert_called_once_with(CLUSTER_ID)

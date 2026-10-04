@@ -5,12 +5,28 @@ from simplyblock_core.settings import Settings
 
 from ._base import KMS
 from ._exceptions import KMSException
-from ._hcp import HCPClient
 from ._fdb import LocalKMS
+from ._hcp import HCPClient
 
 logger = logging.getLogger()
 
 logger.setLevel(logging.DEBUG)
+
+
+def lvol_dek_path(cluster_id: str, lvol_id: str) -> str:
+    return f"cluster/{cluster_id}/lvol/{lvol_id}"
+
+
+def backup_dek_path(cluster_id: str, backup_id: str) -> str:
+    return f"cluster/{cluster_id}/backup/{backup_id}"
+
+
+def pool_kek_name(pool_id: str) -> str:
+    return f"pool-{pool_id}"
+
+
+def backup_kek_name(backup_id: str) -> str:
+    return f"backup-{backup_id}"
 
 
 def create_kms_connection(cluster: Cluster) -> KMS:
@@ -35,7 +51,6 @@ def create_kms_connection(cluster: Cluster) -> KMS:
         settings.tls_certificate_authority,
         settings.tls_certificate,
         settings.tls_key,
-        cluster.get_id(),
         transit_mount=vault.transit_mount,
         kv_mount=vault.kv_mount,
         cert_role=vault.cert_role,

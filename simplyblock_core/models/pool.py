@@ -1,22 +1,34 @@
-# coding=utf-8
 
-from typing import List
+from typing import ClassVar
 
-from simplyblock_core.models.base_model import BaseModel
+from pydantic import SecretStr
+
+from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index, Unique
 
 
 class Pool(BaseModel):
 
+    _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+        # As for LVol.lvol_name: the constraint is per cluster, but a lookup
+        # that knows only the name still has to be answerable.
+        Index('pool_name'),
+        Unique(('cluster_id', 'pool_name')),
+    )
+
     STATUS_ACTIVE = "active"
     STATUS_INACTIVE = "inactive"
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 1,
         STATUS_INACTIVE: 2,
     }
 
     cluster_id: str = ""
-    groups: List[str] = []
+    groups: list[str] = default_factory(list)
     lvol_max_size: int = 0
     lvols: int = 0
     max_r_mbytes_per_sec: int = 0
@@ -26,8 +38,8 @@ class Pool(BaseModel):
     pool_max_size: int = 0
     pool_name: str = ""
     numeric_id: int = 0
-    secret: str = ""  # unused
-    users: List[str] = []
+    secret: SecretStr = SecretStr("")  # unused
+    users: list[str] = default_factory(list)
     qos_host: str = ""
     cr_name: str = ""
     cr_namespace: str = ""
@@ -35,11 +47,14 @@ class Pool(BaseModel):
     lvols_cr_name: str = ""
     lvols_cr_namespace: str = ""
     lvols_cr_plural: str = ""
-    sec_options: dict = {}
+    sec_options: dict = default_factory(dict)
     dhchap: bool = False
-    dhchap_key: str = ""
-    dhchap_ctrlr_key: str = ""
-    allowed_hosts: List[str] = []
+    dhchap_key: SecretStr = SecretStr("")
+    dhchap_ctrlr_key: SecretStr = SecretStr("")
+    allowed_hosts: list[str] = default_factory(list)
+
+    def watch_scope(self):
+        return (self.cluster_id,)
 
 
     def has_qos(self):

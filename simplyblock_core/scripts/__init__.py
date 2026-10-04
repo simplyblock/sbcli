@@ -3,7 +3,6 @@ import logging
 import os
 import subprocess
 
-
 DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
 logger = logging.getLogger()
@@ -16,7 +15,7 @@ def __run_script(args: list):
             logger.debug(output.strip())
     except subprocess.CalledProcessError as e:
         logger.debug(f"Command failed with return code: {e.returncode}")
-        logger.debug((f"Captured output:\n {e.output}"))
+        logger.debug(f"Captured output:\n {e.output}")
         raise
 
 

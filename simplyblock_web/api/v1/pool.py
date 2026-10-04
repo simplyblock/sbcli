@@ -1,15 +1,13 @@
-#!/usr/bin/env python
-# encoding: utf-8
 
 import logging
 
 from flask import Blueprint, request
 
-from simplyblock_web import utils
+from simplyblock_core import db_controller
+from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import pool_controller
-
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import db_controller, utils as core_utils
+from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +61,8 @@ def add_pool():
 
     name = pool_data['name']
     cluster_id = utils.get_cluster_id(request)
-    for p in db.get_pools():
-        if p.pool_name == name and p.cluster_id == cluster_id:
-            return utils.get_response_error(f"Pool found with the same name: {name}", 400)
+    if db.pool_name_taken(cluster_id, name):
+        return utils.get_response_error(f"Pool found with the same name: {name}", 400)
 
     pool_max_size = 0
     lvol_max_size = 0

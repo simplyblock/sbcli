@@ -10,35 +10,35 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
 
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       MNODES:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
         required: true
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
 
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
-        default: "R25.10-Hotfix"
+        default: "main"
 
       CUSTOM_IMAGES:
         description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
-        default: 'spdk="" docker=""'
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
         required: false
 
       # =========================
@@ -69,14 +69,14 @@ on:
       # Bootstrap params (all inputs)
       # ndcs/npcs for stress are derived from DATA/PARITY chunks
       # =========================
-      BOOTSTRAP_MAX_LVOL:
-        description: "bootstrap: --max-lvol"
+      BOOTSTRAP_MAX_SUBSYS:
+        description: "bootstrap: --max-subsys"
         required: true
-        default: "300"
+        default: "75"
       BOOTSTRAP_DATA_CHUNKS:
         description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
         required: true
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
         required: true
@@ -92,7 +92,7 @@ on:
       BOOTSTRAP_HA_JM_COUNT:
         description: "bootstrap: --ha-jm-count"
         required: true
-        default: "3"
+        default: "4"
       BOOTSTRAP_IS_SINGLE_NODE:
         description: "Bootstrap: deploy as single-node (--is-single-node)"
         type: boolean
@@ -102,7 +102,7 @@ on:
         description: "Bootstrap: enable node affinity (--enable-node-affinity)"
         type: boolean
         required: false
-        default: false
+        default: true
       EXTRA_CLUSTER_ARGS:
         description: |
           Additional arguments to pass to cluster create command (optional)
@@ -132,7 +132,7 @@ on:
         description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
         required: false
         type: choice
-        default: "none"
+        default: "backup"
         options:
           - none
           - backup
@@ -172,7 +172,7 @@ jobs:
       NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
 
       # Bootstrap params
-      BOOTSTRAP_MAX_LVOL: ${{ inputs.BOOTSTRAP_MAX_LVOL }}
+      BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS }}
       BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
       BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION }}
@@ -183,7 +183,7 @@ jobs:
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
       TEST_CLASS: ${{ inputs.TEST_CLASS }}
-      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -304,6 +304,7 @@ jobs:
       # Targets = MNODES + STORAGE_PRIVATE_IPS + CLIENTNODES
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -311,7 +312,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -345,6 +347,7 @@ jobs:
           done
 
       - name: Destroy/clean storage nodes (deploy-cleaner, docker prune, uninstall sbcli, k3s)
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -352,7 +355,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -385,6 +389,7 @@ jobs:
           done
 
       - name: Client cleanup disconnect lvols; ensure NFS not mounted anywhere; unmount all /mnt; remove /mnt dirs
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -392,7 +397,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -431,6 +437,7 @@ jobs:
           done
 
       - name: Reboot storage nodes, wait online, disk reset + PCI rebind + mklabel
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -438,7 +445,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -538,7 +546,8 @@ jobs:
           if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
             echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
             S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${mgmt_ip}" \
@@ -548,6 +557,7 @@ jobs:
           fi
 
       - name: Remove /etc/simplyblock on all nodes and verify it is gone
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -555,7 +565,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -632,7 +643,7 @@ jobs:
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --max-subsys "${BOOTSTRAP_MAX_SUBSYS}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
@@ -708,21 +719,44 @@ jobs:
           test -f sbcli/e2e/stress.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+
+      - name: Disable swap on mgmt + storage + client nodes
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
+          # SPDK pins hugepages and is latency critical. When these hosts swap,
+          # poller threads stall and qpairs go delayed, which in the logs looks
+          # exactly like a storage fault. Run
+          # n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656 started
+          # with 30 of 31Gi used, 339Mi available and swap already in use, and
+          # no OOM kill to make that obvious.
+          # Script and full rationale: e2e/scripts/disable_swap.sh
+          SWAP_SCRIPT="sbcli/e2e/scripts/disable_swap.sh"
+          if [[ ! -f "${SWAP_SCRIPT}" ]]; then
+            echo "WARN: ${SWAP_SCRIPT} not found; skipping swap disable"
+            exit 0
           fi
+          ALL_IPS=$(echo "${MNODES} ${STORAGE_PRIVATE_IPS} ${CLIENT_IP}" | tr ' ' '\n' | sed '/^$/d' | sort -u)
+          for ip in ${ALL_IPS}; do
+            echo "---- disable swap: ${ip} ----"
+            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "${SSH_USER}@${ip}" 'bash -s' < "${SWAP_SCRIPT}" || echo "WARN: swap disable failed on ${ip}"
+          done
+
+      - name: Install uv
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before stress
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
       
       - name: Set RUN_DIR_FILE
         shell: bash
@@ -736,19 +770,98 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Start MinIO trace logging
+        if: ${{ env.CLUSTER_SECURITY == 'backup' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # This VM hosts multiple parallel runners, so every path/alias/
+          # process used here MUST be scoped to this run — a shared
+          # /tmp/mc or a pattern-matching pkill would race with, corrupt,
+          # or kill another job's in-flight mc install/trace.
+          MC_BIN="/tmp/mc-${GITHUB_RUN_ID}"
+          MC_ALIAS="myminio-${GITHUB_RUN_ID}"
+          echo "MC_BIN=${MC_BIN}" >> "$GITHUB_ENV"
+          echo "MC_ALIAS=${MC_ALIAS}" >> "$GITHUB_ENV"
+
+          # 1. Install mc (MinIO Client) to our own per-run path
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "${MC_BIN}"
+          chmod +x "${MC_BIN}"
+
+          # 2. Configure our own mc alias to external MinIO
+          "${MC_BIN}" alias set "${MC_ALIAS}" http://192.168.10.164:9000 "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
+
+          # 3. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup "${MC_BIN}" admin trace -v --all "${MC_ALIAS}" > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
+      - name: Enable shared placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${KEY_PATH}"
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          ssh ${ssh_opts} "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster set-shared-placement ${CLUSTER_ID} --force" || true
+
       - name: Run stress (foreground; runs until failure)
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 -u stress.py \
+          PYTHONUNBUFFERED=1 ./stress.py \
             --testname "${TEST_CLASS}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             2>&1 | tee output.log
 
-      - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+      - name: Copy raw output.log to each test's NFS folder
         if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="sbcli/e2e/output.log"
+          if [ ! -f "${out_log}" ]; then
+            echo "No output.log found, skipping"
+            exit 0
+          fi
+          echo "output.log size: $(stat --printf='%s' "${out_log}" 2>/dev/null || echo '?') bytes"
+
+          mapfile -t log_paths < <(
+            grep 'Logs Path:' "${out_log}" 2>/dev/null \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | sed 's/.*Logs Path: *//' \
+              | sed 's/[[:space:]]*$//' || true
+          )
+
+          if [ ${#log_paths[@]} -eq 0 ]; then
+            echo "No 'Logs Path:' entries found in output.log"
+            if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+              cp "${out_log}" "${RUN_BASE_DIR}/github_raw_output.log" || true
+              echo "Saved to ${RUN_BASE_DIR}/github_raw_output.log"
+            fi
+            exit 0
+          fi
+
+          for path in "${log_paths[@]}"; do
+            if [ -d "${path}" ]; then
+              cp "${out_log}" "${path}/github_raw_output.log" || true
+              echo "Saved output.log -> ${path}/github_raw_output.log"
+            else
+              echo "WARN: path does not exist: ${path}"
+            fi
+          done
+
+      - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        timeout-minutes: 15
+        id: post-cleanup
+        if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euxo pipefail
@@ -756,7 +869,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            ssh -i "${KEY_PATH}" \
+            timeout 120 ssh -i "${KEY_PATH}" \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true
@@ -805,330 +919,6 @@ jobs:
           echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
-      - name: Collect Graylog/OpenSearch logs
-        if: always()
-        timeout-minutes: 240
-        shell: bash
-        run: |
-          set +e
-          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
-          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
-          [ "${ELAPSED}" -le 0 ] && exit 0
-
-          WINDOW_START=$((TEST_START_EPOCH - 3600))
-          WINDOW_END=$((TEST_END_EPOCH + 3600))
-
-          MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
-          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
-
-          OUTPUT_DIR=""
-          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
-            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
-          else
-            OUTPUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/graylog_collected-$(date -u '+%Y%m%d-%H%M%S')"
-          fi
-          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
-
-          epoch_to_iso() {
-            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
-          }
-
-          CHUNK=0; CURRENT=${WINDOW_START}
-          while [ ${CURRENT} -lt ${WINDOW_END} ]; do
-            CHUNK=$((CHUNK + 1))
-            CHUNK_END=$((CURRENT + 3600))
-            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
-            CHUNK_MINUTES=$(( ((CHUNK_END - CURRENT) + 59) / 60 ))
-            CHUNK_ISO=$(epoch_to_iso ${CURRENT})
-            REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "python3 -m simplyblock_core.scripts.collect_logs \
-                '${CHUNK_ISO}' '${CHUNK_MINUTES}' \
-                --mode docker \
-                --output-dir '${REMOTE_OUTPUT_DIR}' \
-                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
-            2>&1 || {
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-                "python3 -m simplyblock_core.scripts.collect_logs \
-                  '${CHUNK_ISO}' '${CHUNK_MINUTES}' \
-                  --mode docker --use-opensearch \
-                  --output-dir '${REMOTE_OUTPUT_DIR}' \
-                  ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
-              2>&1 || true
-            }
-            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
-            if [ -n "${TARBALLS}" ]; then
-              for TB in ${TARBALLS}; do
-                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
-              done
-              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
-                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
-              done
-            fi
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-            CURRENT=${CHUNK_END}
-          done
-          echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
-
-      - name: Collect mgmt snapshots into RUN_BASE_DIR (on failure)
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          python3 - <<'PY'
-          import os, subprocess
-
-          mgmt_ip = os.environ["MNODES"].split()[0]
-          key = os.environ["KEY_PATH"]
-          user = os.environ["SSH_USER"]
-          sbcli = os.environ["SBCLI_CMD"]
-          cluster_id = os.environ["CLUSTER_ID"]
-          run_base = os.environ["RUN_BASE_DIR"].rstrip("/")
-          outdir = f"{run_base}/{mgmt_ip}/mgmt_details"
-
-          os.makedirs(f"{outdir}/mgmt", exist_ok=True)
-          os.makedirs(f"{outdir}/subtasks", exist_ok=True)
-          os.makedirs(f"{outdir}/storage_nodes", exist_ok=True)
-
-          script = r"""set -euo pipefail
-          SBCLI="__SBCLI__"
-          CLUSTER_ID="__CLUSTER_ID__"
-          OUTDIR="__OUTDIR__"
-
-          mkdir -p "$OUTDIR"/{mgmt,subtasks,storage_nodes}
-
-          log(){ printf '[%(%F %T)T] %s\n' -1 "$*" >&2; }
-          run_local(){ local cmd="$1" out="$2"; log "LOCAL: $cmd -> $out"; bash -lc "$cmd" > "$out" 2>&1 || true; }
-
-          run_local "$SBCLI cluster list"                               "$OUTDIR/mgmt/cluster_list.txt"
-          run_local "$SBCLI cluster status $CLUSTER_ID"                 "$OUTDIR/mgmt/cluster_status.txt"
-          run_local "$SBCLI cluster show $CLUSTER_ID"                   "$OUTDIR/mgmt/cluster_show.txt"
-          run_local "$SBCLI cluster get-capacity $CLUSTER_ID"           "$OUTDIR/mgmt/cluster_capacity.txt"
-          run_local "$SBCLI cluster get-logs $CLUSTER_ID --limit 0"     "$OUTDIR/mgmt/cluster_get_logs.txt"
-
-          run_local "$SBCLI pool list"                                  "$OUTDIR/mgmt/pool_list.txt"
-          run_local "$SBCLI lvol list"                                  "$OUTDIR/mgmt/lvol_list.txt"
-          run_local "$SBCLI snapshot list"                              "$OUTDIR/mgmt/snapshot_list.txt"
-
-          run_local "$SBCLI sn list"                                    "$OUTDIR/mgmt/sn_list.txt"
-          run_local "$SBCLI sn list --json"                             "$OUTDIR/mgmt/sn_list.json"
-
-          SN_UUIDS=()
-          if [[ -s "$OUTDIR/mgmt/sn_list.json" ]] && command -v jq >/dev/null 2>&1; then
-            mapfile -t SN_UUIDS < <(jq -r '.[]?|.UUID // .uuid // .Id // .id // empty' "$OUTDIR/mgmt/sn_list.json" | awk 'NF')
-          else
-            mapfile -t SN_UUIDS < <(
-              awk 'BEGIN{FS="|"} /^\|/ && !/UUID/ && !/^\+-/ {
-                if (NF>=3) { gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /[0-9a-f-]{8,}/) print $3; }
-              }' "$OUTDIR/mgmt/sn_list.txt" | sort -u
-            )
-          fi
-
-          idx=1
-          for uuid in "${SN_UUIDS[@]}"; do
-            run_local "$SBCLI sn list-devices $uuid"  "$OUTDIR/storage_nodes/node${idx}_list_devices.txt"
-            run_local "$SBCLI sn check $uuid"         "$OUTDIR/storage_nodes/node${idx}_check.txt"
-            run_local "$SBCLI sn get $uuid"           "$OUTDIR/storage_nodes/node${idx}_get.txt"
-            idx=$((idx+1))
-          done
-
-          run_local "$SBCLI cluster list-tasks $CLUSTER_ID --limit 0"   "$OUTDIR/mgmt/cluster_list_tasks.txt"
-
-          BAL_IDS=()
-          while IFS= read -r line; do
-            [[ "$line" =~ ^\+ ]] && continue
-            [[ "$line" =~ Task\ ID ]] && continue
-            [[ "$line" =~ ^\|[[:space:]]*$ ]] && continue
-
-            func=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}' <<<"$line")
-            if [[ "$func" == "balancing_on_restart" ]]; then
-              task_id=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' <<<"$line")
-              [[ -n "$task_id" ]] && BAL_IDS+=("$task_id")
-            fi
-          done < "$OUTDIR/mgmt/cluster_list_tasks.txt"
-
-          for tid in "${BAL_IDS[@]:-}"; do
-            run_local "$SBCLI cluster get-subtasks $tid" "$OUTDIR/subtasks/${tid}_subtasks.txt"
-          done
-          """
-
-          script = (script
-                    .replace("__SBCLI__", sbcli)
-                    .replace("__CLUSTER_ID__", cluster_id)
-                    .replace("__OUTDIR__", outdir))
-
-          ssh_cmd = [
-              "ssh",
-              "-i", key,
-              "-o", "StrictHostKeyChecking=no",
-              "-o", "UserKnownHostsFile=/dev/null",
-              "-o", "ConnectTimeout=10",
-              f"{user}@{mgmt_ip}",
-              "bash", "-s",
-          ]
-
-          subprocess.run(ssh_cmd, input=script.encode(), check=False)
-          PY
-
-      - name: Collect docker logs into RUN_BASE_DIR (on failure)
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
-          SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
-
-          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
-
-          for NODE in ${NODES}; do
-            echo ">>> Node: ${NODE}"
-            REMOTE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
-
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a > '${REMOTE_DIR}/docker_ps_a_${NODE}.txt' 2>&1 || true\"" || true
-
-            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
-
-            if [[ -z "${CONTAINERS}" ]]; then
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"echo 'No containers found' > '${REMOTE_DIR}/_NO_CONTAINERS_${NODE}.txt'\"" || true
-              continue
-            fi
-
-            set +e
-            while IFS= read -r C; do
-              C="${C%%$'\r'}"
-              [[ -z "${C}" ]] && continue
-              echo "    dumping: ${C}"
-              LOG_FILE="${REMOTE_DIR}/${C}.txt"
-              INSPECT_FILE="${REMOTE_DIR}/${C}_inspect.json"
-
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps --details '${C}' > '${LOG_FILE}' 2>&1 || true\"" || true
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker inspect '${C}' > '${INSPECT_FILE}' 2>&1 || true\"" || true
-            done <<< "${CONTAINERS}"
-            set -e
-          done
-
-
-      - name: Collect distrib debug dumps into RUN_BASE_DIR (on failure)
-        if: always()
-        timeout-minutes: 35
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          python3 - <<'PY'
-          import os, subprocess, sys, textwrap
-
-          ssh_user = os.environ["SSH_USER"]
-          key = os.environ["KEY_PATH"]
-          run_base = os.environ["RUN_BASE_DIR"].rstrip("/")
-          tag = "finaldistrib_bdev_logs"
-
-          storage_ips = os.environ["STORAGE_PRIVATE_IPS"].split()
-
-          ssh_base = [
-              "ssh",
-              "-i", key,
-              "-o", "StrictHostKeyChecking=no",
-              "-o", "UserKnownHostsFile=/dev/null",
-              "-o", "ServerAliveInterval=15",
-              "-o", "ServerAliveCountMax=4",
-              "-o", "ConnectTimeout=10",
-              "-C",
-          ]
-
-          scp_base = [
-              "scp",
-              "-i", key,
-              "-o", "StrictHostKeyChecking=no",
-              "-o", "UserKnownHostsFile=/dev/null",
-              "-o", "ConnectTimeout=10",
-              "-C",
-          ]
-
-          remote_script = """\
-          set -euo pipefail
-          TS="$(date +%Y%m%d_%H%M%S)"
-          HOST="$(hostname -s 2>/dev/null || hostname)"
-          STAGING="/tmp/distrib_host_collect_${TS}"
-          mkdir -p "$STAGING"
-
-          CN="$(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' | head -n1 || true)"
-          if [[ -z "$CN" ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
-          SOCK="/mnt/ramdisk/${CN}/spdk.sock"
-
-          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
-          if [[ -z "$BDEV_JSON" ]]; then echo "BDEV_EMPTY"; exit 0; fi
-
-          if command -v jq >/dev/null 2>&1; then
-            mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
-          else
-            mapfile -t DISTRIBS < <(printf '%s\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
-          fi
-
-          if [[ ${#DISTRIBS[@]} -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
-
-          for d in "${DISTRIBS[@]}"; do
-            JF="/tmp/stack_${d}.json"
-
-            python3 - "$d" "$JF" <<'PYIN'
-          import json, sys
-          d = sys.argv[1]
-          jf = sys.argv[2]
-          obj = {"subsystems":[{"subsystem":"distr","config":[{"method":"distr_debug_placement_map_dump","params":{"name":d}}]}]}
-          with open(jf, "w") as f:
-              f.write(json.dumps(obj))
-          PYIN
-
-            sudo docker cp "$JF" "$CN:$JF" || true
-            sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
-            sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
-
-            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\"$d\\" || true"); do
-              sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
-            done
-
-            sudo docker exec "$CN" bash -lc "rm -f '$JF' '/tmp/rpc_${d}.log'" || true
-            rm -f "$JF" || true
-          done
-
-          cat /proc/meminfo | grep -i huge > "$STAGING/hugepage_meminfo.txt" 2>/dev/null || true
-
-          TAR="/tmp/${HOST}_distrib_dumps_${TS}.tgz"
-          tar -C "$STAGING" -czf "$TAR" . 2>/dev/null || true
-          echo "$TAR"
-          """
-
-          # NOTE: the only heredoc above (<<'PYIN') is inside the REMOTE SCRIPT,
-          # not inside YAML. YAML never sees it (we send script via stdin).
-
-          for ip in storage_ips:
-              print(f"=== {ip} ===", flush=True)
-
-              # Run remote script via stdin (no YAML heredoc)
-              cmd = ssh_base + [f"{ssh_user}@{ip}", "bash", "-s"]
-              p = subprocess.run(cmd, input=remote_script.encode(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
-              out = p.stdout.decode(errors="replace").strip().splitlines()
-              last = out[-1].strip() if out else ""
-              last = last.replace("\r", "")
-
-              if last in ("NO_SPDK_CONTAINER", "BDEV_EMPTY", "NO_DISTRIBS") or not last.startswith("/tmp/"):
-                  print(f"[{ip}] WARN: distrib collection skipped/failed: {last or '(no output)'}", flush=True)
-                  continue
-
-              dest_dir = f"{run_base}/{ip}/{tag}"
-              os.makedirs(dest_dir, exist_ok=True)
-
-              scp_cmd = scp_base + [f"{ssh_user}@{ip}:{last}", dest_dir + "/"]
-              subprocess.run(scp_cmd, check=False)
-
-              print(f"[{ip}] ✓ Saved → {dest_dir}/{os.path.basename(last)}", flush=True)
-          PY
-        
       # =========================
       # SUMMARY (always): test run, outages, failure reason, mgmt files, duration
       # Assumes outages are in sbcli/e2e/logs/outage*
@@ -1256,6 +1046,12 @@ jobs:
               echo '```'
               echo "</details>"
             fi
+            if [[ -n "${POST_TEST_WARNINGS:-}" ]]; then
+              echo ""
+              echo "### :warning: Post-Test Warnings"
+              echo "The following post-test steps failed (did NOT affect test result):"
+              echo "- ${POST_TEST_WARNINGS}"
+            fi
             echo ""
             echo "### Mgmt Artifacts (mgmt_details/mgmt)"
             echo "- Path: \`${mgmt_dir}\`"
@@ -1271,6 +1067,8 @@ jobs:
             echo "- Outage logs: \`${outage_dir}/outage*\`"
             echo "- Docker logs: \`${RUN_BASE_DIR:-<run_dir>}/<node_ip>/containers-final-*\`"
             echo "- Distrib dumps: \`${RUN_BASE_DIR:-<run_dir>}/<storage_ip>/finaldistrib_bdev_logs/\`"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack Notification
@@ -1278,6 +1076,8 @@ jobs:
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -1285,9 +1085,11 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request, urllib.error
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping.")
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
               sys.exit(0)
           out_log = "sbcli/e2e/output.log"
           total = passed = failed = skipped = 0
@@ -1312,10 +1114,20 @@ jobs:
           test_cls = os.environ.get("TEST_CLASS",      "") or "all"
           branch   = os.environ.get("GITHUB_REF_NAME", "?")
           wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          warnings = os.environ.get("POST_TEST_WARNINGS", "")
           ok       = os.environ.get("JOB_STATUS",      "") == "success"
-          icon    = ":white_check_mark:" if ok else ":x:"
-          status  = "SUCCESS" if ok else "FAILURE"
-          mention = "" if ok else " <!channel>"
+          if ok and warnings:
+              icon    = ":white_check_mark:"
+              status  = "SUCCESS (with warnings)"
+              mention = ""
+          elif ok:
+              icon    = ":white_check_mark:"
+              status  = "SUCCESS"
+              mention = ""
+          else:
+              icon    = ":x:"
+              status  = "FAILURE"
+              mention = " <!channel>"
           lines = [
               f"{icon} *SimplyBlock {wf_name}*{mention}",
               f"*Status:* {status}  |  *Duration:* {dur}",
@@ -1330,23 +1142,589 @@ jobs:
               ]
           else:
               lines.append("_(test counts not found in log)_")
+          if warnings:
+              lines += ["", f":warning: *Post-test warnings:* {warnings}"]
           lines += [
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              urllib.request.urlopen(req, timeout=15)
-              print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
           PYEOF
+
+
+
+      - name: Analyze SPDK core dumps (gdb backtraces)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -uo pipefail
+          # For every SPDK core left on a storage host, copy it into that host's
+          # SPDK container (same host = same image = symbols resolve), run
+          # `bt` and `thread apply all bt full`, and save all three artifacts
+          # next to the run logs. Script and rationale:
+          # e2e/scripts/analyze_core_dumps_docker.sh
+          CORE_SCRIPT="sbcli/e2e/scripts/analyze_core_dumps_docker.sh"
+          if [[ ! -f "${CORE_SCRIPT}" ]]; then
+            echo "WARN: ${CORE_SCRIPT} not found; skipping core-dump analysis"
+            exit 0
+          fi
+          # RUN_BASE_DIR is exported by an earlier step in some workflows and
+          # only written to RUN_DIR_FILE in others; handle both.
+          OUT_DIR="${RUN_BASE_DIR:-}"
+          if [[ -z "${OUT_DIR}" && -n "${RUN_DIR_FILE:-}" && -f "${RUN_DIR_FILE}" ]]; then
+            OUT_DIR="$(tr -d '\r\n' < "${RUN_DIR_FILE}")"
+          fi
+          if [[ -z "${OUT_DIR}" ]]; then
+            OUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/core_backtraces-$(date -u '+%Y%m%d-%H%M%S')"
+            echo "WARN: no run dir found, falling back to ${OUT_DIR}"
+          fi
+          echo "Core backtraces -> ${OUT_DIR}/core_backtraces"
+          for ip in $(echo "${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+            echo "---- core-dump analysis: ${ip} ----"
+            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "${SSH_USER}@${ip}" 'bash -s' -- "${OUT_DIR}" < "${CORE_SCRIPT}" || echo "WARN: core-dump analysis failed on ${ip}"
+          done
+
+      - name: Collect Graylog/OpenSearch logs
+        id: collect-graylog
+        if: '!cancelled()'
+        continue-on-error: true
+        timeout-minutes: 480
+        shell: bash
+        run: |
+          set +e
+          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
+          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
+          [ "${ELAPSED}" -le 0 ] && exit 0
+
+          WINDOW_START=$((TEST_START_EPOCH - 3600))
+          WINDOW_END=$((TEST_END_EPOCH + 3600))
+
+          MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
+          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            OUTPUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/graylog_collected-$(date -u '+%Y%m%d-%H%M%S')"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
+          }
+
+          # Build chunk boundaries, then iterate in REVERSE order (newest first)
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "python3 -m simplyblock_core.scripts.collect_logs \
+                '${iso}' '${mins}' \
+                --mode docker \
+                --output-dir '${outdir}' \
+                ${extra_flag} \
+                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
+              return 1
+            fi
+          }
+
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
+            REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || true
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || true
+              }
+            fi
+            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            fi
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+          done
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
+
+      - name: Notify Slack log collection complete
+        if: always()
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_MSG_TS: ${{ env.SLACK_MSG_TS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_WF_NAME: "Stress Run Bootstrap"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock ${SLACK_WF_NAME}*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_CHANNEL_ID:-}" ] && [ -n "${SLACK_MSG_TS:-}" ]; then
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{\"channel\":\"${SLACK_CHANNEL_ID}\",\"thread_ts\":\"${SLACK_MSG_TS}\",\"text\":\"${MSG}\"}" || true
+          elif [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\":\"${MSG}\"}" || true
+          fi
+
+      - name: Collect mgmt snapshots into RUN_BASE_DIR (on failure)
+        id: collect-mgmt
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          import os, subprocess
+
+          mgmt_ip = os.environ["MNODES"].split()[0]
+          key = os.environ["KEY_PATH"]
+          user = os.environ["SSH_USER"]
+          sbcli = os.environ["SBCLI_CMD"]
+          cluster_id = os.environ["CLUSTER_ID"]
+          run_base = os.environ["RUN_BASE_DIR"].rstrip("/")
+          outdir = f"{run_base}/{mgmt_ip}/mgmt_details"
+
+          os.makedirs(f"{outdir}/mgmt", exist_ok=True)
+          os.makedirs(f"{outdir}/subtasks", exist_ok=True)
+          os.makedirs(f"{outdir}/storage_nodes", exist_ok=True)
+
+          script = r"""set -euo pipefail
+          SBCLI="__SBCLI__"
+          CLUSTER_ID="__CLUSTER_ID__"
+          OUTDIR="__OUTDIR__"
+
+          mkdir -p "$OUTDIR"/{mgmt,subtasks,storage_nodes}
+
+          log(){ printf '[%(%F %T)T] %s\n' -1 "$*" >&2; }
+          run_local(){ local cmd="$1" out="$2"; log "LOCAL: $cmd -> $out"; bash -lc "$cmd" > "$out" 2>&1 || true; }
+
+          run_local "$SBCLI cluster list"                               "$OUTDIR/mgmt/cluster_list.txt"
+          run_local "$SBCLI cluster status $CLUSTER_ID"                 "$OUTDIR/mgmt/cluster_status.txt"
+          run_local "$SBCLI cluster show $CLUSTER_ID"                   "$OUTDIR/mgmt/cluster_show.txt"
+          run_local "$SBCLI cluster get-capacity $CLUSTER_ID"           "$OUTDIR/mgmt/cluster_capacity.txt"
+          run_local "$SBCLI cluster get-logs $CLUSTER_ID --limit 0"     "$OUTDIR/mgmt/cluster_get_logs.txt"
+
+          run_local "$SBCLI pool list"                                  "$OUTDIR/mgmt/pool_list.txt"
+          run_local "$SBCLI lvol list"                                  "$OUTDIR/mgmt/lvol_list.txt"
+          run_local "$SBCLI snapshot list"                              "$OUTDIR/mgmt/snapshot_list.txt"
+
+          run_local "$SBCLI sn list"                                    "$OUTDIR/mgmt/sn_list.txt"
+          run_local "$SBCLI sn list --json"                             "$OUTDIR/mgmt/sn_list.json"
+
+          SN_UUIDS=()
+          if [[ -s "$OUTDIR/mgmt/sn_list.json" ]] && command -v jq >/dev/null 2>&1; then
+            mapfile -t SN_UUIDS < <(jq -r '.[]?|.UUID // .uuid // .Id // .id // empty' "$OUTDIR/mgmt/sn_list.json" | awk 'NF')
+          else
+            mapfile -t SN_UUIDS < <(
+              awk 'BEGIN{FS="|"} /^\|/ && !/UUID/ && !/^\+-/ {
+                if (NF>=3) { gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /[0-9a-f-]{8,}/) print $3; }
+              }' "$OUTDIR/mgmt/sn_list.txt" | sort -u
+            )
+          fi
+
+          idx=1
+          for uuid in "${SN_UUIDS[@]}"; do
+            run_local "$SBCLI sn list-devices $uuid"  "$OUTDIR/storage_nodes/node${idx}_list_devices.txt"
+            run_local "$SBCLI sn check $uuid"         "$OUTDIR/storage_nodes/node${idx}_check.txt"
+            run_local "$SBCLI sn get $uuid"           "$OUTDIR/storage_nodes/node${idx}_get.txt"
+            idx=$((idx+1))
+          done
+
+          run_local "$SBCLI cluster list-tasks $CLUSTER_ID --limit 0"   "$OUTDIR/mgmt/cluster_list_tasks.txt"
+
+          BAL_IDS=()
+          while IFS= read -r line; do
+            [[ "$line" =~ ^\+ ]] && continue
+            [[ "$line" =~ Task\ ID ]] && continue
+            [[ "$line" =~ ^\|[[:space:]]*$ ]] && continue
+
+            func=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}' <<<"$line")
+            if [[ "$func" == "balancing_on_restart" ]]; then
+              task_id=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' <<<"$line")
+              [[ -n "$task_id" ]] && BAL_IDS+=("$task_id")
+            fi
+          done < "$OUTDIR/mgmt/cluster_list_tasks.txt"
+
+          for tid in "${BAL_IDS[@]:-}"; do
+            run_local "$SBCLI cluster get-subtasks $tid" "$OUTDIR/subtasks/${tid}_subtasks.txt"
+          done
+          """
+
+          script = (script
+                    .replace("__SBCLI__", sbcli)
+                    .replace("__CLUSTER_ID__", cluster_id)
+                    .replace("__OUTDIR__", outdir))
+
+          ssh_cmd = [
+              "ssh",
+              "-i", key,
+              "-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "ConnectTimeout=10",
+              f"{user}@{mgmt_ip}",
+              "bash", "-s",
+          ]
+
+          subprocess.run(ssh_cmd, input=script.encode(), check=False)
+          PY
+
+      - name: Collect docker logs into RUN_BASE_DIR (on failure)
+        id: collect-docker
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
+          SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
+
+          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for NODE in ${NODES}; do
+            echo ">>> Node: ${NODE}"
+            REMOTE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
+
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a > '${REMOTE_DIR}/docker_ps_a_${NODE}.txt' 2>&1 || true\"" || true
+
+            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
+
+            if [[ -z "${CONTAINERS}" ]]; then
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"echo 'No containers found' > '${REMOTE_DIR}/_NO_CONTAINERS_${NODE}.txt'\"" || true
+              continue
+            fi
+
+            set +e
+            while IFS= read -r C; do
+              C="${C%%$'\r'}"
+              [[ -z "${C}" ]] && continue
+              echo "    dumping: ${C}"
+              LOG_FILE="${REMOTE_DIR}/${C}.txt"
+              INSPECT_FILE="${REMOTE_DIR}/${C}_inspect.json"
+
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps --details '${C}' > '${LOG_FILE}' 2>&1 || true\"" || true
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker inspect '${C}' > '${INSPECT_FILE}' 2>&1 || true\"" || true
+            done <<< "${CONTAINERS}"
+            set -e
+          done
+
+
+      - name: Collect distrib debug dumps into RUN_BASE_DIR (on failure)
+        id: collect-distrib
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 35
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          import os, subprocess, sys, textwrap
+
+          ssh_user = os.environ["SSH_USER"]
+          key = os.environ["KEY_PATH"]
+          run_base = os.environ["RUN_BASE_DIR"].rstrip("/")
+          tag = "finaldistrib_bdev_logs"
+
+          storage_ips = os.environ["STORAGE_PRIVATE_IPS"].split()
+
+          ssh_base = [
+              "ssh",
+              "-i", key,
+              "-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "ServerAliveInterval=15",
+              "-o", "ServerAliveCountMax=4",
+              "-o", "ConnectTimeout=10",
+              "-C",
+          ]
+
+          scp_base = [
+              "scp",
+              "-i", key,
+              "-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "ConnectTimeout=10",
+              "-C",
+          ]
+
+          remote_script = """\
+          set -euo pipefail
+          TS="$(date +%Y%m%d_%H%M%S)"
+          HOST="$(hostname -s 2>/dev/null || hostname)"
+          STAGING="/tmp/distrib_host_collect_${TS}"
+          mkdir -p "$STAGING"
+
+          mapfile -t CONTAINERS < <(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true)
+          if [[ ${#CONTAINERS[@]} -eq 0 ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
+
+          ANY_DISTRIB=0
+          for CN in "${CONTAINERS[@]}"; do
+            SOCK="/mnt/ramdisk/${CN}/spdk.sock"
+
+            BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
+            if [[ -z "$BDEV_JSON" ]]; then continue; fi
+
+            if command -v jq >/dev/null 2>&1; then
+              mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
+            else
+              mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
+            fi
+
+            if [[ ${#DISTRIBS[@]} -eq 0 ]]; then continue; fi
+            ANY_DISTRIB=1
+
+            for d in "${DISTRIBS[@]}"; do
+              JF="/tmp/stack_${d}.json"
+
+              python3 - "$d" "$JF" <<'PYIN'
+          import json, sys
+          d = sys.argv[1]
+          jf = sys.argv[2]
+          obj = {"subsystems":[{"subsystem":"distr","config":[{"method":"distr_debug_placement_map_dump","params":{"name":d}}]}]}
+          with open(jf, "w") as f:
+              f.write(json.dumps(obj))
+          PYIN
+
+              sudo docker cp "$JF" "$CN:$JF" || true
+
+              # Try with 120s timeout, retry with 600s on timeout
+              RPC_OK=0
+              for TMO in 120 600; do
+                if sudo timeout "$TMO" docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1"; then
+                  RPC_OK=1; break
+                fi
+                EC=$?
+                if [[ $EC -eq 124 || $EC -eq 137 ]]; then
+                  echo "[${CN}] ${d} RPC timed out after ${TMO}s, retrying..." >&2
+                else
+                  RPC_OK=1; break  # non-timeout failure, still collect what we can
+                fi
+              done
+
+              if [[ $RPC_OK -eq 0 ]]; then
+                echo "[${CN}] ${d} RPC timed out on all attempts — skipping" >&2
+                sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+                rm -f "$JF" || true
+                continue
+              fi
+
+              sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/${CN}__rpc_${d}.log" 2>/dev/null || true
+
+              for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\"$d\\" || true"); do
+                sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
+              done
+
+              sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+              rm -f "$JF" || true
+            done
+          done
+
+          if [[ $ANY_DISTRIB -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
+
+          cat /proc/meminfo | grep -i huge > "$STAGING/hugepage_meminfo.txt" 2>/dev/null || true
+
+          TAR="/tmp/${HOST}_distrib_dumps_${TS}.tgz"
+          tar -C "$STAGING" -czf "$TAR" . 2>/dev/null || true
+          echo "$TAR"
+          """
+
+          # NOTE: the only heredoc above (<<'PYIN') is inside the REMOTE SCRIPT,
+          # not inside YAML. YAML never sees it (we send script via stdin).
+
+          for ip in storage_ips:
+              print(f"=== {ip} ===", flush=True)
+
+              # Run remote script via stdin (no YAML heredoc)
+              cmd = ssh_base + [f"{ssh_user}@{ip}", "bash", "-s"]
+              p = subprocess.run(cmd, input=remote_script.encode(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+              out = p.stdout.decode(errors="replace").strip().splitlines()
+              last = out[-1].strip() if out else ""
+              last = last.replace("\r", "")
+
+              if last in ("NO_SPDK_CONTAINER", "BDEV_EMPTY", "NO_DISTRIBS") or not last.startswith("/tmp/"):
+                  print(f"[{ip}] WARN: distrib collection skipped/failed: {last or '(no output)'}", flush=True)
+                  continue
+
+              dest_dir = f"{run_base}/{ip}/{tag}"
+              os.makedirs(dest_dir, exist_ok=True)
+
+              scp_cmd = scp_base + [f"{ssh_user}@{ip}:{last}", dest_dir + "/"]
+              subprocess.run(scp_cmd, check=False)
+
+              print(f"[{ip}] ✓ Saved → {dest_dir}/{os.path.basename(last)}", flush=True)
+          PY
+        
+      - name: Check post-test step warnings
+        if: always()
+        shell: bash
+        run: |
+          warnings=""
+          [[ "${{ steps.post-cleanup.outcome }}" == "failure" ]] && warnings="${warnings}Post-test cleanup, "
+          [[ "${{ steps.collect-graylog.outcome }}" == "failure" ]] && warnings="${warnings}Graylog collection, "
+          [[ "${{ steps.collect-mgmt.outcome }}" == "failure" ]] && warnings="${warnings}Mgmt snapshots, "
+          [[ "${{ steps.collect-docker.outcome }}" == "failure" ]] && warnings="${warnings}Docker logs, "
+          [[ "${{ steps.collect-distrib.outcome }}" == "failure" ]] && warnings="${warnings}Distrib dumps, "
+
+          if [[ -n "$warnings" ]]; then
+            warnings="${warnings%, }"
+            echo "POST_TEST_WARNINGS=${warnings}" >> "$GITHUB_ENV"
+            echo "::warning::Post-test steps had issues: ${warnings}"
+          else
+            echo "All post-test collection steps succeeded."
+          fi
+      - name: Stop MinIO trace logging and save
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${MC_TRACE_PID:-}" ]; then
+            echo "Stopping MinIO trace (PID=${MC_TRACE_PID})..."
+            kill "${MC_TRACE_PID}" 2>/dev/null || true
+            wait "${MC_TRACE_PID}" 2>/dev/null || true
+          fi
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            LINES=$(wc -l < "${MINIO_TRACE_LOG}")
+            SIZE=$(du -h "${MINIO_TRACE_LOG}" | cut -f1)
+            echo "=== MinIO trace log: ${LINES} lines, ${SIZE} ==="
+            cp "${MINIO_TRACE_LOG}" sbcli/e2e/minio-trace.log 2>/dev/null || true
+          else
+            echo "No MinIO trace log found (backup tests may not have run)"
+          fi
+          # Cleanup: only our own per-run trace log + mc binary — never a
+          # glob/pkill that could hit another parallel job's files or
+          # processes on this shared VM.
+          rm -f "${MINIO_TRACE_LOG:-}" 2>/dev/null || true
+          rm -f "${MC_BIN:-}" 2>/dev/null || true
 
       - name: Upload logs (always)
         if: always()
@@ -1356,6 +1734,7 @@ jobs:
           path: |
             simplyBlockDeploy/bare-metal/bootstrap.log
             sbcli/e2e/output.log
+            sbcli/e2e/minio-trace.log
             sbcli/e2e/logs/**
           if-no-files-found: warn
 

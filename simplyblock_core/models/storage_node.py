@@ -1,23 +1,61 @@
-# coding=utf-8
 import time
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 from uuid import uuid4
 
-from simplyblock_core import utils
-from simplyblock_core.models.base_model import BaseNodeObject, BaseModel
+from pydantic import SecretStr
+
+from simplyblock_core import constants, utils
+from simplyblock_core.models.base_model import (
+    BaseModel,
+    BaseNodeObject,
+    default_factory,
+)
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.indices import Index
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
+from simplyblock_core.models.nvme_device import (
+    JMDevice,
+    NVMeDevice,
+    RemoteDevice,
+    RemoteJMDevice,
+)
 from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.settings import Settings
 from simplyblock_core.snode_client import SNodeClient
+from simplyblock_core.utils import rpc_budget
 
 logger = utils.get_logger(__name__)
 
 
 class StorageNode(BaseNodeObject):
+
+    _WATCHED = True
+
+    # A JM built on a whole device inherits that device's uuid
+    # (storage_node_ops._create_jm_stack_on_device), so a bare device id does
+    # not say which kind of device it names. The kind is the second segment of
+    # the `device_id` key, which leaves the one-segment prefix meaning "whoever
+    # holds this device, either kind" and the full key meaning one kind only.
+    DEVICE_KIND_NVME = "nvme"
+    DEVICE_KIND_JM = "jm"
+
+    # NVMeDevice and JMDevice are not rows of their own — they live inside this
+    # record — so `device_id` is what makes a device lookup two point reads
+    # instead of a scan of every node and every device on it.
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+        Index('system_uuid'),
+        Index('hostname'),
+        Index('device_id', arity=2, extract=lambda node: (
+            [(device.get_id(), StorageNode.DEVICE_KIND_NVME) for device in node.nvme_devices]
+            + ([(node.jm_device.get_id(), StorageNode.DEVICE_KIND_JM)] if node.jm_device else [])
+        )),
+        Index('failover_for', arity=1, extract=lambda node: [
+            (peer,) for peer in (node.secondary_node_id, node.tertiary_node_id) if peer
+        ]),
+    )
 
     # Restart phase constants (per-LVS)
     RESTART_PHASE_PRE_BLOCK = "pre_block"
@@ -25,9 +63,9 @@ class StorageNode(BaseNodeObject):
     RESTART_PHASE_POST_UNBLOCK = "post_unblock"
 
 
-    alceml_cpu_cores: List[int] = []
+    alceml_cpu_cores: list[int] = default_factory(list)
     alceml_cpu_index: int = 0
-    alceml_worker_cpu_cores: List[int] = []
+    alceml_worker_cpu_cores: list[int] = default_factory(list)
     alceml_worker_cpu_index: int = 0
     api_endpoint: str = ""
     app_thread_mask: str = ""
@@ -46,9 +84,9 @@ class StorageNode(BaseNodeObject):
     cluster_id: str = ""
     cpu: int = 0
     cpu_hz: int = 0
-    ctrl_secret: str = ""
-    data_nics: List[IFace] = []
-    distrib_cpu_cores: List[int] = []
+    ctrl_secret: SecretStr = SecretStr("")
+    data_nics: list[IFace] = default_factory(list)
+    distrib_cpu_cores: list[int] = default_factory(list)
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
     enable_ha_jm: bool = False
@@ -56,12 +94,12 @@ class StorageNode(BaseNodeObject):
     enable_test_device: bool = False
     # None => health check is not applicable (node not in ONLINE/DOWN);
     # health is only measured/shown for ONLINE or DOWN nodes.
-    health_check: Optional[bool] = True
+    health_check: bool | None = True
     host_nqn: str = ""
-    host_secret: str = ""
+    host_secret: SecretStr = SecretStr("")
     hostname: str = ""
     hugepages: int = 0
-    ib_devices: List[IFace] = []
+    ib_devices: list[IFace] = default_factory(list)
     id_device_by_nqn: bool = False
     iobuf_large_bufsize: int = 0
     iobuf_large_pool_count: int = 0
@@ -76,11 +114,13 @@ class StorageNode(BaseNodeObject):
     jm_vuid: int = 0
     lvols: int = 0
     lvstore: str = ""
-    lvstore_stack: List[dict] = []
-    lvstore_stack_secondary: List[dict] = []
-    lvstore_stack_tertiary: List[dict] = []
+    lvstore_stack: list[dict] = default_factory(list)
+    # Despite the names, these hold the UUID of the primary whose LVS this node
+    # serves as a peer for — not a bdev stack.
+    lvstore_stack_secondary: str = ""
+    lvstore_stack_tertiary: str = ""
     lvol_subsys_port: int = 9090
-    lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
+    lvstore_ports: dict = default_factory(dict)  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0
     max_prov: int = 0
     max_snap: int = 0
@@ -92,27 +132,46 @@ class StorageNode(BaseNodeObject):
     number_of_devices: int = 0
     number_of_distribs: int = 4
     number_of_alceml_devices: int = 0
-    nvme_devices: List[NVMeDevice] = []
+    nvme_devices: list[NVMeDevice] = default_factory(list)
     online_since: str = ""
     # ISO timestamp of when this node entered STATUS_DOWN (cleared on any other
     # status). Used to apply a grace window before a DOWN node counts toward the
     # cluster suspend threshold — a transient DOWN must not suspend the cluster.
     down_since: str = ""
+    # ISO timestamp of when this node entered STATUS_IN_SHUTDOWN (cleared on any
+    # other status). The monitor uses it to reconcile a node stranded in
+    # in_shutdown back to OFFLINE if the shutdown never completed and its SPDK is
+    # dead — defense against a lost-update reverting the offline flip (incident
+    # 2026-06-18).
+    shutdown_since: str = ""
     partitions_count: int = 0  # Unused
-    poller_cpu_cores: List[int] = []
-    ssd_pcie: List = []
+    poller_cpu_cores: list[int] = default_factory(list)
+    ssd_pcie: list = default_factory(list)
+    # lblk cluster mode: the configured block-device selection for this node,
+    # entries {name, serial, by_id, size, numa}. Parallel to ssd_pcie (which
+    # stays empty in lblk mode). Persisted so restart re-resolves devices
+    # (serial-first) without depending on the host config file.
+    lblk_devices: list[dict] = default_factory(list)
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
-    remote_devices: List[RemoteDevice] = []
-    remote_jm_devices: List[RemoteJMDevice] = []
-    rpc_password: str = ""
+    # Per-node restart claim: owner token + ISO timestamp of the actor
+    # currently driving this node's restart. Written atomically by
+    # try_set_node_restarting, heartbeated by the restart_storage_node
+    # wrapper, released on exit. A claim older than
+    # constants.RESTART_CLAIM_TTL_SEC is stale (driver died) and may be
+    # taken over. Only meaningful while status is RESTARTING/IN_SHUTDOWN.
+    restart_claim_owner: str = ""
+    restart_claim_ts: str = ""
+    remote_devices: list[RemoteDevice] = default_factory(list)
+    remote_jm_devices: list[RemoteJMDevice] = default_factory(list)
+    rpc_password: SecretStr = SecretStr("")
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
-    jm_ids: List[str] = []
+    jm_ids: list[str] = default_factory(list)
     spdk_cpu_mask: str = ""
     l_cores: str = ""
     spdk_debug: bool = False
@@ -129,9 +188,16 @@ class StorageNode(BaseNodeObject):
     # Per-LVS restart phase tracking: {lvs_name: phase_string}
     # Phases: "pre_block", "blocked", "post_unblock", "" (not in restart)
     # Used by other services to gate sync deletes and create/clone/resize registrations.
-    restart_phases: dict = {}
+    restart_phases: dict = default_factory(dict)
     nvmf_port: int = 4420
     physical_label: int = 0
+    # Operator-supplied failure-domain id (rack/cabinet/DC). 32-bit integer,
+    # default -1 (unset); a value >= 0 activates failure-domain placement for
+    # the node. Mandatory when the cluster has enable_failure_domain set.
+    # Used both as the control-plane anti-affinity key for JM/secondary/tertiary
+    # placement and emitted verbatim into the distrib cluster map for the data
+    # plane.
+    failure_domain: int = -1
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False
@@ -139,6 +205,9 @@ class StorageNode(BaseNodeObject):
     firewall_port: int = 5001
     lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
+    transfer_hublvol: HubLVol = None  # type: ignore[assignment]
+    # spdk image tag
+    spdk_version: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.
@@ -160,6 +229,9 @@ class StorageNode(BaseNodeObject):
             return self.hublvol.nvmf_port
         return 0
 
+    def watch_scope(self):
+        return (self.cluster_id,)
+
     def client(self, **kwargs):
         """Return API client to this node
         """
@@ -169,9 +241,52 @@ class StorageNode(BaseNodeObject):
             host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
         return SNodeClient(host, **kwargs)
 
-    def rpc_client(self, **kwargs):
+    def from_dict(self, data):
+        # lvstore_stack_secondary/_tertiary were a secondary bdev STACK
+        # (List[dict], default []) until the 2026-04-16 restart refactor
+        # (d48c2d78e) repurposed them as the UUID of the primary this node
+        # peers for — without migrating existing records. Records written
+        # before that carry [] (or, once loaded and re-persisted by a
+        # str-annotated 26.3.0 control plane, the coerced string "[]"), and
+        # the generic str() coercion in BaseModel.from_dict turns the falsy
+        # legacy list into a TRUTHY garbage string: get_storage_node_by_id
+        # then aborts the first post-upgrade node restart with
+        # "StorageNode [] not found" (customer incident 2026-09-04).
+        # Normalize legacy values to "" on every read — heals stored records
+        # the moment they are loaded, with no one-shot migration to miss.
+        # A non-empty legacy list also maps to "": any record carrying one
+        # would have crashed every restart since 2026-04-16 already, so
+        # surviving records hold only [] / "[]" / a valid UUID.
+        if data:
+            for attr in ("lvstore_stack_secondary", "lvstore_stack_tertiary"):
+                value = data.get(attr)
+                if isinstance(value, list) or value == "[]":
+                    data = dict(data)
+                    for a in ("lvstore_stack_secondary", "lvstore_stack_tertiary"):
+                        v = data.get(a)
+                        if isinstance(v, list) or v == "[]":
+                            data[a] = ""
+                    break
+        return super().from_dict(data)
+
+    def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
+
+        While a port-fence budget is active on this thread (see
+        utils/rpc_budget), a caller that does not ask for a specific timeout
+        gets the fence budget instead of the 180s/retry=3 default. The fenced
+        region reaches this constructor through model methods it does not own
+        -- recreate_hublvol, connect_to_hublvol, create_transfer_hublvol and
+        expose_bdev below them -- so bounding it here is the only way to cover
+        them without threading a timeout through every signature. Callers that
+        pass an explicit timeout keep it: bdev_wait_for_examine needs longer
+        than the default and asks for it.
         """
+        budget = rpc_budget.current_budget()
+        if budget is not None:
+            timeout, retry = budget
+            kwargs.setdefault("timeout", timeout)
+            kwargs.setdefault("retry", retry)
         host = self.mgmt_ip
         if Settings().tls_connect != "disabled":
             host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
@@ -205,8 +320,7 @@ class StorageNode(BaseNodeObject):
         rpc_client = self.rpc_client()
 
         try:
-            subsys_list = rpc_client.subsystem_list(nqn)
-            subsys = subsys_list[0] if subsys_list else None
+            subsys = rpc_client.subsystem_get(nqn)
             if subsys is None:
                 if not rpc_client.subsystem_create(
                         nqn=nqn,
@@ -280,7 +394,57 @@ class StorageNode(BaseNodeObject):
         """
         return f"{cluster_nqn}:hublvol:{lvstore_name}"
 
-    def create_hublvol(self, cluster_nqn=None):
+    def prestage_hublvol_subsystem(self, nqn, model_number, port,
+                                   ana_state=None, min_cntlid=1):
+        """Create the NVMf subsystem + listeners for a hublvol NQN WITHOUT
+        its namespace.
+
+        The subsystem/listener half of :meth:`expose_bdev` has no lvstore or
+        bdev dependency, so the restart flow runs it BEFORE the client-port
+        block window; the in-window ``expose_bdev`` then reduces to one probe
+        plus ``add_ns`` (measured 2026-07-21: subsystem+listener creation was
+        ~4 RPCs x ~50ms inside every blocked window). Idempotent — guarded by
+        ``subsystem_get``; parameters MUST match the later ``expose_bdev``
+        call (same nqn/model/port/ana/min_cntlid — see the disjoint-cntlid
+        requirement in ``create_secondary_hublvol``)."""
+        rpc_client = self.rpc_client()
+        subsys = rpc_client.subsystem_get(nqn)
+        if subsys is None:
+            if not rpc_client.subsystem_create(
+                    nqn=nqn,
+                    serial_number='sbcli-cn',
+                    model_number=model_number,
+                    min_cntlid=min_cntlid,
+            ):
+                raise RPCException(f'Failed to pre-create subsystem for {nqn}')
+            existing_listeners: set = set()
+        else:
+            existing_listeners = {
+                (la.get("trtype", "").upper(),
+                 la.get("traddr"),
+                 str(la.get("trsvcid")))
+                for la in (subsys.get("listen_addresses") or [])
+            }
+        for iface in self.data_nics:
+            ip = iface.ip4_address
+            if self.active_rdma:
+                if iface.trtype != "RDMA":
+                    continue
+                trtype = "RDMA"
+            else:
+                if iface.trtype != "TCP":
+                    continue
+                trtype = "TCP"
+            if (trtype, ip, str(port)) in existing_listeners:
+                continue
+            rpc_client.listeners_create(
+                nqn=nqn, trtype=trtype, traddr=ip, trsvcid=port,
+                ana_state=ana_state,
+            )
+        logger.info("Pre-staged hublvol subsystem %s on %s (port %s)",
+                    nqn, self.get_id(), port)
+
+    def create_hublvol(self, cluster_nqn=None, defer_db_write=False):
         """Create a hublvol for this node's lvstore.
 
         If cluster_nqn is provided, use a shared NQN scheme for multipath.
@@ -322,17 +486,84 @@ class StorageNode(BaseNodeObject):
                     ana_state="optimized",
             )
         except RPCException:
-            if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
+            if hublvol_uuid is not None and rpc_client.bdev_get(hublvol_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
 
-            if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+            if self.hublvol and rpc_client.subsystem_get(self.hublvol.nqn):
                 rpc_client.subsystem_delete(self.hublvol.nqn)
                 self.hublvol = None  # type: ignore[assignment]
 
             raise
 
-        self.write_to_db()
+        if not defer_db_write:
+            self.write_to_db()
         return self.hublvol
+
+    def create_transfer_hublvol(self, defer_db_write=False):
+        """Create a hublvol for this node's transfer lvstore.
+
+        ``defer_db_write=True``: skip the full-object node write (an FDB
+        round-trip measured ~150ms INSIDE the port-block window, and a
+        member of the stale-full-write class behind the 2026-07-21 status
+        resurrection) — the caller persists ``transfer_hublvol`` atomically
+        after the unblock."""
+        logger.info(f'Creating transfer hublvol on {self.get_id()}')
+
+        if not self.transfer_hublvol or not self.transfer_hublvol.bdev_name:
+
+            ctrl_name = "transferhub"
+            mig_hub_bdev = f"{self.lvstore}/{ctrl_name}"
+            mig_hub_nqn = f"{constants.CLUSTER_NQN}:{self.cluster_id}:{ctrl_name}:{self.lvstore}"
+
+            self.transfer_hublvol = HubLVol({
+                'nqn': mig_hub_nqn,
+                'bdev_name': mig_hub_bdev,
+                'model_number': str(uuid4()),
+                'nguid': utils.generate_hex_string(16),
+                'nvmf_port': self.hublvol.nvmf_port,
+                'hublvol_name': ctrl_name,
+            })
+
+        rpc_client = self.rpc_client()
+        transfer_hub_uuid = None
+        try:
+            existing = rpc_client.bdev_get(self.transfer_hublvol.bdev_name)
+            if not existing:
+                transfer_hub_uuid = rpc_client.bdev_lvol_create_hublvol(
+                    self.lvstore, name=self.transfer_hublvol.hublvol_name)
+                if not transfer_hub_uuid:
+                    return None, None, f"Failed to create migration hublvol on {self.get_id()}"
+                logger.info(
+                    f"_ensure_hub_attached: created  name={self.transfer_hublvol.bdev_name} uuid={transfer_hub_uuid}")
+            else:
+                transfer_hub_uuid = existing.get('uuid', '')
+                logger.info(f"_ensure_hub_attached: reusing existing {self.transfer_hublvol.bdev_name}")
+
+            self.transfer_hublvol.uuid = transfer_hub_uuid
+
+            self.expose_bdev(
+                    nqn=self.transfer_hublvol.nqn,
+                    bdev_name=self.transfer_hublvol.bdev_name,
+                    model_number=self.transfer_hublvol.model_number,
+                    uuid=self.transfer_hublvol.uuid,
+                    nguid=self.transfer_hublvol.nguid,
+                    port=self.transfer_hublvol.nvmf_port,
+                    ana_state="optimized",
+            )
+        except RPCException:
+            if transfer_hub_uuid is not None and rpc_client.bdev_get(transfer_hub_uuid):
+                rpc_client.bdev_lvol_delete_hublvol(transfer_hub_uuid)
+
+            if self.transfer_hublvol and rpc_client.subsystem_get(self.transfer_hublvol.nqn):
+                rpc_client.subsystem_delete(self.transfer_hublvol.nqn)
+                self.transfer_hublvol = None  # type: ignore[assignment]
+
+            raise
+
+        if not defer_db_write:
+            self.write_to_db()
+        return self.transfer_hublvol
+
 
     def create_secondary_hublvol(self, primary_node, cluster_nqn):
         """Create and expose a hublvol on this node for a LVStore where this node is sec_1.
@@ -347,7 +578,7 @@ class StorageNode(BaseNodeObject):
 
         bdev_name = f'{lvstore_name}/hublvol'
         # Check if hublvol already exists for this LVStore on this node
-        if rpc_client.get_bdevs(bdev_name):
+        if rpc_client.bdev_get(bdev_name):
             logger.info(f'Secondary hublvol already exists: {bdev_name}')
         else:
             ret = rpc_client.bdev_lvol_create_hublvol(lvstore_name)
@@ -402,7 +633,7 @@ class StorageNode(BaseNodeObject):
         logger.info('Adopting hublvol %s on %s', bdev_name, self.get_id())
         rpc_client = self.rpc_client()
 
-        if not rpc_client.get_bdevs(bdev_name):
+        if not rpc_client.bdev_get(bdev_name):
             if not rpc_client.bdev_lvol_create_hublvol(lvstore_name):
                 raise RPCException(f'Failed to create adopted hublvol for {lvstore_name}')
         else:
@@ -434,7 +665,7 @@ class StorageNode(BaseNodeObject):
             rpc_client = self.rpc_client()
 
             try:
-                if not rpc_client.get_bdevs(self.hublvol.bdev_name):
+                if not rpc_client.bdev_get(self.hublvol.bdev_name):
                     ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
                     if not ret:
                         logger.error(f'Failed to recreate hublvol on {self.get_id()}')
@@ -461,12 +692,22 @@ class StorageNode(BaseNodeObject):
                 self.create_hublvol()
                 return True
             except RPCException as e:
-                logger.error("Error establishing hublvol: %s", e.message)
+                logger.error("Error establishing hublvol: %s", e)
                 return False
 
-    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary",
-                           timeout=None, rpc_timeout=None, lvs_node=None):
+    def connect_to_hublvol(self, primary_node, failover_node=None, *, role,
+                           timeout=None, rpc_timeout=None, lvs_node=None,
+                           coordinator_lock=None, attach_only=False):
         """Connect to a primary node's hublvol, optionally with multipath failover.
+
+        ``role`` is required and must be this node's role for the LVS being
+        wired up ("secondary" or "tertiary"), derived from topology
+        (secondary_node_id / tertiary_node_id back-refs) — NEVER from list
+        position or a default. It is stamped onto the LVS via
+        bdev_lvol_set_lvs_opts; a wrong value gives two nodes the same role
+        for one LVS (the old ``role="secondary"`` default did exactly that
+        to activation-mode tertiary recreates, mass_create_delete_k8s
+        2026-07-14: LVS_11 tertiary worker-1 stamped "secondary").
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
         multipath so that IO automatically fails over from the primary path
@@ -531,7 +772,7 @@ class StorageNode(BaseNodeObject):
         # NQN/port/UUID) — see create_secondary_hublvol.
         remote_bdev = f"{lvs_node.hublvol.bdev_name}n1"
 
-        if not rpc_client.get_bdevs(remote_bdev):
+        if not rpc_client.bdev_get(remote_bdev):
             # All hublvol NVMe-oF attach/detach now flows through a single
             # cross-process coordinator (FDB-locked, cooldown-gated,
             # detach-and-wait-gone). Previously two services could fire
@@ -548,13 +789,49 @@ class StorageNode(BaseNodeObject):
             )
             peers = [primary_node] + ([failover_node] if failover_node else [])
             coordinator = HublvolReconnectCoordinator(DBController())
+            # coordinator_lock: pre-entered advisory lock from
+            # HublvolReconnectCoordinator.acquire_lock — the restart
+            # port-block window acquires it BEFORE blocking the client port
+            # (the acquire txn measured avg 858ms inside the window,
+            # 2026-07-21) and releases it after the unblock. Ownership stays
+            # with the caller.
             if not coordinator.reconcile(self, lvs_node, peers, role=role,
-                                         rpc_timeout=rpc_timeout):
+                                         rpc_timeout=rpc_timeout,
+                                         lock=coordinator_lock):
                 logger.error(
                     "Hublvol reconcile failed for %s on %s (role=%s)",
                     lvs_node.hublvol.bdev_name, self.get_id(), role,
                 )
                 return False
+
+        if attach_only:
+            # Pre-block staging (2026-07-22): the NVMe-oF controller attach is
+            # inert until bdev_lvol_connect_hublvol registers the hub as the
+            # LVS redirect target — so the attach (the coordinator round-trips
+            # above) runs BEFORE the client-port-block window and only
+            # set_lvs_opts + connect_hublvol remain inside it. When the target
+            # subsystem is still namespace-less (a restarting leader whose
+            # hublvol bdev is created only after the in-window examine), the
+            # controller attaches empty and the n1 bdev surfaces via AER after
+            # the in-window add_ns — the wait below covers that.
+            return True
+
+        if not rpc_client.bdev_get(remote_bdev):
+            # Attach done (either just now or pre-staged with attach_only)
+            # but the namespace bdev has not surfaced yet — the target's
+            # add_ns may have completed only milliseconds ago and the AER
+            # hot-add propagates asynchronously. Poll briefly, then PROCEED
+            # either way (pre-existing semantics: connect_hublvol below is
+            # the arbiter and fails loudly if the bdev is truly absent).
+            for _ in range(10):
+                time.sleep(0.1)
+                if rpc_client.bdev_get(remote_bdev):
+                    break
+            else:
+                logger.warning(
+                    "Hublvol bdev %s not surfaced on %s yet after attach; "
+                    "proceeding — connect_hublvol will verify",
+                    remote_bdev, self.get_id())
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 lvs_node.lvstore,
@@ -571,6 +848,21 @@ class StorageNode(BaseNodeObject):
             logger.error("bdev_lvol_connect_hublvol failed for %s on %s",
                          lvs_node.lvstore, self.get_id())
             return False
+
+        # Assert the hublvol multipath policy on the way out. The coordinator
+        # already does this, but it is skipped entirely when the remote bdev
+        # already exists (the guard at the top of this method), which leaves a
+        # window where a re-attached hublvol runs at SPDK's ACTIVE_PASSIVE
+        # default and one NIC of the leader carries all hub IO. Observed on a
+        # non-outaged peer during soak 2026-08-11 (LVS_14 at active_passive
+        # until a later reconcile re-asserted it). wait=False: this is the last
+        # step of the in-freeze / port-block path, so it must not poll.
+        from simplyblock_core.utils.hublvol_reconnect import (
+            ensure_hublvol_active_active,
+        )
+        ensure_hublvol_active_active(
+            rpc_client, lvs_node.hublvol.bdev_name, self.get_id(), role,
+            wait=False, request_timeout=rpc_timeout)
 
         return True
 
@@ -622,27 +914,85 @@ class StorageNode(BaseNodeObject):
             **kwargs,
         )
 
-    def wait_for_jm_rep_tasks_to_finish(self, jm_vuid):
-        if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
-            return True # no lvstore means no need to wait
-        retry = 10
+    def wait_for_jm_rep_tasks_to_finish(self, jm_vuid, retry=10, delay=20):
+        """Wait until this node reports no in-flight JM replication for jm_vuid.
+
+        Every exit from this loop must be bounded. The RPC target is a *peer*
+        that the caller is waiting on, and that peer can die while we wait —
+        so an RPC failure has to consume budget exactly like a "still busy"
+        answer does.
+
+        Incident 2026-08-17 22:03, multipath soak iteration 1: a container_kill
+        on node A started JM history replication on peer B; A's restart then
+        entered this wait, B answered once ("replication task found"), and B was
+        host-rebooted ~1 s later. From then on every jc_get_jm_status raised,
+        the old ``except`` branch neither decremented ``retry`` nor slept, and
+        this loop spun for 50 minutes (only urllib3's connect-retries paced it).
+        A stayed RESTARTING forever, which in turn deferred B's own restart
+        (tasks_runner_restart's strict one-restart-at-a-time) and made
+        StorageNodeMonitor stand down ("has an active restart task"), so B's
+        SPDK was never brought back: a three-way deadlock where each party
+        behaved as designed. Note the pre-check below is deliberately inside
+        the guarded section too — when the peer is already gone it used to
+        raise straight out of this method.
+        """
+        deadline = time.time() + retry * delay
         while retry > 0:
             try:
+                if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+                    return True  # no lvstore means no need to wait
                 jm_replication_tasks = False
                 ret = self.rpc_client().jc_get_jm_status(jm_vuid)
                 for jm in ret:
                     if ret[jm] is False:  # jm is not ready (has active replication task)
                         jm_replication_tasks = True
                         break
-                if jm_replication_tasks:
-                    logger.warning(f"Replication task found on node: {self.get_id()}, jm_vuid: {jm_vuid}, retry...")
-                    retry -= 1
-                    time.sleep(20)
-                else:
+                if not jm_replication_tasks:
                     return True
-            except Exception:
-                logger.warning("Failed to get replication task!")
+                logger.warning(
+                    f"Replication task found on node: {self.get_id()}, "
+                    f"jm_vuid: {jm_vuid}, retry...")
+            except Exception as e:
+                # Unreachable peer: consume budget and pace the loop, and stop
+                # early once the control plane agrees the peer is gone — the
+                # caller has usually already seen it fail (e.g. "hublvol ...
+                # no path attached") and waiting out the full budget only
+                # widens the window in which our own node blocks a peer.
+                logger.warning(
+                    f"Failed to get replication task from {self.get_id()} "
+                    f"(jm_vuid {jm_vuid}): {e}")
+                if not self._is_peer_reachable_for_jm_wait():
+                    logger.warning(
+                        f"Node {self.get_id()} is not usable (status="
+                        f"{self.status}); abandoning the JM replication wait "
+                        f"for jm_vuid {jm_vuid}")
+                    return False
+            retry -= 1
+            if retry <= 0 or time.time() >= deadline:
+                break
+            time.sleep(delay)
+        logger.error(
+            f"Gave up waiting for JM replication on {self.get_id()} "
+            f"(jm_vuid {jm_vuid}) after {retry * delay if retry > 0 else 0}s budget")
         return False
+
+    def _is_peer_reachable_for_jm_wait(self):
+        """True unless the control plane already considers this node dead.
+
+        Read fresh: the record this object was built from predates the outage
+        that is making the RPCs fail.
+        """
+        from simplyblock_core.db_controller import DBController
+        try:
+            fresh = DBController().get_storage_node_by_id(self.get_id())
+        except Exception:
+            return True  # can't tell — keep the bounded retries
+        return fresh.status not in (
+            StorageNode.STATUS_OFFLINE,
+            StorageNode.STATUS_REMOVED,
+            StorageNode.STATUS_IN_SHUTDOWN,
+            StorageNode.STATUS_SCHEDULABLE,
+        )
 
     def lvol_sync_del(self) -> bool:
         from simplyblock_core.db_controller import DBController
@@ -690,9 +1040,9 @@ class StorageNode(BaseNodeObject):
         time.sleep(0.250)
         return True
 
-    def uptime(self) -> Optional[timedelta]:
+    def uptime(self) -> timedelta | None:
         return (
-            datetime.now(timezone.utc) - datetime.fromisoformat(self.online_since)
+            datetime.now(UTC) - datetime.fromisoformat(self.online_since)
             if self.online_since and self.status == StorageNode.STATUS_ONLINE
             else None
         )

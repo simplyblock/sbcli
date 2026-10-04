@@ -1,18 +1,16 @@
-#!/usr/bin/env python
-# encoding: utf-8
 
 import json
 import logging
+import os
 import re
-from typing import List, Tuple
 
 import boto3
 import requests
-
-from simplyblock_core import shell_utils
-from simplyblock_core.utils.pci import PCIAddress
-import simplyblock_core.utils.pci as pci_utils
 from pydantic import BaseModel
+
+import simplyblock_core.utils.pci as pci_utils
+from simplyblock_core.utils import shell as shell_utils
+from simplyblock_core.utils.pci import PCIAddress
 
 
 # Type definitions
@@ -28,13 +26,13 @@ class NVMeController(BaseModel):
     Transport: str
     ModelNumber: str
     SerialNumber: str
-    Namespaces: List[NVMENamespace]
+    Namespaces: list[NVMENamespace]
 
 
 class NVMeSubsystem(BaseModel):
     SubsystemNQN: str
-    Controllers: List[NVMeController]
-    Namespaces: List[NVMENamespace]
+    Controllers: list[NVMeController]
+    Namespaces: list[NVMENamespace]
 
 
 class NVMeDevice(BaseModel):
@@ -53,32 +51,32 @@ class NVMeDevice(BaseModel):
 logger = logging.getLogger(__name__)
 
 
-def get_spdk_pcie_list() -> List[PCIAddress]:
+def get_spdk_pcie_list() -> list[PCIAddress]:
     """
     Get a list of PCIe devices bound to SPDK-compatible drivers.
 
     Returns:
-        List[PCIAddress]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+        list[PCIAddress]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
     return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
 
-def get_nvme_pcie_list() -> List[PCIAddress]:
+def get_nvme_pcie_list() -> list[PCIAddress]:
     """
     Get a list of NVMe PCIe devices.
 
     Returns:
-        List[PCIAddress]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+        list[PCIAddress]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
     return pci_utils.list_devices(driver_name='nvme')
 
 
-def get_nvme_pcie() -> List[Tuple[str, Tuple[int, int]]]:
+def get_nvme_pcie() -> list[tuple[str, tuple[int, int]]]:
     """
     Get a list of NVMe PCIe devices with their vendor and device IDs.
 
     Returns:
-        List[Tuple[str, Tuple[int, int]]]: List of tuples containing
+        list[tuple[str, tuple[int, int]]]: List of tuples containing
             (pci_address, (vendor_id, device_id))
     """
     return [
@@ -87,12 +85,12 @@ def get_nvme_pcie() -> List[Tuple[str, Tuple[int, int]]]:
     ]
 
 
-def get_nvme_devices() -> List[NVMeDevice]:
+def get_nvme_devices() -> list[NVMeDevice]:
     """
     Get detailed information about NVMe devices in the system.
 
     Returns:
-        List[NVMeDevice]: A list of dictionaries containing NVMe device information
+        list[NVMeDevice]: A list of dictionaries containing NVMe device information
     """
     logger.debug("function:get_nvme_devices start")
     out, err, rc = shell_utils.run_command("nvme list -v -o json")
@@ -107,7 +105,7 @@ def get_nvme_devices() -> List[NVMeDevice]:
         return []
 
     logger.debug("NVMe device list: %s", data)
-    devices: List[NVMeDevice] = []
+    devices: list[NVMeDevice] = []
 
     if not data or 'Devices' not in data or not data['Devices']:
         return devices
@@ -147,6 +145,407 @@ def get_nvme_devices() -> List[NVMeDevice]:
 
 def get_spdk_devices():
     return []
+
+
+def _read_sysfs(path: str) -> str:
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _disk_holders(name: str) -> list[str]:
+    """Union of /sys/block/<d>/holders and every partition's holders —
+    catches LVM PVs, md members and dm-crypt without a mountpoint."""
+    import os
+    holders: list[str] = []
+    base = f"/sys/block/{name}"
+    try:
+        holders.extend(os.listdir(f"{base}/holders"))
+    except OSError:
+        pass
+    try:
+        for entry in os.listdir(base):
+            if entry.startswith(name):
+                try:
+                    holders.extend(os.listdir(f"{base}/{entry}/holders"))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return sorted(set(holders))
+
+
+DEV_ROOT = "/dev"
+
+# The /dev/disk directories a persistent name is taken from, in the order a
+# device's preferred link is looked for.
+#
+# The ones left out are left out for the same reason. by-uuid and by-label name
+# the filesystem on the device, which mkfs writes and which moves to whatever
+# disk an image is restored onto; by-path names the slot the device is plugged
+# into, which is the enclosure's enumeration order rather than the device's own
+# name and hands its link to the replacement when a disk is swapped. All of them
+# survive a reboot and none of them identifies the device, so recording one
+# would answer the wrong question stably.
+PERSISTENT_LINK_DIRS = ("by-partuuid", "by-id")
+
+# by-id links built from an identifier the device reports about itself, rather
+# than from strings assembled around it.
+#
+# The distinction is what separates the links a real machine offers for one
+# device. A namespace publishes its EUI or its UUID, and beside them two links
+# built from the controller's model and serial, one of them with an index
+# appended -- and that index counts the namespaces in the order they were found,
+# which is the same kind of ordering the kernel name already is. A SCSI device's
+# NAA designator arrives as a wwn- link, so the SCSI case needs no rule of its
+# own.
+_SELF_REPORTED_PREFIXES = ("wwn-", "nvme-eui.", "nvme-uuid.")
+
+
+def _persistent_link_rank(link: str) -> int:
+    """How much of the device's own identity a link carries, lower is better.
+
+    A partition's by-partuuid link comes first because the identifier is
+    written in the partition table on the device itself: it survives the disk
+    being re-exported under another serial, which a hypervisor or an enclosure
+    swap does and which renames every by-id link the partition has.
+    """
+    directory = os.path.basename(os.path.dirname(link))
+    if directory == "by-partuuid":
+        return 0
+    if directory == "by-id" and os.path.basename(link).startswith(_SELF_REPORTED_PREFIXES):
+        return 1
+    return 2
+
+
+def read_persistent_links(dev_root: str = DEV_ROOT) -> dict[str, list[str]]:
+    """Every persistent /dev/disk link the host publishes, by kernel name.
+
+    A kernel name is a position in one boot's enumeration order, not an
+    identity: on the lab workers the disk the kernel calls sdb is the one the
+    hypervisor calls drive-scsi0, and sda is drive-scsi2, so a host that probes
+    its controllers in another order hands each kernel name to another disk.
+    These links are built from what the device reports, and follow it.
+
+    Every link is kept and not only the preferred one, because the side that
+    records a device and the side that looks it up again run different code on
+    different machines: a lookup matched against one side's ranking would miss
+    a device that is present under another of its own names. Each device's list
+    is ordered best first, so ``[0]`` is the one to write down.
+
+    A missing directory is not a failure. A host whose udev publishes nothing
+    has no persistent names, which every caller already handles, and failing
+    here would take down a configure on a machine whose disks are all readable.
+    Nothing is opened and no target is stat'd: the link is read and the name it
+    ends in is recorded, so a link udev left behind when a device was removed
+    lands under a key nobody asks about.
+    """
+    links: dict[str, list[str]] = {}
+    for link_dir in PERSISTENT_LINK_DIRS:
+        directory = os.path.join(dev_root, "disk", link_dir)
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(directory, name)
+            try:
+                target = os.readlink(path)
+            except OSError:
+                continue
+            links.setdefault(os.path.basename(target), []).append(path)
+    for paths in links.values():
+        paths.sort(key=lambda p: (_persistent_link_rank(p), p))
+    return links
+
+
+def _partition_holders(disk_name: str, part_name: str) -> list[str]:
+    """Holders of a single partition (/sys/block/<disk>/<part>/holders)."""
+    import os
+    try:
+        return sorted(set(os.listdir(f"/sys/block/{disk_name}/{part_name}/holders")))
+    except OSError:
+        return []
+
+
+def _root_disk_names() -> list[str]:
+    """Kernel names of the disk(s) backing the root filesystem."""
+    out, _, rc = shell_utils.run_command("findmnt -no SOURCE /")
+    if rc != 0 or not out.strip():
+        return []
+    source = out.strip().splitlines()[0]
+    # Walk PKNAME upwards (handles /dev/sda2, dm/LVM roots, etc.).
+    out, _, rc = shell_utils.run_command(f"lsblk -no PKNAME,NAME {source}")
+    names = set()
+    if rc == 0:
+        for line in out.splitlines():
+            for token in line.split():
+                names.add(token.strip())
+    if source.startswith("/dev/"):
+        names.add(source[len("/dev/"):])
+    return sorted(n for n in names if n)
+
+
+def _subtree_mounted(dev: dict) -> bool:
+    if dev.get("mountpoint"):
+        return True
+    return any(_subtree_mounted(child) for child in dev.get("children") or [])
+
+
+def get_block_devices_info() -> list[dict]:
+    """Inventory of block devices (whole disks AND their partitions) for the
+    lblk cluster mode.
+
+    One dict per lsblk TYPE=disk entry plus one per TYPE=part child, carrying
+    everything the control plane needs for eligibility filtering, identity
+    (serial-first) and AIO bdev creation. Sizes are bytes (lsblk -b).
+
+    Disk identity: SERIAL, falling back to WWN; devices with neither get a
+    synthetic-stable id derived from hostname|by-id-or-name|size so identity
+    survives reboots.
+
+    Partition identity: partitions have no lsblk SERIAL of their own, so the
+    serial is derived from the parent disk's serial plus the PARTUUID
+    ("<parent-serial>-part-<partuuid>") — stable across disk renames and
+    unique per partition. Partitions without a PARTUUID get a synthetic id.
+    """
+    import hashlib
+    import socket
+
+    logger.debug("function:get_block_devices_info start")
+    out, err, rc = shell_utils.run_command(
+        "lsblk -J -b -o NAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
+    if rc != 0:
+        logger.error("Error running lsblk: %s", err)
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse lsblk output: %s", e)
+        return []
+
+    root_disks = _root_disk_names()
+    hostname = socket.gethostname()
+    # Read once for the whole host: every device's links sit in the same two
+    # directories, so a reading per device would walk them again for each disk.
+    persistent = read_persistent_links()
+    devices: list[dict] = []
+    for dev in data.get("blockdevices", []):
+        if dev.get("type") != "disk":
+            continue
+        name = dev.get("name", "")
+        children = dev.get("children") or []
+        by_id_paths = persistent.get(name, [])
+        by_id_path = by_id_paths[0] if by_id_paths else ""
+        serial = (dev.get("serial") or "").strip()
+        wwn = (dev.get("wwn") or "").strip()
+        if not serial:
+            serial = wwn
+        synthetic = False
+        if not serial:
+            seed = f"{hostname}|{by_id_path or name}|{dev.get('size') or 0}"
+            serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
+            synthetic = True
+        numa_node = int(_read_sysfs(f"/sys/block/{name}/device/numa_node") or -1)
+        devices.append({
+            "name": name,
+            "device_path": f"/dev/{name}",
+            "type": dev.get("type"),
+            "size": int(dev.get("size") or 0),
+            "serial": serial,
+            "serial_synthetic": synthetic,
+            "wwn": wwn,
+            "model": (dev.get("model") or "").strip(),
+            "vendor": (dev.get("vendor") or "").strip(),
+            "rota": bool(dev.get("rota")),
+            "ro": bool(dev.get("ro")),
+            "has_partitions": any(c.get("type") == "part" for c in children),
+            "mounted_in_subtree": _subtree_mounted(dev),
+            "holders": _disk_holders(name),
+            "is_root_disk": name in root_disks,
+            "by_id_path": by_id_path,
+            "by_id_paths": by_id_paths,
+            "numa_node": numa_node,
+        })
+        for child in children:
+            if child.get("type") != "part":
+                continue
+            part_name = child.get("name", "")
+            partuuid = (child.get("partuuid") or "").strip()
+            part_paths = persistent.get(part_name, [])
+            part_synthetic = False
+            if partuuid:
+                part_serial = f"{serial}-part-{partuuid.lower()}"
+            else:
+                seed = f"{hostname}|{serial}|{part_name}|{child.get('size') or 0}"
+                part_serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
+                part_synthetic = True
+            devices.append({
+                "name": part_name,
+                "device_path": f"/dev/{part_name}",
+                "type": "part",
+                "size": int(child.get("size") or 0),
+                "serial": part_serial,
+                "serial_synthetic": part_synthetic or synthetic,
+                "partuuid": partuuid,
+                "parent_name": name,
+                "parent_serial": serial,
+                "wwn": wwn,
+                "model": (dev.get("model") or "").strip(),
+                "vendor": (dev.get("vendor") or "").strip(),
+                "rota": bool(dev.get("rota")),
+                "ro": bool(child.get("ro") or dev.get("ro")),
+                "has_partitions": False,
+                "mounted_in_subtree": _subtree_mounted(child),
+                "holders": _partition_holders(name, part_name),
+                "is_root_disk": part_name in root_disks,
+                "by_id_path": part_paths[0] if part_paths else "",
+                "by_id_paths": part_paths,
+                "numa_node": numa_node,
+            })
+    logger.debug("function:get_block_devices_info end")
+    return devices
+
+
+SB_GPT_PARTITION_TYPECODE = "6527994e-2c5a-4eec-9613-8f5944074e8b"
+
+
+def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, dict]:
+    """Split an existing GPT partition into two: a journal partition of
+    ``jm_bytes`` at its original start and a data partition covering the
+    remainder. Used by lblk nodes running on partitions, where the journal
+    can neither own a whole drive nor may we relabel one (the rest of the
+    disk belongs to the OS or other software).
+
+    The parent disk's partition table is modified ONLY within the bounds of
+    the partition being split. The partition must be idle (unmounted, no
+    holders, not backing root). Returns ``(jm_device, data_device)`` — the
+    two new partitions' inventory dicts (get_block_devices_info shape).
+    Raises ValueError on any precondition or tool failure.
+    """
+    import math
+    import os
+
+    inventory = {d["name"]: d for d in get_block_devices_info()}
+    part = inventory.get(part_name)
+    if part is None or part.get("type") != "part":
+        raise ValueError(f"partition {part_name} not found")
+    if part.get("mounted_in_subtree"):
+        raise ValueError(f"partition {part_name} is mounted (busy)")
+    if part.get("holders"):
+        raise ValueError(f"partition {part_name} is held by {part['holders']} (busy)")
+    if part.get("is_root_disk"):
+        raise ValueError(f"partition {part_name} backs the root filesystem")
+    parent = part.get("parent_name", "")
+    if not parent:
+        raise ValueError(f"cannot determine parent disk of {part_name}")
+
+    out, _, rc = shell_utils.run_command(f"lsblk -ndo PTTYPE /dev/{parent}")
+    if rc != 0 or out.strip() != "gpt":
+        raise ValueError(
+            f"disk {parent} has partition table {out.strip() or 'unknown'!r}; "
+            f"splitting a partition for the journal requires GPT")
+
+    sys_part = f"/sys/block/{parent}/{part_name}"
+    try:
+        part_number = int(_read_sysfs(f"{sys_part}/partition"))
+        start_sector = int(_read_sysfs(f"{sys_part}/start"))
+        size_sectors = int(_read_sysfs(f"{sys_part}/size"))
+    except (ValueError, TypeError):
+        raise ValueError(f"cannot read geometry of {part_name} from sysfs")
+
+    # 1 MiB alignment (2048 x 512b sectors) for the data partition start.
+    align = 2048
+    jm_sectors = int(math.ceil(jm_bytes / 512 / align) * align)
+    end_sector = start_sector + size_sectors - 1
+    data_start = start_sector + jm_sectors
+    if data_start + align > end_sector:
+        raise ValueError(
+            f"partition {part_name} ({size_sectors * 512} bytes) is too small "
+            f"to split into a {jm_bytes}-byte journal plus a data partition")
+
+    cmds = [
+        f"sgdisk -d {part_number} /dev/{parent}",
+        (f"sgdisk -a 1 -n {part_number}:{start_sector}:{data_start - 1} "
+         f"-t {part_number}:{SB_GPT_PARTITION_TYPECODE} -c {part_number}:sb_jm /dev/{parent}"),
+        (f"sgdisk -a 1 -n 0:{data_start}:{end_sector} "
+         f"-t 0:{SB_GPT_PARTITION_TYPECODE} -c 0:sb_data /dev/{parent}"),
+    ]
+    for cmd in cmds:
+        out, err, rc = shell_utils.run_command(cmd)
+        if rc != 0:
+            raise ValueError(f"{cmd} failed (rc={rc}): {err or out}")
+
+    _, _, rc = shell_utils.run_command(f"partprobe /dev/{parent}")
+    if rc != 0:
+        _, err, rc = shell_utils.run_command(f"partx -u /dev/{parent}")
+        if rc != 0:
+            raise ValueError(f"failed to re-read partition table of {parent}: {err}")
+    shell_utils.run_command("udevadm settle -t 5")
+
+    # Identify the two new partitions by their start sectors.
+    jm_name = data_name = ""
+    try:
+        for entry in os.listdir(f"/sys/block/{parent}"):
+            if not entry.startswith(parent):
+                continue
+            e_start = _read_sysfs(f"/sys/block/{parent}/{entry}/start")
+            if not e_start:
+                continue
+            if int(e_start) == start_sector:
+                jm_name = entry
+            elif int(e_start) == data_start:
+                data_name = entry
+    except OSError:
+        pass
+    if not jm_name or not data_name:
+        raise ValueError(
+            f"split of {part_name} completed but the new partitions were not "
+            f"found on {parent} (journal at sector {start_sector}, data at "
+            f"{data_start})")
+
+    inventory = {d["name"]: d for d in get_block_devices_info()}
+    if jm_name not in inventory or data_name not in inventory:
+        raise ValueError(
+            f"new partitions {jm_name}/{data_name} missing from inventory "
+            f"after split of {part_name}")
+    return inventory[jm_name], inventory[data_name]
+
+
+def wipe_block_device_signatures(device_name: str) -> tuple[bool, str]:
+    """Wipe partition-table / filesystem signatures from a whole disk
+    (`--force-format` on lblk add-node). Re-validates that the device is not
+    busy before touching it: any mountpoint in the subtree or any holder
+    refuses the wipe. Wipes partitions first, then the disk itself."""
+    import re as _re
+    if not _re.match(r"^[a-zA-Z0-9_\-]+$", device_name):
+        return False, f"invalid device name {device_name!r}"
+    for dev in get_block_devices_info():
+        if dev["name"] == device_name:
+            if dev["mounted_in_subtree"]:
+                return False, f"device {device_name} has mounted filesystems"
+            if dev["holders"]:
+                return False, (f"device {device_name} is held by "
+                               f"{dev['holders']}")
+            if dev["is_root_disk"]:
+                return False, f"device {device_name} backs the root filesystem"
+            break
+    else:
+        return False, f"device {device_name} not found"
+
+    out, _, rc = shell_utils.run_command(
+        f"lsblk -nro NAME -x NAME /dev/{device_name}")
+    if rc != 0:
+        return False, f"lsblk failed for {device_name}"
+    # Children (partitions) first, whole disk last.
+    names = [n for n in out.split() if n and n != device_name]
+    for name in names + [device_name]:
+        _, err, rc = shell_utils.run_command(f"wipefs -a /dev/{name}")
+        if rc != 0:
+            return False, f"wipefs /dev/{name} failed: {err}"
+    return True, ""
 
 
 def _get_mem_info():
@@ -205,7 +604,7 @@ def get_region():
         logger.info(f"Dynamically retrieved region: {region}")
         return region
     except Exception as e:
-        logger.error(f"Failed to retrieve region: {str(e)}")
+        logger.error(f"Failed to retrieve region: {e!s}")
         return ""
 
 
@@ -243,7 +642,7 @@ def detach_ebs_volumes(instance_id):
             logger.info(f"No volumes with matching tags found on instance {instance_id}.")
 
     except Exception as e:
-        logger.error(f"Failed to detach EBS volumes: {str(e)}")
+        logger.error(f"Failed to detach EBS volumes: {e!s}")
 
     return detached_volumes
 
@@ -269,7 +668,7 @@ def attach_ebs_volumes(instance_id, volume_ids):
         logger.info("All volumes attached successfully.")
         return True 
     except Exception as e:
-        logger.error(f"Failed to attach EBS volumes: {str(e)}")
+        logger.error(f"Failed to attach EBS volumes: {e!s}")
         return False
 
 def get_available_device_name(instance_id):
@@ -298,5 +697,5 @@ def get_available_device_name(instance_id):
             device_letter += 1
 
     except Exception as e:
-        logger.error(f"Failed to get available device name: {str(e)}")
+        logger.error(f"Failed to get available device name: {e!s}")
         return None

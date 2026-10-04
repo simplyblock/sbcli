@@ -1,11 +1,10 @@
-from pathlib import Path
 import re
-from typing import Annotated, Optional
+from pathlib import Path
+from typing import Annotated
 
 from pydantic import StringConstraints
 
 from .helpers import single
-
 
 PCI = Path('/sys/bus/pci')
 PCI_DEVICES = PCI / 'devices'
@@ -33,7 +32,7 @@ def device_id(address: PCIAddress) -> int:
     return int((device(address) / 'vendor').read_text(), 16)
 
 
-def list_devices(*, driver_name: Optional[str] = None, device_class: Optional[bytes] = None):
+def list_devices(*, driver_name: str | None = None, device_class: bytes | None = None):
     assert(sum(param is not None for param in [driver_name, device_class]) == 1)
     if driver_name is not None:
         driver = PCI_DRIVERS / driver_name
@@ -49,7 +48,7 @@ def list_devices(*, driver_name: Optional[str] = None, device_class: Optional[by
                 name
                 for device
                 in PCI_DEVICES.iterdir()
-                if int((device / 'class').read_text(), 16).to_bytes(3) == device_class
+                if int((device / 'class').read_text(), 16).to_bytes(3, 'big') == device_class
         ]
 
     raise AssertionError('unreachable')
@@ -65,7 +64,7 @@ def nvme_device_name(address: PCIAddress):
     )
 
 
-def bound_driver_name(address: PCIAddress) -> Optional[str]:
+def bound_driver_name(address: PCIAddress) -> str | None:
     driver = device_driver(address)
     return driver.readlink().name if driver.exists() else None
 

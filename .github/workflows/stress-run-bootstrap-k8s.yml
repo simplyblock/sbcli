@@ -266,11 +266,12 @@ jobs:
       # PRE-BOOTSTRAP CLEANUP
       # ============================================================
       - name: Pre-clean — kill fio/tmux, unmount NFS on all nodes
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -298,12 +299,13 @@ jobs:
           done
 
       - name: Pre-clean — uninstall k3s / k3s-agent, remove containers and sbcli
+        timeout-minutes: 15
         if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -338,11 +340,12 @@ jobs:
           done
 
       - name: Pre-clean — disconnect lvols and unmount /mnt on clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -358,12 +361,13 @@ jobs:
           done
 
       - name: Pre-clean — remove /etc/simplyblock on all nodes
+        timeout-minutes: 15
         if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -374,12 +378,13 @@ jobs:
           done
 
       - name: Reboot storage nodes + wait online + disk reset
+        timeout-minutes: 15
         if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -517,6 +522,9 @@ jobs:
             "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
             "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
             "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
+            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node"
+            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node2"
+            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node-action"
             "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
             "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
             "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
@@ -690,19 +698,21 @@ jobs:
           fi
           test -f sbcli/e2e/stress.py
 
-      - name: Install Python deps
+      - name: Install uv
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          [[ -f "sbcli/e2e/requirements.txt" ]] && pip install -r sbcli/e2e/requirements.txt || true
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before stress
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
 
       - name: Set RUN_DIR_FILE
         shell: bash
@@ -714,28 +724,75 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Enable shared placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          admin_pod="$(kubectl get pods -n "${K8S_NAMESPACE}" --no-headers \
+            -o custom-columns=:metadata.name | grep simplyblock-admin-control | head -1)"
+          kubectl exec -n "${K8S_NAMESPACE}" "${admin_pod}" -- \
+            bash -c "${SBCLI_CMD} cluster set-shared-placement ${CLUSTER_ID} --force" || true
+
       - name: Run stress (foreground; runs until failure)
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 -u stress.py \
+          PYTHONUNBUFFERED=1 ./stress.py \
             --testname "${TEST_CLASS}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             --run_k8s True \
             2>&1 | tee output.log
 
+      - name: Copy raw output.log to each test's NFS folder
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="sbcli/e2e/output.log"
+          if [ ! -f "${out_log}" ]; then
+            echo "No output.log found, skipping"
+            exit 0
+          fi
+          echo "output.log size: $(stat --printf='%s' "${out_log}" 2>/dev/null || echo '?') bytes"
+
+          mapfile -t log_paths < <(
+            grep 'Logs Path:' "${out_log}" 2>/dev/null \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | sed 's/.*Logs Path: *//' \
+              | sed 's/[[:space:]]*$//' || true
+          )
+
+          if [ ${#log_paths[@]} -eq 0 ]; then
+            echo "No 'Logs Path:' entries found in output.log"
+            if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+              cp "${out_log}" "${RUN_BASE_DIR}/github_raw_output.log" || true
+              echo "Saved to ${RUN_BASE_DIR}/github_raw_output.log"
+            fi
+            exit 0
+          fi
+
+          for path in "${log_paths[@]}"; do
+            if [ -d "${path}" ]; then
+              cp "${out_log}" "${path}/github_raw_output.log" || true
+              echo "Saved output.log -> ${path}/github_raw_output.log"
+            else
+              echo "WARN: path does not exist: ${path}"
+            fi
+          done
+
       # ============================================================
       # POST-TEST CLEANUP & ARTIFACTS
       # ============================================================
       - name: Post-test cleanup (kill tmux/fio on clients)
+        timeout-minutes: 15
         if: always()
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null "${SSH_USER}@$1" \
               "bash -s" <<< "$2" || true
           }
@@ -759,9 +816,170 @@ jobs:
           echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
-      - name: Collect Graylog/OpenSearch logs
+      - name: Write Job Summary
         if: always()
-        timeout-minutes: 240
+        shell: bash
+        run: |
+          set -euxo pipefail
+          out_log="sbcli/e2e/output.log"
+          start="${TEST_START_EPOCH:-0}"; end="${TEST_END_EPOCH:-0}"; dur_sec=0
+          [[ "$end" -ge "$start" && "$start" -gt 0 ]] && dur_sec=$((end-start))
+          dur_fmt="${dur_sec}s ($(( dur_sec/3600 ))h $(( (dur_sec%3600)/60 ))m)"
+          failure_summary="(unknown)"
+          if [[ -f "${out_log}" ]]; then
+            failure_summary="$(grep -oE 'MultipleExceptions: .+' "${out_log}" | tail -1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            [[ -z "${failure_summary}" ]] && failure_summary="$(grep -E 'RuntimeError:|AssertionError:' "${out_log}" | tail -1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
+          fi
+          conclusion="SUCCESS"
+          [[ "${{ job.status }}" != "success" ]] && conclusion="FAILED"
+          {
+            echo "## SimplyBlock K8s Stress Run Summary"
+            echo "**Result:** ${conclusion}"
+            echo "### Run Info"
+            echo "- **Test class:** \`${TEST_CLASS}\`"
+            echo "- **K3s master:** \`${K3S_MNODES}\`"
+            echo "- **CLUSTER_ID:** \`${CLUSTER_ID}\`"
+            echo "- **Start (UTC):** ${TEST_START_HUMAN:-unknown}"
+            echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
+            echo "- **Duration:** ${dur_fmt}"
+            echo "### Failure Reason"
+            echo '```'
+            printf '%s\n' "${failure_summary}"
+            echo '```'
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Slack Notification
+        if: always()
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Stress (Bootstrap)"
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping."); sys.exit(0)
+          out_log = "sbcli/e2e/output.log"
+          total = passed = failed = skipped = 0
+          if os.path.isfile(out_log):
+              content = open(out_log).read()
+              def px(pat):
+                  m = re.search(pat, content); return int(m.group(1)) if m else 0
+              total  = px(r'Number of Total Cases:\s*(\d+)')
+              passed = px(r'Number of Passed Cases:\s*(\d+)')
+              failed = px(r'Number of Failed Cases:\s*(\d+)')
+              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          s = int(os.environ.get("TEST_START_EPOCH","0") or "0")
+          e = int(os.environ.get("TEST_END_EPOCH","0") or "0")
+          secs = max(0, e-s) if e>=s>0 else 0
+          dur = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          ok = os.environ.get("JOB_STATUS","") == "success"
+          icon = ":white_check_mark:" if ok else ":x:"
+          status = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+          branch = os.environ.get("GITHUB_REF_NAME","?")
+          wf_name = os.environ.get("SLACK_WF_NAME","Run")
+          run_url = os.environ.get("SLACK_RUN_URL","")
+          test_cls = os.environ.get("TEST_CLASS","") or "all"
+          k3s = os.environ.get("K3S_MNODES","?")
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *K3s master:* `{k3s}`  |  *Test:* `{test_cls}`",
+              "",
+          ]
+          if total > 0:
+              pass_pct = passed*100//total
+              lines += [f":white_check_mark: *Passed:* {passed}/{total} ({pass_pct}%)",
+                        f":x: *Failed:* {failed}", f":fast_forward: *Skipped:* {skipped}"]
+          lines.append(f":link: *Run:* <{run_url}|View on GitHub>")
+          lines.append(f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._")
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+          PYEOF
+
+
+
+      - name: Analyze SPDK core dumps (gdb backtraces)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -uo pipefail
+          # For every SPDK core on a storage node, stage it inside that node's
+          # snode-spdk pod (where the matching bdts binary and symbols live),
+          # run `bt` and `thread apply all bt full`, and save all three
+          # artifacts next to the run logs. Script and rationale:
+          # e2e/scripts/analyze_core_dumps_k8s.sh
+          CORE_SCRIPT="sbcli/e2e/scripts/analyze_core_dumps_k8s.sh"
+          if [[ ! -f "${CORE_SCRIPT}" ]]; then
+            echo "WARN: ${CORE_SCRIPT} not found; skipping core-dump analysis"
+            exit 0
+          fi
+          OUT_DIR="${RUN_BASE_DIR:-}"
+          if [[ -z "${OUT_DIR}" && -n "${RUN_DIR_FILE:-}" && -f "${RUN_DIR_FILE}" ]]; then
+            OUT_DIR="$(tr -d '\r\n' < "${RUN_DIR_FILE}")"
+          fi
+          if [[ -z "${OUT_DIR}" ]]; then
+            OUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/core_backtraces-$(date -u '+%Y%m%d-%H%M%S')"
+            echo "WARN: no run dir found, falling back to ${OUT_DIR}"
+          fi
+          echo "Core backtraces -> ${OUT_DIR}/core_backtraces"
+          bash "${CORE_SCRIPT}" "${OUT_DIR}" "${NAMESPACE:-simplyblock}" || echo "WARN: core-dump analysis failed"
+
+      - name: Collect Graylog/OpenSearch logs
+        if: '!cancelled()'
+        timeout-minutes: 480
         shell: bash
         run: |
           set +e
@@ -785,7 +1003,25 @@ jobs:
           done
           [ -z "${ADMIN_POD}" ] && echo "No admin pod found, skipping Graylog collection" && exit 0
 
+          # Deploy updated collect_logs.py to admin pod (use /tmp since package dir is read-only)
+          BUILTIN_SCRIPT="/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py"
+          DEPLOYED_SCRIPT="/tmp/collect_logs.py"
+          SCRIPT_SRC="sbcli/scripts/collect_logs.py"
+          if [ -f "${SCRIPT_SRC}" ]; then
+            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:${DEPLOYED_SCRIPT}" 2>/dev/null || \
+              echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
+          fi
+          # Determine which script to use
+          COLLECT_SCRIPT="${BUILTIN_SCRIPT}"
+          if kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- test -f "${DEPLOYED_SCRIPT}" 2>/dev/null; then
+            COLLECT_SCRIPT="${DEPLOYED_SCRIPT}"
+            echo "  Using deployed script: ${COLLECT_SCRIPT}"
+          else
+            echo "  Using built-in script: ${COLLECT_SCRIPT}"
+          fi
+
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
+          OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
           OUTPUT_DIR=""
           if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
             OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
@@ -798,32 +1034,109 @@ jobs:
             python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
           }
 
-          CHUNK=0; CURRENT=${WINDOW_START}
-          while [ ${CURRENT} -lt ${WINDOW_END} ]; do
+          # Build chunk boundaries, then iterate in REVERSE order (newest first)
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            local mgmt_ip_to_use="${MGMT_IP}"
+            if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
+              mgmt_ip_to_use="${OPENSEARCH_IP}"
+            fi
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              python3 "${COLLECT_SCRIPT}" \
+                "${iso}" "${mins}" \
+                --mode kubernetes --namespace "${NAMESPACE}" \
+                --output-dir "${outdir}" \
+                ${extra_flag} \
+                ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
+                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
+              return 1
+            fi
+          }
+
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
             CHUNK=$((CHUNK + 1))
-            CHUNK_END=$((CURRENT + 3600))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
             [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
-            CHUNK_MINUTES=$(( ((CHUNK_END - CURRENT) + 59) / 60 ))
-            CHUNK_ISO=$(epoch_to_iso ${CURRENT})
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
             POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
-            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
-                "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
-                --mode kubernetes --namespace "${NAMESPACE}" \
-                --output-dir "${POD_OUTPUT_DIR}" \
-                ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
-                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
-            2>&1 || {
-              kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-                python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
-                  "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
-                  --mode kubernetes --namespace "${NAMESPACE}" \
-                  --output-dir "${POD_OUTPUT_DIR}" --use-opensearch \
-                  ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
-                  ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
-              2>&1 || true
-            }
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || true
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || true
+              }
+            fi
             TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
               find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
             if [ -n "${TARBALLS}" ]; then
@@ -835,9 +1148,32 @@ jobs:
               done
             fi
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
-            CURRENT=${CHUNK_END}
           done
-          echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
+
+      - name: Notify Slack log collection complete
+        if: always()
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_MSG_TS: ${{ env.SLACK_MSG_TS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_WF_NAME: "Stress Run K8s"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock ${SLACK_WF_NAME}*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_CHANNEL_ID:-}" ] && [ -n "${SLACK_MSG_TS:-}" ]; then
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{\"channel\":\"${SLACK_CHANNEL_ID}\",\"thread_ts\":\"${SLACK_MSG_TS}\",\"text\":\"${MSG}\"}" || true
+          elif [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\":\"${MSG}\"}" || true
+          fi
 
       - name: Collect mgmt snapshots (kubectl exec on admin pod)
         if: always()
@@ -875,98 +1211,6 @@ jobs:
               > "${pod_log_dir}/${pod}.log" 2>&1 || true
           done
           echo "Pod logs saved to ${pod_log_dir}"
-
-      - name: Write Job Summary
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-          out_log="sbcli/e2e/output.log"
-          start="${TEST_START_EPOCH:-0}"; end="${TEST_END_EPOCH:-0}"; dur_sec=0
-          [[ "$end" -ge "$start" && "$start" -gt 0 ]] && dur_sec=$((end-start))
-          dur_fmt="${dur_sec}s ($(( dur_sec/3600 ))h $(( (dur_sec%3600)/60 ))m)"
-          failure_summary="(unknown)"
-          if [[ -f "${out_log}" ]]; then
-            failure_summary="$(grep -oE 'MultipleExceptions: .+' "${out_log}" | tail -1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            [[ -z "${failure_summary}" ]] && failure_summary="$(grep -E 'RuntimeError:|AssertionError:' "${out_log}" | tail -1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
-          fi
-          conclusion="SUCCESS"
-          [[ "${{ job.status }}" != "success" ]] && conclusion="FAILED"
-          {
-            echo "## SimplyBlock K8s Stress Run Summary"
-            echo "**Result:** ${conclusion}"
-            echo "### Run Info"
-            echo "- **Test class:** \`${TEST_CLASS}\`"
-            echo "- **K3s master:** \`${K3S_MNODES}\`"
-            echo "- **CLUSTER_ID:** \`${CLUSTER_ID}\`"
-            echo "- **Start (UTC):** ${TEST_START_HUMAN:-unknown}"
-            echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
-            echo "- **Duration:** ${dur_fmt}"
-            echo "### Failure Reason"
-            echo '```'
-            printf '%s\n' "${failure_summary}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Send Slack Notification
-        if: always()
-        shell: bash
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          JOB_STATUS: ${{ job.status }}
-          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "K8s Stress (Bootstrap)"
-        run: |
-          python3 - <<'PYEOF'
-          import json, os, re, sys, urllib.request, urllib.error
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping."); sys.exit(0)
-          out_log = "sbcli/e2e/output.log"
-          total = passed = failed = skipped = 0
-          if os.path.isfile(out_log):
-              content = open(out_log).read()
-              def px(pat):
-                  m = re.search(pat, content); return int(m.group(1)) if m else 0
-              total  = px(r'Number of Total Cases:\s*(\d+)')
-              passed = px(r'Number of Passed Cases:\s*(\d+)')
-              failed = px(r'Number of Failed Cases:\s*(\d+)')
-              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
-          s = int(os.environ.get("TEST_START_EPOCH","0") or "0")
-          e = int(os.environ.get("TEST_END_EPOCH","0") or "0")
-          secs = max(0, e-s) if e>=s>0 else 0
-          dur = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
-          ok = os.environ.get("JOB_STATUS","") == "success"
-          icon = ":white_check_mark:" if ok else ":x:"
-          status = "SUCCESS" if ok else "FAILURE"
-          mention = "" if ok else " <!channel>"
-          branch = os.environ.get("GITHUB_REF_NAME","?")
-          wf_name = os.environ.get("SLACK_WF_NAME","Run")
-          run_url = os.environ.get("SLACK_RUN_URL","")
-          test_cls = os.environ.get("TEST_CLASS","") or "all"
-          k3s = os.environ.get("K3S_MNODES","?")
-          lines = [
-              f"{icon} *SimplyBlock {wf_name}*{mention}",
-              f"*Status:* {status}  |  *Duration:* {dur}",
-              f"*Branch:* `{branch}`  |  *K3s master:* `{k3s}`  |  *Test:* `{test_cls}`",
-              "",
-          ]
-          if total > 0:
-              pass_pct = passed*100//total
-              lines += [f":white_check_mark: *Passed:* {passed}/{total} ({pass_pct}%)",
-                        f":x: *Failed:* {failed}", f":fast_forward: *Skipped:* {skipped}"]
-          lines.append(f":link: *Run:* <{run_url}|View on GitHub>")
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(webhook, data=json.dumps(payload).encode(),
-                                        headers={"Content-Type":"application/json"})
-          try:
-              urllib.request.urlopen(req, timeout=15); print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack failed: {exc}", file=sys.stderr)
-          PYEOF
-
       - name: Upload logs (always)
         if: always()
         uses: actions/upload-artifact@v4

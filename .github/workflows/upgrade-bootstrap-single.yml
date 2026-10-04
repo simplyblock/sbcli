@@ -11,6 +11,10 @@ on:
         type: string
         required: true
         description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
+      SIMPLYBLOCK_DEPLOY_BRANCH:
+        type: string
+        default: "main"
+        description: "Branch of simplyblock-io/simplyBlockDeploy to clone bootstrap-cluster.sh from"
       CUSTOM_IMAGES:
         type: string
         default: 'base_spdk="" target_spdk="" base_docker="" target_docker=""'
@@ -21,22 +25,19 @@ on:
         description: "sbcli branch / version tag to upgrade to (e.g. main)"
       STORAGE_PRIVATE_IPS:
         type: string
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         type: string
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         type: string
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         type: string
-        default: "192.168.10.211"
-      NR_HUGEPAGES:
-        type: string
-        default: "2048"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         type: string
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SSH_USER:
         type: string
         default: "root"
@@ -49,21 +50,15 @@ on:
       NFS_MOUNTPOINT:
         type: string
         default: "/mnt/nfs_share"
-      BOOTSTRAP_MAX_LVOL:
+      BOOTSTRAP_PARAMS:
         type: string
-        default: "300"
-      BOOTSTRAP_DATA_CHUNKS:
-        type: string
-        default: "2"
-      BOOTSTRAP_PARITY_CHUNKS:
-        type: string
-        default: "2"
-      BOOTSTRAP_JOURNAL_PARTITION:
-        type: string
-        default: "1"
-      BOOTSTRAP_HA_JM_COUNT:
-        type: string
-        default: "3"
+        default: "max-subsys=75,data-chunks-per-stripe=1,parity-chunks-per-stripe=2,journal-partition=1,ha-jm-count=4"
+      BOOTSTRAP_CONFIGURE_MAX_LVOL:
+        type: boolean
+        default: false
+      BOOTSTRAP_CONFIGURE_MAX_SUBSYS:
+        type: boolean
+        default: false
       BOOTSTRAP_HA_TYPE:
         type: string
         default: "single"
@@ -72,10 +67,20 @@ on:
         default: "eth1"
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
         type: boolean
-        default: false
+        default: true
+      EXTRA_CLUSTER_ARGS:
+        type: string
+        default: ""
+      EXTRA_SN_ARGS:
+        type: string
+        default: ""
+      CLUSTER_SECURITY:
+        type: string
+        default: "backup"
+        description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
       TEST_CLASS:
         type: string
-        default: "major_upgrade_single"
+        default: "TestMajorUpgradeSingleNode"
       RUN_LABEL:
         type: string
         default: ""
@@ -86,6 +91,10 @@ on:
       BASE_SBCLI_BRANCH:
         description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
         required: true
+      SIMPLYBLOCK_DEPLOY_BRANCH:
+        description: "Branch of simplyblock-io/simplyBlockDeploy to clone bootstrap-cluster.sh from"
+        required: false
+        default: "main"
       CUSTOM_IMAGES:
         description: "Image overrides: set base_spdk, target_spdk, base_docker and/or target_docker values, leave as \"\" to skip."
         required: false
@@ -96,27 +105,23 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         description: "Management node(s) IPs"
         required: true
-        default: "192.168.10.211"
-      NR_HUGEPAGES:
-        description: "Hugepages"
-        required: true
-        default: "2048"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
         required: true
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SSH_USER:
         description: "SSH user"
         required: true
@@ -133,44 +138,58 @@ on:
         description: "NFS mountpoint to unmount everywhere"
         required: true
         default: "/mnt/nfs_share"
-      BOOTSTRAP_MAX_LVOL:
-        description: "bootstrap: --max-lvol"
+      BOOTSTRAP_PARAMS:
+        description: "Comma-separated key=value bootstrap params: max-subsys, data-chunks-per-stripe, parity-chunks-per-stripe, journal-partition, ha-jm-count"
         required: true
-        default: "300"
-      BOOTSTRAP_DATA_CHUNKS:
-        description: "bootstrap: --data-chunks-per-stripe"
-        required: true
-        default: "2"
-      BOOTSTRAP_PARITY_CHUNKS:
-        description: "bootstrap: --parity-chunks-per-stripe"
-        required: true
-        default: "2"
-      BOOTSTRAP_JOURNAL_PARTITION:
-        description: "bootstrap: --journal-partition"
-        required: true
-        default: "1"
-      BOOTSTRAP_HA_JM_COUNT:
-        description: "bootstrap: --ha-jm-count"
-        required: true
-        default: "3"
+        default: "max-subsys=75,data-chunks-per-stripe=1,parity-chunks-per-stripe=2,journal-partition=1,ha-jm-count=4"
+      BOOTSTRAP_CONFIGURE_MAX_LVOL:
+        description: "Old base version: pass --max-lvol to storage-node configure (pre-2026-06 sbcli). Leave unchecked unless you know the base version needs it."
+        type: boolean
+        required: false
+        default: false
+      BOOTSTRAP_CONFIGURE_MAX_SUBSYS:
+        description: "Mid-era base version: pass --max-subsys to storage-node configure (2026-06 to 2026-08 sbcli). Leave unchecked unless you know the base version needs it."
+        type: boolean
+        required: false
+        default: false
       BOOTSTRAP_HA_TYPE:
         description: "bootstrap: --ha-type (single-node cluster type)"
         required: true
         default: "single"
       BOOTSTRAP_DATA_NIC:
-        description: "bootstrap: --data-nics"
+        description: "bootstrap: --data-nics (network interface for data traffic)"
         required: true
         default: "eth1"
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
-        description: "Bootstrap: enable node affinity"
+        description: "Bootstrap: enable node affinity (--enable-node-affinity)"
         type: boolean
         required: false
-        default: false
+        default: true
+      EXTRA_CLUSTER_ARGS:
+        description: |
+          Additional arguments to pass to cluster create command (optional)
+          Example: --log-del-interval 10 --cap-warn 80
+        required: false
+        type: string
+      EXTRA_SN_ARGS:
+        description: |
+          Additional arguments to pass to storage-node add-node command (optional)
+          Example: --spdk-debug --enable-test-device
+        required: false
+        type: string
+      CLUSTER_SECURITY:
+        description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
+        required: false
+        type: choice
+        default: "backup"
+        options:
+          - none
+          - backup
       TEST_CLASS:
         description: "Upgrade test class name; defaults to single-node variant (no FIO during upgrade)"
         required: false
         type: string
-        default: "major_upgrade_single"
+        default: "TestMajorUpgradeSingleNode"
 
 concurrency:
   group: simplyblock-lab-upgrade-single
@@ -187,17 +206,18 @@ jobs:
       BASE_SBCLI_BRANCH:   ${{ inputs.BASE_SBCLI_BRANCH }}
       SBCLI_BRANCH:   ${{ inputs.BASE_SBCLI_BRANCH }}
       TARGET_SBCLI_BRANCH: ${{ inputs.TARGET_SBCLI_BRANCH }}
+      SIMPLYBLOCK_DEPLOY_BRANCH: ${{ inputs.SIMPLYBLOCK_DEPLOY_BRANCH || 'main' }}
       CUSTOM_IMAGES:       ${{ inputs.CUSTOM_IMAGES || 'base_spdk="" target_spdk="" base_docker="" target_docker=""' }}
 
       # Cluster/lab env
-      STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
-      API_INVOKE_URL:   ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      API_BASE_URL:     ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      BASTION_IP:       ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      BASTION_SERVER:   ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      MNODES:           ${{ inputs.MNODES || '192.168.10.211' }}
-      NR_HUGEPAGES:     ${{ inputs.NR_HUGEPAGES || '2048' }}
-      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
+      STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204' }}
+      API_INVOKE_URL:   ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      API_BASE_URL:     ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      BASTION_IP:       ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      BASTION_SERVER:   ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      MNODES:           ${{ inputs.MNODES || '192.168.10.210' }}
+      NR_HUGEPAGES:     '2048'
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD:        sbctl
 
       # SSH/client env
@@ -209,16 +229,27 @@ jobs:
       # Cleanup
       NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
 
-      # Bootstrap params
-      BOOTSTRAP_MAX_LVOL:          ${{ inputs.BOOTSTRAP_MAX_LVOL || '300' }}
-      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
-      BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
-      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
-      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '3' }}
+      # Bootstrap params — comma-separated key=value string, parsed into
+      # BOOTSTRAP_MAX_SUBSYS/BOOTSTRAP_DATA_CHUNKS/etc. by the "Parse
+      # BOOTSTRAP_PARAMS" step below.
+      BOOTSTRAP_PARAMS: ${{ inputs.BOOTSTRAP_PARAMS || 'max-subsys=75,data-chunks-per-stripe=1,parity-chunks-per-stripe=2,journal-partition=1,ha-jm-count=4' }}
+      # Old/mid-era base version support: when set, the bootstrap step routes
+      # the max-subsys value to `storage-node configure` (via --extra-sn-args)
+      # instead of `cluster create`, since which command accepts it depends
+      # on the base sbcli version and isn't inferable from branch name alone.
+      BOOTSTRAP_CONFIGURE_MAX_LVOL:   ${{ inputs.BOOTSTRAP_CONFIGURE_MAX_LVOL || false }}
+      BOOTSTRAP_CONFIGURE_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_CONFIGURE_MAX_SUBSYS || false }}
       BOOTSTRAP_HA_TYPE:           ${{ inputs.BOOTSTRAP_HA_TYPE || 'single' }}
       BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
+      EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
 
-      TEST_CLASS: ${{ inputs.TEST_CLASS || 'major_upgrade_single' }}
+      TEST_CLASS: ${{ inputs.TEST_CLASS || 'TestMajorUpgradeSingleNode' }}
+
+      # Target images (overridden by CUSTOM_IMAGES target_spdk/target_docker)
+      TARGET_SPDK_IMAGE:   'simplyblock/spdk:main-latest'
+      TARGET_DOCKER_IMAGE: 'public.ecr.aws/simply-block/simplyblock:main'
 
       # Secrets
       SSH_PASSWORD:      ${{ secrets.SSH_PASSWORD }}
@@ -241,6 +272,24 @@ jobs:
           pwd
           python3 --version || true
           git --version
+
+      - name: Parse BOOTSTRAP_PARAMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A bp
+          IFS=',' read -ra pairs <<< "${BOOTSTRAP_PARAMS}"
+          for pair in "${pairs[@]}"; do
+            key="${pair%%=*}"; val="${pair#*=}"
+            bp["$key"]="$val"
+          done
+          {
+            echo "BOOTSTRAP_MAX_SUBSYS=${bp[max-subsys]:-75}"
+            echo "BOOTSTRAP_DATA_CHUNKS=${bp[data-chunks-per-stripe]:-1}"
+            echo "BOOTSTRAP_PARITY_CHUNKS=${bp[parity-chunks-per-stripe]:-2}"
+            echo "BOOTSTRAP_JOURNAL_PARTITION=${bp[journal-partition]:-1}"
+            echo "BOOTSTRAP_HA_JM_COUNT=${bp[ha-jm-count]:-4}"
+          } >> "$GITHUB_ENV"
 
       - name: Clear stale test artifacts from previous run
         shell: bash
@@ -331,6 +380,7 @@ jobs:
       # PRE-BOOTSTRAP CLEANUP
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -338,7 +388,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -372,6 +423,7 @@ jobs:
           done
 
       - name: Destroy/clean storage nodes (deploy-cleaner, docker prune, uninstall sbcli, k3s)
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -379,7 +431,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -412,6 +465,7 @@ jobs:
           done
 
       - name: Client cleanup disconnect lvols; unmount all /mnt; remove /mnt dirs
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -419,7 +473,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -455,6 +510,7 @@ jobs:
           done
 
       - name: Remove /etc/simplyblock; reboot storage; disk reset + PCI rebind + mklabel
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -462,7 +518,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -538,8 +595,31 @@ jobs:
         run: |
           set -euxo pipefail
           rm -rf simplyBlockDeploy
-          git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
+          echo "Cloning simplyBlockDeploy @ branch '${SIMPLYBLOCK_DEPLOY_BRANCH}'"
+          git clone --branch "${SIMPLYBLOCK_DEPLOY_BRANCH}" https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
+
+      - name: Write cluster security/backup config to mgmt node
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${CLUSTER_SECURITY:-none}" == "none" || -z "${CLUSTER_SECURITY:-}" ]]; then
+            echo "CLUSTER_SECURITY=none; skipping."
+            exit 0
+          fi
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
+            echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
+            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${S3_BACKUP_JSON}' > /root/s3-backup.json && echo 'Written:' && cat /root/s3-backup.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --use-backup /root/s3-backup.json" >> "$GITHUB_ENV"
+            echo "Appended --use-backup /root/s3-backup.json to EXTRA_CLUSTER_ARGS"
+          fi
 
       - name: Bootstrap single-node cluster (BASE_SBCLI_BRANCH=${{ inputs.BASE_SBCLI_BRANCH }})
         shell: bash
@@ -559,15 +639,66 @@ jobs:
             extra_args+=( --enable-node-affinity true )
           fi
 
+          # Parse overrides from EXTRA_SN_ARGS
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            if nr_val=$(printf '%s' "${EXTRA_SN_ARGS}" | grep -oP '(?<=--nr-hugepages )\S+' | head -1) && [[ -n "${nr_val}" ]]; then
+              echo "Overriding NR_HUGEPAGES from ${NR_HUGEPAGES} to ${nr_val} (from EXTRA_SN_ARGS)"
+              echo "NR_HUGEPAGES=${nr_val}" >> "$GITHUB_ENV"
+              NR_HUGEPAGES="${nr_val}"
+            fi
+          fi
+
+          # Parse overrides from EXTRA_CLUSTER_ARGS
+          HA_TYPE="${BOOTSTRAP_HA_TYPE}"
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            if ha_val=$(printf '%s' "${EXTRA_CLUSTER_ARGS}" | grep -oP '(?<=--ha-type )\S+' | head -1) && [[ -n "${ha_val}" ]]; then
+              echo "Overriding HA_TYPE from ${HA_TYPE} to ${ha_val} (from EXTRA_CLUSTER_ARGS)"
+              HA_TYPE="${ha_val}"
+            fi
+          fi
+
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            extra_args+=( --extra-cluster-args "${EXTRA_CLUSTER_ARGS}" )
+          fi
+
+          # Whether storage-node configure needs --max-lvol, --max-subsys, or
+          # neither depends on the base sbcli version and can't be inferred
+          # from BASE_SBCLI_BRANCH's name — hence the two explicit checkboxes.
+          # The value goes to exactly one destination: cluster create by
+          # default (today's behavior), or storage-node configure (via
+          # --extra-sn-args) when one of the checkboxes is set — never both,
+          # since cluster create's --max-subsys is itself only valid on base
+          # versions newer than the ones that need it on configure.
+          cluster_max_subsys_args=( --max-subsys "${BOOTSTRAP_MAX_SUBSYS}" )
+          configure_extra_flag=""
+          if [[ "${BOOTSTRAP_CONFIGURE_MAX_LVOL}" == "true" ]]; then
+            configure_extra_flag="--max-lvol ${BOOTSTRAP_MAX_SUBSYS}"
+            cluster_max_subsys_args=()
+            echo "BOOTSTRAP_CONFIGURE_MAX_LVOL set: routing max-subsys value to 'storage-node configure --max-lvol' instead of 'cluster create --max-subsys'"
+          elif [[ "${BOOTSTRAP_CONFIGURE_MAX_SUBSYS}" == "true" ]]; then
+            configure_extra_flag="--max-subsys ${BOOTSTRAP_MAX_SUBSYS}"
+            cluster_max_subsys_args=()
+            echo "BOOTSTRAP_CONFIGURE_MAX_SUBSYS set: routing max-subsys value to 'storage-node configure --max-subsys' instead of 'cluster create --max-subsys'"
+          fi
+
+          combined_extra_sn_args="${EXTRA_SN_ARGS:-}"
+          if [[ -n "${configure_extra_flag}" ]]; then
+            combined_extra_sn_args="${combined_extra_sn_args} ${configure_extra_flag}"
+          fi
+          combined_extra_sn_args="$(echo "${combined_extra_sn_args}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [[ -n "${combined_extra_sn_args}" ]]; then
+            extra_args+=( --extra-sn-args "${combined_extra_sn_args}" )
+          fi
+
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            "${cluster_max_subsys_args[@]}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
             --ha-jm-count "${BOOTSTRAP_HA_JM_COUNT}" \
-            --ha-type "${BOOTSTRAP_HA_TYPE}" \
+            --ha-type "${HA_TYPE}" \
             --data-nics "${BOOTSTRAP_DATA_NIC}" \
             "${extra_args[@]}" | tee bootstrap.log
           rc=${PIPESTATUS[0]}
@@ -632,21 +763,21 @@ jobs:
           test -f sbcli/e2e/e2e_tests/upgrade_tests/major_upgrade.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+      - name: Install uv
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
-          fi
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before upgrade e2e
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
 
       - name: Set RUN_BASE_DIR
         shell: bash
@@ -664,6 +795,36 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Start MinIO trace logging
+        if: ${{ env.CLUSTER_SECURITY == 'backup' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # This VM hosts multiple parallel runners, so every path/alias/
+          # process used here MUST be scoped to this run — a shared
+          # /tmp/mc or a pattern-matching pkill would race with, corrupt,
+          # or kill another job's in-flight mc install/trace.
+          MC_BIN="/tmp/mc-${GITHUB_RUN_ID}"
+          MC_ALIAS="myminio-${GITHUB_RUN_ID}"
+          echo "MC_BIN=${MC_BIN}" >> "$GITHUB_ENV"
+          echo "MC_ALIAS=${MC_ALIAS}" >> "$GITHUB_ENV"
+
+          # 1. Install mc (MinIO Client) to our own per-run path
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "${MC_BIN}"
+          chmod +x "${MC_BIN}"
+
+          # 2. Configure our own mc alias to external MinIO
+          "${MC_BIN}" alias set "${MC_ALIAS}" http://192.168.10.164:9000 "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
+
+          # 3. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup "${MC_BIN}" admin trace -v --all "${MC_ALIAS}" > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Run upgrade e2e tests (major_upgrade_single)
         shell: bash
         working-directory: sbcli/e2e
@@ -673,7 +834,7 @@ jobs:
           if [[ -n "${TEST_CLASS:-}" ]]; then
             TESTNAME_ARGS=(--testname "${TEST_CLASS}")
           fi
-          python3 -u upgrade_e2e.py \
+          PYTHONUNBUFFERED=1 ./upgrade_e2e.py \
             --base_version "${BASE_SBCLI_BRANCH}" \
             --target_version "${TARGET_SBCLI_BRANCH}" \
             --base_spdk_image "${BASE_SPDK_IMAGE:-}" \
@@ -681,6 +842,43 @@ jobs:
             --target_docker_image "${TARGET_DOCKER_IMAGE:-}" \
             "${TESTNAME_ARGS[@]}" \
             2>&1 | tee output.log
+
+      - name: Copy raw output.log to each test's NFS folder
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="sbcli/e2e/output.log"
+          if [ ! -f "${out_log}" ]; then
+            echo "No output.log found, skipping"
+            exit 0
+          fi
+          echo "output.log size: $(stat --printf='%s' "${out_log}" 2>/dev/null || echo '?') bytes"
+
+          mapfile -t log_paths < <(
+            grep 'Logs Path:' "${out_log}" 2>/dev/null \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | sed 's/.*Logs Path: *//' \
+              | sed 's/[[:space:]]*$//' || true
+          )
+
+          if [ ${#log_paths[@]} -eq 0 ]; then
+            echo "No 'Logs Path:' entries found in output.log"
+            if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+              cp "${out_log}" "${RUN_BASE_DIR}/github_raw_output.log" || true
+              echo "Saved to ${RUN_BASE_DIR}/github_raw_output.log"
+            fi
+            exit 0
+          fi
+
+          for path in "${log_paths[@]}"; do
+            if [ -d "${path}" ]; then
+              cp "${out_log}" "${path}/github_raw_output.log" || true
+              echo "Saved output.log -> ${path}/github_raw_output.log"
+            else
+              echo "WARN: path does not exist: ${path}"
+            fi
+          done
 
       - name: Mark test end time (always)
         if: always()
@@ -860,25 +1058,29 @@ jobs:
           STAGING="/tmp/distrib_host_collect_${TS}"
           mkdir -p "$STAGING"
 
-          CN="$(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' | head -n1 || true)"
-          if [[ -z "$CN" ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
-          SOCK="/mnt/ramdisk/${CN}/spdk.sock"
+          mapfile -t CONTAINERS < <(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true)
+          if [[ ${#CONTAINERS[@]} -eq 0 ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
 
-          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
-          if [[ -z "$BDEV_JSON" ]]; then echo "BDEV_EMPTY"; exit 0; fi
+          ANY_DISTRIB=0
+          for CN in "${CONTAINERS[@]}"; do
+            SOCK="/mnt/ramdisk/${CN}/spdk.sock"
 
-          if command -v jq >/dev/null 2>&1; then
-            mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
-          else
-            mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
-          fi
+            BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
+            if [[ -z "$BDEV_JSON" ]]; then continue; fi
 
-          if [[ ${#DISTRIBS[@]} -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
+            if command -v jq >/dev/null 2>&1; then
+              mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
+            else
+              mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
+            fi
 
-          for d in "${DISTRIBS[@]}"; do
-            JF="/tmp/stack_${d}.json"
+            if [[ ${#DISTRIBS[@]} -eq 0 ]]; then continue; fi
+            ANY_DISTRIB=1
 
-            python3 - "$d" "$JF" <<'PYIN'
+            for d in "${DISTRIBS[@]}"; do
+              JF="/tmp/stack_${d}.json"
+
+              python3 - "$d" "$JF" <<'PYIN'
           import json, sys
           d = sys.argv[1]
           jf = sys.argv[2]
@@ -887,17 +1089,41 @@ jobs:
               f.write(json.dumps(obj))
           PYIN
 
-            sudo docker cp "$JF" "$CN:$JF" || true
-            sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
-            sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
+              sudo docker cp "$JF" "$CN:$JF" || true
 
-            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
-              sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
+              # Try with 120s timeout, retry with 600s on timeout
+              RPC_OK=0
+              for TMO in 120 600; do
+                if sudo timeout "$TMO" docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1"; then
+                  RPC_OK=1; break
+                fi
+                EC=$?
+                if [[ $EC -eq 124 || $EC -eq 137 ]]; then
+                  echo "[${CN}] ${d} RPC timed out after ${TMO}s, retrying..." >&2
+                else
+                  RPC_OK=1; break  # non-timeout failure, still collect what we can
+                fi
+              done
+
+              if [[ $RPC_OK -eq 0 ]]; then
+                echo "[${CN}] ${d} RPC timed out on all attempts — skipping" >&2
+                sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+                rm -f "$JF" || true
+                continue
+              fi
+
+              sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/${CN}__rpc_${d}.log" 2>/dev/null || true
+
+              for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
+                sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
+              done
+
+              sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+              rm -f "$JF" || true
             done
-
-            sudo docker exec "$CN" bash -lc "rm -f '$JF' '/tmp/rpc_${d}.log'" || true
-            rm -f "$JF" || true
           done
+
+          if [[ $ANY_DISTRIB -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
 
           cat /proc/meminfo | grep -i huge > "$STAGING/hugepage_meminfo.txt" 2>/dev/null || true
 
@@ -926,6 +1152,164 @@ jobs:
 
               print(f"[{ip}] Saved -> {dest_dir}/{os.path.basename(last)}", flush=True)
           PY
+
+      - name: Collect Graylog/OpenSearch logs
+        if: '!cancelled()'
+        timeout-minutes: 480
+        shell: bash
+        run: |
+          set +e
+          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
+          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
+          [ "${ELAPSED}" -le 0 ] && exit 0
+
+          WINDOW_START=$((TEST_START_EPOCH - 3600))
+          WINDOW_END=$((TEST_END_EPOCH + 3600))
+
+          MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
+          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+
+          OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
+          }
+
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "python3 -m simplyblock_core.scripts.collect_logs \
+                '${iso}' '${mins}' \
+                --mode docker \
+                --output-dir '${outdir}' \
+                ${extra_flag} \
+                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
+              return 1
+            fi
+          }
+
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
+            REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || true
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || true
+              }
+            fi
+            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            fi
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+          done
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
+
+      - name: Notify Slack log collection complete
+        if: always()
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_MSG_TS: ${{ env.SLACK_MSG_TS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_WF_NAME: "E2E (Upgrade Single Node)"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock ${SLACK_WF_NAME}*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_CHANNEL_ID:-}" ] && [ -n "${SLACK_MSG_TS:-}" ]; then
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{\"channel\":\"${SLACK_CHANNEL_ID}\",\"thread_ts\":\"${SLACK_MSG_TS}\",\"text\":\"${MSG}\"}" || true
+          elif [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\":\"${MSG}\"}" || true
+          fi
 
       # =========================
       # SUMMARY (always)
@@ -1069,6 +1453,8 @@ jobs:
             echo '```'
             echo ""
             echo "</details>"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs collected to \`${RUN_BASE_DIR}/graylog_collected/\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack Notification
@@ -1076,6 +1462,8 @@ jobs:
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -1084,9 +1472,11 @@ jobs:
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request, urllib.error
 
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping.")
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
               sys.exit(0)
 
           out_log = "sbcli/e2e/output.log"
@@ -1174,20 +1564,74 @@ jobs:
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
 
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              urllib.request.urlopen(req, timeout=15)
-              print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
           PYEOF
+
+      - name: Stop MinIO trace logging and save
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${MC_TRACE_PID:-}" ]; then
+            echo "Stopping MinIO trace (PID=${MC_TRACE_PID})..."
+            kill "${MC_TRACE_PID}" 2>/dev/null || true
+            wait "${MC_TRACE_PID}" 2>/dev/null || true
+          fi
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            LINES=$(wc -l < "${MINIO_TRACE_LOG}")
+            SIZE=$(du -h "${MINIO_TRACE_LOG}" | cut -f1)
+            echo "=== MinIO trace log: ${LINES} lines, ${SIZE} ==="
+            cp "${MINIO_TRACE_LOG}" sbcli/e2e/minio-trace.log 2>/dev/null || true
+          else
+            echo "No MinIO trace log found (backup tests may not have run)"
+          fi
+          # Cleanup: only our own per-run trace log + mc binary — never a
+          # glob/pkill that could hit another parallel job's files or
+          # processes on this shared VM.
+          rm -f "${MINIO_TRACE_LOG:-}" 2>/dev/null || true
+          rm -f "${MC_BIN:-}" 2>/dev/null || true
 
       - name: Upload logs (always)
         if: always()
@@ -1197,6 +1641,7 @@ jobs:
           path: |
             simplyBlockDeploy/bare-metal/bootstrap.log
             sbcli/e2e/output.log
+            sbcli/e2e/minio-trace.log
             sbcli/e2e/logs/**
           if-no-files-found: warn
 

@@ -1,0 +1,282 @@
+from typing import Union
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict
+from sse_starlette import EventSourceResponse
+
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import policy as backup_policy
+from simplyblock_core.controllers.backup.manifest import ManifestError
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.backup_config import S3Credentials
+from simplyblock_core.models.cluster import Cluster as ClusterModel
+from simplyblock_core.models.lvol_model import LVol
+
+from .._dependencies import BackupResource, Cluster, Policy
+from .._dtos import (
+    BackupConfigDTO,
+    BackupDTO,
+    BackupExportDTO,
+    BackupManifestDTO,
+    BackupPolicyDTO,
+)
+from .._sse import WATCH_RESPONSES, WatchParam, sse_response
+from ..util import CreationResponseFormatParameter, creation_response
+
+api = APIRouter()
+db = DBController()
+
+
+@api.get('/', name='clusters:backups:list', response_model=list[BackupDTO], responses=WATCH_RESPONSES)
+def list_backups(cluster: Cluster, watch: WatchParam = False) -> Union[list[BackupDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(backup_controller.watch_backups(cluster.get_id()), BackupDTO.from_model)
+    backups = db.get_backups(cluster.get_id())
+    backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
+    return [BackupDTO.from_model(b) for b in backups]
+
+
+class _BackupSnapshotParams(BaseModel):
+    snapshot_id: str
+
+
+@api.post('/', name='clusters:backups:create', status_code=201, responses={201: {"content": None}})
+def create_backup(request: Request, cluster: Cluster, parameters: _BackupSnapshotParams, response_format: CreationResponseFormatParameter = "empty") -> Response:
+    backup_id, error = backup_controller.backup_snapshot(
+        parameters.snapshot_id, cluster_id=cluster.get_id())
+    if error:
+        raise HTTPException(400, error)
+
+    return creation_response(
+        request, response_format,
+        entity_id=UUID(backup_id),
+        route_name='clusters:backups:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'backup_id': UUID(backup_id)},
+        get_full=lambda id: BackupDTO.from_model(db.get_backup_by_id(str(id))),
+        extra_headers={'X-Backup-Id': backup_id},  # For backwards compatibility
+    )
+
+
+class _RestoreParams(BaseModel):
+    backup_id: str
+    lvol_name: str
+    pool: str
+    target_node_id: str | None = None
+
+
+    #: Credentials for the backup's bucket, when that is not this cluster's own
+    #: -- the disaster-recovery case. Omit to use the nodes' instance role.
+    s3_credentials: S3Credentials | None = None
+
+@api.post('/restore', name='clusters:backups:restore', status_code=202)
+def restore_backup(cluster: Cluster, parameters: _RestoreParams):
+    return {"lvol_id": backup_controller.restore_backup(
+        parameters.backup_id, parameters.lvol_name, parameters.pool,
+        target_node_id=parameters.target_node_id,
+        s3_credentials=parameters.s3_credentials)}
+
+
+class _ImportManifests(BaseModel):
+    """An export carried in the request itself, e.g. read from a file.
+
+    Nothing beside it names a bucket: an export groups its manifests by the
+    location each was read from, so the caller states nothing the document has
+    not already recorded, and backups from several buckets import in one go.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    metadata: BackupExportDTO
+
+
+class _ImportFromBucket(BaseModel):
+    """Import whatever a bucket turns out to contain.
+
+    The disaster-recovery path: it needs a bucket and credentials for it, and
+    nothing from the cluster that wrote the backups.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: BackupConfigDTO
+
+
+#: The two ways to name what to import. A union rather than one model with two
+#: optional fields and a validator forbidding both/neither: pydantic then rejects
+#: a malformed body itself, and the OpenAPI schema says "one of these two" rather
+#: than "everything optional, good luck".
+_ImportParams = Union[_ImportManifests, _ImportFromBucket]
+
+
+@api.post('/import', name='clusters:backups:import')
+def import_backups(cluster: Cluster, parameters: _ImportParams):
+    try:
+        count = (
+            backup_controller.import_from_bucket(
+                parameters.bucket, cluster_id=cluster.get_id())
+            if isinstance(parameters, _ImportFromBucket) else
+            backup_controller.import_backups(
+                parameters.metadata, cluster_id=cluster.get_id())
+        )
+    except ManifestError as e:
+        # The bucket named in the request could not be read. 400 rather than
+        # 502: nothing here proxies for an upstream service, and what the caller
+        # supplied is the only thing that can be wrong from here.
+        raise HTTPException(400, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"imported": count}
+
+
+@api.post('/discover', name='clusters:backups:discover')
+def discover_backups(parameters: BackupConfigDTO) -> list[BackupManifestDTO]:
+    """List the backups a bucket contains, without importing anything.
+
+    A POST because it carries credentials, which have no business in a query
+    string. Takes no cluster state at all: this is what an operator runs when
+    the cluster that wrote the backups no longer exists.
+    """
+    try:
+        return backup_controller.discover_backups(parameters)
+    except ManifestError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@api.get('/export', name='clusters:backups:export')
+def export_backups(
+    cluster: Cluster,
+    backup_id: str | None = Query(None, description="Export only the chain ending at this backup UUID"),
+    lvol_name: str | None = Query(None, description="Export all completed backups for this lvol name"),
+) -> BackupExportDTO:
+    if backup_id and not lvol_name:
+        try:
+            db.get_backup_by_id(backup_id)
+        except KeyError:
+            raise HTTPException(404, f"Backup {backup_id} not found")
+        return backup_controller.export_backups(
+            cluster_id=cluster.get_id(), backup_id=backup_id)
+
+    return backup_controller.export_backups(
+        cluster_id=cluster.get_id(), lvol_name=lvol_name)
+
+
+def _lookup_lvol_in_cluster(volume_id: str, cluster: ClusterModel) -> LVol:
+    try:
+        volume = db.get_lvol_by_id(volume_id)
+        pool = db.get_pool_by_id(volume.pool_uuid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if pool.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'LVol {volume_id} not found')
+    return volume
+
+
+@api.delete(
+    '/{volume_id}',
+    name='clusters:backups:delete',
+    status_code=204,
+    responses={204: {"content": None}},
+    deprecated=True,
+    summary='Deprecated — delete all backups for a volume',
+    description=(
+        'Deprecated. Use '
+        '`DELETE /clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/backups` '
+        'instead.'
+    ),
+)
+def delete_backups(cluster: Cluster, volume_id: UUID) -> Response:
+    volume = _lookup_lvol_in_cluster(str(volume_id), cluster)
+    success, error = backup_controller.delete_backups(volume.get_id())
+    if error:
+        raise HTTPException(400, error)
+    return Response(status_code=204)
+
+
+# Backup policies
+
+policy_api = APIRouter()
+
+
+@policy_api.get('/', name='clusters:backup-policies:list', response_model=list[BackupPolicyDTO], responses=WATCH_RESPONSES)
+def list_policies(cluster: Cluster, watch: WatchParam = False) -> Union[list[BackupPolicyDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(backup_policy.watch_policies(cluster.get_id()), BackupPolicyDTO.from_model)
+    policies = db.get_backup_policies(cluster.get_id())
+    return [BackupPolicyDTO.from_model(p) for p in policies]
+
+
+class _PolicyCreateParams(BaseModel):
+    name: str
+    versions: int | None = 0
+    age: str | None = ""
+    schedule: str | None = ""
+
+
+@policy_api.post('/', name='clusters:backup-policies:create', status_code=201, responses={201: {"content": None}})
+def create_policy(cluster: Cluster, parameters: _PolicyCreateParams) -> Response:
+    policy_id, error = backup_policy.add_policy(
+        cluster.get_id(), parameters.name,
+        max_versions=parameters.versions or 0,
+        max_age=parameters.age or "",
+        schedule=parameters.schedule or "")
+    if error:
+        raise HTTPException(400, error)
+    return Response(status_code=201, headers={'X-Policy-Id': policy_id})
+
+
+def _validate_attachment_target(target_type: str, target_id: str, cluster: ClusterModel) -> None:
+    if target_type == "pool":
+        try:
+            pool = db.get_pool_by_id(target_id)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        if pool.cluster_id != cluster.get_id():
+            raise HTTPException(404, f'Pool {target_id} not found')
+    elif target_type == "lvol":
+        _lookup_lvol_in_cluster(target_id, cluster)
+
+
+@policy_api.delete('/{policy_id}', name='clusters:backup-policies:delete', status_code=204, responses={204: {"content": None}})
+def delete_policy(cluster: Cluster, policy: Policy) -> Response:
+    success, error = backup_policy.remove_policy(policy.uuid)
+    if error:
+        raise HTTPException(400, error)
+    return Response(status_code=204)
+
+
+class _AttachParams(BaseModel):
+    target_type: str
+    target_id: str
+
+
+@policy_api.post('/{policy_id}/attach', name='clusters:backup-policies:attach', status_code=201)
+def attach_policy(cluster: Cluster, policy: Policy, parameters: _AttachParams):
+    _validate_attachment_target(parameters.target_type, parameters.target_id, cluster)
+    att_id, error = backup_policy.attach_policy(
+        policy.uuid, parameters.target_type, parameters.target_id)
+    if error:
+        raise HTTPException(400, error)
+    return {"attachment_id": att_id}
+
+
+@policy_api.post('/{policy_id}/detach', name='clusters:backup-policies:detach', status_code=204, responses={204: {"content": None}})
+def detach_policy(cluster: Cluster, policy: Policy, parameters: _AttachParams) -> Response:
+    _validate_attachment_target(parameters.target_type, parameters.target_id, cluster)
+    success, error = backup_policy.detach_policy(
+        policy.uuid, parameters.target_type, parameters.target_id)
+    if error:
+        raise HTTPException(400, error)
+    return Response(status_code=204)
+
+
+api.include_router(policy_api, prefix='/backup-policies')
+
+
+instance_api = APIRouter(prefix='/{backup_id}')
+
+
+@instance_api.get('/', name='clusters:backups:detail')
+def get_backup(cluster: Cluster, backup: BackupResource) -> BackupDTO:
+    return BackupDTO.from_model(backup)
+
+
+api.include_router(instance_api)

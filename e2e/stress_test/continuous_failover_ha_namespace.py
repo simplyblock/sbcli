@@ -26,19 +26,18 @@ DELETE:
 """
 
 import random
+import string
 import threading
 import time
 from collections import defaultdict
-import string
 
-from utils.common_utils import sleep_n_sec
-from utils.ssh_utils import get_parent_device
 from exceptions.custom_exception import LvolNotConnectException
-
 from stress_test.continuous_failover_ha_multi_client import (
     RandomMultiClientFailoverTest,
     generate_random_sequence,
 )
+from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 
 class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
@@ -240,8 +239,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=parent_host_id_used,
                         max_namespace_per_subsys=self.max_namespace_per_subsys,
                     )
@@ -262,8 +259,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=parent_host_id_used,
                         max_namespace_per_subsys=self.max_namespace_per_subsys,
                     )
@@ -274,8 +269,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         max_namespace_per_subsys=self.max_namespace_per_subsys,
                     )
             except Exception as e:
@@ -326,8 +319,13 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             initial_devices = self.ssh_obj.get_devices(node=client_node)
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client_node, command=connect_str)
-                if error:
-                    self.record_failed_nvme_connect(parent_name, connect_str, client=client_node)
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        parent_name, connect_str, client=client_node, error=error)
+                elif error:
+                    self.logger.info(
+                        f"[lvol_connect] {parent_name}: {error.strip()}"
+                        f" - path already up, not a failure")
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client_node)
@@ -379,8 +377,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=parent_host_id_used,
                         namespace=parent_id,
                     )

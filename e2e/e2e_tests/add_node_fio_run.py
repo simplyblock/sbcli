@@ -1,7 +1,7 @@
 import os
-from datetime import datetime
-from pathlib import Path
 import threading
+from datetime import datetime
+
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
 from utils.common_utils import sleep_n_sec
 
@@ -12,7 +12,6 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         self.new_nodes = kwargs.get("new_nodes")
         self.test_name = "add_nodes_during_fio"
         self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
         self.logger.info(f"New Nodes to Add: {self.new_nodes}")
 
     def run(self):
@@ -26,7 +25,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         for i, _ in enumerate(self.storage_nodes):
             lvol_name = f"lvl_{generate_random_sequence(4)}{i}"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             node_uuid = self.sbcli_utils.get_node_without_lvols()
 
@@ -91,12 +90,12 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -135,6 +134,10 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         max_lvol = node_sample["max_lvol"]
         max_prov = int(node_sample["max_prov"] / (1024**3))  # Convert bytes to GB
 
+        # Extract data NIC interface name from existing node
+        data_nics = node_sample.get("data_nics", [])
+        data_nic = data_nics[0]["if_name"] if data_nics else None
+        self.logger.info(f"Data NIC from existing node: {data_nic}")
 
         new_nodes_id = []
         timestamp = int(datetime.now().timestamp())
@@ -147,7 +150,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                                           partitions=node_sample["num_partitions_per_dev"],
                                           disable_ha_jm= not node_sample["enable_ha_jm"],
                                           enable_test_device=node_sample["enable_test_device"],
-                                          spdk_debug=node_sample["spdk_debug"])
+                                          spdk_debug=node_sample["spdk_debug"],
+                                          data_nic=data_nic)
             sleep_n_sec(60)
             new_nodes_ids_temp = self.sbcli_utils.get_all_node_without_lvols()
             for node_id in new_nodes_ids_temp:
@@ -157,11 +161,14 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             containers = self.ssh_obj.get_running_containers(node_ip=ip)
             self.container_nodes[ip] = containers
 
-            cluster_details = self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=60
                 )
+            except Exception:
+                self.logger.info("Cluster is not in expansion state, Checking if online!!")
 
         for node in self.storage_nodes:
             self.ssh_obj.restart_docker_logging(
@@ -173,8 +180,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
         # Step 4: Resume cluster
         sleep_n_sec(60)
-        self.logger.info("Expanding the cluster")
-        self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
+        # self.logger.info("Expanding the cluster")
+        # self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
         for node in new_nodes_id:
             self.sbcli_utils.wait_for_storage_node_status(
@@ -182,24 +189,26 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                 status="online",
                 timeout=300
             )
+        
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id,
+            status="active",
+            timeout=300
+        )
+        self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
+
 
         sleep_n_sec(120)
 
         self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
         sleep_n_sec(30)
 
-        cluster_details = self.sbcli_utils.wait_for_cluster_status(
-            cluster_id=self.cluster_id,
-            status="active",
-            timeout=300
-            )
-        self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
-
+        
         # Step 5: Create lvols on new nodes and validate
         for node in new_nodes_id:
             lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
                                       distr_ndcs=self.ndcs, distr_npcs=self.npcs,
@@ -262,12 +271,12 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -310,6 +319,361 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         self.logger.info("TEST CASE PASSED !!!")
 
 
+class TestAddNodesDualNodePerHost(TestAddNodesDuringFioRun):
+    """
+    Dual-node-per-host add-node variant: adds new nodes configured with
+    ``--nodes-per-socket 2``, so each physical host gets 2 logical storage
+    nodes from a single ``sn add-node`` call.
+
+    Overrides Step 3 of the parent to:
+    1. Call ``sn configure --nodes-per-socket 2`` on each new host
+    2. Assert that 2 node UUIDs are created per new IP
+    3. Wait for all logical nodes (2 per IP) to come online
+
+    Steps 1-2, 4-5, and health checks are inherited — they already iterate
+    by node_id and work correctly for multiple nodes per host.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "add_nodes_dual_node_per_host"
+        self.nodes_per_socket = 2
+        self.logger.info(
+            f"Dual-node-per-host add-node mode: each new host will get "
+            f"{self.nodes_per_socket} logical nodes"
+        )
+
+    def run(self):
+        self.logger.info("Starting Test: Add Nodes (Dual-Node-Per-Host) During FIO Run")
+
+        # Step 1: Create lvols on existing nodes (identical to parent)
+        fio_threads = []
+        lvol_details = {}
+        self.sbcli_utils.add_storage_pool(self.pool_name)
+        sleep_n_sec(10)
+        for i, _ in enumerate(self.storage_nodes):
+            lvol_name = f"lvl_{generate_random_sequence(4)}{i}"
+            mount_path = f"{self.mount_base}/{lvol_name}"
+            log_path = f"{self.log_path}/{lvol_name}.log"
+
+            node_uuid = self.sbcli_utils.get_node_without_lvols()
+
+            self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
+                                      distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                                      distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
+                                      host_id=node_uuid)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0],
+                lvol_id=self.sbcli_utils.get_lvol_id(lvol_name)
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, mount_path)
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, mount_path, log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{lvol_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+            # Snapshot + clone on existing lvols
+            sleep_n_sec(10)
+            snapshot_name = f"snap_{lvol_name}"
+            self.ssh_obj.add_snapshot(
+                self.mgmt_nodes[0],
+                self.sbcli_utils.get_lvol_id(lvol_name),
+                snapshot_name,
+            )
+            snapshot_id = self.ssh_obj.get_snapshot_id(
+                self.mgmt_nodes[0], snapshot_name=snapshot_name
+            )
+            sleep_n_sec(10)
+            clone_name = f"clone_{lvol_name}"
+            self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
+            clone_id = self.sbcli_utils.get_lvol_id(clone_name)
+
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            cl_mount_path = f"{self.mount_base}/{clone_name}"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
+
+            lvol_details[lvol_name] = {
+                "ID": self.sbcli_utils.get_lvol_id(lvol_name),
+                "Mount": mount_path,
+                "Log": log_path,
+                "Clone": {
+                    "ID": clone_id,
+                    "Snapshot": snapshot_name,
+                    "Log": cl_log_path,
+                    "Mount": cl_mount_path,
+                },
+            }
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0], lvol_id=clone_id
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, cl_mount_path)
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, cl_mount_path, cl_log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{clone_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+            sleep_n_sec(30)
+
+        sleep_n_sec(30)
+
+        # Step 3: Add new nodes with --nodes-per-socket 2
+        self.logger.info(
+            f"Adding new nodes (nodes_per_socket={self.nodes_per_socket})"
+        )
+
+        node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
+        max_lvol = node_sample["max_lvol"]
+        max_prov = int(node_sample["max_prov"] / (1024**3))
+
+        data_nics = node_sample.get("data_nics", [])
+        data_nic = data_nics[0]["if_name"] if data_nics else None
+        self.logger.info(f"Data NIC from existing node: {data_nic}")
+
+        new_nodes_id = []
+        timestamp = int(datetime.now().timestamp())
+        cluster_details = None
+        for ip in self.new_nodes:
+            self.logger.info(
+                f"Configuring and deploying storage node: {ip} "
+                f"(nodes_per_socket={self.nodes_per_socket})"
+            )
+            self.ssh_obj.deploy_storage_node(
+                ip, max_lvol, max_prov,
+                nodes_per_socket=self.nodes_per_socket,
+            )
+            self.ssh_obj.add_storage_node(
+                self.mgmt_nodes[0], self.cluster_id, ip,
+                spdk_image=node_sample["spdk_image"],
+                partitions=node_sample["num_partitions_per_dev"],
+                disable_ha_jm=not node_sample["enable_ha_jm"],
+                enable_test_device=node_sample["enable_test_device"],
+                spdk_debug=node_sample["spdk_debug"],
+                data_nic=data_nic,
+            )
+            sleep_n_sec(60)
+
+            # Collect new node IDs — expect nodes_per_socket new UUIDs per IP
+            new_nodes_before = set(new_nodes_id)
+            new_nodes_ids_temp = self.sbcli_utils.get_all_node_without_lvols()
+            new_on_this_ip = [
+                nid for nid in new_nodes_ids_temp if nid not in new_nodes_before
+            ]
+            self.logger.info(
+                f"[{ip}] New nodes created: {new_on_this_ip} "
+                f"(expected {self.nodes_per_socket})"
+            )
+            assert len(new_on_this_ip) == self.nodes_per_socket, (
+                f"Expected {self.nodes_per_socket} new nodes on {ip}, "
+                f"got {len(new_on_this_ip)}: {new_on_this_ip}"
+            )
+            new_nodes_id.extend(new_on_this_ip)
+
+            self.storage_nodes.append(ip)
+            containers = self.ssh_obj.get_running_containers(node_ip=ip)
+            self.container_nodes[ip] = containers
+
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=60,
+                )
+            except Exception:
+                self.logger.info(
+                    "Cluster is not in expansion state, Checking if online!!"
+                )
+
+        for node in self.storage_nodes:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node,
+                containers=self.container_nodes[node],
+                log_dir=os.path.join(self.docker_logs_path, node),
+                test_name=self.test_name,
+            )
+
+        # Step 4: Wait for all new nodes online
+        sleep_n_sec(60)
+        self.logger.info(
+            f"Waiting for {len(new_nodes_id)} new nodes to come online"
+        )
+
+        for node in new_nodes_id:
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id=node, status="online", timeout=300
+            )
+
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id, status="active", timeout=300
+        )
+        self.logger.info(
+            f"Completed cluster expansion for cluster id: {self.cluster_id} "
+            f"and Cluster status is {cluster_details['status']}"
+        )
+
+        sleep_n_sec(120)
+
+        self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
+        sleep_n_sec(30)
+
+        # Step 5: Create lvols on new nodes and validate
+        for node in new_nodes_id:
+            lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
+            mount_path = f"{self.mount_base}/{lvol_name}"
+            log_path = f"{self.log_path}/{lvol_name}.log"
+
+            self.sbcli_utils.add_lvol(
+                lvol_name, self.pool_name, size="10G",
+                distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
+                host_id=node,
+            )
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0],
+                lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, mount_path)
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, mount_path, log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{lvol_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+            lvol_details[lvol_name] = {
+                "ID": self.sbcli_utils.get_lvol_id(lvol_name),
+                "Mount": mount_path,
+                "Log": log_path,
+                "Clone": {
+                    "ID": None,
+                    "Snapshot": None,
+                    "Log": None,
+                    "Mount": None,
+                },
+            }
+
+            sleep_n_sec(10)
+
+            snapshot_name = f"snap_{lvol_name}"
+            self.ssh_obj.add_snapshot(
+                self.mgmt_nodes[0], lvol_details[lvol_name]["ID"], snapshot_name
+            )
+            snapshot_id = self.ssh_obj.get_snapshot_id(
+                self.mgmt_nodes[0], snapshot_name=snapshot_name
+            )
+            sleep_n_sec(10)
+
+            clone_name = f"clone_{lvol_name}"
+            self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
+            clone_id = self.sbcli_utils.get_lvol_id(clone_name)
+
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            cl_mount_path = f"{self.mount_base}/{clone_name}"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
+
+            lvol_details[lvol_name]["Clone"]["ID"] = clone_id
+            lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0], lvol_id=clone_id
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, cl_mount_path)
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, cl_mount_path, cl_log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{clone_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+        self.common_utils.manage_fio_threads(
+            node=self.mgmt_nodes[0], threads=fio_threads, timeout=2000
+        )
+        sleep_n_sec(60)
+
+        for lvol_name, lvol_detail in lvol_details.items():
+            self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")
+            self.common_utils.validate_fio_test(
+                node=self.mgmt_nodes[0], log_file=lvol_detail["Log"]
+            )
+            self.common_utils.validate_fio_test(
+                node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"]
+            )
+
+        for node in self.sbcli_utils.get_storage_nodes()["results"]:
+            assert node["status"] == "online", f"{node['id']} is not online"
+            assert node["health_check"], f"{node['id']} health check failed"
+
+        self.logger.info("TEST CASE PASSED !!!")
+
+
 class TestAddK8sNodesDuringFioRun(TestClusterBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -317,24 +681,24 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.k3s_mnode = kwargs.get("k3s_mnode")
         self.storage_pool_name = self.pool_name # Taking from base class
         self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
         self.namespace = kwargs.get("namespace", None)
         self.test_name = "add_nodes_during_fio_k8s"
         self.logger.info(f"New Nodes to Add: {self.new_nodes}")
 
     def get_namespace(self):
         """Retrieves the namespace using the specified logic."""
-        namespace = None
         node_ip = self.storage_nodes[0]  # Use the first storage node
 
         # 1. Namespace provided as input
         if self.namespace and len(self.namespace) > 0:
-            self.logger.info(f"Namespace provided as input: {namespace}")
+            self.logger.info(f"Namespace provided as input: {self.namespace}")
+            return self.namespace
 
-        # 2. Check /etc/simplyblock/namespace on an existing node
+        # 2. Check /var/simplyblock/namespace on an existing node
         command = "cat /var/simplyblock/namespace 2>/dev/null"  # Suppress errors if file doesn't exist
         try:
-            namespace = self.ssh_obj.exec_command(node_ip, command).strip()
+            out, _err = self.ssh_obj.exec_command(node_ip, command)
+            namespace = out.strip()
             if namespace:
                 self.logger.info(f"Namespace found in /var/simplyblock/namespace: {namespace}")
                 return namespace
@@ -346,18 +710,32 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         return "simplyblk"
 
     def _prepare_worker_node(self, node_ip):
-        """Prepares a worker node by installing necessary packages and configuring kernel parameters."""
+        """Prepares a worker node by installing necessary packages and configuring kernel parameters.
+
+        Deliberately does NOT set vm.nr_hugepages. `storage-node deploy` sizes and claims
+        hugepages itself, so pre-claiming them here is redundant, and the calculation this
+        used to carry was wrong: it computed 30% of total RAM *in MB* and then used that
+        number as a COUNT of 2 MiB pages, reserving 60% of RAM rather than the 30% it read
+        as. It also persisted the value to /etc/sysctl.d/hugepages.conf, which left every
+        host this test ever touched booting with that reservation forever.
+
+        The deploy side already stopped doing this: simplyBlockDeploy's
+        bare-metal/bootstrap-cluster.sh notes "Newer releases claim them themselves, so
+        NR_HUGEPAGES is not required there" and gates its own sysctl on SBCLI_BRANCH=25.*,
+        while bootstrap-k3s.sh / bootstrap-kubeadm.sh hardcode hugepages=0.
+
+        Caveat: an sbcli 25.* release does not self-claim. If this test is ever pointed at
+        25.x, hugepages must be pre-claimed again or SPDK will not start on the new node.
+        """
         commands = [
             "sudo rm -f /usr/local/bin/kubectl || true",
             "sudo rm -f /usr/bin/kubectl || true",
             "sudo yum remove -y kubectl || true",
-            "sudo yum install -y fio nvme-cli bc",
+            "sudo yum install -y fio nvme-cli",
             "sudo modprobe nvme-tcp",
             "sudo modprobe nbd",
-            "total_memory_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')",
-            "total_memory_mb=$((total_memory_kb / 1024))",
-            "hugepages=$(echo \"$total_memory_mb * 0.3 / 1\" | bc)",
-            "sudo sysctl -w vm.nr_hugepages=$hugepages",
+            # ipv6 is disabled live only; nothing here writes to /etc/sysctl.d, so there
+            # is no `sysctl --system` reload to follow.
             "sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1",
             "sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1",
             "sudo systemctl disable nm-cloud-setup.service nm-cloud-setup.timer",
@@ -367,8 +745,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             "sudo yum install -y make golang",
             "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
             "echo 'nbd' | sudo tee /etc/modules-load.d/nbd.conf",
-            "echo \"vm.nr_hugepages=$hugepages\" | sudo tee /etc/sysctl.d/hugepages.conf",
-            "sudo sysctl --system"
         ]
         for command in commands:
             self.logger.info(f"Executing command on {node_ip}: {command}")
@@ -403,6 +779,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
     def _add_node_sbcli(self, node_ip):
           """Adds the node to the SimplyBlock cluster using sbcli."""
           node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
+          data_nics = node_sample.get("data_nics", [])
+          data_nic = data_nics[0]["if_name"] if data_nics else None
           self.ssh_obj.add_storage_node(self.mgmt_nodes[0], self.cluster_id, node_ip,
                                         spdk_image=node_sample["spdk_image"],
                                         partitions=node_sample["num_partitions_per_dev"],
@@ -410,7 +788,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                                         enable_test_device=node_sample["enable_test_device"],
                                         spdk_debug=node_sample["spdk_debug"],
                                         namespace=self.namespace,
-                                        data_nic=None)
+                                        data_nic=data_nic)
           sleep_n_sec(180)
 
     def run(self):
@@ -426,7 +804,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         for i, _ in enumerate(self.storage_nodes):
             lvol_name = f"lvl_{generate_random_sequence(4)}{i}"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             node_uuid = self.sbcli_utils.get_node_without_lvols()
 
@@ -491,12 +869,12 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -544,12 +922,15 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 if node_id not in new_nodes_id:
                     new_nodes_id.append(node_id)
             self.storage_nodes.append(ip)
-
-            cluster_details = self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300
+            
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=60
                 )
+            except Exception:
+                self.logger.error("Cluster is not in expansion state, Checking if online!!")
 
         self.runner_k8s_log.restart_logging()
 
@@ -562,8 +943,14 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 timeout=300
             )
         
-        self.logger.info("Expanding the cluster")
-        self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id,
+            status="active",
+            timeout=300
+        )
+        
+        # self.logger.info("Expanding the cluster")
+        # self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
         for node in new_nodes_id:
             self.sbcli_utils.wait_for_storage_node_status(
@@ -577,18 +964,13 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
         sleep_n_sec(30)
 
-        cluster_details = self.sbcli_utils.wait_for_cluster_status(
-            cluster_id=self.cluster_id,
-            status="active",
-            timeout=300
-            )
         self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
 
         # Step 4: Create lvols on new nodes and validate
         for node in new_nodes_id:
             lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
                                       distr_ndcs=self.ndcs, distr_npcs=self.npcs,
@@ -618,7 +1000,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             )
             fio_thread.start()
             fio_threads.append(fio_thread)
-            
+
             lvol_details[lvol_name] = {
                 "ID": self.sbcli_utils.get_lvol_id(lvol_name),
                 "Mount": mount_path,
@@ -632,7 +1014,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             }
 
             sleep_n_sec(10)
-            
+
             snapshot_name = f"snap_{lvol_name}"
             self.ssh_obj.add_snapshot(self.mgmt_nodes[0], lvol_details[lvol_name]["ID"], snapshot_name)
 
@@ -651,12 +1033,12 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -695,5 +1077,423 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         for node in self.sbcli_utils.get_storage_nodes()["results"]:
             assert node["status"] == "online", f"{node['id']} is not online"
             assert node["health_check"], f"{node['id']} health check failed"
+
+        self.logger.info("TEST CASE PASSED !!!")
+
+
+class TestAddK8sNodesDualNodePerHost(TestAddK8sNodesDuringFioRun):
+    """K8s add-node test for dual-node-per-host (nodesPerSocket=2).
+
+    Before adding new workers, the StorageNodeSet is patched with
+    nodesPerSocket=2 so the operator provisions 2 logical storage
+    nodes on each new worker.
+
+    Dispatch with:
+      TEST_CLASS: "TestAddK8sNodesDualNodePerHost"
+      NEW_NODE_IPS: "IP1 IP2"   (spare hosts to add)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "add_k8s_nodes_dual_node_per_host"
+        self.nodes_per_socket = 2
+
+    def _patch_nodes_per_socket(self):
+        """Patch the StorageNodeSet to set nodesPerSocket."""
+        patch_cmd = (
+            "kubectl patch storagenodesets.storage.simplyblock.io "
+            f"simplyblock-node -n {self.namespace} --type=merge "
+            f"-p '{{\"spec\":{{\"nodesPerSocket\":{self.nodes_per_socket}}}}}'"
+        )
+        self.logger.info(
+            f"Patching StorageNodeSet with nodesPerSocket="
+            f"{self.nodes_per_socket}"
+        )
+        self.ssh_obj.exec_command(self.k3s_mnode, patch_cmd)
+
+    def run(self):
+        self.logger.info(
+            "Starting Test: Add K8s Nodes During FIO Run "
+            f"(Dual-Node, nodesPerSocket={self.nodes_per_socket})"
+        )
+        self.namespace = self.get_namespace()
+        self.mgmt_node = self.mgmt_nodes[0]
+
+        # Step 1: Create lvols on existing nodes with FIO + snapshots/clones
+        fio_threads = []
+        lvol_details = {}
+        self.sbcli_utils.add_storage_pool(self.storage_pool_name)
+        sleep_n_sec(10)
+        for i, _ in enumerate(self.storage_nodes):
+            lvol_name = f"lvl_{generate_random_sequence(4)}{i}"
+            mount_path = f"{self.mount_base}/{lvol_name}"
+            log_path = f"{self.log_path}/{lvol_name}.log"
+
+            node_uuid = self.sbcli_utils.get_node_without_lvols()
+
+            self.sbcli_utils.add_lvol(
+                lvol_name, self.storage_pool_name, size="10G",
+                distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
+                host_id=node_uuid,
+            )
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                lvol_name=lvol_name
+            )
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0],
+                lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, mount_path)
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, mount_path, log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{lvol_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+            lvol_details[lvol_name] = {
+                "ID": self.sbcli_utils.get_lvol_id(lvol_name),
+                "Mount": mount_path,
+                "Log": log_path,
+                "Clone": {
+                    "ID": None,
+                    "Snapshot": None,
+                    "Log": None,
+                    "Mount": None,
+                },
+            }
+
+            sleep_n_sec(10)
+
+            snapshot_name = f"snap_{lvol_name}"
+            self.ssh_obj.add_snapshot(
+                self.mgmt_nodes[0],
+                lvol_details[lvol_name]["ID"],
+                snapshot_name,
+            )
+
+            snapshot_id = self.ssh_obj.get_snapshot_id(
+                self.mgmt_nodes[0], snapshot_name=snapshot_name
+            )
+
+            sleep_n_sec(10)
+
+            clone_name = f"clone_{lvol_name}"
+            self.ssh_obj.add_clone(
+                self.mgmt_nodes[0], snapshot_id, clone_name
+            )
+
+            clone_id = self.sbcli_utils.get_lvol_id(clone_name)
+
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                lvol_name=clone_name
+            )
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            cl_mount_path = f"{self.mount_base}/{clone_name}"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
+
+            lvol_details[lvol_name]["Clone"]["ID"] = clone_id
+            lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0], lvol_id=clone_id
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(
+                self.mgmt_nodes[0], device, cl_mount_path
+            )
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, cl_mount_path, cl_log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{clone_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+            sleep_n_sec(30)
+
+        sleep_n_sec(30)
+
+        # Step 2: Patch StorageNodeSet for dual-node, then add new workers
+        self.logger.info(
+            "Patching StorageNodeSet and adding new nodes "
+            f"(nodesPerSocket={self.nodes_per_socket})"
+        )
+        self._patch_nodes_per_socket()
+
+        new_nodes_id = []
+        timestamp = int(datetime.now().timestamp())
+        cluster_details = None
+
+        # Track existing nodes before expansion
+        existing_node_ids = set(
+            n["id"]
+            for n in self.sbcli_utils.get_storage_nodes()["results"]
+        )
+
+        for ip in self.new_nodes:
+            self.logger.info(f"Preparing worker node: {ip}")
+            self._prepare_worker_node(ip)
+            self.logger.info(f"Adding node {ip} to k3s cluster")
+            self._add_node_to_cluster(ip)
+            sleep_n_sec(30)
+            self.logger.info(f"Adding node {ip} to SimplyBlock cluster")
+            sleep_n_sec(180)
+
+            # Detect new nodes created on this worker
+            all_nodes_now = self.sbcli_utils.get_storage_nodes()["results"]
+            new_on_this_ip = [
+                n["id"] for n in all_nodes_now
+                if n["id"] not in existing_node_ids
+                and n["id"] not in new_nodes_id
+            ]
+            self.logger.info(
+                f"New nodes on {ip}: {new_on_this_ip} "
+                f"(expected {self.nodes_per_socket})"
+            )
+
+            # If not all nodes created yet, wait longer
+            if len(new_on_this_ip) < self.nodes_per_socket:
+                self.logger.info(
+                    f"Waiting for remaining nodes on {ip} "
+                    f"(got {len(new_on_this_ip)}, "
+                    f"need {self.nodes_per_socket})"
+                )
+                sleep_n_sec(120)
+                all_nodes_now = self.sbcli_utils.get_storage_nodes()[
+                    "results"
+                ]
+                new_on_this_ip = [
+                    n["id"] for n in all_nodes_now
+                    if n["id"] not in existing_node_ids
+                    and n["id"] not in new_nodes_id
+                ]
+
+            assert len(new_on_this_ip) >= self.nodes_per_socket, (
+                f"Expected {self.nodes_per_socket} new nodes on {ip}, "
+                f"got {len(new_on_this_ip)}: {new_on_this_ip}"
+            )
+            new_nodes_id.extend(new_on_this_ip)
+            self.storage_nodes.append(ip)
+
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=60,
+                )
+            except Exception:
+                self.logger.error(
+                    "Cluster is not in expansion state, "
+                    "Checking if online!!"
+                )
+
+        self.runner_k8s_log.restart_logging()
+
+        self.logger.info(
+            f"Total new nodes: {len(new_nodes_id)} "
+            f"(expected {self.nodes_per_socket * len(self.new_nodes)})"
+        )
+
+        # Step 3: Wait for all new nodes online
+        sleep_n_sec(300)
+        for node in new_nodes_id:
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id=node, status="online", timeout=300,
+            )
+
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id, status="active", timeout=300,
+        )
+
+        for node in new_nodes_id:
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id=node, status="online", timeout=300,
+            )
+
+        sleep_n_sec(120)
+
+        self.validate_migration_for_node(
+            timestamp, 2000, None, 60, no_task_ok=False
+        )
+        sleep_n_sec(30)
+
+        self.logger.info(
+            f"Completed cluster expansion for cluster id: "
+            f"{self.cluster_id} and Cluster status is "
+            f"{cluster_details['status']}"
+        )
+
+        # Step 4: Create lvols on new nodes and validate
+        for node in new_nodes_id:
+            lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
+            mount_path = f"{self.mount_base}/{lvol_name}"
+            log_path = f"{self.log_path}/{lvol_name}.log"
+
+            self.sbcli_utils.add_lvol(
+                lvol_name, self.pool_name, size="10G",
+                distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
+                host_id=node,
+            )
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                lvol_name=lvol_name
+            )
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0],
+                lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, mount_path)
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, mount_path, log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{lvol_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+            lvol_details[lvol_name] = {
+                "ID": self.sbcli_utils.get_lvol_id(lvol_name),
+                "Mount": mount_path,
+                "Log": log_path,
+                "Clone": {
+                    "ID": None,
+                    "Snapshot": None,
+                    "Log": None,
+                    "Mount": None,
+                },
+            }
+
+            sleep_n_sec(10)
+
+            snapshot_name = f"snap_{lvol_name}"
+            self.ssh_obj.add_snapshot(
+                self.mgmt_nodes[0],
+                lvol_details[lvol_name]["ID"],
+                snapshot_name,
+            )
+
+            snapshot_id = self.ssh_obj.get_snapshot_id(
+                self.mgmt_nodes[0], snapshot_name=snapshot_name
+            )
+
+            sleep_n_sec(10)
+
+            clone_name = f"clone_{lvol_name}"
+            self.ssh_obj.add_clone(
+                self.mgmt_nodes[0], snapshot_id, clone_name
+            )
+
+            clone_id = self.sbcli_utils.get_lvol_id(clone_name)
+
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                lvol_name=clone_name
+            )
+            for connect_str in connect_ls:
+                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+
+            cl_mount_path = f"{self.mount_base}/{clone_name}"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
+
+            lvol_details[lvol_name]["Clone"]["ID"] = clone_id
+            lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
+
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=self.mgmt_nodes[0], lvol_id=clone_id
+            )
+            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
+            self.ssh_obj.mount_path(
+                self.mgmt_nodes[0], device, cl_mount_path
+            )
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(self.mgmt_nodes[0], None, cl_mount_path, cl_log_path),
+                kwargs={
+                    "size": "500M",
+                    "name": f"{clone_name}_fio",
+                    "rw": "randrw",
+                    "nrfiles": 5,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 600,
+                },
+            )
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+
+        self.common_utils.manage_fio_threads(
+            node=self.mgmt_nodes[0],
+            threads=fio_threads,
+            timeout=2000,
+        )
+        sleep_n_sec(60)
+
+        for lvol_name, lvol_detail in lvol_details.items():
+            self.logger.info(
+                f"Checking fio log for lvol and clone for {lvol_name}"
+            )
+            self.common_utils.validate_fio_test(
+                node=self.mgmt_nodes[0], log_file=lvol_detail["Log"]
+            )
+            self.common_utils.validate_fio_test(
+                node=self.mgmt_nodes[0],
+                log_file=lvol_detail["Clone"]["Log"],
+            )
+
+        for node in self.sbcli_utils.get_storage_nodes()["results"]:
+            assert node["status"] == "online", (
+                f"{node['id']} is not online"
+            )
+            assert node["health_check"], (
+                f"{node['id']} health check failed"
+            )
 
         self.logger.info("TEST CASE PASSED !!!")

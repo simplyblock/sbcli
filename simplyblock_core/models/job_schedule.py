@@ -1,10 +1,26 @@
-# coding=utf-8
 import datetime
+from types import MappingProxyType
+from typing import ClassVar
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index
+
+
+class FrozenTaskError(RuntimeError):
+    """A write to a task that was handed out for reading only."""
 
 
 class JobSchedule(BaseModel):
+
+    _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        # get_id() embeds cluster and date, which is what makes a per-cluster
+        # range read cheap; `uuid` is what makes a lookup by the bare task id a
+        # point read instead of a scan of the entire (never-pruned) table.
+        Index('uuid'),
+        Index(('cluster_id', 'function_name', 'status')),
+    )
 
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
@@ -17,6 +33,7 @@ class JobSchedule(BaseModel):
     FN_FAILED_DEV_MIG = "failed_device_migration"
     FN_NEW_DEV_MIG = "new_device_migration"
     FN_NODE_ADD = "node_add"
+    FN_NODE_REMOVAL = "node_removal"
     FN_PORT_ALLOW = "port_allow"
     FN_BALANCING_AFTER_NODE_RESTART = "balancing_on_restart"
     FN_BALANCING_AFTER_DEV_REMOVE = "balancing_on_dev_rem"
@@ -24,30 +41,70 @@ class JobSchedule(BaseModel):
     FN_JC_COMP_RESUME = "jc_comp_resume"
     FN_SNAPSHOT_REPLICATION = "snapshot_replication"
     FN_LVOL_SYNC_DEL = "lvol_sync_del"
+    # Deferred per-node lvol operation ("register" / "resize") — DB-backed
+    # replacement for the in-memory restart drain queue (incident 2026-07-10).
+    FN_LVOL_SYNC_OP = "lvol_sync_op"
     FN_LVOL_MIG = "lvol_migration"
+    FN_LVOL_BATCH_MIG = "lvol_batch_migration"
     FN_BACKUP = "s3_backup"
     FN_BACKUP_RESTORE = "s3_backup_restore"
     FN_BACKUP_MERGE = "s3_backup_merge"
+    FN_CLUSTER_EXPAND = "cluster_expand"
+    # Cross-cluster replication cutover: freeze source IO, transfer the final
+    # lvol delta to the target, flip ANA so the client fails over. Used for
+    # migration commit and fail-back (fresh or recovered source).
+    FN_REPLICATION_FINAL = "replication_final"
+    FN_FDB_BACKUP = "fdb_backup"
 
     canceled: bool = False
     cluster_id: str = ""
     date: int = 0
     device_id: str = ""
     function_name: str = ""
-    function_params: dict = {}
+    function_params: dict = default_factory(dict)
     function_result: str = ""
     max_retry: int = -1
     node_id: str = ""
     retry: int = 0
-    sub_tasks: list = []
+    sub_tasks: list = default_factory(list)
     # Hostname of the runner that currently holds this task's lease. Empty
     # means unclaimed. Combined with updated_at (refreshed on every write) this
     # gives a soft lease: a different host may take over only once the lease
     # goes stale (see constants.TASK_LEASE_TTL_SEC). See tasks_controller.claim_task.
     owner: str = ""
 
+    # Set only on the view handed to a task handler. Deliberately not
+    # annotated: the leading underscore keeps it out of the serialized
+    # attributes (BaseModel._annotated_attrs).
+    _frozen = False
+
+    def __setattr__(self, name, value):
+        if self._frozen:
+            raise FrozenTaskError(
+                f"{name}: this task is read-only. The driver re-reads the row "
+                f"after the handler returns, so an in-memory write here would "
+                f"be dropped; persist it with task_runner_base.checkpoint() or "
+                f"set_result()."
+            )
+        super().__setattr__(name, value)
+
+    def frozen_view(self):
+        """An independent read-only copy, for handing to a task handler.
+
+        Both the attributes and ``function_params`` reject writes, so a handler
+        that mutates what it was given fails where it stands rather than losing
+        the write silently.
+        """
+        view = JobSchedule().from_dict(self.to_dict())
+        view.function_params = MappingProxyType(view.function_params)
+        view._frozen = True
+        return view
+
+    def watch_scope(self):
+        return (self.cluster_id,)
+
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         super().write_to_db(kv_store)
 
 

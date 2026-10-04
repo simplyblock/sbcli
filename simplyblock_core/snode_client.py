@@ -1,12 +1,13 @@
 import json
-
-import requests
 import logging
 
+import requests
+from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 
 logger = logging.getLogger()
 
@@ -18,7 +19,7 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, host, timeout=300, retry=5):
+    def __init__(self, host, timeout=300, retry=5, connect_retry=None, backoff_factor=1):
         settings = Settings()
         scheme = "https" if settings.tls_connect != "disabled" else "http"
         self.url = f'{scheme}://{host}/snode/'
@@ -33,7 +34,19 @@ class SNodeClient:
         # (add-node, restart, …). Bounding per-attempt backoff for an
         # unreachable node agent is handled at the call layer instead (the
         # restart pre-flight reachability check in _restart_storage_node_impl).
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
+        #
+        # connect_retry lets liveness probes (the StorageNodeMonitor health
+        # checks) FAIL FAST on connection errors: a refused/timed-out connect
+        # (Errno 111) means the node agent is not serving, and retrying it with
+        # backoff only delays detecting a down node. Such probes pass
+        # connect_retry=0 so a connect failure raises immediately, while read
+        # retries (a slow-but-alive agent) are still governed by `retry`.
+        # Defaults to `retry` to preserve existing behaviour for all other
+        # callers (e.g. add-node, which legitimately waits for the agent).
+        if connect_retry is None:
+            connect_retry = retry
+        retries = Retry(total=retry, backoff_factor=backoff_factor,
+                        connect=connect_retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
         if settings.tls_connect == "authenticated":
@@ -42,21 +55,27 @@ class SNodeClient:
     def _request(self, method, path, payload=None):
         try:
             logger.debug("Requesting path: %s, params: %s", path, payload)
+            wire_payload = unwrap_secrets_for_send(payload) if payload else None
             data = None
             params = None
-            if payload:
-                if method == "GET" :
-                    params = payload
+            if wire_payload:
+                if method == "GET":
+                    params = wire_payload
                 else:
-                    data = json.dumps(payload)
+                    data = json.dumps(wire_payload)
 
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:
             raise SNodeClientException(str(e))
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
+        log_body = Settings().log_response_bodies
+        if log_body:
+            logger.debug("Response: status_code: %s, content: %s",
+                         response.status_code, response.content)
+        else:
+            logger.debug("Response: status_code: %s, content-length: %s",
+                         response.status_code, len(response.content))
         ret_code = response.status_code
 
         result = None
@@ -79,7 +98,7 @@ class SNodeClient:
             raise SNodeClientException("Invalid http status: %s" % ret_code)
 
         if ret_code == 422:
-            raise SNodeClientException(f"Request validation failed: '{response.text}'")
+            raise SNodeClientException("Request validation failed (status 422)")
 
         raise SNodeClientException(f"Unknown http status: {ret_code}")
 
@@ -93,7 +112,7 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
-    def write_key_file(self, name, content):
+    def write_key_file(self, name, content: SecretStr):
         """Write a DHCHAP key file on the storage node for SPDK keyring."""
         return self._request("POST", "write_key_file", {"name": name, "content": content})
 
@@ -108,10 +127,10 @@ class SNodeClient:
         return self._request("POST", "recalculate_cores_distribution", params)
 
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
-                           fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
-                           rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
+                           fdb_connection: SecretStr | None = None, namespace=None, server_ip=None, rpc_port=None,
+                           rpc_username=None, rpc_password: SecretStr | None = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
                            total_mem=None, system_mem=None, cluster_mode=None, socket=0, firewall_port=0, cluster_id=None,
-                           spdk_proxy_image=None):
+                           spdk_proxy_image=None, mcp_max_unavailable=None):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -150,6 +169,8 @@ class SNodeClient:
             params["cluster_id"] = cluster_id
         if spdk_proxy_image:
             params["spdk_proxy_image"] = spdk_proxy_image
+        if mcp_max_unavailable is not None:
+            params["mcp_max_unavailable"] = mcp_max_unavailable
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
@@ -161,8 +182,21 @@ class SNodeClient:
         #     "db_connection": db_connection}
         # return self._request("POST", "join_swarm", params)
 
+    def spdk_thread_state(self, rpc_port):
+        """Per-thread state of SPDK, sampled twice ~1s apart (diagnostic)."""
+        return self._request("GET", "spdk_thread_state", {"rpc_port": rpc_port})
+
     def spdk_process_kill(self, rpc_port, cluster_id=None):
         return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port, "cluster_id": cluster_id})
+
+    def spdk_process_cleanup(self, rpc_port, cluster_id=None):
+        """Slow, authoritative SPDK teardown: restart policy cleared, remove
+        synchronous, success only when the containers/pod are verifiably
+        GONE. Use on failure-cleanup paths (spdk_process_kill is the fast
+        peer-termination sibling whose detached remove can lose against a
+        restart policy)."""
+        return self._request("GET", "spdk_process_cleanup",
+                             {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
     def leave_swarm(self):
         return True
@@ -193,6 +227,16 @@ class SNodeClient:
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
 
+    def get_blockdevices(self):
+        """Whole-disk inventory for the lblk cluster mode."""
+        return self._request("GET", "blockdevices")
+
+    def wipe_block_device(self, device_name):
+        """--force-format for lblk add-node: wipe partition/FS signatures
+        from a whole disk (refused when busy)."""
+        return self._request("POST", "wipe_block_device",
+                             {"device_name": device_name})
+
     def spdk_process_is_up(self, rpc_port, cluster_id):
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)
@@ -203,6 +247,44 @@ class SNodeClient:
 
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
+
+    def persist_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list,
+                            cpu_mask=None, isolated=None, l_cores=None,
+                            distribution=None, core_to_index=None,
+                            small_pool_count=None, large_pool_count=None,
+                            number_of_distribs=None, lblk_serials=None):
+        """Write sizing/CPU fields onto ONE of the host's node-config slots.
+
+        ``numa_node`` plus the slot's device set selects it: ``ssd_list`` (PCI
+        addresses) in nvme mode, ``lblk_serials`` in lblk mode. Pass the one
+        the host's mode populates -- an lblk node's ssd_list is always empty,
+        and empty means "no device filter", so lblk callers that send only
+        ssd_list select the socket's FIRST slot rather than their own.
+        """
+        payload = {
+            "max_lvol": max_lvol,
+            "huge_page_memory": huge_page_memory,
+            "numa_node": numa_node,
+            "ssd_list": ssd_list,
+            "lblk_serials": sorted(lblk_serials) if lblk_serials else None,
+        }
+        if cpu_mask is not None:
+            payload["cpu_mask"] = cpu_mask
+        if isolated is not None:
+            payload["isolated"] = isolated
+        if l_cores is not None:
+            payload["l_cores"] = l_cores
+        if distribution is not None:
+            payload["distribution"] = distribution
+        if core_to_index is not None:
+            payload["core_to_index"] = core_to_index
+        if small_pool_count is not None:
+            payload["small_pool_count"] = small_pool_count
+        if large_pool_count is not None:
+            payload["large_pool_count"] = large_pool_count
+        if number_of_distribs is not None:
+            payload["number_of_distribs"] = number_of_distribs
+        return self._request("POST", "persist_node_config", payload)
 
     def ifc_is_roce(self, nic):
         params = {"nic": nic}

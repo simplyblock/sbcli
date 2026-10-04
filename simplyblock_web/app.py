@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# encoding: utf-8
 
 import logging
 import os
@@ -7,27 +5,38 @@ import ssl
 import sys
 import time
 
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.middleware.base import BaseHTTPMiddleware
-import uvicorn
 from uvicorn.config import Config
 
-from simplyblock_web.api import public, v1
-from simplyblock_core import constants, utils as core_utils
-from simplyblock_core.settings import Settings
+from simplyblock_core import constants
+from simplyblock_core import utils as core_utils
 from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.settings import Settings
+from simplyblock_web.api import v1, v2
+from simplyblock_web.settings import Settings as WebSettings
 
 logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
 logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 
+# Prevent external libraries from logging secrets (tokens, response bodies)
+# at DEBUG level while keeping our own loggers at DEBUG.
+for _ext_logger_name in (
+    "kubernetes.client.rest",
+    "urllib3",
+):
+    logging.getLogger(_ext_logger_name).setLevel(logging.WARNING)
+
 access_logger = logging.getLogger('simplyblock_web.access')
 _access_handler = logging.StreamHandler(stream=sys.stdout)
 _access_handler.setFormatter(logging.Formatter(
     '%(asctime)s %(levelname)s %(client_ip)s'
-    ' "%(message)s" %(status_code)s %(request_size)s %(response_size)s %(duration_ms).2fms "%(user_agent)s"'
+    ' "%(message)s" %(status_code)s %(request_size)s %(response_size)s %(duration_ms).2fms'
 ))
 access_logger.addHandler(_access_handler)
 access_logger.propagate = False
@@ -39,12 +48,11 @@ core_utils.init_sentry_sdk()
 class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         client_ip = request.client.host if request.client else '-'
-        user_agent = request.headers.get('user-agent', '-')
         request_size = request.headers.get('content-length', '-')
 
+        # Query strings can carry credentials (?secret=…, ?token=…) and have
+        # no type info to mask by, so log the path only.
         path = request.url.path
-        if request.url.query:
-            path = f'{path}?{request.url.query}'
 
         start = time.monotonic()
         response = await call_next(request)
@@ -58,7 +66,6 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             path,
             extra={
                 'client_ip': client_ip,
-                'user_agent': user_agent,
                 'request_size': request_size,
                 'status_code': response.status_code,
                 'response_size': response_size,
@@ -69,7 +76,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
 
 app: FastAPI = FastAPI()
-
+Instrumentator().instrument(app).expose(app, endpoint="/_meta/metrics")
 
 @app.exception_handler(PreconditionError)
 async def precondition_handler(request: Request, exc: PreconditionError):
@@ -89,33 +96,29 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
     })
 
 
+_web_settings = WebSettings()
+
 app.add_middleware(AccessLogMiddleware)
-app.include_router(public, prefix='/api')
-app.mount('/api/v1', WSGIMiddleware(v1.api))  # For some reason this fails if done in `api/__init__.py`
 
+if 2 in _web_settings.api_versions:
+    app.include_router(v2.api, prefix='/api/v2')
 
-@app.api_route('/', methods=['GET'])
-@app.api_route('/cluster/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/mgmtnode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/device/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/lvol/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/snapshot/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/storagenode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/pool/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def redirect_legacy(request: Request) -> RedirectResponse:
-    """
-    Redirect legacy API routes to their corresponding v1 endpoints.
-    
-    Args:
-        request: The incoming HTTP request
-        
-    Returns:
-        RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint
-    """
-    redirect_url: str = f'/api/v1/{request.url.path}'
-    if (query_params := str(request.query_params)):
-        redirect_url += f'?{query_params}'
-    return RedirectResponse(url=redirect_url, status_code=308)
+if 1 in _web_settings.api_versions:
+    app.mount('/api/v1', WSGIMiddleware(v1.api))  # For some reason this fails if done in `api/__init__.py`
+
+    @app.api_route('/', methods=['GET'])
+    @app.api_route('/cluster/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/mgmtnode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/device/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/lvol/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/snapshot/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/storagenode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/pool/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    def redirect_legacy(request: Request) -> RedirectResponse:
+        redirect_url: str = f'/api/v1/{request.url.path}'
+        if (query_params := str(request.query_params)):
+            redirect_url += f'?{query_params}'
+        return RedirectResponse(url=redirect_url, status_code=308)
 
 
 def main() -> None:
@@ -127,7 +130,7 @@ def main() -> None:
         app=app,
         host='0.0.0.0',
         port=int(os.environ.get('FLASK_PORT', 5000)),
-        log_level='debug',
+        log_level=constants.LOG_WEB_LEVEL,
         access_log=False,
         proxy_headers=True,
         forwarded_allow_ips='192.168.1.0/24',

@@ -1,10 +1,10 @@
-# coding=utf-8
 import datetime
 import time
-from typing import List
+from typing import ClassVar
 
 from simplyblock_core import constants
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index
 
 
 class LVolMigration(BaseModel):
@@ -27,6 +27,11 @@ class LVolMigration(BaseModel):
     5. COMPLETED   – migration finished successfully.
     """
 
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Index('lvol_id'),
+    )
+
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
     STATUS_SUSPENDED = 'suspended'
@@ -34,13 +39,14 @@ class LVolMigration(BaseModel):
     STATUS_FAILED = 'failed'
     STATUS_CANCELLED = 'cancelled'
 
+    PHASE_PRE_CREATED = 'pre_created'
     PHASE_SNAP_COPY = 'snap_copy'
     PHASE_LVOL_MIGRATE = 'lvol_migrate'
     PHASE_CLEANUP_SOURCE = 'cleanup_source'
     PHASE_CLEANUP_TARGET = 'cleanup_target'
     PHASE_COMPLETED = 'completed'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_NEW: 0,
         STATUS_RUNNING: 1,
         STATUS_SUSPENDED: 2,
@@ -60,21 +66,43 @@ class LVolMigration(BaseModel):
 
     # Ordered list of snapshot UUIDs to copy, oldest → newest.
     # Built once at migration start from the volume's snapshot chain.
-    snap_migration_plan: List[str] = []
+    snap_migration_plan: list[str] = default_factory(list)
 
     # Snapshot UUIDs that are available on the target node (either transferred by
     # this migration or already present from a prior migration of a related volume).
-    snaps_migrated: List[str] = []
+    snaps_migrated: list[str] = default_factory(list)
 
     # Subset of snaps_migrated that were already present on the target node when
     # this migration started (e.g. copied by an earlier migration of a clone).
     # These must NEVER be deleted during CLEANUP_TARGET rollback.
-    snaps_preexisting_on_target: List[str] = []
+    snaps_preexisting_on_target: list[str] = default_factory(list)
 
     # Snapshot UUIDs of intermediate ("shrink") snapshots taken on the source
     # during migration to progressively reduce the live delta. These are
     # created by the migration process itself and must be cleaned up afterward.
-    intermediate_snaps: List[str] = []
+    intermediate_snaps: list[str] = default_factory(list)
+
+    # ── Target inventory: objects created on the target by this migration ───
+    # Populated incrementally as objects are created so that the cleanup
+    # endpoint can remove them even if the migration ends in terminal state.
+
+    # Composite bdev path created on the target (e.g. "LVS_TGT/LVOL_xxx_m").
+    target_lvol_bdev: str = ""
+
+    # NQN of the subsystem created on non-overlap target nodes.
+    # Empty when the subsystem was pre-existing (overlap or shared).
+    target_subsystem_nqn: str = ""
+
+    # Node IDs (get_id() form) where we called subsystem_create during
+    # create_migration().  Overlap nodes are excluded — their subsystem
+    # belongs to the source role and must NOT be deleted on cleanup.
+    target_subsystem_node_ids: list[str] = default_factory(list)
+
+    # Full composite bdev paths created on the target by this migration
+    # (e.g. "LVS_TGT/SNAP_xxx_m").  Excludes pre-existing bdevs so the
+    # cleanup endpoint knows exactly what this migration created.
+    # Cleared to [] after cleanup (normal CLEANUP_TARGET or manual endpoint).
+    target_snap_bdevs: list[str] = default_factory(list)
 
     # In-progress RPC job ID for the currently executing data-plane operation
     # (either a snapshot copy or the final lvol migrate). Empty when idle.
@@ -83,7 +111,7 @@ class LVolMigration(BaseModel):
     # Per-snapshot (or final-lvol) transfer context.  Tracks fine-grained state
     # so that the runner can poll an async transfer and resume after a restart.
     # Keys used: stage, snap_uuid, temp_nqn, ctrl_name, nqn (lvol migrate).
-    transfer_context: dict = {}
+    transfer_context: dict = default_factory(dict)
 
     # Index into snap_migration_plan: the next snapshot to be copied.
     # Allows resuming after a suspension without re-copying already-migrated snaps.
@@ -107,16 +135,55 @@ class LVolMigration(BaseModel):
     max_retries: int = constants.LVOL_MIG_MAX_RETRIES
     canceled: bool = False
 
+    # Set when this migration is part of a batch (shared-namespace) migration.
+    # References an LVolMigrationGroup.uuid.  Empty for standalone migrations.
+    migration_group_id: str = ""
+
+    # Snaps whose raw data has been transferred to the target in group/worker
+    # mode but whose add_clone + convert have NOT yet been performed (the main
+    # orchestrator reconstructs the tree after all workers reach snap_copy_done).
+    # Unused for standalone migrations.
+    snaps_transferred_group: list[str] = default_factory(list)
+
     def get_id(self):
         # Prefix with cluster_id so that FDB range queries can filter by cluster.
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._merge_external_cancel(kv_store)
         super().write_to_db(kv_store)
 
+    def _merge_external_cancel(self, kv_store):
+        """Guard against losing a concurrent cancel_migration() call.
+
+        write_to_db() is a full-object overwrite with no CAS/versioning, and
+        the task runner holds one in-memory copy of this object across an
+        entire tick (sometimes several RPCs long, e.g. a snapshot transfer).
+        If `migrate-cancel` sets canceled=True on the DB record after that
+        in-memory copy was loaded, the tick's own next write — carrying its
+        stale canceled=False — would otherwise silently revert the
+        cancellation, and the migration runs to completion instead of
+        rolling back. Re-checking on every write (not just at the top of a
+        tick) means a cancellation landing at any point during a tick
+        survives whatever that tick writes afterward.
+        """
+        if self.canceled:
+            return
+        try:
+            from simplyblock_core.utils.helpers import single_or_none
+            existing = single_or_none(
+                self.__class__().read_from_db(kv_store, id=self.get_id()))
+        except Exception:
+            return
+        if existing is not None and existing.canceled:
+            self.canceled = True
+
     def is_active(self):
-        return self.status in (self.STATUS_NEW, self.STATUS_RUNNING, self.STATUS_SUSPENDED)
+        return self.status in (
+            self.STATUS_NEW, self.STATUS_RUNNING,
+            self.STATUS_SUSPENDED,
+        )
 
     def has_deadline_passed(self):
         if not self.deadline:

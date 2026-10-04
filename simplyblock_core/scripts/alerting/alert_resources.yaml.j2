@@ -1,3 +1,23 @@
+{#
+  Grafana unified-alerting provisioning file (policies, contact points and
+  notification templates) for the docker deployment.
+
+  Rendered from the alerting configuration file passed to `sbctl cluster
+  create`. Its structure is identical to the `controlplane.observability.
+  grafana.notifications` block of the simplyblock-operator Helm chart, so the
+  same file describes the receivers in both deployments — keep this template in
+  sync with `templates/controlplane_configmap.yaml` in that chart.
+
+  Every key is guaranteed to be present by `alerting_config_parser.parse_alerting_config()`,
+  which layers the file on top of ALERTING_DEFAULTS.
+
+  `{% raw %}...{% endraw %}` guards Grafana's own Go notification templates
+  from Jinja. Values coming from the configuration file go through `| tojson`,
+  which emits a double-quoted JSON scalar -- also a valid YAML scalar -- so a
+  URL, key or password containing a quote cannot break the rendered file.
+#}
+{% set any_receiver = slack.enabled or teams.enabled or pagerduty.enabled or opsgenie.enabled or webhook.enabled %}
+{% if any_receiver %}
 policies:
   - orgId: 1
     receiver: grafana-alerts
@@ -11,106 +31,96 @@ contactPoints:
   - orgId: 1
     name: grafana-alerts
     receivers:
+  {% if slack.enabled %}
       - uid: grafana
-        type: {{ ALERT_TYPE }}
-        {% if ALERT_TYPE == 'slack' %}
+        type: slack
         settings:
           username: grafana_bot
-          url: '{{ CONTACT_POINT }}'
-          title: |
-            {{ '{{' }} template "slack.title" . {{ '}}' }}
-          text: |
-            {{ '{{' }} template "slack.message" . {{ '}}' }}
-        {% else %}
+          url: {{ slack.url | tojson }}
+          title: '{% raw %}{{ template "simplyblock.title" . }}{% endraw %}'
+          text: '{% raw %}{{ template "simplyblock.message" . }}{% endraw %}'
+  {% endif %}
+  {% if teams.enabled %}
+      - uid: grafana-teams
+        type: teams
         settings:
-          addresses: '{{ CONTACT_POINT }}'
-          subject: |
-            {{ '{{' }} template "email.subject" . {{ '}}' }}
-          body: |
-            {{ '{{' }} template "email.body" . {{ '}}' }}
-        {% endif %}
+          url: {{ teams.url | tojson }}
+          title: '{% raw %}{{ template "simplyblock.title" . }}{% endraw %}'
+          message: '{% raw %}{{ template "simplyblock.message" . }}{% endraw %}'
+  {% endif %}
+  {% if pagerduty.enabled %}
+      - uid: grafana-pagerduty
+        type: pagerduty
+        settings:
+          severity: {{ pagerduty.severity | tojson }}
+          summary: '{% raw %}{{ template "simplyblock.title" . }}{% endraw %}'
+    {% if pagerduty.class %}
+          class: {{ pagerduty.class | tojson }}
+    {% endif %}
+    {% if pagerduty.component %}
+          component: {{ pagerduty.component | tojson }}
+    {% endif %}
+    {% if pagerduty.group %}
+          group: {{ pagerduty.group | tojson }}
+    {% endif %}
+        secureSettings:
+          integrationKey: {{ pagerduty.integrationKey | tojson }}
+  {% endif %}
+  {% if opsgenie.enabled %}
+      - uid: grafana-opsgenie
+        type: opsgenie
+        settings:
+          apiUrl: {{ opsgenie.apiUrl | tojson }}
+          autoClose: {{ opsgenie.autoClose | tojson }}
+          overridePriority: {{ opsgenie.overridePriority | tojson }}
+          sendTagsAs: {{ opsgenie.sendTagsAs | tojson }}
+          message: '{% raw %}{{ template "simplyblock.title" . }}{% endraw %}'
+          description: '{% raw %}{{ template "simplyblock.message" . }}{% endraw %}'
+        secureSettings:
+          apiKey: {{ opsgenie.apiKey | tojson }}
+  {% endif %}
+  {% if webhook.enabled %}
+      # No title and no message: without them Grafana posts its own alert
+      # JSON payload unmodified, which is what a generic receiver expects.
+      - uid: grafana-webhook
+        type: webhook
+        settings:
+          url: {{ webhook.url | tojson }}
+          httpMethod: {{ webhook.httpMethod | tojson }}
+          maxAlerts: {{ webhook.maxAlerts | tojson }}
+    {% if webhook.username %}
+          username: {{ webhook.username | tojson }}
+    {% endif %}
+    {% if webhook.authorizationScheme %}
+          authorization_scheme: {{ webhook.authorizationScheme | tojson }}
+    {% endif %}
+    {% set use_basic_auth = webhook.username and webhook.password %}
+    {% set use_auth_header = webhook.authorizationScheme and webhook.authorizationCredentials %}
+    {% if use_basic_auth or use_auth_header %}
+        secureSettings:
+      {% if use_basic_auth %}
+          password: {{ webhook.password | tojson }}
+      {% endif %}
+      {% if use_auth_header %}
+          authorization_credentials: {{ webhook.authorizationCredentials | tojson }}
+      {% endif %}
+    {% endif %}
+  {% endif %}
 
-{% if ALERT_TYPE == 'slack' %}
-{% raw %}
+{% endif %}
 templates:
   - orgId: 1
-    name: slack.title
-    template: |-
-      {{ define "slack.title" -}}
-      [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] Grafana Alerting Notification
-      {{- end -}}
+    name: simplyblock.title
+    template: |
+      [ALERT] Grafana Alerting Notification
+
   - orgId: 1
-    name: slack.message
-    template: |-
-      {{ define "slack.print_alert" -}}
-      *Alert*: {{ .Labels.alertname }}
-      {{ if .Annotations -}}
-      *Summary*: {{ .Annotations.summary}}
+    name: simplyblock.message
+    template: |
+      {%+ raw %}{{ range .Alerts }}*Alert*: {{ .Labels.alertname }}
+      *Summary*: {{ .Annotations.summary }}
       *Description*: {{ .Annotations.description }}
-      {{ end -}}
-      *Log message*: {{ index .Labels "message" }}
-      {% endraw %}
-      *Explore logs:* {{ GRAFANA_ENDPOINT }}
-      {% raw %}
-      {{ if .DashboardURL -}}
       *Go to dashboard:* {{ .DashboardURL }}
-      {{- end }}
-      {{ if .PanelURL -}}
       *Go to panel:* {{ .PanelURL }}
-      {{- end }}
-
-      *Details:*
-      {{ range .Labels.SortedPairs -}}
-      - *{{ .Name }}:* `{{ .Value }}`
-      {{ end -}}
-
-      {{ if .SilenceURL -}}
-      *Silence this alert:* {{ .SilenceURL }}
-      {{- end }}
-      {{- end }}
-
-      {{ define "slack.message" -}}
-      {{ if .Alerts.Firing -}}
-      {{ len .Alerts.Firing }} firing alert(s):
-      {{ range .Alerts.Firing }}
-      {{ template "slack.print_alert" . }}
-      {{ end -}}
       {{ end }}
-
-      {{- end }}
 {% endraw %}
-{% else %}
-{% raw %}
-  - orgId: 1
-    name: email.subject
-    template: |-
-      {{ define "email.subject" -}}
-      [{{ .Status | toUpper }}] Grafana Alert
-      {{- end -}}
-  - orgId: 1
-    name: email.body
-    template: |-
-      {{ define "email.body" -}}
-      Alert: {{ .Labels.alertname }}
-      {{ if .Annotations -}}
-      Summary: {{ .Annotations.summary}}
-      Description: {{ .Annotations.description }}
-      {{ end -}}
-      Log message: {{ index .Labels "message" }}
-      Explore logs: {{ GRAFANA_ENDPOINT }}
-      {{ if .DashboardURL -}}
-      Go to dashboard: {{ .DashboardURL }}
-      {{- end }}
-      {{ if .PanelURL -}}
-      Go to panel: {{ .PanelURL }}
-      {{- end }}
-      Details:
-      {{ range .Labels.SortedPairs -}}
-      - {{ .Name }}: `{{ .Value }}`
-      {{ end -}}
-      {{ if .SilenceURL -}}
-      Silence this alert: {{ .SilenceURL }}
-      {{- end }}
-      {{- end }}
-{% endraw %}
-{% endif %}

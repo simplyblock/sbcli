@@ -1,16 +1,13 @@
-#!/usr/bin/env python
-# encoding: utf-8
 import json
 import logging
 import threading
 
-from flask import abort, Blueprint, request
+from flask import Blueprint, abort, request
 
-from simplyblock_core.controllers import tasks_controller, device_controller
-from simplyblock_web import utils
-
-from simplyblock_core import db_controller, cluster_ops, storage_node_ops
+from simplyblock_core import cluster_ops, db_controller, storage_node_ops
+from simplyblock_core.controllers import device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
 
@@ -345,7 +342,7 @@ def cluster_allstats(uuid, history):
                 for record in db.get_lvol_stats(lvol, limit=1)
             ],
         }
-        for lvol in db.get_lvols()
+        for lvol in db.get_lvols(uuid)
     ]
 
     return utils.get_response(out)

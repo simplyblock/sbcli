@@ -1,11 +1,23 @@
-# coding=utf-8
 import datetime
-from typing import List
+from typing import ClassVar
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.backup_config import BackupLocation
+from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index
 
 
 class Backup(BaseModel):
+
+    _WATCHED = True
+
+    # get_id() is "<cluster>/<uuid>", so a caller holding only the uuid cannot
+    # point-read the record; `uuid` is the index that lets it.
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Index('lvol_id'),
+        Index('snapshot_id'),
+        Index('prev_backup_id'),
+    )
 
     STATUS_PENDING = 'pending'
     STATUS_IN_PROGRESS = 'in_progress'
@@ -15,7 +27,7 @@ class Backup(BaseModel):
     STATUS_MERGED = 'merged'
     STATUS_DELETING = 'deleting'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_PENDING: 0,
         STATUS_IN_PROGRESS: 1,
         STATUS_COMPLETED: 2,
@@ -35,20 +47,49 @@ class Backup(BaseModel):
     prev_backup_id: str = ""
     pool_uuid: str = ""
     size: int = 0
-    source_cluster_id: str = ""  # original cluster that created this backup
     created_at: int = 0
     completed_at: int = 0
     error_message: str = ""
-    # Security params from the source lvol (for cross-cluster restore)
-    allowed_hosts: List[dict] = []
-    # S3 metadata written to metadata bucket
-    s3_metadata: dict = {}
+    #: Where this backup's objects live and how to interpret them, as a
+    #: ``BackupLocation``. Stored as a dict because ``BaseModel`` cannot nest
+    #: pydantic models; read it through :meth:`get_location`.
+    location: dict = default_factory(dict)
+    #: Kept beside `encryption` rather than derived from it, because a record
+    #: written before backups described their own keys says only this much, and
+    #: reading that as "not encrypted" would restore a plaintext volume over
+    #: ciphertext.
+    encrypted: bool = False
+
+    #: Which KMS holds this backup's key, and under what path. A
+    #: ``backup_manifest.KeyDescriptor``; stored as a dict for the same reason
+    #: ``location`` is. Empty for an unencrypted backup, and for one whose
+    #: record predates self-describing backups.
+    encryption: dict = default_factory(dict)
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
+    def watch_scope(self):
+        return (self.cluster_id,)
+
+    def get_location(self) -> BackupLocation:
+        """Validate and return where this backup's objects live.
+
+        Raises:
+            ValueError: The backup predates self-describing locations, or its
+                recorded location is not valid. Either way it cannot be read
+                without knowing what wrote it. ``ValidationError`` is a
+                ``ValueError``, so one except clause covers both.
+        """
+        if not self.location:
+            raise ValueError(
+                f"Backup {self.uuid} has no recorded location "
+                "(created before backups became self-describing)")
+
+        return BackupLocation.model_validate(self.location)
+
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         super().write_to_db(kv_store)
 
 
@@ -66,10 +107,16 @@ class BackupChainLock(BaseModel):
 
 class BackupPolicy(BaseModel):
 
+    _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+    )
+
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 0,
         STATUS_INACTIVE: 1,
     }
@@ -84,12 +131,19 @@ class BackupPolicy(BaseModel):
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
+    def watch_scope(self):
+        return (self.cluster_id,)
+
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         super().write_to_db(kv_store)
 
 
 class BackupPolicyAttachment(BaseModel):
+
+    _INDEXES: ClassVar[tuple] = (
+        Index(('target_type', 'target_id')),
+    )
     """Links a BackupPolicy to a pool or lvol."""
 
     cluster_id: str = ""
@@ -99,3 +153,11 @@ class BackupPolicyAttachment(BaseModel):
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
+
+
+class DBBackup(BaseModel):
+    """FDB backup metadata."""
+
+    backup_name: str = ""
+    cluster_id: str = ""
+

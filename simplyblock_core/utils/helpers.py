@@ -21,12 +21,32 @@ def single(xs):
         return x
 
 
+def single_or_none(xs):
+    """Returns the single value in the passed collection, or None if empty.
+
+    If `xs` contains multiple values, a ValueError error is raised.
+    """
+
+    it = iter(xs)
+
+    try:
+        x = next(it)
+    except StopIteration:
+        return None
+
+    try:
+        next(it)
+        raise ValueError('Multiple values present')
+    except StopIteration:
+        return x
+
+
 def parse_thread_siblings_list(siblings: str) -> list[int]:
     if not siblings or not siblings.strip():
         return []
 
     cpus = set()
-    token_re = re.compile(r"^\s*(?P<start>\d+)(?:\s*-\s*(?P<end>\d+)(?:\s*(?:[:\/])\s*(?P<step>\d+))?)?\s*$", re.X)
+    token_re = re.compile(r"^\s*(?P<start>\d+)(?:\s*-\s*(?P<end>\d+)(?:\s*(?:[:\/])\s*(?P<step>\d+))?)?\s*$", re.VERBOSE)
 
     for raw in siblings.split(","):
         part = raw.strip()

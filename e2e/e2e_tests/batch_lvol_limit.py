@@ -1,9 +1,11 @@
 import random
 import threading
-from utils.common_utils import sleep_n_sec
+import traceback
+
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
-import traceback
+from utils.common_utils import sleep_n_sec
+
 
 class TestBatchLVOLsLimit(TestClusterBase):
     """
@@ -132,8 +134,7 @@ class TestBatchLVOLsLimit(TestClusterBase):
         """Disconnects the logical volume."""
         nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0], nqn_filter=lvol_device)
         for nqn in nqn_lvol:
-            self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=nqn)
+            self.ssh_obj.safe_disconnect_nvme(node=self.mgmt_nodes[0], nqn=nqn)
 
     def cleanup(self):
         """Cleans up by unmounting, disconnecting, and deleting all logical volumes."""

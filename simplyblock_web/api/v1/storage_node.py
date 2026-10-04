@@ -1,15 +1,12 @@
-#!/usr/bin/env python
-# encoding: utf-8
 
 import logging
 import threading
 
 from flask import Blueprint, request
 
+from simplyblock_core import db_controller, storage_node_ops
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
-
-from simplyblock_core import db_controller, storage_node_ops
 
 logger = logging.getLogger(__name__)
 

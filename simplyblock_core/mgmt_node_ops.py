@@ -1,17 +1,16 @@
-# coding=utf-8
 import datetime
-import json
-import os
 import logging
-import uuid
+import os
 import time
+import uuid
+from typing import Any
+
 import requests
+from kubernetes import client as k8s_client
+from pydantic import SecretStr
 
 import docker
-from kubernetes import client as k8s_client
-
-
-from simplyblock_core import utils, scripts, constants
+from simplyblock_core import constants, scripts, utils
 from simplyblock_core.controllers import mgmt_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -19,11 +18,10 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 logger = logging.getLogger()
 
 
-
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode, alert_config: dict[str, Any] | None = None):
 
     try:
-        headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
+        headers = {'Authorization': f'{cluster_id} {cluster_secret.get_secret_value()}'}
         resp = requests.get(f"http://{cluster_ip}/api/v1/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
         cluster_data = resp_json['results'][0]
@@ -64,8 +62,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
                 return False
 
         if not cluster_data['disable_monitoring']:
-            utils.render_and_deploy_alerting_configs(cluster_data['contact_point'], cluster_data['grafana_endpoint'],
-                                                                        cluster_data['uuid'], cluster_data['secret'])
+            utils.render_and_deploy_alerting_configs(alert_config, cluster_data['contact_point'],
+                                                     cluster_data['grafana_endpoint'],
+                                                     cluster_data['uuid'], cluster_data['secret'])
 
         logger.info("Joining docker swarm...")
         try:
@@ -245,11 +244,10 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     return node.uuid
 
 
-def list_mgmt_nodes(is_json):
+def list_mgmt_nodes():
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes()
     data = []
-    output = ""
 
     for node in nodes:
         logging.debug(node)
@@ -261,14 +259,7 @@ def list_mgmt_nodes(is_json):
             "Status": node.status,
         })
 
-    if not data:
-        return output
-
-    if is_json:
-        output = json.dumps(data, indent=2)
-    else:
-        output = utils.print_table(data)
-    return output
+    return data
 
 
 def remove_mgmt_node(uuid):

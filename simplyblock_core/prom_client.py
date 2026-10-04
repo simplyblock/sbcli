@@ -2,11 +2,11 @@ import logging
 import re
 from datetime import datetime, timedelta
 
+from prometheus_api_client import PrometheusConnect
+
 from simplyblock_core import constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
-
-from prometheus_api_client import PrometheusConnect
 
 logger = logging.getLogger()
 
@@ -71,6 +71,7 @@ class PromClient:
         history_in_hours = history_in_hours % 24
         return history_in_days, history_in_hours, history_in_minutes
 
+
     def get_metrics(self, key_prefix, metrics_lst, params, history=None):
         start_time = datetime.now() - timedelta(minutes=10)
         if history:
@@ -131,3 +132,69 @@ class PromClient:
             "pool": pool_uuid
         }
         return self.get_metrics("pool", metrics_lst, params, history)
+
+
+    def get_raw_metric(self, metric_key, params, history=None):
+        start_time = datetime.now() - timedelta(minutes=10)
+        if history:
+            try:
+                days,hours,minutes = self.parse_history_param(history)
+                start_time = datetime.now() - timedelta(days=days, hours=hours, minutes=minutes)
+            except Exception:
+                raise PromClientException(f"Error parsing history string: {history}")
+        end_time = datetime.now()
+        data_out: list[dict] = []
+        metrics = self.client.get_metric_range_data(
+            metric_key, label_config=params, start_time=start_time, end_time=end_time)
+        for m in metrics:
+            mt_info = m["metric"]
+            mt_values = m["values"]
+            mt_values_list = [v[1] for v in mt_values]
+            data_out.append({"key": metric_key,"metric": mt_info, "values": mt_values_list})
+        return data_out
+
+    def get_node_filesystem_metrics(self, history=None):
+        params = {
+            "mountpoint": "/",
+             "job": "node",
+             "fstype!": "rootfs",
+        }
+        metrics_lst = ["avail_bytes", "size_bytes"]
+        node_stats = {}
+        try:
+            for metric in metrics_lst:
+                params[metric] = ""
+                response_list = self.get_raw_metric(f"node_filesystem_{metric}", params, history)
+                for m_data in response_list:
+                    node_name = m_data["metric"]["instance"]
+                    if node_name not in node_stats:
+                        node_stats[node_name] = {metric: m_data["values"]}
+                    else:
+                        node_stats[node_name][metric] = m_data["values"]
+        except Exception as e:
+            logger.error(f"Error getting node filesystem metrics: {e}")
+            return []
+        return node_stats
+
+    def get_api_metrics(self, history=None):
+        params = {
+             "handler!": "none",
+        }
+        metrics_lst = ["seconds_sum", "seconds_count"]
+        api_stats = {}
+        try:
+            for metric in metrics_lst:
+                params[metric] = ""
+                response_list = self.get_raw_metric(f"http_request_duration_{metric}", params, history)
+                for m_data in response_list:
+                    node_name = m_data["metric"]["instance"]
+                    if node_name not in api_stats:
+                        api_stats[node_name] = {metric: m_data["values"]}
+                    else:
+                        api_stats[node_name][metric] = m_data["values"]
+        except Exception as e:
+            logger.error(f"Error getting API metrics: {e}")
+            return []
+        return api_stats
+
+

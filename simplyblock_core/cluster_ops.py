@@ -1,41 +1,116 @@
-# coding=utf-8
-import datetime
+import base64
+import builtins
+import copy
 import json
 import os
+import re
+import shlex
 import socket
 import subprocess
+import threading
 import time
-import uuid
 import typing as t
+import uuid
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
+
+import requests
+import yaml
+from docker.errors import DockerException
+from kubernetes import client as k8s_client
+from pydantic import SecretStr
 
 import docker
-from kubernetes import client as k8s_client
-import requests
-
-from docker.errors import DockerException
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core import port_block
-from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+from simplyblock_core import (
+    constants,
+    index_ops,
+    jm_raid,
+    mgmt_node_ops,
+    release_upgrades,
+    scripts,
+    storage_node_ops,
+    utils,
+)
+from simplyblock_core.controllers import (
+    cluster_events,
+    device_controller,
+    qos_controller,
+    tasks_controller,
+    tcp_ports_events,
+)
+from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models import indices
+from simplyblock_core.models.backup_config import UnresolvedBackupConfig
+from simplyblock_core.models.cluster import (
+    Cluster,
+    DeployConfig,
+    HashicorpVaultSettings,
+)
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, NodeStatObject, DeviceStatObject
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.stats import (
+    ClusterStatObject,
+    DeviceStatObject,
+    LVolStatObject,
+    NodeStatObject,
+)
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.utils import pull_docker_image_with_retry
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils import port_block, pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
 db_controller = DBController()
 
-def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
+SUPPORTED_ERASURE_CODING_SCHEMES = {
+    (1, 0),
+    (1, 1),
+    (2, 1),
+    (4, 1),
+    (1, 2),
+    (2, 2),
+    (4, 2),
+}
+
+# Default window for both get_logs() and the watch_events() live tail, so a
+# watch subscriber's initial snapshot matches the plain GET's default page.
+EVENT_LOG_TAIL = 50
+
+
+async def watch_clusters():
+    """Stream changes across all clusters."""
+    async for batch in db_controller.watch(Cluster):
+        yield batch
+
+
+async def watch_cluster(cluster_id):
+    """Stream changes for a single cluster."""
+    async for batch in db_controller.watch(Cluster, entity_id=cluster_id):
+        yield batch
+
+
+async def watch_events(cluster_id):
+    """Stream the cluster's most recent log entries (tailed to EVENT_LOG_TAIL,
+    since the event log is append-only and otherwise unbounded)."""
+    async for batch in db_controller.watch(
+            EventObj, scope=(cluster_id,), tail=EVENT_LOG_TAIL,
+            select=lambda models: sorted(models, key=lambda e: e.date),
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
+
+
+def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
-    session.auth = ("admin", grafana_secret)
+    session.auth = ("admin", grafana_secret.get_secret_value())
     headers = {
         'X-Requested-By': '',
         'Content-Type': 'application/json',
@@ -47,7 +122,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
         userid = response.json().get("id")
 
         payload = json.dumps({
-            "password": user_secret
+            "password": user_secret.get_secret_value()
         })
 
         url = f"{grafana_url}/api/admin/users/{userid}/password"
@@ -66,7 +141,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
         payload = json.dumps({
             "name": cluster_id,
             "login": cluster_id,
-            "password": user_secret
+            "password": user_secret.get_secret_value()
         })
         url = f"{grafana_url}/api/admin/users"
         while retries > 0:
@@ -80,19 +155,20 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
             time.sleep(3)
 
 
-def _add_graylog_input(cluster_ip, password):
+def _add_graylog_input(cluster_ip, password: SecretStr):
     base_url = f"{cluster_ip}/api"
     input_url = f"{base_url}/system/inputs"
 
     retries = 30
     reachable = False
     session = requests.session()
-    session.auth = ("admin", password)
+    session.auth = ("admin", password.get_secret_value())
     headers = {
         'X-Requested-By': 'setup-script',
         'Content-Type': 'application/json',
     }
 
+    last_error = None
     while retries > 0:
         payload = json.dumps({
             "title": "spdk log input",
@@ -109,23 +185,35 @@ def _add_graylog_input(cluster_ip, password):
             "global": True
         })
 
-        response = session.post(input_url, headers=headers, data=payload)
+        try:
+            response = session.post(input_url, headers=headers, data=payload)
+        except requests.exceptions.RequestException as e:
+            # Graylog may still be starting (fresh cluster bootstrap) — a
+            # refused/failed connection must retry the same as a bad status
+            # code, not crash add_cluster() on the very first attempt.
+            last_error = str(e)
+            logger.debug("Graylog input POST failed, waiting for graylog to come up: %s", e)
+            retries -= 1
+            time.sleep(5)
+            continue
+
         if response.status_code == 201:
             logger.info("Graylog input created...")
             reachable = True
             break
 
-        logger.debug(response.text)
+        last_error = f"status {response.status_code}"
+        logger.debug("Graylog input POST returned status %s", response.status_code)
         retries -= 1
         time.sleep(5)
 
     if not reachable:
-        logger.error(f"Failed to create graylog input: {response.text}")
+        logger.error("Failed to create graylog input (%s)", last_error)
         return False
 
     inputs_response = session.get(input_url, headers=headers)
     if inputs_response.status_code != 200:
-        logger.error(f"Failed to retrieve inputs: {inputs_response.text}")
+        logger.error("Failed to retrieve inputs (status %s)", inputs_response.status_code)
         return False
 
     input_id = None
@@ -154,7 +242,7 @@ def _add_graylog_input(cluster_ip, password):
 
     extractor_response = session.post(extractor_url, headers=headers, data=json.dumps(extractor_payload))
     if extractor_response.status_code != 201:
-        logger.error(f"Failed to add JSON extractor: {extractor_response.text}")
+        logger.error("Failed to add JSON extractor (status %s)", extractor_response.status_code)
         return False
 
     logger.info("JSON extractor added successfully.")
@@ -163,30 +251,44 @@ def _add_graylog_input(cluster_ip, password):
 def _set_max_result_window(cluster_ip, max_window=100000):
 
     url_existing_indices = f"{cluster_ip}/_all/_settings"
+    headers = {
+        'Content-Type': 'application/json',
+    }
 
     retries = 30
-    reachable=False
+    reachable = False
+    last_error = None
     while retries > 0:
         payload_existing = json.dumps({
             "settings": {
                 "index.max_result_window": max_window
             }
         })
-        headers = {
-            'Content-Type': 'application/json',
-        }
-        response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+        try:
+            response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+        except requests.exceptions.RequestException as e:
+            # OpenSearch may still be starting (fresh cluster bootstrap) — a
+            # refused/failed connection must retry the same as a bad status
+            # code, not crash add_cluster() on the very first attempt
+            # (2026-07-28: cluster create failed outright with an unhandled
+            # ConnectionError because opensearch wasn't listening yet).
+            last_error = str(e)
+            logger.debug("waiting for opensearch cluster to come up: %s", e)
+            retries -= 1
+            time.sleep(5)
+            continue
         if response.status_code == 200:
             logger.info("Settings updated for existing indices.")
-            reachable=True
+            reachable = True
             break
+        last_error = response.text
         logger.debug(response.status_code)
         logger.debug("waiting for opensearch cluster to come up")
         retries -= 1
         time.sleep(5)
 
     if not reachable:
-        logger.error(f"Failed to update settings for existing indices: {response.text}")
+        logger.error(f"Failed to update settings for existing indices: {last_error}")
         return False
 
     url_template = f"{cluster_ip}/_template/all_indices_template"
@@ -196,7 +298,11 @@ def _set_max_result_window(cluster_ip, max_window=100000):
             "index.max_result_window": max_window
         }
     })
-    response_template = requests.put(url_template, headers=headers, data=payload_template)
+    try:
+        response_template = requests.put(url_template, headers=headers, data=payload_template)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to create template for future indices: {e}")
+        return False
     if response_template.status_code == 200:
         logger.info("Template created for future indices.")
         return True
@@ -220,6 +326,17 @@ def parse_protocols(input_str: str):
         "rdma": "rdma" in parts,
     }
 
+def _validated_device_mode(device_mode) -> str:
+    """Normalize/validate the cluster device mode ("nvme" | "lblk").
+    Deploy-time only, like enable_failure_domain."""
+    mode = (device_mode or constants.DEVICE_MODE_NVME).lower()
+    if mode not in (constants.DEVICE_MODE_NVME, constants.DEVICE_MODE_LBLK):
+        raise ValueError(
+            f"invalid device_mode {device_mode!r}; must be "
+            f"'{constants.DEVICE_MODE_NVME}' or '{constants.DEVICE_MODE_LBLK}'")
+    return mode
+
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -227,11 +344,18 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
-                   hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
-                   inline_checksum=False, atomic_4k=False) -> str:
-
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+                   hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                   enable_failure_domain=False,
+                   device_mode=constants.DEVICE_MODE_NVME,
+                   enable_hang_device=False,
+                   max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
+                   alert_config: dict[str, t.Any] | None = None,
+                   inline_checksum=False,
+                   atomic_4k=False,
+                   cluster_vip=None,
+) -> str:
+    if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+        raise ValueError("Unsupported erasure coding scheme")
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -246,66 +370,73 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
+    if backup_config:
+        # Reject a configuration the cluster could not act on before installing
+        # anything, rather than at the set_backup_config below. Everything but
+        # the bucket is checked here: that one is derived from a cluster id that
+        # does not exist yet, so an absent one is not a caller's mistake.
+        UnresolvedBackupConfig.model_validate(backup_config)
+
     if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()
         for existing in existing_clusters:
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    db_connection = None
-    if mode == "docker":
-        if not ifname:
-            ifname = "eth0"
+    if not ifname:
+        ifname = "eth0"
 
-        dev_ip = utils.get_iface_ip(ifname)
-        if not dev_ip:
-            raise ValueError(f"Error getting interface ip: {ifname}")
+    dev_ip = utils.get_iface_ip(ifname)
+    if not dev_ip:
+        raise ValueError(f"Error getting interface ip: {ifname}")
 
-        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-        scripts.set_db_config(db_connection)
-        logger.info(f"Node IP: {dev_ip}")
-        scripts.configure_docker(dev_ip)
-        logger.info("Configuring docker swarm...")
-        c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
-        if c.swarm.attrs and "ID" in c.swarm.attrs:
-            logger.info("Docker swarm found, leaving swarm now")
-            c.swarm.leave(force=True)
-            try:
-                c.volumes.get("monitoring_grafana_data").remove(force=True)
-            except DockerException:
-                pass
-            time.sleep(3)
+    db_connection = SecretStr(f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500")
+    scripts.set_db_config(db_connection.get_secret_value())
+    logger.info(f"Node IP: {dev_ip}")
+    scripts.configure_docker(dev_ip)
+    logger.info("Configuring docker swarm...")
+    c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
+    if c.swarm.attrs and "ID" in c.swarm.attrs:
+        logger.warning("Warning! Docker swarm found")
+        ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
+        if not ret:
+            raise ValueError("Aborting")
+        c.swarm.leave(force=True)
+        try:
+            c.volumes.get("monitoring_grafana_data").remove(force=True)
+        except DockerException as e:
+            logger.debug(
+                "Best-effort cleanup: could not remove volume 'monitoring_grafana_data'; continuing cluster reset. Error: %s",
+                e,
+            )
+        time.sleep(3)
 
-        c.swarm.init(dev_ip)
-        logger.info("Configuring docker swarm > Done")
+    c.swarm.init(dev_ip)
+    logger.info("Configuring docker swarm > Done")
 
-        hostname = socket.gethostname()
-        current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
-        if current_node:
-            current_spec = current_node.attrs["Spec"]
-            current_labels = current_spec.get("Labels", {})
-            current_labels["app"] = "graylog"
-            current_spec["Labels"] = current_labels
+    hostname = socket.gethostname()
+    current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
+    if current_node:
+        current_spec = current_node.attrs["Spec"]
+        current_labels = current_spec.get("Labels", {})
+        current_labels["app"] = "graylog"
+        current_spec["Labels"] = current_labels
 
-            current_node.update(current_spec)
+        current_node.update(current_spec)
 
-            logger.info(f"Labeled node '{hostname}' with app=graylog")
-        else:
-            logger.warning("Could not find current node for labeling")
-    elif mode == "kubernetes":
-        dev_ip = mgmt_ip
-        if not dev_ip:
-            raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
+        logger.info(f"Labeled node '{hostname}' with app=graylog")
+    else:
+        logger.warning("Could not find current node for labeling")
 
 
     if not cli_pass:
-        cli_pass = utils.generate_string(10)
+        cli_pass = SecretStr(utils.generate_string(10))
 
     logger.info("Adding new cluster object")
     cluster = Cluster()
@@ -319,11 +450,19 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
+    # New clusters build journals with the current RAID 0+1 layout.
+    cluster.jm_raid_layout = jm_raid.LAYOUT_RAID01
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = cli_pass
-    cluster.secret = utils.generate_string(20)
+    cluster.secret = SecretStr(utils.generate_string(20))
     cluster.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
@@ -353,13 +492,20 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster.grafana_endpoint = grafana_endpoint or default_grafana
     cluster.enable_node_affinity = enable_node_affinity
+    cluster.enable_hang_device = enable_hang_device
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
 
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
-    cluster.contact_point = contact_point
+    cluster.enable_failure_domain = enable_failure_domain
+    validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
+    cluster.max_subsys = max_subsys or 0
+    cluster.hugepages_mem = hugepages_mem or 0
+    cluster.spdk_vcpu_count = spdk_vcpu_count or 0
+    cluster.device_mode = _validated_device_mode(device_mode)
+    cluster.contact_point = contact_point or ""
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
     cluster.full_page_unmap = False
@@ -372,41 +518,37 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.snode_api_port = snode_api_port
     cluster.container_image_prefix = container_image_prefix or ""
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
-
+    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
+    cluster.cluster_vip = cluster_vip or ""
     if nvmeof_tls_config:
         cluster.tls = True
         cluster.tls_config = nvmeof_tls_config
 
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
-    if mode == "docker":
-        if not disable_monitoring:
-            utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
+    if not disable_monitoring:
+        utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
-        logger.info("Deploying swarm stack ...")
-        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-        logger.info("Deploying swarm stack > Done")
+    logger.info("Deploying swarm stack ...")
+    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
+                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+    logger.info("Deploying swarm stack > Done")
 
-        logger.info("Configuring DB...")
-        scripts.set_db_config_single()
-        logger.info("Configuring DB > Done")
-        monitoring_secret = cluster.secret
+    logger.info("Configuring DB...")
+    scripts.set_db_config_single()
+    logger.info("Configuring DB > Done")
+    monitoring_secret = cluster.secret
 
-    elif mode == "kubernetes":
-        logger.info("Retrieving foundationdb connection string...")
-        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-        db_connection = fdb_cluster_string
 
-        logger.info("Patching prometheus configmap...")
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
-
-        if ingress_host_source == "hostip":
-            dns_name = dev_ip
-    else:
-        assert False, "Unreachable"
+    cfg = DeployConfig()
+    cfg.mode = mode
+    cfg.grafana_endpoint = grafana_endpoint or default_grafana
+    cfg.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
+    cfg.db_connection = db_connection if db_connection else SecretStr("")
+    cfg.disable_monitoring = disable_monitoring
+    cfg.write_to_db()
 
     # Monitoring stack configuration (OpenSearch max_result_window, Graylog
     # GELF input + JSON extractor, Grafana admin user). Must run after the
@@ -425,11 +567,19 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.create_dt = str(datetime.datetime.now())
+    cluster.create_dt = str(datetime.now())
 
     cluster.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(cluster)
+
+    # Every declared index is complete from the first write on a cluster that
+    # starts empty, so flip them to `ready` now rather than leaving every read
+    # on the scan fallback until someone runs the backfill by hand. The walk is
+    # over empty tables here; on a deployment that already holds clusters it
+    # indexes what is there, which is equally correct.
+    for line in index_ops.build_indices(log=logger.info):
+        logger.info(line)
 
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
 
@@ -465,29 +615,83 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
-                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None,
+                cr_namespace=None, cr_plural=None, fabric="tcp",
+                max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
-                inline_checksum=False, atomic_4k=False) -> str:
+                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                enable_failure_domain=False,
+                device_mode=constants.DEVICE_MODE_NVME,
+                inline_checksum=False,
+                atomic_4k=False,
+) -> str:
+    """Thin wrapper around _add_cluster_impl() that serializes create calls
+    for the same name behind a DbLock.
+
+    The duplicate-name check inside _add_cluster_impl is a plain
+    read-then-write with no atomicity: concurrent/retried create calls for the
+    same name can all pass it before any of them has committed (observed
+    2026-07-28: a control-plane readiness flap made the operator retry
+    cluster-create in a burst, producing 6 separate clusters named
+    "simplyblock-cluster" instead of one). Acquiring this lock first — and
+    only for named creates, matching the check it protects — closes that
+    window without touching _add_cluster_impl's body. Kept as an explicit,
+    identically-shaped signature (not *args/**kwargs) since existing callers
+    pass ``name`` positionally.
+    """
+    kwargs = dict(
+        blk_size=blk_size, page_size_in_blocks=page_size_in_blocks, cap_warn=cap_warn, cap_crit=cap_crit,
+        prov_cap_warn=prov_cap_warn, prov_cap_crit=prov_cap_crit, distr_ndcs=distr_ndcs, distr_npcs=distr_npcs,
+        distr_bs=distr_bs, distr_chunk_bs=distr_chunk_bs, ha_type=ha_type, enable_node_affinity=enable_node_affinity,
+        qpair_count=qpair_count, max_queue_size=max_queue_size, inflight_io_threshold=inflight_io_threshold,
+        strict_node_anti_affinity=strict_node_anti_affinity, is_single_node=is_single_node, name=name,
+        max_subsys=max_subsys, hugepages_mem=hugepages_mem, spdk_vcpu_count=spdk_vcpu_count,
+        cr_name=cr_name, cr_namespace=cr_namespace, cr_plural=cr_plural, fabric=fabric,
+        client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
+        nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
+        hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        device_mode=device_mode,
+        inline_checksum=inline_checksum,
+        atomic_4k=atomic_4k,
+    )
+    if not name:
+        return _add_cluster_impl(**kwargs)
+
+    # timeout=0: a create for a name someone else is already creating is
+    # answered, not queued — the queued one would only reach the duplicate-name
+    # check and fail there. DbLockUnavailableError deliberately propagates: an
+    # unreachable database is not a name collision.
+    lock = DbLock(f"cluster_create/{name}", timeout=0)
+    try:
+        with lock:
+            return _add_cluster_impl(**kwargs)
+    except DbLockBusyError as busy:
+        raise ValueError(f"A cluster with the name '{name}' already exists or is currently being created "
+                          f"(held by {busy.owner or 'unknown'})") from busy
 
 
-    default_cluster = None
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
+def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
+                cr_namespace=None, cr_plural=None, fabric="tcp",
+                max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
+                client_data_nic="", max_fault_tolerance=1, backup_config=None,
+                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
+                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                enable_failure_domain=False,
+                device_mode=constants.DEVICE_MODE_NVME,
+                inline_checksum=False,
+                atomic_4k=False,
+) -> str:
+
     clusters = db_controller.get_clusters()
-    if clusters:
-        default_cluster = clusters[0]
-    else:
-        logger.info("No previous clusters found")
-
-    if name:
+    if name and clusters:
         for existing in clusters:
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+    if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+        raise ValueError("Unsupported erasure coding scheme")
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -497,8 +701,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
         raise ValueError("External KMS requires mTLS authentication to be used")
-
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
 
     logger.info("Adding new cluster")
     cluster = Cluster()
@@ -512,45 +714,70 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
+    # New clusters build journals with the current RAID 0+1 layout.
+    cluster.jm_raid_layout = jm_raid.LAYOUT_RAID01
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.secret = utils.generate_string(20)
+    cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
-    if default_cluster:
-        cluster.mode = default_cluster.mode
-        cluster.db_connection = default_cluster.db_connection
-        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
-        cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    cluster.enable_failure_domain = enable_failure_domain
+    cluster.device_mode = _validated_device_mode(device_mode)
+
+    if clusters:
+        cfg = db_controller.get_deploy_config()
+        cluster.mode = cfg.mode
+        cluster.db_connection = cfg.db_connection
+        cluster.grafana_secret = cfg.grafana_secret
+        cluster.grafana_endpoint = cfg.grafana_endpoint
+        cluster.disable_monitoring = cfg.disable_monitoring
     else:
-        # creating first cluster on k8s
+        # Bootstrapping the very first cluster of a fresh deployment: no
+        # DeployConfig exists yet (only the docker-swarm create_cluster()
+        # path writes one), so derive the cluster-wide settings here and
+        # persist them as the DeployConfig every later add_cluster() call
+        # will read.
+        logger.info("No previous clusters found, bootstrapping first cluster")
+        enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
+        monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
+
         cluster.mode = "kubernetes"
+        cluster.disable_monitoring = enable_monitoring != "true"
         logger.info("Retrieving foundationdb connection string...")
-        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-        cluster.db_connection = fdb_cluster_string
+        cluster.db_connection = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         if monitoring_secret:
             cluster.grafana_secret = monitoring_secret
         elif enable_monitoring != "true":
-            cluster.grafana_secret = ""
+            cluster.grafana_secret = SecretStr("")
         else:
-            raise Exception("monitoring_secret is required")
+            raise ValueError("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
-        if not cluster_ip:
-            cluster_ip = "0.0.0.0"
 
-        # add mgmt node object
-        mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
-        if enable_monitoring == "true":
-            graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
-            os_endpoint = constants.OS_K8S_ENDPOINT
-            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid)
 
-            _set_max_result_window(os_endpoint)
+        if not cluster.disable_monitoring:
+            _set_max_result_window(constants.OS_K8S_ENDPOINT)
+            _add_graylog_input(constants.GRAYLOG_K8S_ENDPOINT, cluster.grafana_secret)
 
-            _add_graylog_input(graylog_endpoint, monitoring_secret)
+        cfg = DeployConfig()
+        cfg.mode = cluster.mode
+        cfg.grafana_endpoint = cluster.grafana_endpoint
+        cfg.grafana_secret = cluster.grafana_secret
+        cfg.db_connection = cluster.db_connection
+        cfg.disable_monitoring = cluster.disable_monitoring
+        cfg.write_to_db()
+
+    if not cluster.disable_monitoring:
+        _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if cluster.mode == "kubernetes":
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
 
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
@@ -562,6 +789,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
+    validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
+    cluster.max_subsys = max_subsys or 0
+    cluster.hugepages_mem = hugepages_mem or 0
+    cluster.spdk_vcpu_count = spdk_vcpu_count or 0
     cluster.cr_name = cr_name
     cluster.cr_namespace = cr_namespace
     cluster.cr_plural = cr_plural
@@ -586,10 +817,11 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.snode_api_port = snode_api_port
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
+    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.create_dt = str(datetime.datetime.now())
+    cluster.create_dt = str(datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
 
@@ -609,13 +841,365 @@ def set_name(cl_id, name) -> Cluster:
     return cluster
 
 
+def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
+    """Block until every ONLINE primary node holds a connected remote-device
+    record for every ONLINE device of every OTHER online node, or raise.
+
+    Activation's first create_lvstore builds distribs that immediately
+    read/write across ALL cluster devices. A single missing cross-node
+    connection fails that create ~12 s in with an opaque distrib
+    ``error_read`` and aborts the whole activation (incident 2026-07-10
+    14:12: the deploy retried two node-adds via delete+re-add, producing
+    four fresh device records in the final 3 minutes, and activation
+    started 70 s after the last join — before peers had attached to the
+    re-added nodes' devices). Node records converge as the add/health
+    flows finish attaching, so waiting here is both sufficient and
+    bounded; on timeout the error names the exact missing links instead
+    of a distrib read error.
+    """
+    deadline = time.time() + timeout_sec
+    prev_missing = None
+    # A stalled repair is bounded by round count as well as by the wall-clock
+    # deadline. The two express the same budget when the ``time.sleep`` below is
+    # real, but only the round count holds when it is not: the integration
+    # fixtures patch this module's ``time.sleep`` to a no-op, which turns the
+    # wait into thousands of full-mesh repair passes burning CPU for the whole
+    # timeout_sec. Rounds that make progress reset the counter, so a genuinely
+    # long repair keeps the same unbounded-while-shrinking behavior as before.
+    max_stalled_rounds = max(1, int(timeout_sec / poll_sec))
+    stalled_rounds = 0
+    while True:
+        snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+        online = [n for n in snodes
+                  if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+        expected = {}  # device uuid -> owner node id
+        for node in online:
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    expected[dev.get_id()] = node.get_id()
+        missing = []
+        for node in online:
+            have = {rd.get_id() for rd in node.remote_devices if rd.remote_bdev}
+            for dev_id, owner in expected.items():
+                if owner != node.get_id() and dev_id not in have:
+                    missing.append((node.get_id(), owner, dev_id))
+        if not missing:
+            logger.info("Pre-activation connectivity check passed: %d nodes fully meshed "
+                        "over %d devices", len(online), len(expected))
+            return
+        if time.time() >= deadline or stalled_rounds >= max_stalled_rounds:
+            sample = ", ".join(f"{n[:8]}->{o[:8]}/dev {d[:8]}" for n, o, d in missing[:8])
+            raise ValueError(
+                f"Failed to activate cluster: {len(missing)} cross-node device "
+                f"connection(s) still missing after {timeout_sec}s "
+                f"(node->device-owner/device): {sample}. Nodes are still "
+                f"attaching to recently (re-)added peers — retry activation "
+                f"once node health checks pass.")
+        logger.warning("Pre-activation connectivity check: %d cross-node device "
+                       "connection(s) missing; repairing, then waiting %ds "
+                       "(%.0fs left)", len(missing), poll_sec,
+                       deadline - time.time())
+
+        # Actively REPAIR the missing links instead of only waiting for them.
+        # Waiting is sufficient after node-add (the add/health flows are still
+        # attaching), but after a whole-cluster parallel recovery nothing else
+        # drives these: each restart's peer reconnect is best-effort and skips
+        # peers that are mid-restart at that moment, and once the last restart
+        # finishes no reconciliation sweeps the leftovers — a bare wait
+        # livelocks activation (2026-07-13: 382 links static across repeated
+        # in_activation -> suspended -> in_activation cycles). Repair mirrors
+        # _reconnect_peers_to_restarted_node: per-node worker threads, DELTA
+        # reconnect per missing owner, atomic_update so we never clobber the
+        # node's concurrent flows. Best-effort — the re-check above is the
+        # only pass/fail authority.
+        # NB: a plain ``set()`` here would resolve to this module's ``set``
+        # function (it shadows the builtin).
+        by_node: dict = {}
+        for n_id, owner_id, _ in missing:
+            if n_id not in by_node:
+                by_node[n_id] = {owner_id}
+            else:
+                by_node[n_id].add(owner_id)
+
+        def _repair_node(node_id, owner_ids):
+            # A full-mesh outage (whole-fleet reboot) leaves each node missing
+            # MOST owners. The per-owner delta below pays its fixed overhead
+            # (DB reads, connect round-trips, JM reconcile, atomic_update)
+            # once per owner — measured ~40s each, and 31 sequential owners
+            # made round 1 the 21-minute activation stall of 2026-07-16
+            # (13:09:43 "1353 missing" -> 13:30:49 "15 missing", one round).
+            # One FULL reconcile connects every peer's devices in parallel
+            # behind a single shared surface-poll (~67s/node, 2026-07-13
+            # measurement), so use it whenever more than a couple of owners
+            # are missing; keep the delta for the small post-node-add case.
+            if len(owner_ids) > 2:
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation full reconcile of %s failed: %s",
+                        node_id[:8], e)
+                return
+            for owner_id in sorted(owner_ids):
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True,
+                        only_node_id=owner_id)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(
+                            node, only_node_id=owner_id)
+
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation repair of %s -> %s failed: %s",
+                        node_id[:8], owner_id[:8], e)
+
+        repair_threads = []
+        for node_id, owner_ids in by_node.items():
+            t = threading.Thread(
+                target=_repair_node, args=(node_id, owner_ids),
+                name=f"preact-repair-{node_id[:8]}")
+            t.start()
+            repair_threads.append(t)
+        for t in repair_threads:
+            t.join()
+
+        # Progress-aware deadline. The FIRST completed repair round counts as
+        # progress unconditionally: the round itself may consume the whole
+        # initial budget (2026-07-13 validation run: 1116 links repaired at
+        # ~38/min = 25+ min in round 1), and without this the already-expired
+        # deadline forced a pointless abort lap on the re-check even though
+        # the mesh was nearly healed. After that, extend only while the
+        # missing count keeps shrinking — a stalled repair (no reduction
+        # across a full round) still runs the clock out.
+        if prev_missing is None or len(missing) < prev_missing:
+            deadline = max(deadline, time.time() + timeout_sec / 2)
+            stalled_rounds = 0
+        else:
+            stalled_rounds += 1
+        prev_missing = len(missing)
+        time.sleep(poll_sec)
+
+
+def set_object_ops(cl_id, stopped) -> bool:
+    """Stop or resume object lifecycle operations on one cluster.
+
+    While stopped, creation, deletion and modification of lvols, snapshots,
+    clones and pools are refused -- including parameter changes such as QoS
+    limits and resizes. Read paths stay open, and the cluster keeps maintaining
+    itself (restarts, migrations, rebalancing) so a stopped cluster still
+    recovers from faults on its own.
+
+    Enforcement lives in the controllers (see controllers/ops_gate.py), which
+    is what both the CLI and the v2 API funnel through.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    stopped = bool(stopped)
+    if bool(getattr(cluster, "object_ops_stopped", False)) == stopped:
+        logger.info(
+            f"Object operations are already "
+            f"{'stopped' if stopped else 'started'} on cluster {cl_id}")
+        return True
+
+    db_controller.atomic_update(
+        cluster, lambda c, v=stopped: setattr(c, "object_ops_stopped", v))
+    logger.info(
+        f"Object operations {'stopped' if stopped else 'started'} on cluster {cl_id}")
+    try:
+        cluster_events.cluster_object_ops_change(
+            db_controller.get_cluster_by_id(cl_id), stopped)
+    except Exception as ev_err:
+        # The switch is already persisted; failing to journal it must not
+        # report the operation as failed.
+        logger.warning(f"Could not log the object-ops change event: {ev_err}")
+    return True
+
+
+def validate_spdk_sizing(max_subsys=None, hugepages_mem=None, spdk_vcpu_count=None):
+    """Check the cluster-wide SPDK sizing values, raising ValueError if unusable.
+
+    These are cluster-level on purpose: set per node they let a cluster drift
+    into nodes with different subsystem ceilings and different core budgets.
+    """
+    if max_subsys is not None and max_subsys:
+        if max_subsys < 0 or max_subsys > constants.MAX_SUBSYSTEMS_PER_NODE:
+            raise ValueError(
+                f"max_subsys must be between 1 and "
+                f"{constants.MAX_SUBSYSTEMS_PER_NODE} (0 = product default)")
+    if hugepages_mem is not None and hugepages_mem < 0:
+        raise ValueError("hugepages_mem cannot be negative (0 = computed)")
+    if spdk_vcpu_count is not None and spdk_vcpu_count < 0:
+        raise ValueError("spdk_vcpu_count cannot be negative (0 = heuristic)")
+
+
+def set_spdk_sizing(cluster_id, max_subsys=None, hugepages_mem=None) -> bool:
+    """Change the cluster-wide SPDK sizing that may be changed after creation.
+
+    A node adopts these when it is added and on every restart, so the change
+    lands node by node as they restart rather than immediately. spdk_vcpu_count
+    is not settable here: changing a running cluster's core budget rewrites
+    every node's core mask, which belongs to a deliberate re-deploy.
+    """
+    validate_spdk_sizing(max_subsys=max_subsys, hugepages_mem=hugepages_mem)
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    changes = {}
+    if max_subsys is not None:
+        changes["max_subsys"] = int(max_subsys)
+    if hugepages_mem is not None:
+        changes["hugepages_mem"] = int(hugepages_mem)
+    if not changes:
+        return True
+
+    def _apply(c, values=changes):
+        for key, value in values.items():
+            setattr(c, key, value)
+
+    db_controller.atomic_update(cluster, _apply)
+    logger.info(
+        f"Cluster {cluster_id} SPDK sizing updated: "
+        + ", ".join(f"{k}={v}" for k, v in changes.items())
+        + ". Nodes pick this up on their next restart.")
+    return True
+
+
+def _record_activated_nodes(cl_id) -> None:
+    """Freeze the node set that is now part of the activated cluster.
+
+    Written on the success path of both activation and expansion, so a later
+    re-activation can tell "the same cluster" from "the same cluster plus nodes
+    someone added while it was suspended".
+    """
+    try:
+        cluster = db_controller.get_cluster_by_id(cl_id)
+        node_ids = sorted(
+            n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id))
+        db_controller.atomic_update(
+            cluster, lambda c, v=node_ids: setattr(c, "activated_node_ids", v))
+    except Exception as e:
+        # Never fail an otherwise-successful activation over bookkeeping; the
+        # next activation or expansion rewrites it.
+        logger.warning(f"Could not record the activated node set: {e}")
+
+
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+    """Wrapper around the activation body that keeps ``activation_heartbeat``
+    fresh for its whole duration. The storage_node_monitor watchdog uses a
+    stale heartbeat to tell a DEAD activation (driver process/container gone)
+    from a merely long one: without it, a wedged IN_ACTIVATION sat for the
+    full node-scaled budget — 42 minutes on a 32-node cluster — before the
+    revert (incident 2026-07-13, monitor container replaced mid-activation).
+    """
+    stop_beat = threading.Event()
+
+    def _beat():
+        while not stop_beat.wait(60):
+            try:
+                fresh = db_controller.get_cluster_by_id(cl_id)
+                if fresh.status != Cluster.STATUS_IN_ACTIVATION:
+                    continue
+                now_iso = datetime.now(UTC).isoformat()
+                db_controller.atomic_update(
+                    fresh, lambda c, v=now_iso: setattr(c, "activation_heartbeat", v))
+            except Exception:
+                # Never let heartbeat trouble touch the activation itself; a
+                # missed beat only means the watchdog waits for the next one.
+                pass
+
+    beat_thread = threading.Thread(
+        target=_beat, daemon=True, name=f"activation-heartbeat-{cl_id[:8]}")
+    beat_thread.start()
+    try:
+        _cluster_activate_impl(
+            cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    finally:
+        stop_beat.set()
+
+
+def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> None:
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    prev_status = cluster.status
+    if prev_status == Cluster.STATUS_IN_ACTIVATION:
+        prev_status = Cluster.STATUS_UNREADY
+    try:
+        _cluster_activate(cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    except Exception:
+        # Never leave the cluster wedged in in_activation: this often runs in
+        # a fire-and-forget thread, and an unhandled failure would otherwise
+        # block any retry (the activate API rejects in_activation clusters).
+        # The expected-failure paths inside _cluster_activate restore the
+        # status themselves; this only catches what they missed.
+        cluster = db_controller.get_cluster_by_id(cl_id)
+        if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+            logger.error("Cluster activation failed unexpectedly; reverting status "
+                         f"from {Cluster.STATUS_IN_ACTIVATION} to {prev_status}")
+            set_cluster_status(cl_id, prev_status)
+        raise
+
+
+def is_single_node_activation(cluster, online_nodes) -> bool:
+    """A cluster with exactly one storage node activates as non-HA regardless
+    of the chosen ha_type / EC schema: no secondary roles, no HA journaling
+    (single local journal), no physical labels. This is what makes 1-node
+    deployments activatable with the API defaults (ha_type='ha')."""
+    return bool(cluster.is_single_node or len(online_nodes) == 1)
+
+
+def activation_minimum_devices(cluster, single_node_cluster) -> int:
+    """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
+    headroom that a single-node cluster (no data redundancy to rebuild onto
+    a spare) does not require."""
+    return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
+
+
+def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")
         if not force:
             raise ValueError("Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
+
+    # Growth by re-activation is not a supported path. Once a cluster has been
+    # activated its node set is fixed; nodes added afterwards are integrated by
+    # the expansion flow ("sn add-node --expansion" on an ACTIVE cluster), which
+    # rotates roles and rebalances data. Re-activating with extra nodes present
+    # would pull them in with none of that.
+    #
+    # The ACTIVE check above does not catch it: suspend -> add-node -> activate
+    # walks straight past, because a suspended cluster is not ACTIVE. There is
+    # deliberately no --force escape here -- forcing it produces a cluster whose
+    # roles and failure domains were never rotated for the new nodes, which is
+    # not a state an operator can ask for meaningfully.
+    current_node_ids = {
+        n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)}
+    if cluster.activated_node_ids:
+        added = sorted(current_node_ids - set(cluster.activated_node_ids))
+        if added:
+            raise ValueError(
+                f"Cluster {cl_id} has already been activated and {len(added)} "
+                f"node(s) were added since: {', '.join(n[:8] for n in added)}. "
+                f"Re-activation must not grow a cluster. Remove those nodes, or "
+                f"grow the cluster with 'sn add-node --expansion' while it is "
+                f"ACTIVE.")
 
     ols_status = cluster.status
     if ols_status == Cluster.STATUS_IN_ACTIVATION:
@@ -642,6 +1226,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     online_nodes = []
     dev_count = 0
 
+    raw_device_size = 0
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
@@ -651,26 +1236,162 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     dev_count += 1
-    minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
+                    raw_device_size += int(dev.size or 0)
+    single_node_cluster = is_single_node_activation(cluster, online_nodes)
+    if single_node_cluster and cluster.ha_type == "ha":
+        logger.warning("Single-node cluster: activating as non-HA "
+                       "(no secondary nodes, single journal) regardless of ha_type")
+
+    minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
     if dev_count < minimum_devices:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+
+    # The distribs created below span every online device — require the full
+    # cross-node connectivity mesh before building on top of it (see
+    # _wait_for_full_device_connectivity for the incident this prevents).
+    try:
+        _wait_for_full_device_connectivity(cl_id)
+    except ValueError:
+        set_cluster_status(cl_id, ols_status)
+        raise
+
+    # Failure-domain coverage check (best-effort: warn, don't block). A 2-FD
+    # layout can never absorb a second independent failure once one domain
+    # is down, so the hard minimum below (enforced at fresh activation) is
+    # npcs+2, not npcs+1 -- this warning uses the same number so a
+    # reactivation that's short of it gets the same signal without being
+    # blocked (recovering a drifted layout must not turn into an outage).
+    fd_desired_layout: dict[str, tuple[str, str]] = {}
+    if cluster.enable_failure_domain:
+        distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
+        min_domains = cluster.distr_npcs + 2
+        if len(distinct_domains) < min_domains:
+            logger.warning(
+                "Failure-domain feature is enabled but only %d distinct failure "
+                "domain(s) are present (%s); at least %d are recommended to "
+                "tolerate a full domain outage. Activating anyway with "
+                "best-effort placement.",
+                len(distinct_domains), sorted(distinct_domains) or "none", min_domains)
+
+        # Fresh activation is the only point where the whole HA layout is
+        # created at once, so the topology policy is enforced HARD here:
+        # every domain must hold the same number of hosts (the +/-1 rule of
+        # later expand/remove keeps oscillating around this balance), each
+        # host must sit entirely in one domain, and the host topology must
+        # be uniform. Roles are then assigned by an FD-interleaved rotation
+        # (secondary always lands cross-domain; the planner's rotation
+        # assumption becomes true by construction, which single-node
+        # expansion relies on). Re-activation (recovery of an existing
+        # layout) is deliberately NOT blocked: refusing to reactivate a
+        # drifted cluster would turn a policy violation into an outage.
+        if is_fresh_activation:
+            from simplyblock_core.controllers.cluster_expansion import (
+                planner as fd_planner,
+            )
+
+            def _fd_fail(msg: str) -> None:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(f"Failed to activate cluster: {msg}")
+
+            hosts: dict[str, builtins.list] = {}
+            host_fd: dict[str, int] = {}
+            for node in online_nodes:
+                if node.failure_domain < 0:
+                    _fd_fail(f"node {node.get_id()} has no failure-domain id; "
+                             f"all nodes need one on this cluster")
+                hosts.setdefault(node.mgmt_ip, []).append(node)
+                if host_fd.setdefault(node.mgmt_ip, node.failure_domain) != node.failure_domain:
+                    _fd_fail(f"host {node.mgmt_ip} spans failure domains "
+                             f"{host_fd[node.mgmt_ip]} and {node.failure_domain}; "
+                             f"a host must sit entirely in one domain")
+
+            fd_host_counts = Counter(host_fd.values())
+            # See fd_activation_domain_count_violation's docstring: npcs+2
+            # domains, not just the bare rotation-correctness minimum, so a
+            # later single add/remove has a spare candidate instead of
+            # stranding another node's secondary/tertiary with none at all.
+            # This also subsumes the plain "at least two domains" floor.
+            domain_count_violation = fd_planner.fd_activation_domain_count_violation(
+                cluster.distr_npcs, len(fd_host_counts))
+            if domain_count_violation:
+                _fd_fail(domain_count_violation)
+            if len(set(fd_host_counts.values())) != 1:
+                _fd_fail(
+                    f"failure domains must hold an EQUAL number of hosts at "
+                    f"activation; current split: "
+                    f"{ {fd: fd_host_counts[fd] for fd in sorted(fd_host_counts)} }. "
+                    f"Add or remove hosts to balance the domains, then activate.")
+            if cluster.ha_type == "ha":
+                host_order = fd_planner.fd_interleaved_host_order(
+                    [(ip, host_fd[ip]) for ip in hosts])
+                topology = [[n.get_id() for n in hosts[ip]] for ip in host_order]
+                try:
+                    fd_desired_layout = fd_planner.rotation_layout(
+                        topology, cluster.max_fault_tolerance)
+                except ValueError as e:
+                    _fd_fail(f"cannot build the failure-domain rotation: {e}")
+                violations = fd_planner.compute_fd_layout_violations(
+                    topology, cluster.max_fault_tolerance,
+                    {n.get_id(): n.failure_domain for n in online_nodes},
+                    layout=fd_desired_layout)
+                if violations:
+                    _fd_fail("failure-domain layout invariant violated: "
+                             + "; ".join(violations))
 
     for node in online_nodes:
         if cluster.is_single_node or len(online_nodes) <= 2:
             node.physical_label = 0
         else:
             node.physical_label = storage_node_ops.get_next_physical_device_order(node)
+        # Keep the per-device label copies in sync — the distrib cluster map
+        # emits dev.physical_label, not the node's, so a stale non-zero copy
+        # from node-add would re-enable label anti-affinity in the data plane.
+        for dev in node.nvme_devices:
+            dev.physical_label = node.physical_label
+        if single_node_cluster and node.enable_ha_jm and not node.lvstore:
+            # Fresh node in a single-node cluster: force the single-journal
+            # shape before the LVS is created (jm_vuid=1, no remote JMs). A
+            # node that already carries an lvstore keeps its shape.
+            logger.info(f"Single-node cluster: disabling HA journaling on node {node.get_id()}")
+            node.enable_ha_jm = False
         node.write_to_db()
 
+    # Cluster raw capacity, for the reported cluster_max_size (create_lvstore
+    # takes it but sizes its distribs from DISTRIB_SIZE_BYTES instead). The
+    # capacity collector has not necessarily run yet on a freshly deployed
+    # cluster — a single-node deployment reaches activation seconds after
+    # add-node — and the unguarded records[0] aborted activation with a bare
+    # "list index out of range". Fall back to the raw device sum.
     records = db_controller.get_cluster_capacity(cluster)
-    max_size = records[0]['size_total']
+    if records:
+        max_size = records[0]['size_total']
+    else:
+        max_size = raw_device_size
+        logger.warning(
+            "No cluster capacity record yet (stats collector has not run); "
+            "using the raw online-device sum %s as cluster max size", max_size)
 
-    used_nodes_as_sec: t.List[str] = []
-    used_nodes_as_tertiary: t.List[str] = []
+    used_nodes_as_sec: builtins.list[str] = []
+    used_nodes_as_tertiary: builtins.list[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    if cluster.ha_type == "ha":
+    # Process primaries grouped by failure domain. get_secondary_nodes/
+    # get_secondary_nodes_2 (and their splice repairs) already sort their own
+    # candidate scan by domain, which alone is enough to keep the assignment
+    # domain-disjoint when domains are evenly sized. But once any node needs
+    # splice-repair (uneven domain sizes, some conflict unavoidable), the
+    # repair works off whatever partial assignment already exists -- so which
+    # primary gets processed first still changes the outcome. Grouping here
+    # too makes the result deterministic instead of order-dependent in that
+    # case. A no-op when FD is disabled (all nodes share one failure_domain).
+    # Fresh FD+HA activation bypasses this fallback via fd_desired_layout,
+    # but reactivation and non-HA/non-fresh paths still rely on it.
+    snodes = sorted(snodes, key=lambda n: n.failure_domain)
+    if cluster.ha_type == "ha" and not single_node_cluster:
         for snode in snodes:
+            # Do not assign secondary to removed node
+            if snode.status == StorageNode.STATUS_REMOVED:
+                continue
             if snode.is_secondary_node:  # pass
                 continue
             if snode.secondary_node_id:
@@ -679,40 +1400,77 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
             else:
-                secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
-                if not secondary_nodes:
+                if snode.get_id() in fd_desired_layout:
+                    # FD-interleaved rotation (fresh FD activation): the
+                    # secondary is cross-domain by construction.
+                    secondary_nodes = [fd_desired_layout[snode.get_id()][0]]
+                else:
+                    secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+                if secondary_nodes:
+                    snode = db_controller.get_storage_node_by_id(snode.get_id())
+                    snode.secondary_node_id = secondary_nodes[0]
+                    snode.write_to_db()
+                    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                    sec_node.lvstore_stack_secondary = snode.get_id()
+                    sec_node.write_to_db()
+                elif not storage_node_ops.splice_stranded_secondary(snode):
+                    # get_secondary_nodes()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # pairing left to splice it into (only possible this early
+                    # in the pass, before 2+ pairings exist).
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, No enough secondary nodes")
-
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
-                snode.secondary_node_id = secondary_nodes[0]
-                snode.write_to_db()
-                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                sec_node.lvstore_stack_secondary = snode.get_id()
-                sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
 
             # Assign second secondary when max_fault_tolerance >= 2
             if cluster.max_fault_tolerance >= 2 and not snode.tertiary_node_id:
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
-                    snode,
-                    exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
-                    exclude_mgmt_ips=[sec_node.mgmt_ip],
-                )
-                if not secondary_nodes_2:
+                if fd_desired_layout.get(snode.get_id(), ("", ""))[1]:
+                    # FD-interleaved rotation: tertiary from the same
+                    # deterministic layout as the secondary above.
+                    secondary_nodes_2 = [fd_desired_layout[snode.get_id()][1]]
+                else:
+                    secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
+                        snode,
+                        exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
+                        exclude_mgmt_ips=[sec_node.mgmt_ip],
+                        exclude_failure_domains=[sec_node.failure_domain],
+                        exclude_physical_labels=[sec_node.physical_label],
+                    )
+                if secondary_nodes_2:
+                    snode.tertiary_node_id = secondary_nodes_2[0]
+                    snode.write_to_db()
+                    sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+                    sec_node_2.lvstore_stack_tertiary = snode.get_id()
+                    sec_node_2.write_to_db()
+                elif not storage_node_ops.splice_stranded_tertiary(snode):
+                    # get_secondary_nodes_2()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # tertiary pairing left to splice it into.
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
-
-                snode.tertiary_node_id = secondary_nodes_2[0]
-                snode.write_to_db()
-                sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
-                sec_node_2.lvstore_stack_tertiary = snode.get_id()
-                sec_node_2.write_to_db()
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
 
+    # Pass 1: bring up the primary LVS on every online primary node.
+    #
+    # Re-activation (recreate_lvstore, activation_mode=True) only touches the
+    # node being recreated plus RPCs to its peers, and every worker operates on
+    # a distinct node — safe to fan out (bounded pool). A fresh create_lvstore
+    # additionally writes its secondary/tertiary records (full-object
+    # read-modify-write), and in a cross-pair layout the same record is
+    # written both as "own" by its create and as "sec" by its partner's —
+    # so creates fan out on the pool too, serializing only creates whose
+    # touched-record sets intersect (per-node locks taken in sorted order,
+    # the Pass 3 pattern). The old fully-serial loop cost ~40s x n — 22 min
+    # at n=32, the dominant cost of a fresh activation (2026-07-13 audit).
+    # Port allocation inside create_lvstore is separately serialized by
+    # storage_node_ops._lvstore_port_alloc_lock.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    pass1_recreate_ids: builtins.list[str] = []
+    pass1_create_ids: builtins.list[str] = []
     for snode in snodes:
         if snode.is_secondary_node:  # pass
             continue
@@ -722,38 +1480,112 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         # (previous create_lvstore calls may have modified this node as a secondary)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if snode.lvstore and force_lvstore_create is False:
-            logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
-            try:
-                ret = storage_node_ops.recreate_lvstore(snode, activation_mode=True)
-            except storage_node_ops.LVSRestartRequiredError as e:
-                logger.error(e)
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError(
-                    f"Failed to activate cluster: node {e.node_id} holds "
-                    f"partial state for LVS {e.lvs_name} that examine could "
-                    f"not recover. Restart node {e.node_id} before activating.")
-            except Exception as e:
-                logger.error(e)
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to activate cluster")
+            pass1_recreate_ids.append(snode.get_id())
         else:
-            ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
+            pass1_create_ids.append(snode.get_id())
+
+    def _set_lvstore_status(node_id, value) -> None:
+        # Atomic: full-object writes of node records race concurrent
+        # parallel-pass workers AND phase transitions on the same record —
+        # a stale copy written back resurrects a just-cleared restart phase
+        # (observed twice on fresh activation, 2026-07-10 20:22 soak run).
+        node = db_controller.get_storage_node_by_id(node_id)
+        db_controller.atomic_update(
+            node, lambda n, v=value: setattr(n, "lvstore_status", v))
+
+    def _finish_pass1_node(node_id, ret) -> None:
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
 
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
-                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                snode = db_controller.get_storage_node_by_id(node_id)
+                backup_device.create_s3_bdev(snode, cluster.get_backup_config())
 
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
-            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
+            _set_lvstore_status(node_id, "failed")
+            logger.error(f"Failed to restore lvstore on node {node_id}")
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
+
+    def _recreate_primary_lvs(node_id):
+        snode = db_controller.get_storage_node_by_id(node_id)
+        logger.warning(f"Node {node_id} already has lvstore {snode.lvstore}")
+        return storage_node_ops.recreate_lvstore(snode, activation_mode=True)
+
+    if pass1_recreate_ids:
+        pass1_results: dict[str, t.Any] = {}
+        pass1_errors: builtins.list[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_recreate_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1") as pool:
+            futures = {pool.submit(_recreate_primary_lvs, nid): nid for nid in pass1_recreate_ids}
+            for future in as_completed(futures):
+                node_id = futures[future]
+                try:
+                    pass1_results[node_id] = future.result()
+                except storage_node_ops.LVSRestartRequiredError as e:
+                    logger.error(e)
+                    pass1_errors.append(ValueError(
+                        f"Failed to activate cluster: node {e.node_id} holds "
+                        f"partial state for LVS {e.lvs_name} that examine could "
+                        f"not recover. Restart node {e.node_id} before activating."))
+                except Exception as e:
+                    logger.error(e)
+                    pass1_errors.append(ValueError("Failed to activate cluster"))
+        if pass1_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise pass1_errors[0]
+        for node_id in pass1_recreate_ids:
+            _finish_pass1_node(node_id, pass1_results.get(node_id))
+
+    if pass1_create_ids:
+        # Lock set per create = the records create_lvstore writes: the node
+        # itself plus its secondary/tertiary. Locks are acquired in sorted-id
+        # order so two creates with intersecting sets serialize deadlock-free
+        # while disjoint pairs run concurrently.
+        pass1_create_lock_ids: dict[str, builtins.list[str]] = {}
+        pass1_create_locks: dict[str, threading.Lock] = {}
+        for nid in pass1_create_ids:
+            n = db_controller.get_storage_node_by_id(nid)
+            touched = {nid}
+            if n.secondary_node_id:
+                touched.add(n.secondary_node_id)
+            if n.tertiary_node_id:
+                touched.add(n.tertiary_node_id)
+            pass1_create_lock_ids[nid] = sorted(touched)
+            for lid in pass1_create_lock_ids[nid]:
+                pass1_create_locks.setdefault(lid, threading.Lock())
+
+        def _create_primary_lvs(node_id):
+            locks = [pass1_create_locks[lid] for lid in pass1_create_lock_ids[node_id]]
+            for lk in locks:
+                lk.acquire()
+            try:
+                snode = db_controller.get_storage_node_by_id(node_id)
+                return storage_node_ops.create_lvstore(
+                    snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                    cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+            finally:
+                for lk in reversed(locks):
+                    lk.release()
+
+        create_results: dict[str, t.Any] = {}
+        create_errors: builtins.list[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_create_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1c") as pool:
+            futures = {pool.submit(_create_primary_lvs, nid): nid for nid in pass1_create_ids}
+            for future in as_completed(futures):
+                node_id = futures[future]
+                try:
+                    create_results[node_id] = future.result()
+                except Exception as e:
+                    logger.error(e)
+                    create_errors.append(ValueError("Failed to activate cluster"))
+        if create_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise create_errors[0]
+        for node_id in pass1_create_ids:
+            _finish_pass1_node(node_id, create_results.get(node_id))
 
     # Pass 2: Recreate secondary/tertiary LVS on every node that participates
     # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
@@ -761,96 +1593,136 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # is_secondary_node filter only matched dedicated secondary-only nodes,
     # skipping the ring participants entirely.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    pass2_ids: builtins.list[str] = []
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
+        if db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
+            pass2_ids.append(snode.get_id())
 
-        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id())
-        if not primary_nodes:
-            continue
+    # Workers fan out per non-leader node, but work on the SAME primary must
+    # never interleave: with FTT=2 a primary's LVS is recreated on both its
+    # secondary and tertiary, and the leader port-block plus the
+    # lvstore_status writes on that primary are not concurrency-safe.
+    # Pre-created per-primary locks serialize exactly that, nothing more.
+    pass2_primary_locks: dict[str, threading.Lock] = {}
+    for node_id in pass2_ids:
+        for p in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+            pass2_primary_locks.setdefault(p.get_id(), threading.Lock())
 
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        logger.info(f"recreating secondary/tertiary LVS on node {snode.get_id()}")
+    def _recreate_non_leader_lvs(node_id) -> bool:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+        logger.info(f"recreating secondary/tertiary LVS on node {node_id}")
         ret = True
         for primary_node in primary_nodes:
-            primary_node.lvstore_status = "in_creation"
-            primary_node.write_to_db()
+            with pass2_primary_locks[primary_node.get_id()]:
+                # Re-read under the lock: a peer worker (the other non-leader of
+                # this primary) may have written lvstore_status meanwhile.
+                # Atomic: a full-object write here races the primary's OWN
+                # pass-2 worker transitioning restart phases on the same
+                # record — writing a stale copy back resurrects a cleared
+                # phase (stale-phase generator, 2026-07-10).
+                primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
+                db_controller.atomic_update(
+                    primary_node,
+                    lambda n: setattr(n, "lvstore_status", "in_creation"))
 
-            # On re-activation the primary's LVS is still alive and serving
-            # client I/O — snode's examine of its non-leader raid0 will race
-            # the leader's blob-metadata writes unless we quiesce the leader
-            # first. We do this with a firewall-only port-block on the leader:
-            # it has no effect on a peer whose service isn't listening (per
-            # design, safe even when peer stacks aren't fully built yet) but
-            # it stops the live leader from issuing writes that race the
-            # examine. We deliberately do NOT switch the helper out of
-            # activation_mode here: that would enable peer leader/distrib/
-            # lvstore/hublvol RPCs which presume the peer's full stack is up.
-            leader_blocked = False
-            leader_port = None
-            if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
-                try:
-                    leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                    port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
-                    tcp_ports_events.port_deny(primary_node, leader_port)
-                    leader_blocked = True
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(
-                        "Re-activation: port-block on leader %s for %s failed: %s — "
-                        "proceeding without block (secondary examine may race live leader writes)",
-                        primary_node.get_id(), primary_node.lvstore, e)
-
-            try:
-                try:
-                    r = storage_node_ops.recreate_lvstore_on_non_leader(
-                        snode, primary_node, primary_node, activation_mode=True)
-                except storage_node_ops.LVSRestartRequiredError as e:
-                    logger.error(e)
-                    set_cluster_status(cl_id, ols_status)
-                    raise ValueError(
-                        f"Failed to activate cluster: node {e.node_id} holds "
-                        f"partial state for LVS {e.lvs_name} (non-leader). "
-                        f"Restart node {e.node_id} before activating.")
-            finally:
-                if leader_blocked:
+                # On re-activation the primary's LVS is still alive and serving
+                # client I/O — snode's examine of its non-leader raid0 will race
+                # the leader's blob-metadata writes unless we quiesce the leader
+                # first. We do this with a firewall-only port-block on the leader:
+                # it has no effect on a peer whose service isn't listening (per
+                # design, safe even when peer stacks aren't fully built yet) but
+                # it stops the live leader from issuing writes that race the
+                # examine. We deliberately do NOT switch the helper out of
+                # activation_mode here: that would enable peer leader/distrib/
+                # lvstore/hublvol RPCs which presume the peer's full stack is up.
+                leader_blocked = False
+                leader_port = None
+                if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
                     try:
-                        port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
-                        tcp_ports_events.port_allowed(primary_node, leader_port)
-                    except Exception as ue:
-                        logger.error(
-                            "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
-                            primary_node.get_id(), leader_port, ue)
+                        leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
+                        port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
+                        tcp_ports_events.port_deny(primary_node, leader_port)
+                        leader_blocked = True
+                        time.sleep(0.5)
+                    except Exception as e:
+                        logger.warning(
+                            "Re-activation: port-block on leader %s for %s failed: %s — "
+                            "proceeding without block (secondary examine may race live leader writes)",
+                            primary_node.get_id(), primary_node.lvstore, e)
+
+                try:
+                    try:
+                        r = storage_node_ops.recreate_lvstore_on_non_leader(
+                            snode, primary_node, primary_node, activation_mode=True)
+                    except storage_node_ops.LVSRestartRequiredError as e:
+                        logger.error(e)
+                        raise ValueError(
+                            f"Failed to activate cluster: node {e.node_id} holds "
+                            f"partial state for LVS {e.lvs_name} (non-leader). "
+                            f"Restart node {e.node_id} before activating.")
+                finally:
+                    if leader_blocked:
                         try:
-                            tasks_controller.add_port_allow_task(
-                                primary_node.cluster_id, primary_node.get_id(), leader_port)
-                        except Exception as se:
-                            logger.error("Failed to schedule port_allow fallback: %s", se)
+                            port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
+                            tcp_ports_events.port_allowed(primary_node, leader_port)
+                        except Exception as ue:
+                            logger.error(
+                                "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
+                                primary_node.get_id(), leader_port, ue)
+                            try:
+                                tasks_controller.add_port_allow_task(
+                                    primary_node.cluster_id, primary_node.get_id(), leader_port)
+                            except Exception as se:
+                                logger.error("Failed to schedule port_allow fallback: %s", se)
             if not r:
                 ret = False
 
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
-            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            set_cluster_status(cl_id, ols_status)
+            _set_lvstore_status(node_id, "failed")
+            logger.error(f"Failed to restore lvstore on node {node_id}")
             raise ValueError("Failed to activate cluster")
+        return True
+
+    if pass2_ids:
+        pass2_errors: builtins.list[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass2_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p2") as pool:
+            futures = {pool.submit(_recreate_non_leader_lvs, nid): nid for nid in pass2_ids}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except ValueError as e:
+                    pass2_errors.append(e)
+                except Exception as e:
+                    logger.error(e)
+                    pass2_errors.append(ValueError("Failed to activate cluster"))
+        if pass2_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise pass2_errors[0]
 
     # --- Pass 3: Create hublvols and cross-connections ---
     # All lvstores (primary + secondary/tertiary) are now up. Safe to create
     # hublvols and connect peers. This mirrors the logic in create_lvstore()
     # lines 5350-5379 and must tolerate offline nodes (FTT=1 or FTT=2).
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    for snode in snodes:
-        if snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
+    pass3_ids = [n.get_id() for n in snodes
+                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+
+    # Workers fan out per primary, but a node may serve as secondary/tertiary
+    # for several primaries: hublvol create/connect mutates DB state on both
+    # the primary and its peers, so each worker holds the locks of every node
+    # it touches. Locks are pre-created and acquired in sorted-id order so two
+    # workers sharing a peer cannot deadlock.
+    pass3_node_locks: dict[str, threading.Lock] = {
+        n.get_id(): threading.Lock() for n in snodes}
+
+    def _wire_hublvols(node_id) -> None:
+        snode = db_controller.get_storage_node_by_id(node_id)
 
         secondary_ids = []
         if snode.secondary_node_id:
@@ -859,36 +1731,72 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             secondary_ids.append(snode.tertiary_node_id)
 
         if not secondary_ids:
-            continue
+            return
 
-        # Create hublvol on primary
+        held: builtins.list[threading.Lock] = []
         try:
-            if not snode.recreate_hublvol():
-                logger.error("Failed to recreate hublvol on %s", snode.get_id())
-        except Exception as e:
-            logger.error("Error creating hublvol on %s: %s", snode.get_id(), e)
+            for nid in sorted({node_id, *secondary_ids}):
+                lock = pass3_node_locks.setdefault(nid, threading.Lock())
+                lock.acquire()
+                held.append(lock)
 
-        # Create secondary hublvol on sec_1 (for tertiary multipath failover)
-        sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
-        if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
+            # Create hublvol on primary
             try:
-                snode = db_controller.get_storage_node_by_id(snode.get_id())
-                sec1.create_secondary_hublvol(snode, cluster.nqn)
+                if not snode.recreate_hublvol():
+                    logger.error("Failed to recreate hublvol on %s", node_id)
             except Exception as e:
-                logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
+                logger.error("Error creating hublvol on %s: %s", node_id, e)
 
-        # Connect each secondary/tertiary to primary's hublvol
-        for i, sec_node_id in enumerate(secondary_ids):
-            sec_node = db_controller.get_storage_node_by_id(sec_node_id)
-            if sec_node.status != StorageNode.STATUS_ONLINE:
-                continue
-            try:
-                time.sleep(1)
-                failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
-                sec_role = "tertiary" if i >= 1 else "secondary"
-                sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
-            except Exception as e:
-                logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), snode.get_id(), e)
+            # Create secondary hublvol on sec_1 (for tertiary multipath
+            # failover). sec_1 is the CONFIGURED secondary — never
+            # secondary_ids[0], which is the tertiary whenever
+            # secondary_node_id is unset (e.g. demoted after a failover).
+            sec1 = None
+            if snode.secondary_node_id:
+                sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
+                try:
+                    snode = db_controller.get_storage_node_by_id(node_id)
+                    sec1.create_secondary_hublvol(snode, cluster.nqn)
+                except Exception as e:
+                    logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
+
+            # Connect each secondary/tertiary to primary's hublvol
+            for sec_node_id in secondary_ids:
+                sec_node = db_controller.get_storage_node_by_id(sec_node_id)
+                if sec_node.status != StorageNode.STATUS_ONLINE:
+                    continue
+                try:
+                    # Brief settle beat before the connect; connect_to_hublvol
+                    # itself retries via the reconnect coordinator, so a full
+                    # 1s per edge was pure serial latency across the pass.
+                    time.sleep(0.2)
+                    # Role and failover from topology, never list position:
+                    # with secondary_node_id unset the tertiary sits at
+                    # index 0 and an index rule marks it "secondary" — a
+                    # duplicate secondary role on the LVS (recurred in
+                    # mass_create_delete_k8s 2026-07-14; each LVS must hold
+                    # a unique role per node).
+                    is_tert = sec_node_id == snode.tertiary_node_id
+                    failover_node = sec1 if is_tert and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                    sec_role = "tertiary" if is_tert else "secondary"
+                    sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
+                except Exception as e:
+                    logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), node_id, e)
+        finally:
+            for lock in reversed(held):
+                lock.release()
+
+    if pass3_ids:
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass3_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p3") as pool:
+            for future in as_completed({pool.submit(_wire_hublvols, nid) for nid in pass3_ids}):
+                try:
+                    future.result()
+                except Exception as e:
+                    # Same tolerance as the sequential loop: hublvol wiring
+                    # errors are logged, not fatal to activation.
+                    logger.error("Pass 3 hublvol wiring worker failed: %s", e)
 
     # reorder qos classes ids
     qos_classes = db_controller.get_qos(cl_id)
@@ -910,7 +1818,9 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
     # Start JC compression on each node
-    if ols_status == Cluster.STATUS_UNREADY:
+    # (release-upgrade guard: held until `cluster upgrade-complete`, remove
+    # with the jc_compression_upgrade plugin)
+    if ols_status == Cluster.STATUS_UNREADY and not jc_compression_upgrade.resume_is_held(cluster):
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
@@ -934,23 +1844,19 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # we set the cluster ACTIVE — so clients never resume IO against a primary
     # whose redirect to its peers isn't established (which is what produced the
     # mid-activation writer-conflict / EIO).
-    for snode in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-        if snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(snode.get_id())
+    def _set_node_ana(node_id) -> None:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(node_id)
                       if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
         if not node_lvols:
-            continue
+            return
         # primary path -> optimized
         for lv in node_lvols:
             try:
                 storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
             except Exception as e:
                 logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
-                             snode.get_id(), lv.nqn, e)
+                             node_id, lv.nqn, e)
         # secondary/tertiary paths -> non_optimized
         for sec_id in [snode.secondary_node_id, snode.tertiary_node_id]:
             if not sec_id:
@@ -965,6 +1871,54 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
                                  sec_node.get_id(), lv.nqn, e)
 
+    # ANA flips are RPC-only (no DB writes) so the per-primary workers need no
+    # locks; different primaries touch different subsystems even when they
+    # share a secondary node.
+    pass4_ids = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)
+                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+    if pass4_ids:
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass4_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p4") as pool:
+            for future in as_completed({pool.submit(_set_node_ana, nid) for nid in pass4_ids}):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error("Pass 4 ANA worker failed: %s", e)
+
+    # The cluster is now active and about to serve IO. During node-add the
+    # storage MCP was created wide (= parallel-add count) so the first-time
+    # CPU-topology reboots happened in one parallel wave rather than a
+    # serialized queue. Now narrow it to the cluster's fault tolerance so any
+    # future MachineConfig/KubeletConfig rollout never reboots more storage
+    # nodes at once than the data plane can absorb. Done here (success path,
+    # before flipping to ACTIVE) so a failed/aborted activation leaves the
+    # cluster non-serving with the wide value — harmless, since no data is at
+    # risk until it goes ACTIVE. (Use max_fault_tolerance - 1 instead if you
+    # want headroom for an unplanned failure concurrent with a rollout.)
+    utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
+
+    # JM mesh gate (2026-08-05 incident: nodes joined via add-node retries
+    # activated with peers missing their remote_jm controllers — the cluster
+    # reported healthy while a third of the journal mesh was unreachable,
+    # and the first journal load collapsed n_safe_jms into a cluster-wide
+    # JCERR). FRESH activation must not complete over such a hole; a
+    # RE-ACTIVATION is a recovery path that may legitimately run with one
+    # or two nodes unhealthy, so it repairs best-effort and only warns —
+    # the verifier already skips JMs whose owner node is not ONLINE.
+    if cluster.ha_type == "ha" and not single_node_cluster:
+        jm_problems = storage_node_ops.verify_jm_mesh_coverage(cl_id, repair=True)
+        if jm_problems:
+            if is_fresh_activation:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    "Failed to activate cluster: JM mesh coverage incomplete "
+                    "(journal quorum would silently run degraded): "
+                    + "; ".join(jm_problems))
+            logger.warning(
+                "JM mesh coverage incomplete on re-activation (continuing — "
+                "recovery path): %s", "; ".join(jm_problems))
+
+    _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
@@ -1004,8 +1958,20 @@ def cluster_expand(cl_id) -> None:
 
         if cluster.ha_type == "ha" and cluster.max_fault_tolerance >= 2 and not snode.tertiary_node_id:
             snode = db_controller.get_storage_node_by_id(snode.get_id())
-            secondary_nodes_2 = storage_node_ops.get_secondary_nodes(
-                snode, exclude_ids=[snode.secondary_node_id])
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            # Expansion must honor the same host / failure-domain / physical-label
+            # anti-affinity as initial activation: the tertiary has to be
+            # disjoint from BOTH the primary and the already-picked secondary.
+            # (Previously this used get_secondary_nodes with only the secondary
+            # excluded by id, so an expanded cluster could land the tertiary on
+            # the secondary's host or domain.)
+            secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
+                snode,
+                exclude_ids=[snode.secondary_node_id],
+                exclude_mgmt_ips=[sec_node.mgmt_ip],
+                exclude_failure_domains=[sec_node.failure_domain],
+                exclude_physical_labels=[sec_node.physical_label],
+            )
             if not secondary_nodes_2:
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError("A minimum of 3 new nodes are required to expand cluster with dual fault tolerance")
@@ -1030,11 +1996,12 @@ def cluster_expand(cl_id) -> None:
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to expand cluster")
 
+    _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster expanded successfully")
 
 
-def get_cluster_status(cl_id) -> t.List[dict]:
+def get_cluster_status(cl_id) -> builtins.list[dict]:
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     return sorted([
@@ -1059,10 +2026,44 @@ def set_cluster_status(cl_id, status) -> None:
     if cluster.status == status:
         return
 
-    old_status = cluster.status
-    cluster.status = status
-    cluster.write_to_db(db_controller.kv_store)
-    cluster_events.cluster_status_change(cluster, cluster.status, old_status)
+    # Transactional compare-and-set: concurrent node-adds (now parallel) both
+    # call this, and a plain read+write_to_db would clobber any other cluster
+    # field a peer updated in between. atomic_update re-reads inside the tx and
+    # only writes the status field change.
+    captured = {}
+
+    def _mutate(fresh):
+        if fresh.status == status:
+            return False  # already at target (a peer won the race); don't write
+        captured['old'] = fresh.status
+        fresh.status = status
+        # Track when the cluster enters / leaves IN_ACTIVATION so the
+        # storage_node_monitor watchdog can detect a wedged activation and
+        # revert it. A half-finished cluster_activate otherwise leaves the
+        # cluster stuck in IN_ACTIVATION forever — auto-restart refuses to queue
+        # while the cluster is not SUSPENDED, so it can never recover on its own
+        # (incident 2026-06-25). Stamped inside the CAS so it is written
+        # atomically with the status flip.
+        if status == Cluster.STATUS_IN_ACTIVATION:
+            fresh.in_activation_since = datetime.now(UTC).isoformat()
+            fresh.activation_heartbeat = fresh.in_activation_since
+        elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
+            fresh.in_activation_since = ""
+            fresh.activation_heartbeat = ""
+        # Leaving suspension for a healthy status closes the current
+        # suspend-recovery episode: clear the drain marker so the next
+        # suspension starts a fresh drain (auto-restart paused -> drain ->
+        # resume). Kept set across the suspended<->in_activation flapping of a
+        # single recovery so the drain does not restart on every failed
+        # activation attempt. Inside the CAS so it is written atomically.
+        if status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+            fresh.suspend_drain_complete = False
+        return True
+
+    updated = db_controller.atomic_update(cluster, _mutate)
+    if updated is None or 'old' not in captured:
+        return
+    cluster_events.cluster_status_change(updated, updated.status, captured['old'])
 
 
 def cluster_set_read_only(cl_id) -> None:
@@ -1100,6 +2101,44 @@ def cluster_set_active(cl_id) -> None:
                 dev_stat = db_controller.get_device_stats(dev, 1)
                 if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
                     device_controller.device_set_online(dev.get_id())
+
+
+# The runtime RPCs the data-plane migrations dispatch per node. A data plane
+# whose SPDK advertises them (rpc_get_methods) can be migrated at runtime.
+SHARED_PLACEMENT_RUNTIME_RPCS = ("distr_shared_placement", "jm_set_shared_placement")
+WRITE_PROTECTION_RUNTIME_RPCS = ("distr_write_protection_v2",)
+
+
+def _all_nodes_support_rpcs(nodes, required) -> bool:
+    """True when every given storage node's RUNNING SPDK advertises every RPC
+    in ``required``.
+
+    This is the data-plane capability gate for the post-upgrade
+    auto-migrations (shared placement, write-protection v2): during a rolling
+    upgrade, nodes still on an incapable image do not list the methods, so
+    the probe holds the migration off until the LAST node has restarted onto
+    a capable image. Any unreachable node counts as unsupported — a migration
+    must only run against a fully settled cluster, and its own per-node RPC
+    dispatch would abort on that node anyway.
+    """
+    for node in nodes:
+        try:
+            methods = node.rpc_client(timeout=5, retry=1).rpc_get_methods() or []
+        except Exception as e:
+            logger.debug("rpc_get_methods failed on node %s: %s",
+                         node.get_id()[:8], e)
+            return False
+        if any(rpc not in methods for rpc in required):
+            return False
+    return True
+
+
+def all_nodes_support_shared_placement(nodes) -> bool:
+    return _all_nodes_support_rpcs(nodes, SHARED_PLACEMENT_RUNTIME_RPCS)
+
+
+def all_nodes_support_write_protection_v2(nodes) -> bool:
+    return _all_nodes_support_rpcs(nodes, WRITE_PROTECTION_RUNTIME_RPCS)
 
 
 def set_shared_placement(cl_id, enable=True, force=False) -> bool:
@@ -1214,44 +2253,141 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
 
     # Step 3: persist the flag in every stored distrib stack entry on
     # every node, so restarts re-create with the new mode without needing
-    # to consult the cluster row.
-    #
-    # NB: only `lvstore_stack` is a List[dict] of bdev stack entries.
-    # Despite the model's type annotation, `lvstore_stack_secondary` and
-    # `_tertiary` hold a single UUID string — the id of the upstream
-    # primary whose LVS this node serves as a peer for. The peer's bdev
-    # params come from that primary's lvstore_stack at recreate time
-    # (see storage_node_ops._create_bdev_stack callers in step-2 /
-    # step-3 of full_node_recreate_lvstore), so updating the primary's
-    # stack here covers the peers automatically.
+    # to consult the cluster row. Peers recreate their bdevs from the
+    # primary's lvstore_stack, so updating primaries covers them too.
     for node in nodes:
-        changed = False
-        for entry in (node.lvstore_stack or []):
-            if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
-                continue
-            params = entry.setdefault("params", {})
-            if not isinstance(params, dict):
-                continue
-            current = params.get("shared_placement", False)
-            if enable and not current:
-                params["shared_placement"] = True
-                changed = True
-            elif not enable and current:
-                # remove rather than set False, so the param dict stays
-                # minimal and matches the default-construct case.
-                params.pop("shared_placement", None)
-                changed = True
-        if changed:
-            node.write_to_db(db_controller.kv_store)
+        # Atomic compare-and-set: mutate only lvstore_stack on the freshly-read
+        # node so the long per-node loop above can't clobber a concurrent
+        # node.status change (lost-update class — incident 2026-06-18). Returning
+        # False (no entry changed) aborts the write.
+        def _mut(n, en=enable):
+            changed = False
+            for entry in (n.lvstore_stack or []):
+                if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.setdefault("params", {})
+                if not isinstance(params, dict):
+                    continue
+                current = params.get("shared_placement", False)
+                if en and not current:
+                    params["shared_placement"] = True
+                    changed = True
+                elif not en and current:
+                    # remove rather than set False, so the param dict stays
+                    # minimal and matches the default-construct case.
+                    params.pop("shared_placement", None)
+                    changed = True
+            return changed
 
-    # Step 4: persist on the cluster row.
-    cluster.shared_placement = enable
-    cluster.write_to_db(db_controller.kv_store)
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()), _mut)
+
+    # Step 4: persist on the cluster row (atomic, so it doesn't clobber a
+    # concurrent cluster.status change committed by set_cluster_status).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c, v=enable: setattr(c, "shared_placement", v))
     logger.info("Cluster %s shared_placement set to %s", cl_id, enable)
     return True
 
 
-def list() -> t.List[dict]:
+def switch_write_protection(cl_id) -> bool:
+    """Move a cluster from v1 to v2 distrib write protection.
+
+    Two steps, strictly in this order, so the recorded generation never claims
+    more than the data plane has actually done:
+
+      1. Send the runtime ``distr_write_protection_v2(enable=True)`` RPC to
+         every ONLINE storage node, with no ``name`` so it covers every distrib
+         bdev on that node. This is the only way an already-created distrib
+         gains v2 -- a create parameter cannot reach a bdev that exists. Every
+         online node must succeed; a single failure aborts the switch and
+         leaves the cluster on v1, so recovery is just re-running the command.
+
+      2. Only then stamp the generation: into each node's stored distrib params
+         (so a restart replays the right key) and onto the cluster row (so
+         newly created distribs, and nodes added later, pick it up).
+
+    Offline nodes are not a failure and are not skipped: they have no running
+    bdevs to migrate, and step 2 rewrites their stored stack, so their distribs
+    come back on v2 when they next restart.
+
+    Idempotent: a cluster already on v2 returns True untouched.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if cluster.write_protection_v2:
+        logger.info(
+            "Cluster %s already runs v2 write protection; nothing to do", cl_id)
+        return True
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    online = [n for n in nodes if n.status == StorageNode.STATUS_ONLINE]
+    if not online:
+        logger.error(
+            "Cluster %s has no online storage node; cannot switch write "
+            "protection", cl_id)
+        return False
+
+    # Step 1: the runtime RPC on every online node.
+    failures = []
+    for node in online:
+        try:
+            if node.rpc_client().distr_write_protection_v2(enable=True):
+                logger.info("Node %s: v2 write protection activated",
+                            node.get_id())
+            else:
+                failures.append(node.get_id())
+                logger.error(
+                    "Node %s rejected distr_write_protection_v2(enable=True)",
+                    node.get_id())
+        except Exception as e:
+            failures.append(node.get_id())
+            logger.error(
+                "Node %s raised on distr_write_protection_v2(enable=True): %s",
+                node.get_id(), e)
+
+    if failures:
+        logger.error(
+            "Aborting write-protection switch: %d of %d online node(s) failed "
+            "(%s). The cluster stays on v1 -- fix those nodes and re-run.",
+            len(failures), len(online), ", ".join(failures))
+        return False
+
+    # Step 2a: persist the generation in every stored distrib stack entry, on
+    # every node including offline ones. Atomic compare-and-set so the long
+    # per-node RPC loop above cannot clobber a concurrent node.status write
+    # (lost-update class -- incident 2026-06-18).
+    for node in nodes:
+        def _mut(n):
+            changed = False
+            for entry in (n.lvstore_stack or []):
+                if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.get("params")
+                if not isinstance(params, dict):
+                    continue
+                before = ("write_protection" in params,
+                          "write_protection_v2" in params)
+                storage_node_ops.apply_write_protection_mode(params, True)
+                if before != ("write_protection" in params,
+                              "write_protection_v2" in params):
+                    changed = True
+            return changed
+
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()), _mut)
+
+    # Step 2b: the cluster row (atomic, so it does not clobber a concurrent
+    # cluster.status write from set_cluster_status).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c: setattr(c, "write_protection_v2", True))
+    logger.info("Cluster %s switched to v2 write protection (%d node(s))",
+                cl_id, len(online))
+    return True
+
+
+def list() -> builtins.list[dict]:
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
 
@@ -1293,7 +2429,7 @@ def list_all_info(cluster_id) -> str:
     lvols = db_controller.get_lvols(cluster_id)
     lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
 
-    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
+    snaps = db_controller.get_snapshots(cluster_id)
 
     devs = []
     devs_online = []
@@ -1480,7 +2616,7 @@ def list_all_info(cluster_id) -> str:
     return out
 
 
-def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
+def get_capacity(cluster_id, history, records_count=20) -> builtins.list[dict]:
     try:
         _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
@@ -1501,7 +2637,7 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
     return utils.process_records(records, records_count, keys=cap_stats_keys)
 
 
-def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
+def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> builtins.list[dict]:
     try:
         _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
@@ -1552,18 +2688,19 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
 
 
 def get_ssh_pass(cluster_id) -> str:
-    return db_controller.get_cluster_by_id(cluster_id).cli_pass
+    return db_controller.get_cluster_by_id(cluster_id).cli_pass.get_secret_value()
 
 
 def get_secret(cluster_id) -> str:
-    return db_controller.get_cluster_by_id(cluster_id).secret
+    return db_controller.get_cluster_by_id(cluster_id).secret.get_secret_value()
 
 
-def set_secret(cluster_id, secret) -> None:
+def set_secret(cluster_id, secret: SecretStr) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)
-    secret = secret.strip()
-    if len(secret) < 20:
+    plain = secret.get_secret_value().strip()
+    if len(plain) < 20:
         raise ValueError("Secret must be at least 20 char")
+    secret = SecretStr(plain)
 
     _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
 
@@ -1593,13 +2730,21 @@ def change_cluster_name(cluster_id, new_name) -> None:
     logger.info(f"Cluster has been renamed: {old_name} -> {new_name}")
 
 
-def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
-    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+def get_log_events(cluster_id, limit=EVENT_LOG_TAIL) -> builtins.list[EventObj]:
+    """Cluster's most recent log entries, oldest first.
 
+    Shared by get_logs() (legacy dict shape, v1 API + CLI) and the v2 API's
+    ClusterLogEntryDTO, so both render the exact same underlying set.
+    """
+    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
-    out = []
     events.reverse()
-    for record in events:
+    return events
+
+
+def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
+    out = []
+    for record in get_log_events(cluster_id, limit):
         Storage_ID = None
         if record.storage_id >= 0:
             Storage_ID = record.storage_id
@@ -1615,7 +2760,6 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
         if record.event in ["device_status", "node_status"]:
             msg = msg+f" ({record.count})"
 
-        logger.debug(record)
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,
@@ -1629,12 +2773,307 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
     return out
 
 
+# Grafana's provisioning paths inside the monitoring container, as mounted by
+# docker-compose-swarm-monitoring.yml.
+GRAFANA_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource.yaml"
+GRAFANA_ALERTING_TARGET = "/etc/grafana/provisioning/alerting"
+GRAFANA_EVENT_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource-events.yaml"
+
+_GRAFANA_DURATION = re.compile(r'^(?:\d+(?:ms|[smhdwy]))+$')
+
+
+def _event_alert_settings(enabled, log_limit, interval, pending_period,
+                          plugin_url, plugin_preinstalled) -> dict[str, t.Any]:
+    """Validate the tuning knobs and shape them for the templates.
+
+    Validated here because Grafana answers a malformed duration or limit by
+    refusing to start, long after the command that caused it.
+    """
+    settings = {
+        'enabled': enabled,
+        'logLimit': 1000 if log_limit is None else log_limit,
+        'interval': interval or '1m',
+        'for': pending_period or '1m',
+        'plugin': {
+            'url': constants.GRAFANA_EVENT_ALERTS_PLUGIN_URL if plugin_url is None else plugin_url,
+            'preinstalled': plugin_preinstalled,
+        },
+    }
+
+    if not enabled:
+        return settings
+
+    if settings['logLimit'] < 1:
+        raise ValueError(f"--log-limit must be at least 1, got {settings['logLimit']}")
+
+    for flag, key in (('--interval', 'interval'), ('--pending-period', 'for')):
+        if not _GRAFANA_DURATION.match(settings[key]):
+            raise ValueError(
+                f"{flag} must be a Grafana duration such as 30s, 1m or 1h, got {settings[key]!r}")
+
+    if not settings['plugin']['preinstalled'] and not settings['plugin']['url']:
+        raise ValueError(
+            "--plugin-url is empty and --plugin-preinstalled was not given, so the data source "
+            "plugin the rules query would never be installed")
+
+    return settings
+
+
+def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
+    """The host directories the running Grafana reads its provisioning from.
+
+    Read off the service rather than computed from this package's location, so
+    the files land where the cluster's own mounts point.
+    """
+    try:
+        service = cluster_docker.services.get(constants.MONITORING_GRAFANA_SERVICE)
+    except docker.errors.NotFound as e:
+        raise ValueError(
+            f"Service {constants.MONITORING_GRAFANA_SERVICE} not found: this cluster has no "
+            f"monitoring stack") from e
+
+    mounts = service.attrs['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
+    sources = {mount.get('Target'): mount.get('Source') for mount in mounts}
+    for target in (GRAFANA_DATASOURCE_TARGET, GRAFANA_ALERTING_TARGET):
+        if not sources.get(target):
+            raise ValueError(
+                f"Service {constants.MONITORING_GRAFANA_SERVICE} has no bind mount at {target}; "
+                f"redeploy the monitoring stack before provisioning event log alerts")
+
+    return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
+
+
+def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
+    """Write Grafana's provisioning files onto every management node.
+
+    Grafana is constrained to node.role == manager and may be rescheduled to
+    any of them, and these are host paths, so a manager that lacks them
+    provisions no rules the first time Grafana lands there. They cannot ship
+    with the package the way alert_rules.yaml does, carrying this cluster's id
+    and secret. Written through each node's docker API, the same way SNodeAPI
+    is started on a remote node; base64 keeps the YAML out of shell quoting,
+    and user=root because the image runs as USER simplyblock, which cannot
+    write into the package directory.
+    """
+    script = "; ".join(
+        f"umask 022 && echo {base64.b64encode(content.encode('utf-8')).decode('ascii')} "
+        f"| base64 -d > {shlex.quote(path)}"
+        for path, content in files.items()
+    )
+    volumes = sorted({os.path.dirname(path) for path in files})
+
+    failed = {}
+    for node in db_controller.get_mgmt_nodes():
+        try:
+            node_docker = docker.DockerClient(
+                base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
+            node_docker.containers.run(
+                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
+                volumes=[f"{directory}:{directory}" for directory in volumes],
+                remove=True, detach=False)
+            logger.info("Provisioning files written on %s", node.mgmt_ip)
+        except Exception as e:
+            failed[node.mgmt_ip] = str(e)
+
+    if failed:
+        raise RuntimeError(
+            "Could not write the provisioning files on: "
+            + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
+            + ". Fix those nodes and re-run; Grafana provisions nothing on a node it cannot "
+              "read them from")
+
+
+def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pending_period=None,
+                     plugin_url=None, plugin_preinstalled=False) -> None:
+    """Provision (or remove) the Grafana alert rules read from the cluster event log.
+
+    Unlike the Thanos-backed rules in alerting/alert_rules.yaml, which ship
+    with the package and are provisioned unconditionally, these are opt-in:
+    they query the control plane's REST API, which needs a Grafana plugin the
+    deployed image does not carry and downloads once.
+
+    Runs against the live stack -- files onto every management node, then the
+    Grafana task recreated so it re-reads them -- so it configures a cluster
+    that already exists.
+    """
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+
+    if cluster.mode != "docker":
+        raise ValueError(
+            "Event log alerts are provisioned by the simplyblock-operator Helm chart on "
+            "kubernetes; this command configures the docker monitoring stack only")
+
+    if cluster.disable_monitoring:
+        raise ValueError("This cluster was created with --disable-monitoring, so it has no Grafana")
+
+    settings = _event_alert_settings(enabled, log_limit, interval, pending_period,
+                                     plugin_url, plugin_preinstalled)
+
+    cluster_docker = utils.get_docker_client(cluster_id)
+    scripts_dir, alerting_dir = _grafana_provisioning_dirs(cluster_docker)
+
+    # The secret is the bearer token the data source sends, and reaches
+    # plaintext only here, on its way into a file Grafana reads -- the same
+    # treatment prometheus.yml gets.
+    rendered = utils.render_event_alert_configs(
+        settings, [(cluster.get_id(), cluster.secret.get_secret_value())])
+    datasource_path = os.path.join(scripts_dir, utils.EVENT_ALERT_DATASOURCE_FILE)
+    _install_provisioning_on_all_managers({
+        os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
+            rendered[utils.EVENT_ALERT_RULES_FILE],
+        datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
+    })
+
+    # --force recreates the task, which is what makes Grafana re-read
+    # provisioning; a single-file bind mount also tracks the inode it started
+    # with, so the rewritten data source is only picked up here. Mounts are
+    # keyed by target and env by name, so re-running updates both in place.
+    # Disabling leaves them: both files are empty now, and keeping the plugin
+    # makes re-enabling a restart instead of another download.
+    update = ["sudo", "docker", "service", "update", "--force"]
+    if enabled:
+        if not settings['plugin']['preinstalled']:
+            update += ["--env-add", f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
+                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}"]
+        update += ["--mount-add", f"type=bind,src={datasource_path},"
+                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly"]
+
+    logger.info("Restarting Grafana...")
+    subprocess.check_call(update + [constants.MONITORING_GRAFANA_SERVICE])
+
+
 def get_cluster(cl_id) -> dict:
-    return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    data = cluster.get_clean_dict()
+    # Derived, human-readable placement-migration state; the raw flags are
+    # shared_placement / shared_placement_migration_pending.
+    if cluster.shared_placement:
+        data['data_placement'] = 'per-chunk'
+    elif cluster.shared_placement_migration_pending:
+        data['data_placement'] = 'per-page (migration pending)'
+    else:
+        data['data_placement'] = 'per-page (legacy)'
+    if cluster.write_protection_v2:
+        data['write_protection'] = 'v2'
+    elif cluster.write_protection_migration_pending:
+        data['write_protection'] = 'v1 (migration pending)'
+    else:
+        data['write_protection'] = 'v1 (legacy)'
+    return data
 
 
-def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
+#: Releases whose `cluster update` must restart Grafana to load a changed
+#: alert_rules.yaml. Add a version here when a release changes that file.
+GRAFANA_RESTART_RELEASE = "26.3.0.4"
+
+
+#: Swarm service -> compose service, for the monitoring args reconciled on every
+#: Docker ``cluster update``. Those args are fixed at ``docker stack deploy``
+#: time, so a compose change otherwise never reaches a deployed cluster.
+#:
+#: An allowlist on purpose. Grafana must not be added: set_event_alerts() mutates
+#: its spec at runtime, and the compose file would overwrite that.
+_RECONCILED_MONITORING_ARGS = {"monitoring_node-exporter": "node-exporter"}
+
+
+def _compose_monitoring_command_args(compose: dict[str, t.Any], service_key: str) -> builtins.list[str]:
+    command = compose["services"][service_key]["command"]
+    if isinstance(command, str):
+        command = shlex.split(command)
+
+    # Compose escapes a literal '$' as '$$'; Swarm stores it interpolated.
+    return [arg.replace("$$", "$") for arg in command]
+
+
+def _reconcile_monitoring_args(cluster_docker) -> None:
+    compose_path = os.path.join(
+        os.path.dirname(scripts.__file__), "docker-compose-swarm-monitoring.yml")
+    with open(compose_path, encoding="utf-8") as f:
+        compose = yaml.safe_load(f)
+
+    for service_name, compose_key in _RECONCILED_MONITORING_ARGS.items():
+        desired = _compose_monitoring_command_args(compose, compose_key)
+        try:
+            service = cluster_docker.services.get(service_name)
+        except docker.errors.NotFound:
+            logger.info("%s is not deployed; nothing to reconcile", service_name)
+            continue
+
+        spec = service.attrs["Spec"]
+        current = spec["TaskTemplate"]["ContainerSpec"].get("Args", [])
+        if current == desired:
+            logger.info("%s args already current", service_name)
+            continue
+
+        logger.info("Reconciling %s args from %s to %s",
+                    service_name, current, desired)
+        task_template = copy.deepcopy(spec["TaskTemplate"])
+        task_template["ContainerSpec"]["Args"] = desired
+        cluster_docker.api.update_service(
+            service.id, service.attrs["Version"]["Index"],
+            task_template=task_template, fetch_current_spec=True)
+
+
+def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
+                   max_subsys=None, hugepages_mem=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+
+    # Cluster-wide SPDK sizing is a settings write, not an upgrade. Handled
+    # first, and when no image or control-plane flag was given this returns
+    # before the rollout: changing a number must not drag a whole cluster
+    # through an image update. Nodes adopt the new values on their next
+    # restart, so nothing here restarts anything.
+    if max_subsys is not None or hugepages_mem is not None:
+        set_spdk_sizing(cluster_id, max_subsys=max_subsys,
+                        hugepages_mem=hugepages_mem)
+        if not (spdk_image or mgmt_image or mgmt_only):
+            return
+
+    # Release-specific pre-upgrade steps (simplyblock_core/release_upgrades/).
+    # Must be the very first thing the upgrade does; raises to abort the
+    # upgrade before anything was changed. Completed later by
+    # `cluster upgrade-complete` (upgrade_complete below).
+    release_upgrades.run_pre_update(cluster)
+
+    # Pin this cluster's JM RAID geometry BEFORE the rolling restart, while the
+    # JMDevice records still reflect what is on disk. The raid has no on-disk
+    # superblock, so an image whose planner changed would otherwise rebuild the
+    # journals under a different geometry and read the same bytes back scrambled
+    # (prod incident 2026-09-08). Detect from the current records: any JM device
+    # with recorded RAID0+1 legs means the cluster is raid01, else it is the
+    # legacy N-way mirror. Only set it when still unpinned.
+    if not (getattr(cluster, "jm_raid_layout", "") or "").strip():
+        _detected_layout = jm_raid.LAYOUT_LEGACY
+        for _n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            _jd = _n.jm_device
+            if _jd and (getattr(_jd, "jm_leg_bdevs", None) or []):
+                _detected_layout = jm_raid.LAYOUT_RAID01
+                break
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c, v=_detected_layout: setattr(c, "jm_raid_layout", v))
+        logger.info("Cluster %s JM RAID geometry pinned to %s for the upgrade",
+                    cluster_id, _detected_layout)
+
+    # An upgraded cluster's existing distribs carry v1 write protection, and no
+    # create parameter can retrofit a bdev that already exists -- only the
+    # runtime distr_write_protection_v2 RPC can, via
+    # `sbctl cluster switch-write-protection`. Stamp the generation back to v1
+    # BEFORE the rolling restart below, because those restarts replay each
+    # node's stored distrib stack and must replay it under the key the running
+    # bdevs actually use.
+    #
+    # This also demotes a cluster that was already on v2: after an upgrade the
+    # switch has to be re-run either way, and claiming v2 we have not verified
+    # on the new image is the one failure mode worth avoiding here.
+    if cluster.write_protection_v2:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "write_protection_v2", False))
+        logger.info(
+            "Cluster %s stamped back to v1 write protection for the upgrade; "
+            "run `sbctl cluster switch-write-protection` once every node is "
+            "back online", cluster_id)
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
@@ -1647,15 +3086,20 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         service_names = []
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         for service in cluster_docker.services.list():
-            service_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
+            container_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
             for part in image_parts:
-                if part in service_image:
+                if part in container_image:
                     if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                         logger.info(f"Removing service {service.name}")
                         service.remove()
                     else:
                         logger.info(f"Updating service {service.name}")
-                        service.update(image=service_image, force_update=True)
+                        service_env = service.attrs['Spec']['TaskTemplate']['ContainerSpec']['Env']
+                        if "SIMPLYBLOCK_LOG_LEVEL=DEBUG" in service_env:
+                            service_env.remove("SIMPLYBLOCK_LOG_LEVEL=DEBUG")
+                            service_env.append("SIMPLYBLOCK_LOG_LEVEL=INFO")
+
+                        service.update(image=service_image, env=service_env, force_update=True)
                         service_names.append(service.attrs['Spec']['Name'])
                     break
 
@@ -1663,22 +3107,51 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_SnapshotMonitor",
-                service_file="python simplyblock_core/services/snapshot_monitor.py",
+                command=["python3", "simplyblock_core/services/snapshot_monitor.py"],
                 service_image=service_image)
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerLVolSyncDelete",
-                service_file="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 service_image=service_image)
 
         if "app_TasksRunnerJCCompResume" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
-                service_file="python simplyblock_core/services/tasks_runner_jc_comp.py",
+                command=["simplyblock-task-runner", "tasks-runner-jc-comp"],
                 service_image=service_image)
+
+        if "app_BackupService" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_BackupService",
+                command=["simplyblock-task-runner", "tasks-runner-fdb-backup"],
+                service_image=service_image)
+
+        if not cluster.disable_monitoring:
+            try:
+                _reconcile_monitoring_args(cluster_docker)
+            except Exception as e:
+                logger.error(f"Failed to reconcile monitoring service args: {e}")
+
+        # Grafana reads provisioning at startup, and its upstream image is not
+        # matched by the loop above, so the alert rules `pip` refreshed in the
+        # directory it mounts are only picked up here. Gated on the release
+        # that adds API_request_latency_high, so an update that changes no rule
+        # does not interrupt Grafana; a later release that does has to add its
+        # version here. Logged, not raised: a Grafana that will not restart
+        # must not fail the whole update.
+        if not cluster.disable_monitoring and release_upgrades.release_matches(
+                constants.SIMPLY_BLOCK_VERSION, GRAFANA_RESTART_RELEASE):
+            try:
+                cluster_docker.services.get(
+                    constants.MONITORING_GRAFANA_SERVICE).update(force_update=True)
+                logger.info("Restarted Grafana to reload the alert rules")
+            except Exception as e:
+                logger.error(f"Failed to restart Grafana: {e}")
 
         logger.info("Done updating mgmt cluster")
 
@@ -1702,7 +3175,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = deploy.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
                         deploy.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_deployment(
                             name=deploy.metadata.name,
@@ -1715,7 +3188,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-tasks-runner-sync-lvol-del",
                 container_name="tasks-runner-sync-lvol-del",
-                service_file="simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 container_image=service_image)
 
         if "simplyblock-snapshot-monitor" not in deployment_names:
@@ -1723,7 +3196,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-snapshot-monitor",
                 container_name="snapshot-monitor",
-                service_file="simplyblock_core/services/snapshot_monitor.py",
+                command=["python", "simplyblock_core/services/snapshot_monitor.py"],
                 container_image=service_image)
 
         # Update DaemonSets
@@ -1735,7 +3208,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = ds.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
                         ds.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_daemon_set(
                             name=ds.metadata.name,
@@ -1784,19 +3257,162 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.error(f"Failed to restart node: {node.get_id()}")
                 return
 
-    # All storage nodes have been restarted onto the upgraded SPDK image.
-    # Arm the one-shot per-chunk placement migration now — and only now,
-    # after the full rolling restart — so storage_node_monitor switches the
-    # cluster once it settles (ACTIVE, not rebalancing, all nodes online).
-    # Skipped on the early-return failure path above, so a partial/failed
-    # upgrade never arms it. No-op if the cluster is already on per-chunk.
-    upgraded = db_controller.get_cluster_by_id(cluster_id)
-    if not upgraded.shared_placement and not upgraded.shared_placement_migration_pending:
-        upgraded.shared_placement_migration_pending = True
-        upgraded.write_to_db(db_controller.kv_store)
-        logger.info("Armed shared_placement migration for cluster %s post-upgrade", cluster_id)
-
+    # The shared-placement migration is NOT armed here any more. This tail
+    # only runs for restart=True callers, which no CLI invocation ever sets,
+    # so arming here stranded every CLI-upgraded cluster on per-page
+    # placement (customer incident 2026-09-04). It is armed by
+    # upgrade_complete below, and storage_node_monitor additionally
+    # self-heals via a data-plane capability probe
+    # (all_nodes_support_shared_placement).
     logger.info("Done")
+
+
+def upgrade_complete(cluster_id) -> bool:
+    """Completes a cluster upgrade started by update_cluster: runs the
+    completion step of every release-upgrade plugin that left state on the
+    cluster (e.g. resuming JC compression) and stamps the installed release.
+    Safe to re-run: with no pending plugin state it only re-stamps."""
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    for message in release_upgrades.run_upgrade_complete(cluster):
+        logger.info(message)
+
+    # Arm the one-shot per-chunk placement migration for clusters upgraded
+    # from a pre-shared-placement release. upgrade-complete is the documented
+    # final step of every upgrade, i.e. after the full rolling node restart —
+    # exactly when the migration may start. storage_node_monitor performs the
+    # actual flip once the cluster settles (ACTIVE, not rebalancing, all
+    # nodes online) and disarms the flag; it also self-heals clusters whose
+    # upgrade predates this arming via a data-plane capability probe.
+    # No-op for clusters already on per-chunk (including all newly created
+    # ones, which are born shared).
+    if not cluster.shared_placement and not cluster.shared_placement_migration_pending:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "shared_placement_migration_pending", True))
+        logger.info("Armed shared_placement migration for cluster %s "
+                    "post-upgrade", cluster_id)
+
+    # Same for write-protection v2: update_cluster deliberately stamps the
+    # generation back to v1 before the rolling restart, so after every
+    # upgrade the runtime switch has to run again. Previously that was a
+    # manual `sbctl cluster switch-write-protection`; now the monitor runs it
+    # once the cluster settles (and self-heals via the capability probe even
+    # when this arming was never reached). The CLI command remains as the
+    # manual override.
+    if not cluster.write_protection_v2 and not cluster.write_protection_migration_pending:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "write_protection_migration_pending", True))
+        logger.info("Armed write-protection v2 migration for cluster %s "
+                    "post-upgrade", cluster_id)
+    return True
+
+
+def build_indices() -> bool:
+    """Backfill every declared secondary index that is not ``ready`` yet.
+
+    Idempotent and safe on a live cluster: live writes have maintained each
+    index since its declaration shipped, so the backfill only has to cover the
+    records that predate it, and it derives each one's entries inside the
+    transaction that writes them — a record rewritten underneath is re-derived,
+    never indexed under the value it used to carry. Re-running it after
+    completion is a no-op.
+
+    False when an index could not be completed — a ``Unique`` declaration whose
+    values are already duplicated in the data, or a record that stayed under
+    rewrite for the whole retry budget. Reads keep their scan fallback, so this
+    is a job for the operator, not an outage.
+
+    Deployment-wide: the index keyspace is shared by every cluster on the
+    management node, so this takes no cluster id.
+    """
+    for line in index_ops.build_indices(log=logger.info):
+        logger.info(line)
+    unready = index_ops.unready_indices()
+    for name in unready:
+        logger.error("Index %s was not completed; reads still fall back to a "
+                     "full scan. Run `sbctl cluster check-indices` for the "
+                     "records behind it.", name)
+    return not unready
+
+
+def list_index_states(index=None) -> builtins.list[dict]:
+    """The state record of every declared index, or of the one named.
+
+    The only way to see where an index stands without reading ``index_meta/``
+    out of FoundationDB by hand: ``build-indices`` reports an outcome and
+    ``check-indices`` reports drift, neither reports state.
+    """
+    if index is None:
+        return index_ops.index_states()
+    model_cls, idx = index_ops.resolve_index(index)
+    return index_ops.index_states(model_cls, idx)
+
+
+def switch_index(index, state) -> bool:
+    """Take one index out of service, or put it back.
+
+    ``building`` empties the index on the way back in — see
+    :func:`index_ops.enable_index` — and hands it to the next
+    ``build-indices``.
+
+    Blocks for ``ttl_cache.INDEX_STATE_CONVERGENCE_SEC`` while the new state
+    reaches the other processes, so the command returns only once the switch is
+    actually in effect across the deployment.
+    """
+    if not index:
+        raise ValueError('--set needs an index to act on, e.g. LVol.node_id')
+    if state == indices.STATE_READY:
+        raise ValueError('an index reaches `ready` only by completing '
+                         '`sbctl cluster build-indices`')
+    if state not in indices.STATES:
+        raise ValueError(f'unknown index state {state!r}')
+
+    model_cls, idx = index_ops.resolve_index(index)
+    if state == indices.STATE_DISABLED:
+        index_ops.disable_index(model_cls, idx)
+        logger.warning("Index %s is out of service everywhere; reads of it fall "
+                       "back to a full scan of %s", index, model_cls.__name__)
+    else:
+        index_ops.enable_index(model_cls, idx)
+        logger.info("Index %s is back in service at `building`. Run "
+                    "`sbctl cluster build-indices` to fill and flip it.", index)
+    return True
+
+
+def check_indices(repair=False) -> bool:
+    """Verify every secondary index in both directions and report the drift.
+
+    False while anything is left for the operator to do — which is every finding
+    of a read-only run, and the duplicated values a ``--repair`` run cannot
+    settle by picking a winner. A repair that found its finding already gone is
+    not one of them: the walks are not isolated from live traffic, so on a busy
+    cluster that is the expected outcome rather than a problem.
+
+    Deployment-wide, like :func:`build_indices`.
+    """
+    findings = index_ops.check_indices(repair=repair, log=logger.info)
+    for entry in findings['missing']:
+        logger.error("Missing index entry %s -> %s", *entry)
+    for entry in findings['stale']:
+        logger.error("Index entry %s points at %s, expected %s", *entry)
+    for key in findings['orphaned']:
+        logger.error("Orphaned index entry %s", key)
+    for entry in findings['duplicate']:
+        logger.error("Unique index key %s is derived by both %s and %s", *entry)
+    total = sum(len(findings[kind])
+                for kind in ('missing', 'stale', 'orphaned', 'duplicate'))
+    logger.info("Index check: %d problem(s), %d repaired, %d no longer present, "
+                "%d unresolved", total, findings['repaired'], findings['vanished'],
+                findings['unresolved'])
+    if findings['unresolved'] and not repair:
+        logger.error("Re-run with --repair to write back the entries that can be "
+                     "derived from the records.")
+    elif findings['unresolved']:
+        logger.error("%d problem(s) need an operator: a value two live records "
+                     "both carry cannot be repaired by picking one of them.",
+                     findings['unresolved'])
+    return findings['unresolved'] == 0
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
@@ -1829,15 +3445,120 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
 
 
 
+def _grace_shutdown_skipped(node) -> bool:
+    """Nodes a full-cluster shutdown must not touch.
+
+    See the rationale in cluster_grace_shutdown's loop.
+    """
+    return node.status in (StorageNode.STATUS_REMOVED,
+                           StorageNode.STATUS_IN_REMOVAL)
+
+
 def cluster_grace_shutdown(cl_id) -> None:
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        # REMOVED is terminal and must survive a cluster shutdown. Without
+        # this filter the sweep force-shuts-down every record it can see,
+        # and shutdown_storage_node drives in_shutdown -> offline, so a node
+        # that was deliberately removed comes back as a plain offline member
+        # (live 2026-09-03: one graceful-shutdown resurrected all four nodes
+        # removed earlier that day). That is not cosmetic --
+        # failure_domain_host_map skips only STATUS_REMOVED, so those records
+        # start counting toward FD host balance again, and the next
+        # activation or startup acts on nodes whose devices are already
+        # failed_and_migrated and which own no lvstore.
+        #
+        # IN_REMOVAL is skipped because node_removal_orchestrate has already
+        # shut that node down and owns the rest of its lifecycle.
+        # PENDING_REMOVAL is deliberately NOT skipped -- the node is still up
+        # and serving at that point, so a full-cluster shutdown must stop it
+        # like any other member.
+        if _grace_shutdown_skipped(node):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id(), force=True)
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+
+    # Settle check. The sweep is serial, so a node it already passed can come
+    # back up behind it -- that is exactly what happened on 2026-09-03, when
+    # queued restart rows put s7457 and zdgtb back ONLINE seconds after the
+    # sweep had shut them down, and the command still returned as if the
+    # cluster were down. shutdown_storage_node now reaps those rows, but this
+    # verifies the end state rather than assuming it: anything that resurrects
+    # a node by another route is caught and stopped here, once.
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    stragglers = [n for n in st
+                  if not _grace_shutdown_skipped(n)
+                  and n.status != StorageNode.STATUS_OFFLINE]
+    for node in stragglers:
+        logger.warning(
+            f"Node {node.get_id()} is {node.status} after the shutdown sweep; "
+            f"shutting it down again")
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    still_up = [n.get_id() for n in st
+                if not _grace_shutdown_skipped(n)
+                and n.status != StorageNode.STATUS_OFFLINE]
+    if still_up:
+        # Deliberately not raising: the caller asked for a shutdown and most
+        # of the cluster is down, so failing here would be less useful than
+        # saying precisely which nodes are not. An operator following up with
+        # `sn shutdown` needs the list, not a traceback.
+        logger.error(
+            f"Graceful shutdown finished with {len(still_up)} node(s) not "
+            f"offline: {still_up}")
+
+
+def cluster_restart(cl_id) -> None:
+    """Operator-requested full-cluster restart: force-shutdown every node that
+    is not already offline, restart all nodes, then reactivate.
+
+    Implemented by arming the suspend-recovery machinery instead of
+    duplicating it: clear the deliberate-shutdown markers (so nodes an
+    operator stopped earlier are restarted too, and the operator-caused-
+    suspension suppression in the monitor disarms), reset the drain marker,
+    and flip the cluster to SUSPENDED. The storage-node monitor then drives
+    the full sequence: drain (parallel force-shutdown of every non-offline
+    node), parallel auto-restart of all nodes, and the gated
+    ``cluster_activate`` once every node is back ONLINE.
+
+    Works from any steady state — ACTIVE/DEGRADED/READONLY (planned restart)
+    or SUSPENDED (e.g. recover from a manual-shutdown-caused suspension).
+    Returns immediately; progress is observable via ``cluster show`` /
+    ``cluster get-logs`` (suspended -> in_activation -> active).
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
+                              Cluster.STATUS_READONLY, Cluster.STATUS_SUSPENDED]:
+        raise ValueError(
+            f"Cluster restart requires a steady cluster state "
+            f"(active/degraded/read_only/suspended), current: {cluster.status}")
+
+    # Re-arm auto recovery for operator-stopped nodes: an explicit cluster
+    # restart overrides the per-node "stay down" intent.
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        if node.auto_restart_disabled:
+            logger.info("Clearing deliberate-shutdown marker on node %s", node.get_id())
+            db_controller.atomic_update(
+                node, lambda n: setattr(n, "auto_restart_disabled", False))
+
+    set_cluster_status(cl_id, Cluster.STATUS_SUSPENDED)
+
+    # Reset the drain marker AFTER the status flip: set_cluster_status clears
+    # it only when leaving suspension, and a marker left True (cluster already
+    # SUSPENDED with a completed earlier drain) would make the drain a no-op.
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    db_controller.atomic_update(
+        cluster, lambda c: setattr(c, "suspend_drain_complete", False))
+
+    logger.info(
+        "Cluster %s restart initiated: monitor will drain all nodes, restart "
+        "them in parallel and reactivate the cluster", cl_id)
 
 
 def delete_cluster(cl_id) -> None:
@@ -1851,15 +3572,12 @@ def delete_cluster(cl_id) -> None:
     if pools:
         raise ValueError("Can only remove Empty cluster, Pools found")
 
-    if len(db_controller.get_clusters()) == 1 :
-        raise ValueError("Can not remove the last cluster!")
-
     logger.info(f"Deleting Cluster {cl_id}")
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def set(cl_id, attr, value) -> bool:
+def set_(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)
     key_splits = attr.split(".")
     key = key_splits[0]
@@ -1885,26 +3603,50 @@ def set(cl_id, attr, value) -> bool:
 
 def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> bool:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(source_cl_id)
-    if not cluster:
+    # The get_*_by_id() helpers raise KeyError rather than returning None, so
+    # translate here; a bare KeyError traceback used to reach the operator.
+    try:
+        db_controller.get_cluster_by_id(source_cl_id)
+    except KeyError:
         raise ValueError(f"Cluster not found: {source_cl_id}")
 
-    target_cluster = db_controller.get_cluster_by_id(target_cl_id)
-    if not target_cluster:
+    try:
+        db_controller.get_cluster_by_id(target_cl_id)
+    except KeyError:
         raise ValueError(f"Target cluster not found: {target_cl_id}")
 
     logger.info("Updating Cluster replication target")
-    cluster.snapshot_replication_target_cluster = target_cl_id
+    new_pool = None
     if target_pool:
-        pool = db_controller.get_pool_by_id(target_pool)
-        if not pool:
+        # --target-pool is documented as "ID or name", and a name is only
+        # unique within its cluster -- which is the target cluster here.
+        try:
+            pool = db_controller.get_pool_by_id_or_name(target_pool, target_cl_id)
+        except KeyError:
             raise ValueError(f"Pool not found: {target_pool}")
         if pool.status != Pool.STATUS_ACTIVE:
             raise ValueError(f"Pool not active: {target_pool}")
-        cluster.snapshot_replication_target_pool = target_pool
+        # Store the UUID: the name is mutable, the reference must not be.
+        new_pool = pool.get_id()
+    new_timeout = timeout if (timeout and timeout > 0) else None
 
-    if timeout and timeout > 0:
-        cluster.snapshot_replication_timeout = timeout
-    cluster.write_to_db()
+    # Atomic: mutate only the replication fields on the freshly-read cluster so
+    # a concurrent cluster.status change is not clobbered (incident 2026-06-18).
+    def _mut(c):
+        c.snapshot_replication_target_cluster = target_cl_id
+        if new_pool is not None:
+            c.snapshot_replication_target_pool = new_pool
+        if new_timeout is not None:
+            c.snapshot_replication_timeout = new_timeout
+        return True
+
+    db_controller.atomic_update(db_controller.get_cluster_by_id(source_cl_id), _mut)
     logger.info("Done")
+    return True
+
+
+def rebalance(cluster_id) -> bool:
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            tasks_controller.add_device_mig_task_for_node(node.get_id())
     return True

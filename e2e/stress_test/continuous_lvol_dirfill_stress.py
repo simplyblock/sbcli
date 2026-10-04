@@ -80,10 +80,14 @@ class TestLvolDirFillStress(TestClusterBase):
     """
 
     # ---- tunables ---------------------------------------------------------
-    # Per-node targets.  Cluster deploy sets --max-lvol=100 (the per-node
-    # NVMe-oF subsystem cap); we keep a 10-lvol headroom below it so
-    # transient races around create don't push a node over the cluster cap.
-    LVOL_PER_NODE_MAX = 90
+    # Per-node targets.  75 is the per-node NVMe-oF subsystem cap
+    # (constants.MAX_SUBSYSTEMS_PER_NODE, enforced at `sn configure` /
+    # `sn restart` ingress, so deploy can no longer ask for more). The target
+    # sits ON the cap, deliberately: no headroom, so the stress run exercises
+    # the boundary. Concurrent creates racing at the limit come back as
+    # `max subsystems reached`, which _is_recoverable_cluster_pressure already
+    # classifies as cluster pressure — non-fatal skip, biased toward deletes.
+    LVOL_PER_NODE_MAX = 75
     ACTIVE_PER_NODE_TGT = 15
 
     # Global snapshot cap (shared across nodes)
@@ -215,7 +219,7 @@ class TestLvolDirFillStress(TestClusterBase):
             self._metrics[bucket][key] = self._metrics[bucket].get(key, 0) + n
 
     def _set_failure(self, op: str, exc: Exception, details: str = "",
-                     ctx: dict = None, api_err: dict = None):
+                     ctx: dict | None = None, api_err: dict | None = None):
         with self._lock:
             if self._metrics["failure_info"] is None:
                 self._metrics["failure_info"] = {
@@ -1174,6 +1178,8 @@ class TestLvolDirFillStress(TestClusterBase):
                     raise
                 self.logger.info(f"API retry {30 - retry}/30: {e}")
                 sleep_n_sec(2)
+
+        self._validate_storage_node_health()
 
         # SSH connect to every storage node and bump aio-max-nr (fio needs headroom)
         for node in self.storage_nodes:

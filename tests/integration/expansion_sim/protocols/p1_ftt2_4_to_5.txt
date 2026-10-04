@@ -1,0 +1,378 @@
+==============================================================================
+EXPANSION PROTOCOL — p1_ftt2_4_to_5
+==============================================================================
+description    : 1 node/host, FTT2 — add a single host to a 4-host FTT2 cluster.
+FTT            : 2
+nodes per host : 1
+lvols/primary  : 8
+current topology : [['n1'], ['n2'], ['n3'], ['n4']]
+new topology     : [['n1'], ['n2'], ['n3'], ['n4'], ['n5']]
+newcomers        : ['n5']
+
+------------------------------------------------------------------------------
+PLAN — 6 moves
+------------------------------------------------------------------------------
+  [ 0] rehome tertiary  LVS@n3      n1 -> n5  
+  [ 1] rehome secondary LVS@n4      n1 -> n5  
+  [ 2] rehome tertiary  LVS@n4      n2 -> n1  
+  [ 3] create primary   LVS@n5       — -> n5  
+  [ 4] create secondary LVS@n5       — -> n1  
+  [ 5] create tertiary  LVS@n5       — -> n2  
+
+------------------------------------------------------------------------------
+RPC TIMELINE — 298 events, total 4109.5 ms
+------------------------------------------------------------------------------
+    t_ms    dur   mv phase          role       target  rpc                                    detail
+  --- move 0: rehome tertiary LVS@n3 n1 -> n5 ---
+      0.0    1.0    0 pre_block      tertiary   n1     firewall_set_port                      block n1:4420 (sec subsys)
+      1.0    1.0    0 pre_block      tertiary   n5     firewall_set_port                      block n5:4420 (sec subsys)
+      2.0   11.0    0 blocked        tertiary   n5     bdev_nvme_attach_controller            hub_n3 -> n3:4421
+     13.0    5.5    0 blocked        tertiary   n5     bdev_lvol_connect_hublvol              hub_n3
+     18.5   33.5    0 blocked        tertiary   n5     bdev_alceml_create                     alceml_n3_on_n5
+     52.0  172.0    0 blocked        tertiary   n5     bdev_distrib_create                    distr_n3_on_n5
+    224.0    6.0    0 blocked        tertiary   n5     bdev_raid_create                       raid_n3_on_n5
+    230.0    6.0    0 blocked        tertiary   n5     bdev_PT_NoExcl_create                  pt_n3_on_n5
+    236.0    7.0    0 blocked        tertiary   n5     bdev_lvol_get_lvstores                 LVS_n3
+    243.0    8.0    0 blocked        tertiary   n5     bdev_lvol_set_lvs_opts                 LVS_n3 non_leader cntlid=2000
+    251.0    6.0    0 blocked        tertiary   n5     bdev_examine                           LVS_n3
+    257.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.0 on n5
+    262.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.0 ns1
+    267.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.0 n5:4420
+    273.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.0 ANA=non_optimized
+    283.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.1 on n5
+    288.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.1 ns1
+    293.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.1 n5:4420
+    299.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.1 ANA=non_optimized
+    309.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.2 on n5
+    314.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.2 ns1
+    319.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.2 n5:4420
+    325.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.2 ANA=non_optimized
+    335.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.3 on n5
+    340.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.3 ns1
+    345.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.3 n5:4420
+    351.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.3 ANA=non_optimized
+    361.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.4 on n5
+    366.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.4 ns1
+    371.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.4 n5:4420
+    377.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.4 ANA=non_optimized
+    387.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.5 on n5
+    392.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.5 ns1
+    397.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.5 n5:4420
+    403.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.5 ANA=non_optimized
+    413.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.6 on n5
+    418.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.6 ns1
+    423.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.6 n5:4420
+    429.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.6 ANA=non_optimized
+    439.0    5.0    0 blocked        tertiary   n5     nvmf_create_subsystem                  nqn.lvol.n3.7 on n5
+    444.0    5.0    0 blocked        tertiary   n5     nvmf_subsystem_add_ns                  nqn.lvol.n3.7 ns1
+    449.0    6.0    0 blocked        tertiary   n5     nvmf_subsystem_add_listener            nqn.lvol.n3.7 n5:4420
+    455.0   10.0    0 blocked        tertiary   n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n3.7 ANA=non_optimized
+    465.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.0 on n1
+    470.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.1 on n1
+    475.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.2 on n1
+    480.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.3 on n1
+    485.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.4 on n1
+    490.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.5 on n1
+    495.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.6 on n1
+    500.0    5.0    0 blocked        tertiary   n1     nvmf_delete_subsystem                  nqn.lvol.n3.7 on n1
+    505.0    6.0    0 blocked        tertiary   n1     bdev_PT_NoExcl_delete                  pt_n3_on_n1
+    511.0    6.0    0 blocked        tertiary   n1     bdev_raid_delete                       raid_n3_on_n1
+    517.0   80.0    0 blocked        tertiary   n1     bdev_distrib_delete                    distr_n3_on_n1
+    597.0  314.0    0 blocked        tertiary   n1     bdev_nvme_detach_controller            hub_n3
+    911.0    1.0    0 post_unblock   tertiary   n5     firewall_set_port                      unblock n5:4420
+    912.0    1.0    0 post_unblock   tertiary   n1     firewall_set_port                      unblock n1:4420
+    913.0    7.0    0                tertiary   n5     distr_send_cluster_map                 propagate listener change for LVS@n3
+  --- move 1: rehome secondary LVS@n4 n1 -> n5 ---
+    920.0    1.0    1 pre_block      secondary  n1     firewall_set_port                      block n1:4420 (sec subsys)
+    921.0    1.0    1 pre_block      secondary  n5     firewall_set_port                      block n5:4420 (sec subsys)
+    922.0   11.0    1 blocked        secondary  n5     bdev_nvme_attach_controller            hub_n4 -> n4:4421
+    933.0    5.5    1 blocked        secondary  n5     bdev_lvol_connect_hublvol              hub_n4
+    938.5   33.5    1 blocked        secondary  n5     bdev_alceml_create                     alceml_n4_on_n5
+    972.0  172.0    1 blocked        secondary  n5     bdev_distrib_create                    distr_n4_on_n5
+   1144.0    6.0    1 blocked        secondary  n5     bdev_raid_create                       raid_n4_on_n5
+   1150.0    6.0    1 blocked        secondary  n5     bdev_PT_NoExcl_create                  pt_n4_on_n5
+   1156.0    7.0    1 blocked        secondary  n5     bdev_lvol_get_lvstores                 LVS_n4
+   1163.0    8.0    1 blocked        secondary  n5     bdev_lvol_set_lvs_opts                 LVS_n4 non_leader cntlid=1000
+   1171.0    6.0    1 blocked        secondary  n5     bdev_examine                           LVS_n4
+   1177.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.0 on n5
+   1182.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.0 ns1
+   1187.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.0 n5:4420
+   1193.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.0 ANA=non_optimized
+   1203.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.1 on n5
+   1208.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.1 ns1
+   1213.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.1 n5:4420
+   1219.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.1 ANA=non_optimized
+   1229.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.2 on n5
+   1234.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.2 ns1
+   1239.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.2 n5:4420
+   1245.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.2 ANA=non_optimized
+   1255.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.3 on n5
+   1260.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.3 ns1
+   1265.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.3 n5:4420
+   1271.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.3 ANA=non_optimized
+   1281.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.4 on n5
+   1286.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.4 ns1
+   1291.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.4 n5:4420
+   1297.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.4 ANA=non_optimized
+   1307.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.5 on n5
+   1312.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.5 ns1
+   1317.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.5 n5:4420
+   1323.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.5 ANA=non_optimized
+   1333.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.6 on n5
+   1338.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.6 ns1
+   1343.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.6 n5:4420
+   1349.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.6 ANA=non_optimized
+   1359.0    5.0    1 blocked        secondary  n5     nvmf_create_subsystem                  nqn.lvol.n4.7 on n5
+   1364.0    5.0    1 blocked        secondary  n5     nvmf_subsystem_add_ns                  nqn.lvol.n4.7 ns1
+   1369.0    6.0    1 blocked        secondary  n5     nvmf_subsystem_add_listener            nqn.lvol.n4.7 n5:4420
+   1375.0   10.0    1 blocked        secondary  n5     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.7 ANA=non_optimized
+   1385.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.0 on n1
+   1390.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.1 on n1
+   1395.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.2 on n1
+   1400.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.3 on n1
+   1405.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.4 on n1
+   1410.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.5 on n1
+   1415.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.6 on n1
+   1420.0    5.0    1 blocked        secondary  n1     nvmf_delete_subsystem                  nqn.lvol.n4.7 on n1
+   1425.0    6.0    1 blocked        secondary  n1     bdev_PT_NoExcl_delete                  pt_n4_on_n1
+   1431.0    6.0    1 blocked        secondary  n1     bdev_raid_delete                       raid_n4_on_n1
+   1437.0   80.0    1 blocked        secondary  n1     bdev_distrib_delete                    distr_n4_on_n1
+   1517.0  314.0    1 blocked        secondary  n1     bdev_nvme_detach_controller            hub_n4
+   1831.0   11.0    1 blocked        secondary  n2     bdev_nvme_attach_controller            hub_n4 multipath += n5
+   1842.0   11.0    1 blocked        secondary  n2     bdev_nvme_remove_trid                  hub_n4 multipath -= n1
+   1853.0    1.0    1 post_unblock   secondary  n5     firewall_set_port                      unblock n5:4420
+   1854.0    1.0    1 post_unblock   secondary  n1     firewall_set_port                      unblock n1:4420
+   1855.0    7.0    1                secondary  n5     distr_send_cluster_map                 propagate listener change for LVS@n4
+  --- move 2: rehome tertiary LVS@n4 n2 -> n1 ---
+   1862.0    1.0    2 pre_block      tertiary   n2     firewall_set_port                      block n2:4420 (sec subsys)
+   1863.0    1.0    2 pre_block      tertiary   n1     firewall_set_port                      block n1:4420 (sec subsys)
+   1864.0   11.0    2 blocked        tertiary   n1     bdev_nvme_attach_controller            hub_n4 -> n4:4421
+   1875.0    5.5    2 blocked        tertiary   n1     bdev_lvol_connect_hublvol              hub_n4
+   1880.5   33.5    2 blocked        tertiary   n1     bdev_alceml_create                     alceml_n4_on_n1
+   1914.0  172.0    2 blocked        tertiary   n1     bdev_distrib_create                    distr_n4_on_n1
+   2086.0    6.0    2 blocked        tertiary   n1     bdev_raid_create                       raid_n4_on_n1
+   2092.0    6.0    2 blocked        tertiary   n1     bdev_PT_NoExcl_create                  pt_n4_on_n1
+   2098.0    7.0    2 blocked        tertiary   n1     bdev_lvol_get_lvstores                 LVS_n4
+   2105.0    8.0    2 blocked        tertiary   n1     bdev_lvol_set_lvs_opts                 LVS_n4 non_leader cntlid=2000
+   2113.0    6.0    2 blocked        tertiary   n1     bdev_examine                           LVS_n4
+   2119.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.0 on n1
+   2124.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.0 ns1
+   2129.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.0 n1:4420
+   2135.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.0 ANA=non_optimized
+   2145.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.1 on n1
+   2150.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.1 ns1
+   2155.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.1 n1:4420
+   2161.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.1 ANA=non_optimized
+   2171.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.2 on n1
+   2176.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.2 ns1
+   2181.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.2 n1:4420
+   2187.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.2 ANA=non_optimized
+   2197.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.3 on n1
+   2202.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.3 ns1
+   2207.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.3 n1:4420
+   2213.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.3 ANA=non_optimized
+   2223.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.4 on n1
+   2228.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.4 ns1
+   2233.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.4 n1:4420
+   2239.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.4 ANA=non_optimized
+   2249.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.5 on n1
+   2254.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.5 ns1
+   2259.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.5 n1:4420
+   2265.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.5 ANA=non_optimized
+   2275.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.6 on n1
+   2280.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.6 ns1
+   2285.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.6 n1:4420
+   2291.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.6 ANA=non_optimized
+   2301.0    5.0    2 blocked        tertiary   n1     nvmf_create_subsystem                  nqn.lvol.n4.7 on n1
+   2306.0    5.0    2 blocked        tertiary   n1     nvmf_subsystem_add_ns                  nqn.lvol.n4.7 ns1
+   2311.0    6.0    2 blocked        tertiary   n1     nvmf_subsystem_add_listener            nqn.lvol.n4.7 n1:4420
+   2317.0   10.0    2 blocked        tertiary   n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n4.7 ANA=non_optimized
+   2327.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.0 on n2
+   2332.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.1 on n2
+   2337.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.2 on n2
+   2342.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.3 on n2
+   2347.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.4 on n2
+   2352.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.5 on n2
+   2357.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.6 on n2
+   2362.0    5.0    2 blocked        tertiary   n2     nvmf_delete_subsystem                  nqn.lvol.n4.7 on n2
+   2367.0    6.0    2 blocked        tertiary   n2     bdev_PT_NoExcl_delete                  pt_n4_on_n2
+   2373.0    6.0    2 blocked        tertiary   n2     bdev_raid_delete                       raid_n4_on_n2
+   2379.0   80.0    2 blocked        tertiary   n2     bdev_distrib_delete                    distr_n4_on_n2
+   2459.0  314.0    2 blocked        tertiary   n2     bdev_nvme_detach_controller            hub_n4
+   2773.0    1.0    2 post_unblock   tertiary   n1     firewall_set_port                      unblock n1:4420
+   2774.0    1.0    2 post_unblock   tertiary   n2     firewall_set_port                      unblock n2:4420
+   2775.0    7.0    2                tertiary   n1     distr_send_cluster_map                 propagate listener change for LVS@n4
+  --- move 3: create primary LVS@n5 - -> n5 ---
+   2782.0   33.5    3                primary    n5     bdev_alceml_create                     alceml_n5_0
+   2815.5  172.0    3                primary    n5     bdev_distrib_create                    distr_n5_0
+   2987.5    6.0    3                primary    n5     bdev_raid_create                       raid_n5
+   2993.5    6.0    3                primary    n5     bdev_PT_NoExcl_create                  pt_n5
+   2999.5    5.0    3                primary    n5     bdev_jm_create                         jm_n5
+   3004.5    8.0    3                primary    n5     bdev_lvol_create_lvstore               LVS_n5
+   3012.5    8.0    3                primary    n5     bdev_lvol_set_lvs_opts                 LVS_n5 primary cntlid=0
+   3020.5    6.0    3                primary    n5     bdev_lvol_create_hublvol               hub_n5
+   3026.5    5.0    3                primary    n5     nvmf_create_subsystem                  hub_subsys n5
+   3031.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            hub_listener n5:4421
+   3037.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.0
+   3042.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.0 ns1
+   3047.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.0 n5:4420 ANA=optimized
+   3053.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.1
+   3058.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.1 ns1
+   3063.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.1 n5:4420 ANA=optimized
+   3069.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.2
+   3074.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.2 ns1
+   3079.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.2 n5:4420 ANA=optimized
+   3085.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.3
+   3090.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.3 ns1
+   3095.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.3 n5:4420 ANA=optimized
+   3101.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.4
+   3106.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.4 ns1
+   3111.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.4 n5:4420 ANA=optimized
+   3117.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.5
+   3122.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.5 ns1
+   3127.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.5 n5:4420 ANA=optimized
+   3133.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.6
+   3138.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.6 ns1
+   3143.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.6 n5:4420 ANA=optimized
+   3149.5    5.0    3                primary    n5     nvmf_create_subsystem                  nqn.lvol.n5.7
+   3154.5    5.0    3                primary    n5     nvmf_subsystem_add_ns                  nqn.lvol.n5.7 ns1
+   3159.5    6.0    3                primary    n5     nvmf_subsystem_add_listener            nqn.lvol.n5.7 n5:4420 ANA=optimized
+  --- move 4: create secondary LVS@n5 - -> n1 ---
+   3165.5    1.0    4 pre_block      secondary  n1     firewall_set_port                      block n1:4420 (sec subsys)
+   3166.5   11.0    4 blocked        secondary  n1     bdev_nvme_attach_controller            hub_n5 -> n5:4421
+   3177.5    5.5    4 blocked        secondary  n1     bdev_lvol_connect_hublvol              hub_n5
+   3183.0   33.5    4 blocked        secondary  n1     bdev_alceml_create                     alceml_n5_on_n1
+   3216.5  172.0    4 blocked        secondary  n1     bdev_distrib_create                    distr_n5_on_n1
+   3388.5    6.0    4 blocked        secondary  n1     bdev_raid_create                       raid_n5_on_n1
+   3394.5    6.0    4 blocked        secondary  n1     bdev_PT_NoExcl_create                  pt_n5_on_n1
+   3400.5    7.0    4 blocked        secondary  n1     bdev_lvol_get_lvstores                 LVS_n5
+   3407.5    8.0    4 blocked        secondary  n1     bdev_lvol_set_lvs_opts                 LVS_n5 non_leader cntlid=1000
+   3415.5    6.0    4 blocked        secondary  n1     bdev_examine                           LVS_n5
+   3421.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.0 on n1
+   3426.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.0 ns1
+   3431.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.0 n1:4420
+   3437.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.0 ANA=non_optimized
+   3447.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.1 on n1
+   3452.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.1 ns1
+   3457.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.1 n1:4420
+   3463.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.1 ANA=non_optimized
+   3473.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.2 on n1
+   3478.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.2 ns1
+   3483.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.2 n1:4420
+   3489.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.2 ANA=non_optimized
+   3499.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.3 on n1
+   3504.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.3 ns1
+   3509.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.3 n1:4420
+   3515.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.3 ANA=non_optimized
+   3525.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.4 on n1
+   3530.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.4 ns1
+   3535.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.4 n1:4420
+   3541.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.4 ANA=non_optimized
+   3551.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.5 on n1
+   3556.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.5 ns1
+   3561.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.5 n1:4420
+   3567.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.5 ANA=non_optimized
+   3577.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.6 on n1
+   3582.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.6 ns1
+   3587.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.6 n1:4420
+   3593.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.6 ANA=non_optimized
+   3603.5    5.0    4 blocked        secondary  n1     nvmf_create_subsystem                  nqn.lvol.n5.7 on n1
+   3608.5    5.0    4 blocked        secondary  n1     nvmf_subsystem_add_ns                  nqn.lvol.n5.7 ns1
+   3613.5    6.0    4 blocked        secondary  n1     nvmf_subsystem_add_listener            nqn.lvol.n5.7 n1:4420
+   3619.5   10.0    4 blocked        secondary  n1     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.7 ANA=non_optimized
+   3629.5    1.0    4 post_unblock   secondary  n1     firewall_set_port                      unblock n1:4420
+   3630.5    7.0    4                secondary  n1     distr_send_cluster_map                 propagate listener change for LVS@n5
+  --- move 5: create tertiary LVS@n5 - -> n2 ---
+   3637.5    1.0    5 pre_block      tertiary   n2     firewall_set_port                      block n2:4420 (sec subsys)
+   3638.5   11.0    5 blocked        tertiary   n2     bdev_nvme_attach_controller            hub_n5 -> n5:4421
+   3649.5    5.5    5 blocked        tertiary   n2     bdev_lvol_connect_hublvol              hub_n5
+   3655.0   33.5    5 blocked        tertiary   n2     bdev_alceml_create                     alceml_n5_on_n2
+   3688.5  172.0    5 blocked        tertiary   n2     bdev_distrib_create                    distr_n5_on_n2
+   3860.5    6.0    5 blocked        tertiary   n2     bdev_raid_create                       raid_n5_on_n2
+   3866.5    6.0    5 blocked        tertiary   n2     bdev_PT_NoExcl_create                  pt_n5_on_n2
+   3872.5    7.0    5 blocked        tertiary   n2     bdev_lvol_get_lvstores                 LVS_n5
+   3879.5    8.0    5 blocked        tertiary   n2     bdev_lvol_set_lvs_opts                 LVS_n5 non_leader cntlid=2000
+   3887.5    6.0    5 blocked        tertiary   n2     bdev_examine                           LVS_n5
+   3893.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.0 on n2
+   3898.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.0 ns1
+   3903.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.0 n2:4420
+   3909.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.0 ANA=non_optimized
+   3919.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.1 on n2
+   3924.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.1 ns1
+   3929.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.1 n2:4420
+   3935.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.1 ANA=non_optimized
+   3945.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.2 on n2
+   3950.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.2 ns1
+   3955.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.2 n2:4420
+   3961.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.2 ANA=non_optimized
+   3971.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.3 on n2
+   3976.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.3 ns1
+   3981.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.3 n2:4420
+   3987.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.3 ANA=non_optimized
+   3997.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.4 on n2
+   4002.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.4 ns1
+   4007.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.4 n2:4420
+   4013.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.4 ANA=non_optimized
+   4023.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.5 on n2
+   4028.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.5 ns1
+   4033.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.5 n2:4420
+   4039.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.5 ANA=non_optimized
+   4049.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.6 on n2
+   4054.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.6 ns1
+   4059.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.6 n2:4420
+   4065.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.6 ANA=non_optimized
+   4075.5    5.0    5 blocked        tertiary   n2     nvmf_create_subsystem                  nqn.lvol.n5.7 on n2
+   4080.5    5.0    5 blocked        tertiary   n2     nvmf_subsystem_add_ns                  nqn.lvol.n5.7 ns1
+   4085.5    6.0    5 blocked        tertiary   n2     nvmf_subsystem_add_listener            nqn.lvol.n5.7 n2:4420
+   4091.5   10.0    5 blocked        tertiary   n2     nvmf_subsystem_listener_set_ana_state  nqn.lvol.n5.7 ANA=non_optimized
+   4101.5    1.0    5 post_unblock   tertiary   n2     firewall_set_port                      unblock n2:4420
+   4102.5    7.0    5                tertiary   n2     distr_send_cluster_map                 propagate listener change for LVS@n5
+
+------------------------------------------------------------------------------
+RPC FREQUENCY
+------------------------------------------------------------------------------
+  RPC                                     count   cumulative_ms
+  bdev_distrib_create                         6          1032.0
+  bdev_nvme_detach_controller                 3           942.0
+  nvmf_subsystem_listener_set_ana_state      40           400.0
+  nvmf_subsystem_add_listener                49           294.0
+  nvmf_create_subsystem                      49           245.0
+  nvmf_subsystem_add_ns                      48           240.0
+  bdev_distrib_delete                         3           240.0
+  bdev_alceml_create                          6           201.0
+  nvmf_delete_subsystem                      24           120.0
+  bdev_nvme_attach_controller                 6            66.0
+  bdev_lvol_set_lvs_opts                      6            48.0
+  bdev_raid_create                            6            36.0
+  bdev_PT_NoExcl_create                       6            36.0
+  bdev_lvol_get_lvstores                      5            35.0
+  distr_send_cluster_map                      5            35.0
+  bdev_examine                                5            30.0
+  bdev_lvol_connect_hublvol                   5            27.5
+  bdev_PT_NoExcl_delete                       3            18.0
+  bdev_raid_delete                            3            18.0
+  firewall_set_port                          16            16.0
+  bdev_nvme_remove_trid                       1            11.0
+  bdev_lvol_create_lvstore                    1             8.0
+  bdev_lvol_create_hublvol                    1             6.0
+  bdev_jm_create                              1             5.0
+
+------------------------------------------------------------------------------
+PORT BLOCK / UNBLOCK EVENTS — 16
+------------------------------------------------------------------------------
+      0.0  n1     pre_block      block n1:4420 (sec subsys)
+      1.0  n5     pre_block      block n5:4420 (sec subsys)
+    911.0  n5     post_unblock   unblock n5:4420
+    912.0  n1     post_unblock   unblock n1:4420
+    920.0  n1     pre_block      block n1:4420 (sec subsys)
+    921.0  n5     pre_block      block n5:4420 (sec subsys)
+   1853.0  n5     post_unblock   unblock n5:4420
+   1854.0  n1     post_unblock   unblock n1:4420
+   1862.0  n2     pre_block      block n2:4420 (sec subsys)
+   1863.0  n1     pre_block      block n1:4420 (sec subsys)
+   2773.0  n1     post_unblock   unblock n1:4420
+   2774.0  n2     post_unblock   unblock n2:4420
+   3165.5  n1     pre_block      block n1:4420 (sec subsys)
+   3629.5  n1     post_unblock   unblock n1:4420
+   3637.5  n2     pre_block      block n2:4420 (sec subsys)
+   4101.5  n2     post_unblock   unblock n2:4420

@@ -579,10 +579,26 @@ class SoakRunner:
                 if uuid not in target_nodes and status != "online"
             ]
             if unaffected_bad:
-                raise TestRunError(
-                    "Unaffected nodes are not online: "
-                    + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in unaffected_bad)
-                )
+                # Transient DOWN of survivors is a DESIGNED self-healing
+                # state (CP down_since grace; monitor flips them back in
+                # 10-30s — observed 2026-08-03 21:47 after a dual outage:
+                # all 3 survivors online->down->online within 35s, but the
+                # instant check aborted the soak). Tolerate it for a grace
+                # window; only sustained non-online survivors are fatal.
+                first_bad = getattr(self, "_unaffected_bad_since", None)
+                if first_bad is None:
+                    self._unaffected_bad_since = time.time()
+                    self.logger.log(
+                        "Unaffected node(s) transiently not online "
+                        "(grace 120s): "
+                        + ", ".join(f"{u}:{statuses[u]}" for u in unaffected_bad))
+                elif time.time() - first_bad > 120:
+                    raise TestRunError(
+                        "Unaffected nodes are not online (sustained >120s): "
+                        + ", ".join(f"{u}:{statuses[u]}" for u in unaffected_bad)
+                    )
+            else:
+                self._unaffected_bad_since = None
             if not offline and len(statuses) == expected:
                 return nodes
             self.logger.log(
@@ -1194,10 +1210,16 @@ class SoakRunner:
             iteration = 0
             while True:
                 iteration += 1
-                self.wait_for_cluster_stable()
-                self.wait_for_data_migration_complete(
-                    f"starting outage iteration {iteration}"
-                )
+                # Deliberately NOT waiting for rebalancing / data-migration
+                # drain between iterations (user decision 2026-08-03, same
+                # policy as multipath_role_path_outage_test): the drain took
+                # ~20min per outage and dominated wall time. Fixed 60s
+                # settle only; outages land while the cluster is still
+                # rebalancing — harsher and closer to real cascaded failures.
+                self.logger.log(
+                    f"fixed 60s settle before outage iteration {iteration} "
+                    "(no rebalancing wait)")
+                time.sleep(60)
                 current_nodes = self.ensure_expected_nodes()
                 current_uuids = [node["uuid"] for node in current_nodes]
                 if any(node["status"] != "online" for node in current_nodes):

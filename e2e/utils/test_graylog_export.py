@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "requests>=2.34.0",
+# ]
+# ///
 """
 Standalone test for the Graylog / OpenSearch per-container log export.
 
@@ -13,13 +19,21 @@ Discovery strategy (in order):
 Fetch strategy:
   - Graylog REST API when reachable; OpenSearch scroll API otherwise.
 
+Chunking:
+  - The total time window is split into 1-hour chunks.
+  - Chunks are processed in REVERSE order (newest first) so you can
+    verify collection is working while it runs.
+  - Each chunk writes to a subfolder: OUTPUT_DIR/chunk_NN_HH-MM_to_HH-MM/
+
 Environment variables:
-    MGMT_IP            Management node IP (required)
+    MGMT_IP            Management node IP (required unless both dedicated IPs are set)
     CLUSTER_SECRET     Graylog admin password / cluster secret (required)
     START_TIME         UTC start time, ISO-8601 (optional; defaults to now - DURATION_MINUTES)
     DURATION_MINUTES   Window length in minutes (default: 60)
-    DEPLOY_MODE        "docker" (default) or "kubernetes"
+    DEPLOY_MODE        "docker" (default), "kubernetes", or "k8s-native"
     OUTPUT_DIR         Where to write per-container .log files (default: ./graylog_test_output)
+    OPENSEARCH_IP      Dedicated OpenSearch IP (optional; defaults to MGMT_IP)
+    GRAYLOG_IP         Dedicated Graylog IP (optional; defaults to MGMT_IP)
 
 Usage:
     export MGMT_IP=192.168.10.210
@@ -27,11 +41,20 @@ Usage:
     export START_TIME="2026-04-25T16:38:00"
     export DURATION_MINUTES=420
     python3 e2e/utils/test_graylog_export.py
+
+    # Or with separate IPs for OpenSearch and Graylog:
+    export OPENSEARCH_IP=192.168.10.210
+    export GRAYLOG_IP=192.168.10.211
+    export CLUSTER_SECRET="<your-cluster-secret>"
+    export START_TIME="2026-06-27T21:59:00"
+    export DURATION_MINUTES=660
+    python3 e2e/utils/test_graylog_export.py
 """
 
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import UTC, datetime, timedelta
 
 try:
     import requests
@@ -48,11 +71,13 @@ CLUSTER_SECRET = os.environ.get("CLUSTER_SECRET", "")
 DEPLOY_MODE = os.environ.get("DEPLOY_MODE", "docker")
 DURATION_MINUTES = int(os.environ.get("DURATION_MINUTES", "60"))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./graylog_test_output")
+OPENSEARCH_IP = os.environ.get("OPENSEARCH_IP", "") or MGMT_IP
+GRAYLOG_IP = os.environ.get("GRAYLOG_IP", "") or MGMT_IP
 
 START_TIME_STR = os.environ.get("START_TIME", "")
 
-if not MGMT_IP:
-    print("ERROR: MGMT_IP not set", file=sys.stderr)
+if not MGMT_IP and not (OPENSEARCH_IP and GRAYLOG_IP):
+    print("ERROR: MGMT_IP not set (or set OPENSEARCH_IP and GRAYLOG_IP)", file=sys.stderr)
     sys.exit(1)
 if not CLUSTER_SECRET:
     print("ERROR: CLUSTER_SECRET not set", file=sys.stderr)
@@ -62,34 +87,39 @@ if not CLUSTER_SECRET:
 if START_TIME_STR:
     start_dt = datetime.fromisoformat(START_TIME_STR.replace(" ", "T"))
     if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=timezone.utc)
+        start_dt = start_dt.replace(tzinfo=UTC)
     end_dt = start_dt + timedelta(minutes=DURATION_MINUTES)
 elif DURATION_MINUTES:
     # No start time but duration given -> last N minutes
-    end_dt = datetime.now(timezone.utc)
+    end_dt = datetime.now(UTC)
     start_dt = end_dt - timedelta(minutes=DURATION_MINUTES)
 else:
     # No start time, no duration -> collect everything Graylog has
-    start_dt = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    end_dt = datetime.now(timezone.utc)
+    start_dt = datetime(2020, 1, 1, tzinfo=UTC)
+    end_dt = datetime.now(UTC)
 
 FROM_ISO = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 TO_ISO = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 FROM_MS = int(start_dt.timestamp() * 1000)
 TO_MS = int(end_dt.timestamp() * 1000)
 
-# URLs
-if DEPLOY_MODE == "kubernetes":
-    GRAYLOG_BASE = f"http://{MGMT_IP}:9000/api"
+# URLs — use dedicated IPs when set, otherwise fall back to MGMT_IP
+_K8S_MODES = ("kubernetes", "k8s-native")
+
+if DEPLOY_MODE in _K8S_MODES:
+    GRAYLOG_BASE = f"http://{GRAYLOG_IP}:9000/api"
 else:
-    GRAYLOG_BASE = f"http://{MGMT_IP}/graylog/api"
+    GRAYLOG_BASE = f"http://{GRAYLOG_IP}/graylog/api"
 
-OPENSEARCH_BASE = f"http://{MGMT_IP}/opensearch"
+OPENSEARCH_BASE = f"http://{OPENSEARCH_IP}/opensearch"
 
-CNAME_FIELD = "kubernetes_container_name" if DEPLOY_MODE == "kubernetes" else "container_name"
+CNAME_FIELD = "kubernetes_container_name" if DEPLOY_MODE in _K8S_MODES else "container_name"
 
 PAGE_SIZE = 1000
 MAX_RESULT_WINDOW = 100_000
+
+# Chunk size in minutes for splitting the time window
+CHUNK_MINUTES = 60
 
 # ---------------------------------------------------------------------------
 # HTTP sessions
@@ -274,11 +304,35 @@ def os_discover_containers():
     return []
 
 
-def os_fetch_container_logs(container_name, source, out_path, probe_cache=None):
-    """Fetch logs from OpenSearch using the scroll API. Returns line count."""
-    from_ms = FROM_MS
-    to_ms = TO_MS
+MAX_RETRIES = 3
+RETRY_BACKOFF = [10, 30, 60]  # seconds between retries on 429
 
+
+def _os_request_with_retry(session, method, url, retries=MAX_RETRIES, **kwargs):
+    """Make an HTTP request with retry on 429 (circuit breaker) errors."""
+    for attempt in range(retries + 1):
+        try:
+            r = session.request(method, url, **kwargs)
+            if r.status_code == 429 and attempt < retries:
+                wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                print(f"    429 circuit breaker hit, waiting {wait}s "
+                      f"(attempt {attempt + 1}/{retries}) ...", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            return r
+        except requests.RequestException:
+            if attempt < retries:
+                wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                time.sleep(wait)
+                continue
+            raise
+    return r  # unreachable but keeps linters happy
+
+
+def os_fetch_container_logs(container_name, source, out_path,
+                            chunk_from_ms, chunk_to_ms,
+                            probe_cache=None):
+    """Fetch logs from OpenSearch using the scroll API. Returns line count."""
     if probe_cache is None:
         probe_cache = {}
     if "index" not in probe_cache:
@@ -292,7 +346,7 @@ def os_fetch_container_logs(container_name, source, out_path, probe_cache=None):
 
     esc = container_name.replace("/", "\\/").replace(":", "\\:")
     must_clauses = [
-        {"range": {ts_f: {"gte": from_ms, "lte": to_ms,
+        {"range": {ts_f: {"gte": chunk_from_ms, "lte": chunk_to_ms,
                            "format": "epoch_millis"}}},
         {"query_string": {"default_field": cname_f,
                            "query": f"*{esc}*",
@@ -324,7 +378,8 @@ def os_fetch_container_logs(container_name, source, out_path, probe_cache=None):
     written = 0
 
     try:
-        r = os_session.post(init_url, json=body, timeout=60)
+        r = _os_request_with_retry(
+            os_session, "POST", init_url, json=body, timeout=60)
         if not r.ok:
             print(f"    WARN: OpenSearch scroll failed for {container_name}: "
                   f"HTTP {r.status_code} {r.text[:300]}", file=sys.stderr)
@@ -355,12 +410,17 @@ def os_fetch_container_logs(container_name, source, out_path, probe_cache=None):
             if len(hits) < PAGE_SIZE or not scroll_id:
                 break
             try:
-                sc_r = os_session.post(
+                sc_r = _os_request_with_retry(
+                    os_session, "POST",
                     f"{OPENSEARCH_BASE}/_search/scroll",
                     json={"scroll": "2m", "scroll_id": scroll_id},
                     timeout=60,
                 )
-                sc_r.raise_for_status()
+                if not sc_r.ok:
+                    print(f"    WARN: scroll continuation failed for "
+                          f"{container_name}: HTTP {sc_r.status_code}",
+                          file=sys.stderr)
+                    break
                 sc_data = sc_r.json()
                 scroll_id = sc_data.get("_scroll_id", scroll_id)
                 hits = sc_data.get("hits", {}).get("hits", [])
@@ -405,8 +465,8 @@ def gl_discover_containers():
     search_url = f"{GRAYLOG_BASE}/search/universal/absolute"
     pairs = set()
 
-    t_start = datetime.fromisoformat(FROM_ISO.replace("Z", "+00:00"))
-    t_end = datetime.fromisoformat(TO_ISO.replace("Z", "+00:00"))
+    t_start = datetime.fromisoformat(FROM_ISO)
+    t_end = datetime.fromisoformat(TO_ISO)
     total_minutes = (t_end - t_start).total_seconds() / 60
 
     # Use ~10-20 slices, minimum 1 minute each
@@ -459,7 +519,8 @@ def gl_discover_containers():
     return []
 
 
-def gl_fetch_container_logs(container_name, source, out_path):
+def gl_fetch_container_logs(container_name, source, out_path,
+                            chunk_from_iso, chunk_to_iso):
     """Fetch all logs for a container+source via Graylog. Returns line count."""
     search_url = f"{GRAYLOG_BASE}/search/universal/absolute"
     # Use wildcard so partial names work (e.g. "spdk_8080" matches
@@ -526,7 +587,7 @@ def gl_fetch_container_logs(container_name, source, out_path):
         return written
 
     # Probe total
-    msgs, total = _fetch_page(query, FROM_ISO, TO_ISO, 1, 0)
+    msgs, total = _fetch_page(query, chunk_from_iso, chunk_to_iso, 1, 0)
     if msgs is None:
         open(out_path, "w").close()
         return 0
@@ -534,11 +595,11 @@ def gl_fetch_container_logs(container_name, source, out_path):
     written = 0
     with open(out_path, "w") as fh:
         if total <= MAX_RESULT_WINDOW:
-            written = _write_window(fh, query, FROM_ISO, TO_ISO)
+            written = _write_window(fh, query, chunk_from_iso, chunk_to_iso)
         else:
             # Split into 10-minute sub-windows
-            t = datetime.fromisoformat(FROM_ISO.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(TO_ISO.replace("Z", "+00:00"))
+            t = datetime.fromisoformat(chunk_from_iso)
+            t_end = datetime.fromisoformat(chunk_to_iso)
             chunk = timedelta(minutes=10)
             while t < t_end:
                 chunk_end = min(t + chunk, t_end)
@@ -580,15 +641,94 @@ def discover_containers(graylog_ok):
 # Main
 # ---------------------------------------------------------------------------
 
+def _safe(s):
+    return (
+        s.replace("/", "_").replace("\\", "_")
+        .replace(":", "_").strip("_")
+    ) or "unnamed"
+
+
+def _build_chunks(start, end, chunk_minutes=CHUNK_MINUTES):
+    """Build list of (chunk_start_dt, chunk_end_dt) in reverse order (newest first)."""
+    chunks = []
+    t = start
+    while t < end:
+        c_end = min(t + timedelta(minutes=chunk_minutes), end)
+        chunks.append((t, c_end))
+        t = c_end
+    chunks.reverse()  # newest first
+    return chunks
+
+
+def _fetch_chunk(pairs, chunk_start, chunk_end, chunk_dir, os_ok,
+                 graylog_ok, os_probe_cache, chunk_label):
+    """Fetch all container logs for a single time chunk.
+
+    Containers are fetched SEQUENTIALLY (one scroll context at a time)
+    to avoid OpenSearch circuit breaker / heap pressure.
+    On OpenSearch failure, falls back to Graylog for that container.
+    Returns total lines.
+    """
+    c_from_ms = int(chunk_start.timestamp() * 1000)
+    c_to_ms = int(chunk_end.timestamp() * 1000)
+    c_from_iso = chunk_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    c_to_iso = chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    total_lines = 0
+
+    for i, (container_name, source) in enumerate(sorted(pairs), 1):
+        safe_cname = _safe(container_name)
+        if source:
+            safe_source = _safe(source)
+            fname = f"{safe_cname}__{safe_source}.log"
+        else:
+            fname = f"{safe_cname}.log"
+        out_path = os.path.join(chunk_dir, fname)
+        label = f"{container_name}@{source}" if source else container_name
+
+        n = 0
+        try:
+            if os_ok:
+                n = os_fetch_container_logs(
+                    container_name, source, out_path,
+                    chunk_from_ms=c_from_ms, chunk_to_ms=c_to_ms,
+                    probe_cache=os_probe_cache,
+                )
+                # Fallback to Graylog if OpenSearch returned 0 lines
+                if n == 0 and graylog_ok:
+                    n = gl_fetch_container_logs(
+                        container_name, source, out_path,
+                        chunk_from_iso=c_from_iso, chunk_to_iso=c_to_iso,
+                    )
+            else:
+                n = gl_fetch_container_logs(
+                    container_name, source, out_path,
+                    chunk_from_iso=c_from_iso, chunk_to_iso=c_to_iso,
+                )
+        except Exception as exc:
+            print(f"    [{i}/{len(pairs)}] {label:<50} FAILED: {exc}")
+            continue
+
+        total_lines += n
+        if n > 0:
+            print(f"    [{i}/{len(pairs)}] {label:<50} {n:>8,} lines")
+
+    return total_lines
+
+
 def main():
     print("=" * 64)
-    print("  Graylog / OpenSearch Export Test")
+    print("  Graylog / OpenSearch Export (Chunked, Reverse Order)")
     print("=" * 64)
     print(f"  Window     : {FROM_ISO}  ->  {TO_ISO}  ({DURATION_MINUTES} min)")
+    print(f"  Chunk size : {CHUNK_MINUTES} min")
     print(f"  Mode       : {DEPLOY_MODE}")
     print(f"  Field      : {CNAME_FIELD}")
     print(f"  Graylog    : {GRAYLOG_BASE}")
     print(f"  OpenSearch : {OPENSEARCH_BASE}")
+    print(f"  Output     : {OUTPUT_DIR}")
     print()
 
     # Check Graylog
@@ -624,29 +764,13 @@ def main():
         print("\nNeither Graylog nor OpenSearch is reachable. Exiting.")
         sys.exit(1)
 
-    # Discover (container, source) pairs
+    # Discover (container, source) pairs across the full window
     pairs = discover_containers(graylog_ok)
     if not pairs:
         print("\nNo containers found. Check your time window and log setup.")
         sys.exit(1)
 
-    # Create output directory
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    # Fetch strategy: prefer OpenSearch (scroll API handles large windows),
-    # fall back to Graylog only when OpenSearch is unavailable.
-    fetch_via = "OpenSearch" if os_ok else "Graylog"
-    print(f"\n[3] Fetching logs for {len(pairs)} (container, source) pairs "
-          f"via {fetch_via} -> {OUTPUT_DIR}")
-    print("-" * 64)
-
-    def _safe(s):
-        return (
-            s.replace("/", "_").replace("\\", "_")
-            .replace(":", "_").strip("_")
-        ) or "unnamed"
-
-    # Pre-populate probe cache before parallel fetch
+    # Pre-populate probe cache once (shared across all chunks)
     os_probe_cache = {}
     if os_ok:
         try:
@@ -655,52 +779,44 @@ def main():
         except Exception as exc:
             print(f"  WARN: Failed to pre-populate probe cache: {exc}")
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import threading
+    # Build 1-hour chunks in reverse order (newest first)
+    chunks = _build_chunks(start_dt, end_dt, CHUNK_MINUTES)
+    num_chunks = len(chunks)
 
-    max_workers = min(8, len(pairs))
-    total_lines = 0
-    lock = threading.Lock()
+    fetch_via = "OpenSearch" if os_ok else "Graylog"
+    print(f"\n[3] Fetching logs in {num_chunks} chunk(s) of {CHUNK_MINUTES} min "
+          f"(reverse order, newest first)")
+    print(f"    {len(pairs)} (container, source) pairs via {fetch_via}")
+    print("=" * 64)
 
-    def _fetch_one(container_name, source):
-        """Fetch a single container's logs. Returns (label, line_count)."""
-        safe_cname = _safe(container_name)
-        if source:
-            safe_source = _safe(source)
-            fname = f"{safe_cname}__{safe_source}.log"
-        else:
-            fname = f"{safe_cname}.log"
-        out_path = os.path.join(OUTPUT_DIR, fname)
-        label = f"{container_name}@{source}" if source else container_name
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    grand_total = 0
 
-        if os_ok:
-            n = os_fetch_container_logs(
-                container_name, source, out_path,
-                probe_cache=os_probe_cache,
-            )
-        else:
-            n = gl_fetch_container_logs(container_name, source, out_path)
-        return label, n
+    for idx, (c_start, c_end) in enumerate(chunks, 1):
+        c_start_label = c_start.strftime("%Y%m%d_%H%M")
+        c_end_label = c_end.strftime("%H%M")
+        chunk_dir_name = f"chunk_{idx:02d}_of_{num_chunks:02d}_{c_start_label}_to_{c_end_label}"
+        chunk_dir = os.path.join(OUTPUT_DIR, chunk_dir_name)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_fetch_one, cname, src): (cname, src)
-            for cname, src in sorted(pairs)
-        }
-        for future in as_completed(futures):
-            cname, src = futures[future]
-            label = f"{cname}@{src}" if src else cname
-            try:
-                label, n = future.result()
-                with lock:
-                    total_lines += n
-                print(f"  {label:<60} {n:>8,} lines")
-            except Exception as exc:
-                print(f"  {label:<60} FAILED: {exc}")
+        c_start_pretty = c_start.strftime("%Y-%m-%d %H:%M")
+        c_end_pretty = c_end.strftime("%H:%M")
+        print(f"\n--- Chunk {idx}/{num_chunks}: {c_start_pretty} -> {c_end_pretty} "
+              f"-> {chunk_dir_name}/ ---")
 
-    print("-" * 64)
-    print(f"  TOTAL: {total_lines:,} lines from {len(pairs)} (container, source) pairs")
+        chunk_lines = _fetch_chunk(
+            pairs, c_start, c_end, chunk_dir, os_ok,
+            graylog_ok, os_probe_cache, chunk_dir_name,
+        )
+        grand_total += chunk_lines
+
+        print(f"    Chunk {idx}/{num_chunks} done: {chunk_lines:,} lines")
+
+    print()
+    print("=" * 64)
+    print(f"  TOTAL: {grand_total:,} lines from {len(pairs)} pairs "
+          f"across {num_chunks} chunk(s)")
     print(f"  Output: {os.path.abspath(OUTPUT_DIR)}")
+    print("=" * 64)
     print()
 
 

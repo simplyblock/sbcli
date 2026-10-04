@@ -1,15 +1,26 @@
-# coding=utf-8
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-
-from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
-from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
+from simplyblock_core import (
+    cluster_ops,
+    constants,
+    db_controller,
+    storage_node_ops,
+    utils,
+)
+from simplyblock_core.controllers import (
+    device_controller,
+    health_controller,
+    storage_events,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils.ttl_cache import TTLCache
 
 logger = utils.get_logger(__name__)
 
@@ -21,8 +32,50 @@ utils.init_sentry_sdk()
 
 node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 
+# A cluster_activate() that wedges — started before all nodes were back, or
+# blocked/aborted partway through its per-node recreate RPCs — leaves the
+# cluster stuck in IN_ACTIVATION. The monitor early-returns on IN_ACTIVATION
+# and add_node_to_auto_restart refuses to queue restarts while the cluster is
+# not SUSPENDED, so the cluster can never recover on its own (incident
+# 2026-06-25: ~2h11m hang). If the cluster has been IN_ACTIVATION longer than
+# the budget, revert it to SUSPENDED so the gated activation + auto-restart
+# re-queue paths run again.
+#
+# The budget MUST scale with cluster size: activation runs sequential per-node
+# passes, so a legitimate activation takes minutes-per-node at scale (observed
+# 2026-07-08: 22 min for 32 nodes — a flat 600 s watchdog would have declared
+# it wedged at the 10-minute mark and kicked the cluster back to SUSPENDED,
+# triggering a full drain + restart + re-activation lap, forever). Flat base
+# covers small clusters and mgmt overhead; the per-node term covers the
+# sequential recreate/hublvol/ANA work.
+CLUSTER_ACTIVATION_WATCHDOG_SEC = 600
+CLUSTER_ACTIVATION_WATCHDOG_PER_NODE_SEC = 60
+# A live cluster_activate stamps Cluster.activation_heartbeat every ~60s.
+# Older than this => the activation driver is dead; revert immediately
+# instead of waiting out the node-scaled budget above.
+ACTIVATION_HEARTBEAT_STALE_SEC = 300
 
-def is_new_migrated_node(cluster_id, node):
+
+def _activation_watchdog_budget_sec(cluster):
+    """Activation watchdog budget scaled by storage-node count."""
+    try:
+        n_nodes = len(db.get_storage_nodes_by_cluster_id(cluster.get_id()))
+    except Exception:
+        n_nodes = 0
+    return CLUSTER_ACTIVATION_WATCHDOG_SEC + CLUSTER_ACTIVATION_WATCHDOG_PER_NODE_SEC * n_nodes
+
+# In-flight suspend-recovery force-shutdowns, keyed by node_id. A force shutdown
+# (kill + ANA failover) can take many seconds; this keeps the monitor tick from
+# re-spawning one for the same node before it has flipped to in_shutdown/offline.
+recovery_shutdown_threads: dict[str, threading.Thread] = {}
+
+
+def is_new_migrated_node(cluster_id, node, tasks=None):
+    """``tasks`` lets the caller pass an already-fetched job-task list.
+    get_next_cluster_status calls this once per ONLINE node — fetching the
+    full per-cluster task table inside that loop made a single status verdict
+    O(n·T), amplified further by concurrent update_cluster_status callers
+    (2026-07-13 audit)."""
     dev_lst = []
     for dev in node.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -34,7 +87,7 @@ def is_new_migrated_node(cluster_id, node):
             distr_names.append(item["name"])
 
     if dev_lst:
-        tasks = db.get_job_tasks(cluster_id)
+        tasks = tasks if tasks is not None else db.get_job_tasks(cluster_id)
         for task in tasks:
             if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
                 if task.device_id not in dev_lst:
@@ -45,10 +98,28 @@ def is_new_migrated_node(cluster_id, node):
     return False
 
 
-# A DOWN node only counts toward the cluster suspend threshold once it has been
-# DOWN at least this long. Below it, a DOWN node is treated as a transient blip
-# (it commonly self-heals in seconds) and does not contribute to the FTT bucket.
-DOWN_SUSPEND_GRACE_SEC = 60
+# How long a node may sit in IN_SHUTDOWN before the monitor treats it as a
+# stranded shutdown and reconciles it to OFFLINE. A graceful shutdown (device
+# events + SPDK kill + ANA failover) completes well within this; anything longer
+# means the shutdown crashed or its offline flip was lost (incident 2026-06-18).
+IN_SHUTDOWN_RECONCILE_GRACE_SEC = 120
+
+
+def _in_shutdown_longer_than(node, seconds):
+    """True if a node has been IN_SHUTDOWN for at least ``seconds``.
+
+    Keyed off ``node.shutdown_since`` (stamped by set_node_status on the
+    ->IN_SHUTDOWN transition). A missing/blank/unparseable timestamp is treated
+    as NOT long enough — be conservative and never reconcile a node whose entry
+    time we can't establish (e.g. a still-running shutdown on an old row).
+    """
+    ss = getattr(node, "shutdown_since", "") or ""
+    if not ss:
+        return False
+    try:
+        return (datetime.now(UTC) - datetime.fromisoformat(ss)).total_seconds() >= seconds
+    except Exception:
+        return False
 
 
 def _down_longer_than(node, seconds):
@@ -63,9 +134,141 @@ def _down_longer_than(node, seconds):
     if not ds:
         return True
     try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(ds)).total_seconds() >= seconds
+        return (datetime.now(UTC) - datetime.fromisoformat(ds)).total_seconds() >= seconds
     except Exception:
         return True
+
+
+def _fd_aware_cluster_status(cluster, snodes, affected_ips, n, k, jm_replication_tasks):
+    """Failure-domain-aware cluster status.
+
+    Implements the operator-agreed availability contract for clusters created
+    with ``--enable-failure-domain`` (where data/parity chunks are spread
+    across distinct domains):
+
+      (A) Losing ALL nodes and/or any combination of devices within a SINGLE
+          failure domain is tolerated — the cluster stays serving (DEGRADED),
+          never SUSPENDED.
+      (B) Losing a whole failure domain AND one additional node/device outage
+          (>=1 devices on a SINGLE node) on ONE other domain is also tolerated,
+          but ONLY when FTT == 2 (``distr_npcs`` == 2) AND the cluster spans at
+          least ndcs (``distr_ndcs``) independent failure domains.
+
+    Anything broader than (A)/(B) -> SUSPENDED.
+
+    ``affected_ips`` is the list of distinct physical-host mgmt IPs that have a
+    device/node outage (the same set the flat per-node logic counts).
+
+    Failure-domain ids are 32-bit ints: ``-1`` means "unset", ``>= 0`` is a
+    real domain (0 is a valid domain — never test truthiness here).
+
+    Returns a ``Cluster.STATUS_*`` string, or ``None`` to signal "this is not a
+    usable failure-domain layout — fall back to the flat per-node suspend
+    logic": fewer than 2 tagged domains, or an affected host carrying no domain
+    tag (mixed/partially-tagged cluster — be safe, don't reason FD-wise).
+    """
+    all_fds = {nd.failure_domain for nd in snodes if nd.failure_domain >= 0}
+    if len(all_fds) < 2:
+        return None
+
+    fd_by_ip = {nd.mgmt_ip: nd.failure_domain for nd in snodes}
+    # Group the affected physical hosts by their failure domain.
+    damaged: dict[int, set] = {}
+    for ip in affected_ips:
+        fd = fd_by_ip.get(ip, -1)
+        if fd < 0:
+            return None
+        damaged.setdefault(fd, set()).add(ip)
+
+    num_damaged_fds = len(damaged)
+    if num_damaged_fds == 0:
+        # No FTT-affecting damage; an in-flight JM replication still degrades.
+        return Cluster.STATUS_DEGRADED if jm_replication_tasks else Cluster.STATUS_ACTIVE
+
+    # Any surviving damage means reduced redundancy -> at best DEGRADED.
+    # (A) Damage confined to one domain is always tolerated.
+    if num_damaged_fds == 1:
+        return Cluster.STATUS_DEGRADED
+
+    # (B) One whole domain + at most one extra affected node on exactly one
+    # other domain, gated on FTT==2 and >=ndcs independent domains.
+    if num_damaged_fds == 2 and k == 2 and len(all_fds) >= n:
+        nodes_in_smaller_domain = min(len(ips) for ips in damaged.values())
+        if nodes_in_smaller_domain <= 1:
+            return Cluster.STATUS_DEGRADED
+
+    # Damage spans more domains (or more than one extra node on the second
+    # domain) than the contract permits.
+    return Cluster.STATUS_SUSPENDED
+
+
+# RPC-dependent signals feeding get_next_cluster_status, cached briefly so a
+# burst of update_cluster_status calls (every escalation triggers one) does
+# not re-probe the same nodes with 10s-class timeouts.
+_status_probe_cache = TTLCache()
+_JM_REPL_PROBE_TTL_SEC = 10
+_DP_QUORUM_PROBE_TTL_SEC = 8
+
+
+def _probe_jm_replication(node):
+    """Does ``node`` report an active JM replication task? RPC-backed."""
+    try:
+        if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
+            ret = node.rpc_client(timeout=8).jc_get_jm_status(node.jm_vuid)
+            for jm in ret:
+                if ret[jm] is False:  # jm not ready (active replication task)
+                    return True
+        return False
+    except Exception:
+        logger.warning("Failed to get replication task!")
+        return False
+
+
+def _collect_status_probes(snodes):
+    """Gather every RPC-dependent signal for get_next_cluster_status —
+    in parallel across nodes, TTL-cached per node.
+
+    These probes carry 8-10 s timeouts each; running them inline and
+    sequentially inside the status computation made one verdict take
+    minutes during a mass outage (2026-07-10: 32-host reboot reported
+    ACTIVE for ~2 extra minutes because verdicts were computed from
+    snapshots taken before the escalations they overlapped). Probing
+    first, in parallel, keeps the verdict pass pure DB state.
+
+    Returns (jm_replication_by_node_id, dp_disconnected_by_node_id).
+    """
+    jm_repl: dict = {}
+    dp_quorum: dict = {}
+
+    def _jm(n):
+        jm_repl[n.get_id()] = bool(_status_probe_cache.get_or_compute(
+            ("jm_repl", n.get_id()), _JM_REPL_PROBE_TTL_SEC,
+            lambda: _probe_jm_replication(n)))
+
+    def _q(n):
+        dp_quorum[n.get_id()] = bool(_status_probe_cache.get_or_compute(
+            ("dp_quorum", n.get_id()), _DP_QUORUM_PROBE_TTL_SEC,
+            lambda: is_node_data_plane_disconnected_quorum(n)))
+
+    threads = []
+    for node in snodes:
+        if node.status == StorageNode.STATUS_ONLINE:
+            target = _jm
+        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
+                                 StorageNode.STATUS_DOWN, StorageNode.STATUS_OFFLINE,
+                                 StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
+            # Transient states (UNREACHABLE / SCHEDULABLE / ...) may need the
+            # data-plane quorum answer in the verdict pass below.
+            target = _q
+        else:
+            continue
+        t = threading.Thread(target=target, args=(node,),
+                             name=f"status-probe-{node.get_id()[:8]}")
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+    return jm_repl, dp_quorum
 
 
 def get_next_cluster_status(cluster_id):
@@ -73,6 +276,14 @@ def get_next_cluster_status(cluster_id):
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
+
+    # Phase 1: slow, RPC-dependent signals on a throwaway snapshot.
+    probe_snapshot = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
+    jm_repl_by_node, dp_quorum_by_node = _collect_status_probes(probe_snapshot)
+
+    # Phase 2: the verdict, computed from a FRESH snapshot with no RPCs —
+    # milliseconds, so the returned status describes the cluster as it is
+    # NOW, not as it was when a slow probe pass started.
     snodes = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
@@ -84,6 +295,11 @@ def get_next_cluster_status(cluster_id):
 
     affected_physical_nodes = []
 
+    # One task-table fetch for the whole verdict: is_new_migrated_node runs
+    # once per ONLINE node below and used to re-fetch the full per-cluster
+    # task list each time (O(n·T) per verdict).
+    cluster_tasks = db.get_job_tasks(cluster_id)
+
     for node in snodes:
 
         node_online_devices = 0
@@ -93,20 +309,15 @@ def get_next_cluster_status(cluster_id):
             continue
 
         if node.status == StorageNode.STATUS_ONLINE:
-            if is_new_migrated_node(cluster_id, node):
+            if is_new_migrated_node(cluster_id, node, tasks=cluster_tasks):
                 continue
             online_nodes += 1
-            try:
-                # check for jm rep tasks:
-                if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
-                    ret = node.rpc_client(timeout=5).jc_get_jm_status(node.jm_vuid)
-                    for jm in ret:
-                        if ret[jm] is False: # jm is not ready (has active replication task)
-                            jm_replication_tasks = True
-                            logger.warning("Replication task found!")
-                            break
-            except Exception:
-                logger.warning("Failed to get replication task!")
+            # JM-replication signal precomputed by _collect_status_probes;
+            # a node that turned ONLINE after the probe pass defaults to
+            # False and is picked up by the next (now fast) tick.
+            if jm_repl_by_node.get(node.get_id()):
+                jm_replication_tasks = True
+                logger.warning("Replication task found!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -120,33 +331,52 @@ def get_next_cluster_status(cluster_id):
             else:
                 node_offline_devices += 1
 
-        if node_offline_devices > 0 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED):
+        if (node_offline_devices > 0
+                or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED)
+                or node.status == StorageNode.STATUS_OFFLINE):
             affected_nodes += 1
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
-        elif node.status == StorageNode.STATUS_DOWN:
-            # DOWN is a temporary, self-recovering state: SPDK and its devices
-            # are alive, only the client-facing LVS port is firewall-blocked
-            # (set_node_down flips node status only). A brief DOWN — e.g. a
-            # transient writer conflict the data plane unfreezes in seconds —
-            # must NOT tip an otherwise-survivable outage into a full cluster
-            # suspend + reactivation (incident 2026-06-08: cbc62adc DOWN for
-            # ~6.5s pushed affected_nodes 2->3 and suspended the cluster).
-            #
-            # But a SUSTAINED DOWN must still count: the cluster has to reach
-            # SUSPENDED for add_node_to_auto_restart's peer-count guard to accept
-            # the recovery queue. So apply a grace window — only count the node
-            # once it has been DOWN at least DOWN_SUSPEND_GRACE_SEC.
-            if _down_longer_than(node, DOWN_SUSPEND_GRACE_SEC):
-                if node.mgmt_ip not in affected_physical_nodes:
-                    affected_physical_nodes.append(node.mgmt_ip)
-        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+        elif node.status == StorageNode.STATUS_OFFLINE:
+            # OFFLINE is a terminal mgmt escalation: data-plane loss was
+            # already confirmed (_check_data_plane_and_escalate), the node
+            # aborted, or an operator shut it down. Its device records may
+            # still read ONLINE (host_reboot flips node status first), but
+            # nothing is serving — count it unconditionally. Re-running the
+            # peer quorum here (as the branch below does for the transient
+            # states) gates suspension on RPC probes against a node that is
+            # already declared gone, and returns ACTIVE for whole-domain
+            # outages (2026-07 failure-domain suspend regressions).
+            if node.mgmt_ip not in affected_physical_nodes:
+                affected_physical_nodes.append(node.mgmt_ip)
+        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
+                                 StorageNode.STATUS_DOWN]:
             # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
             # with devices still flagged online in the DB (e.g. UNREACHABLE
-            # before _check_data_plane_and_escalate fires). From a client's
-            # perspective the node is unavailable, so it contributes to the FTT
-            # bucket.
-            if node.mgmt_ip not in affected_physical_nodes:
+            # before _check_data_plane_and_escalate fires).
+            #
+            # Suspension must be driven by DATA-PLANE truth only. UNREACHABLE
+            # is a mgmt-plane verdict (ping / SnodeAPI / RPC from the CP); the
+            # storage network is a different plane, and an API blip or mgmt-NIC
+            # flap leaves the node's NVMe-TCP targets serving IO perfectly.
+            # Counting such a node toward affected_nodes > k suspends the whole
+            # cluster while clients see zero impact. So only count it if a peer
+            # majority actually lost the node's data plane; once the outage is
+            # real, _check_data_plane_and_escalate flips its devices unavailable
+            # and the branch above counts it from device state anyway.
+            #
+            # DOWN is intentionally excluded and never counts toward suspension:
+            # it is a temporary, self-recovering state — SPDK and its devices are
+            # alive, only the client-facing LVS port is firewall-blocked
+            # (set_node_down flips node status only). Recovery is a port-unblock,
+            # not a destructive restart, so a DOWN node must not tip the cluster
+            # toward SUSPENDED.
+            # Quorum verdict precomputed by _collect_status_probes; a node
+            # that entered a transient state after the probe pass defaults
+            # to "connected" (don't count) — same conservative bias as the
+            # inline probe had, and the next fast tick re-evaluates it.
+            if (node.mgmt_ip not in affected_physical_nodes
+                    and dp_quorum_by_node.get(node.get_id(), False)):
                 affected_physical_nodes.append(node.mgmt_ip)
 
         online_devices += node_online_devices
@@ -163,8 +393,27 @@ def get_next_cluster_status(cluster_id):
     n = cluster.distr_ndcs
     k = cluster.distr_npcs
 
+    # Failure-domain-aware suspend criteria. When the cluster was created with
+    # --enable-failure-domain, chunks are spread across distinct domains, so it
+    # can survive losing whole domains that the flat per-node count below would
+    # treat as a fatal FTT breach (affected_nodes > k). The helper returns None
+    # when the layout isn't a usable FD layout (<2 tagged domains, or an
+    # affected host without a domain tag), in which case we fall through to the
+    # legacy node-count logic unchanged.
+    if cluster.enable_failure_domain:
+        fd_status = _fd_aware_cluster_status(
+            cluster, snodes, affected_physical_nodes, n, k, jm_replication_tasks)
+        if fd_status is not None:
+            return fd_status
+
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
-    if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
+    #
+    # affected_nodes > 0 guard: "we are exactly at the parity limit" only
+    # means degraded when something is actually affected. Without it a
+    # no-parity cluster (npcs=0, k=0 — the natural single-node schema)
+    # reports DEGRADED while perfectly healthy, because 0 == 0.
+    if affected_nodes > 0 and affected_nodes == k and (
+            not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
         return Cluster.STATUS_DEGRADED
     elif jm_replication_tasks:
         return Cluster.STATUS_DEGRADED
@@ -173,6 +422,68 @@ def get_next_cluster_status(cluster_id):
         return Cluster.STATUS_SUSPENDED
     else:
         return Cluster.STATUS_ACTIVE
+
+
+# Backstop grace before the reconciler re-admits a stranded device: the normal
+# recovery paths (node-ONLINE clear, port_allow, restart raw-write) get this
+# long to do their job first, and legitimate mid-recovery flaps (a device
+# bouncing while its node is actively recovering) never live this long on an
+# ONLINE node.
+STRANDED_DEVICE_READMIT_GRACE_SEC = 30
+
+# (cluster_id, node_id, device_id) -> first tick we saw the device stranded.
+_stranded_first_seen: dict = {}
+
+
+def _readmit_stranded_devices(cluster_id):
+    """Backstop reconciler: no UNAVAILABLE device may survive on an ONLINE node.
+
+    Every observed path into the 2026-07-02 suspend series ended the same way:
+    a device left UNAVAILABLE (io_error=False) on a node that reads ONLINE, with
+    no recovery path responsible for it — it then counts toward affected_nodes
+    forever and the next unrelated outage suspends the cluster. The targeted
+    fixes close the known entry points (node-ONLINE clear, port_allow); this
+    sweep closes ALL of them, including one-shot failures of those fixes and
+    entry points nobody has hit yet: if a device stays stranded for longer than
+    the grace window on an ONLINE node, re-admit it and say so loudly.
+
+    Deliberately narrow: only UNAVAILABLE devices without io_error /
+    retries_exhausted. FAILED / REMOVED / NEW and io_error devices are owned by
+    the device-restart, removal, and auto-restart paths respectively.
+    """
+    now = time.time()
+    live_keys = set()
+    try:
+        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status != StorageNode.STATUS_ONLINE:
+                continue
+            for dev in node.nvme_devices:
+                if dev.status != NVMeDevice.STATUS_UNAVAILABLE:
+                    continue
+                if dev.io_error or dev.retries_exhausted:
+                    continue
+                key = (cluster_id, node.get_id(), dev.get_id())
+                live_keys.add(key)
+                first = _stranded_first_seen.setdefault(key, now)
+                if now - first < STRANDED_DEVICE_READMIT_GRACE_SEC:
+                    continue
+                logger.warning(
+                    f"Reconciler: device {dev.get_id()} stranded UNAVAILABLE on "
+                    f"ONLINE node {node.get_id()} for {now - first:.0f}s with no "
+                    f"recovery path; re-admitting")
+                if device_controller.device_set_online(dev.get_id()):
+                    _stranded_first_seen.pop(key, None)
+                else:
+                    logger.error(
+                        f"Reconciler: re-admit of stranded device {dev.get_id()} "
+                        f"was refused; will retry next tick")
+    except Exception as e:
+        logger.error(f"Stranded-device reconciler failed: {e}")
+    # Forget devices that are no longer stranded (recovered, node went down,
+    # device removed) so a later re-strand starts a fresh grace window.
+    for key in [k for k in _stranded_first_seen
+                if k[0] == cluster_id and k not in live_keys]:
+        _stranded_first_seen.pop(key, None)
 
 
 def _requeue_stuck_auto_restarts(cluster_id):
@@ -191,9 +502,17 @@ def _requeue_stuck_auto_restarts(cluster_id):
     queue for the same reason.
     """
     try:
+        # While a suspended cluster is still draining to all-offline, auto-restart
+        # is paused (add_node_to_auto_restart would refuse anyway); skip the scan
+        # so it does not log a misleading "re-queuing" line every tick. Uses
+        # tasks_controller.is_auto_restart_paused so the operator-caused-
+        # suspension exception (which never drains but must still allow
+        # per-node restarts of genuinely-failed nodes) stays in one place.
+        cluster = db.get_cluster_by_id(cluster_id)
+        if tasks_controller.is_auto_restart_paused(cluster):
+            return
         for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status not in (StorageNode.STATUS_OFFLINE,
-                                   StorageNode.STATUS_SCHEDULABLE):
+            if node.status != StorageNode.STATUS_OFFLINE:
                 continue
             # Nodes stopped on purpose (`sn shutdown`) land in OFFLINE just
             # like a failure-detected node, but must NOT be auto-restarted.
@@ -216,12 +535,408 @@ def _requeue_stuck_auto_restarts(cluster_id):
         logger.error("Auto-restart re-queue scan failed for cluster %s: %s", cluster_id, e)
 
 
+def _activation_node_gate(cluster_id, nodes, max_fault_tolerance):
+    """Decide whether the storage nodes are settled enough to (re)activate.
+
+    Returns ``(can_activate: bool, reason: str)``.
+
+    Auto-reactivation must NOT start until the outage has fully recovered —
+    all nodes brought back ONLINE one-by-one — otherwise it either fires
+    uselessly while nodes are still UNREACHABLE (race #1) or wedges the
+    cluster in IN_ACTIVATION when it runs against a not-yet-online node
+    (race #2). Both were observed in incident 2026-06-25. Rules:
+
+      * No node may be mid-transition (IN_SHUTDOWN / IN_CREATION / RESTARTING)
+        or UNREACHABLE — recovery is still in flight; activating now races the
+        still-restarting nodes.
+      * Every node must be ONLINE, EXCEPT up to ``max_fault_tolerance`` nodes
+        that an operator *deliberately* shut down (``auto_restart_disabled``):
+        those are not coming back on their own and the cluster is designed to
+        run without up-to-FTT of them.
+      * A node that is OFFLINE / DOWN / SCHEDULABLE but was NOT a deliberate
+        shutdown is still recovering (auto-restart will bring it back) — wait.
+      * Prior guards preserved: a node with an active restart task, or one
+        ONLINE for < 30s (not yet settled), block activation.
+    """
+    ftt = max_fault_tolerance if isinstance(max_fault_tolerance, int) and max_fault_tolerance >= 1 else 1
+    deliberate_down = 0
+    for node in nodes:
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
+        if node.status in (StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION,
+                            StorageNode.STATUS_RESTARTING, StorageNode.STATUS_UNREACHABLE):
+            return False, f"node {node.get_id()} is still transitioning ({node.status})"
+        if node.status != StorageNode.STATUS_ONLINE:
+            # OFFLINE / DOWN / SCHEDULABLE.
+            if getattr(node, "auto_restart_disabled", False):
+                deliberate_down += 1
+                continue
+            return False, (f"node {node.get_id()} is {node.status} and was not deliberately "
+                           f"shut down; waiting for it to restart and come back online")
+        # ONLINE from here on.
+        if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
+            return False, f"node {node.get_id()} has an active restart task"
+        if node.online_since:
+            try:
+                diff = datetime.now(UTC) - datetime.fromisoformat(node.online_since)
+                if diff.total_seconds() < 30:
+                    return False, f"node {node.get_id()} has been online less than 30 seconds"
+            except (ValueError, TypeError):
+                pass
+    if deliberate_down > ftt:
+        return False, (f"{deliberate_down} deliberately-shut-down node(s) exceed the cluster "
+                       f"fault tolerance ({ftt}); not enough nodes to activate safely")
+    return True, ""
+
+
+def _watchdog_stuck_activation(cluster):
+    """Revert a cluster wedged in IN_ACTIVATION back to SUSPENDED.
+
+    ``cluster_activate`` runs in the monitor's own status thread; if a tick's
+    activation died or returned without completing the transition, the status
+    stays IN_ACTIVATION, every later tick early-returns, and
+    ``add_node_to_auto_restart`` refuses to queue restarts while the cluster
+    is not SUSPENDED — a deadlock that never clears on its own (incident
+    2026-06-25). After the node-count-scaled budget (see
+    ``_activation_watchdog_budget_sec``) with no completion, flip back to
+    SUSPENDED so the gated activation and the auto-restart re-queue scan run
+    again.
+    """
+    since = getattr(cluster, "in_activation_since", "")
+    if not since:
+        return
+    try:
+        elapsed = (datetime.now(UTC) - datetime.fromisoformat(since)).total_seconds()
+    except (ValueError, TypeError):
+        return
+
+    # Fast path: cluster_activate heartbeats every ~60s for its whole
+    # duration (cluster_ops wrapper). A stale heartbeat means the driving
+    # process/container is GONE (e.g. monitor replaced mid-activation) — no
+    # point waiting out the node-scaled budget (42 min at 32 nodes,
+    # incident 2026-07-13); revert after a few missed beats. A fresh
+    # heartbeat means the activation is alive: leave it alone until the
+    # absolute budget below, which stays as the backstop for a live-but-
+    # stuck activation (and for pre-heartbeat records, where the field is
+    # empty and only the budget applies).
+    heartbeat = getattr(cluster, "activation_heartbeat", "")
+    if heartbeat:
+        try:
+            hb_age = (datetime.now(UTC)
+                      - datetime.fromisoformat(heartbeat)).total_seconds()
+        except (ValueError, TypeError):
+            hb_age = None
+        if hb_age is not None and hb_age >= ACTIVATION_HEARTBEAT_STALE_SEC:
+            logger.error(
+                "Cluster %s IN_ACTIVATION but activation heartbeat is %.0fs old "
+                "(> %ds): the activation driver is gone; reverting to SUSPENDED "
+                "so activation re-gates and auto-restart can re-queue",
+                cluster.get_id(), hb_age, ACTIVATION_HEARTBEAT_STALE_SEC)
+            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+            return
+
+    budget = _activation_watchdog_budget_sec(cluster)
+    if elapsed < budget:
+        return
+    logger.error(
+        "Cluster %s stuck in IN_ACTIVATION for %.0fs (> %ds budget for this node count); "
+        "reverting to SUSPENDED so activation re-gates and auto-restart can re-queue",
+        cluster.get_id(), elapsed, budget)
+    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+
+
+# Node statuses that mean a node is NOT yet drained for suspend recovery:
+# either still up/serving or mid-transition. The drain is complete only once
+def _watchdog_stuck_shrink(cluster):
+    """Release a cluster wedged in IN_SHRINK with no removal task driving it.
+
+    ``node_removal_orchestrate`` holds IN_SHRINK for one attempt and restores
+    the previous status in a ``finally``. If the process driving it dies, that
+    restore never runs: the status sticks, every later tick early-returns, the
+    topology gates keep refusing, and ``get_restart_phase`` stops reclaiming
+    genuinely leaked phases — none of which clears on its own.
+
+    The removal task is the liveness signal. It is created with max_retry=-1 and
+    only reaches DONE when the removal completes, so "IN_SHRINK held but no open
+    FN_NODE_REMOVAL task" means the flow is gone, not slow. No time budget is
+    needed (contrast ``_watchdog_stuck_activation``, whose driver is a thread
+    with no task row of its own).
+    """
+    if tasks_controller.get_active_node_removal_task_for_cluster(cluster.get_id()):
+        return
+    next_status = get_next_cluster_status(cluster.get_id())
+    logger.error(
+        "Cluster %s is IN_SHRINK but no node-removal task is open: the removal "
+        "driver is gone. Reverting to %s so topology gates and stale-phase "
+        "reclamation resume.", cluster.get_id(), next_status)
+    cluster_ops.set_cluster_status(cluster.get_id(), next_status)
+
+
+# every (non operator-stopped) node has left all of these for OFFLINE/REMOVED.
+_DRAIN_PENDING_STATUSES = (
+    StorageNode.STATUS_ONLINE,
+    StorageNode.STATUS_DOWN,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_IN_SHUTDOWN,
+    StorageNode.STATUS_RESTARTING,
+    StorageNode.STATUS_IN_CREATION,
+    StorageNode.STATUS_SCHEDULABLE,
+)
+
+
+def _spawn_recovery_shutdown(node):
+    """Force-shutdown a node for suspend recovery in a daemon thread (so the
+    kill / ANA-failover work does not block the monitor tick). keep_auto_restart
+    leaves auto_restart_disabled unset, so once the whole cluster has drained
+    the existing auto-restart brings this node back."""
+    node_id = node.get_id()
+    existing = recovery_shutdown_threads.get(node_id)
+    if existing is not None and existing.is_alive():
+        return
+
+    def _run():
+        try:
+
+            storage_node_ops.shutdown_storage_node(
+                node_id, force=True, keep_auto_restart=True)
+        except Exception as e:
+            logger.error("Suspend-recovery shutdown of %s failed: %s", node_id, e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    recovery_shutdown_threads[node_id] = t
+
+
+def _drive_suspend_recovery(cluster):
+    """Drive a SUSPENDED cluster to a clean all-offline slate before any
+    auto-restart runs (auto-restart stays paused via
+    tasks_controller.is_auto_restart_paused until this finishes).
+
+    Per tick while the drain is incomplete:
+      * ONLINE / DOWN nodes (reachable and up) -> force-shutdown.
+      * UNREACHABLE nodes -> escalate to OFFLINE directly. We cannot reach them
+        to shut SPDK down, and once peers have drained there is no online quorum
+        left for the normal data-plane escalation, so without this the drain
+        would stall forever on a stranded UNREACHABLE node. (Nodes that move
+        UNREACHABLE -> OFFLINE on their own simply reach OFFLINE first; this is
+        just the convergence backstop.)
+      * Operator-stopped nodes (auto_restart_disabled) are left alone and
+        excluded from both the drain wait and the later restart.
+    Once every node has settled to OFFLINE/REMOVED, flip
+    suspend_drain_complete so the existing auto-restart resumes. After that this
+    is a no-op, so it never re-kills nodes that are restarting back up."""
+    if cluster.suspend_drain_complete:
+        return
+
+    nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+    for node in nodes:
+        if node.auto_restart_disabled:
+            continue
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            logger.info(
+                "Cluster %s suspended: force-shutting-down node %s (status %s) "
+                "for clean recovery drain",
+                cluster.get_id(), node.get_id(), node.status)
+            _spawn_recovery_shutdown(node)
+        elif node.status == StorageNode.STATUS_UNREACHABLE:
+            logger.info(
+                "Cluster %s suspended: escalating unreachable node %s to OFFLINE "
+                "to converge recovery drain", cluster.get_id(), node.get_id())
+            try:
+                set_node_offline(node)
+            except Exception as e:
+                logger.error("Failed to escalate unreachable node %s to OFFLINE: %s",
+                             node.get_id(), e)
+
+    drained = all(
+        node.auto_restart_disabled or node.status not in _DRAIN_PENDING_STATUSES
+        for node in nodes
+    )
+    if drained:
+        fresh = db.get_cluster_by_id(cluster.get_id())
+        if fresh.status == Cluster.STATUS_SUSPENDED and not fresh.suspend_drain_complete:
+            fresh.suspend_drain_complete = True
+            fresh.write_to_db()
+            logger.info(
+                "Cluster %s drained to all-offline; suspend-recovery auto-restart "
+                "unpaused", cluster.get_id())
+
+
+# Debounce state for update_cluster_status: during a mass outage every
+# per-node thread re-enters it synchronously on each status flip — up to n
+# concurrent full recomputes of the same cluster verdict (each doing
+# full-table scans, job-task scans and probe fan-outs): O(n²) DB pressure at
+# the worst possible moment (2026-07-13 audit, 32-node whole-cluster reboot).
+# All callers want the same thing — "recompute the verdict, something
+# changed" — so one thread computes while contemporaries just mark the
+# cluster dirty; the computing thread re-runs while dirty, so no caller's
+# change is ever missed, and the n-way recompute collapses to at most two
+# sequential passes.
+_ucs_state_lock = threading.Lock()
+_ucs_running: dict = {}
+_ucs_pending: dict = {}
+
+
 def update_cluster_status(cluster_id):
+    with _ucs_state_lock:
+        if _ucs_running.get(cluster_id):
+            _ucs_pending[cluster_id] = True
+            return
+        _ucs_running[cluster_id] = True
+    try:
+        # AT MOST two passes -- what the comment above always promised, now
+        # enforced. The unbounded re-run turned into permanent capture the
+        # moment one pass grew slower than the callers' re-arm period: the
+        # main loop marks the cluster dirty every NODE_MONITOR_INTERVAL_SEC
+        # (3s), and in run mass_create_delete_docker-20260821 a pass took
+        # ~4.3s at 12k entities, so `pending` was ALWAYS set again before a
+        # pass ended. The per-node thread that happened to be computing
+        # (sn-1's) looped cluster passes for 10.6 HOURS while its node's
+        # SPDK was killed 30 times undetected -- the node sat "online" in
+        # the DB with no SPDK process, and every delete returned "No leader
+        # available". Exiting after the second pass is safe: a dropped
+        # pending flag only means the next caller (at most 3s away) becomes
+        # the computing thread and recomputes.
+        for _ in range(2):
+            _update_cluster_status_impl(cluster_id)
+            with _ucs_state_lock:
+                if not _ucs_pending.pop(cluster_id, False):
+                    break
+    finally:
+        with _ucs_state_lock:
+            _ucs_running[cluster_id] = False
+            _ucs_pending.pop(cluster_id, None)
+
+
+def _delete_old_tasks(tasks: list[JobSchedule]):
+    now_in_seconds = int(time.time())
+    for task in tasks:
+        if now_in_seconds - task.date > constants.TASKS_RETENTION_PERIOD_SEC:
+            task.remove(db.kv_store)
+
+
+def _delete_old_logs(events: list[EventObj], cluster_id: str):
+    now_in_seconds = int(time.time())
+    for event in events:
+        if event.cluster_uuid != cluster_id:
+            continue
+        if now_in_seconds - int(event.date/1000) > constants.TASKS_RETENTION_PERIOD_SEC:
+            event.remove(db.kv_store)
+
+
+def _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status):
+    """One-shot auto-migration to shared (per-chunk) data placement.
+
+    Runs only for a settled cluster (ACTIVE, not rebalancing, every storage
+    node ONLINE) whose shared_placement is still off, and fires on either of
+    two triggers:
+
+      * shared_placement_migration_pending — armed at cluster creation on
+        releases that still created legacy clusters, and by
+        `sbctl cluster upgrade-complete` after an upgrade's rolling restart;
+      * a data-plane capability probe
+        (cluster_ops.all_nodes_support_shared_placement): every node's
+        running SPDK advertises the runtime shared-placement RPCs. This
+        retro-heals clusters whose upgrade never armed the flag — the
+        original arming sat behind an update_cluster(restart=True) path no
+        CLI invocation reaches, which stranded every CLI-upgraded cluster on
+        per-page placement (customer incident 2026-09-04).
+
+    Why not fire on a bare shared_placement==False: during a rolling upgrade
+    the cluster passes through transient ACTIVE / all-online windows between
+    node restarts. The capability probe is what makes evaluating those
+    windows safe — a node still on a pre-shared-placement image does not
+    expose the RPCs, so the flip waits for the last restart; and
+    set_shared_placement aborts wholesale (nothing persisted) if any node
+    rejects the runtime RPC, so a race lost anyway cannot half-flip the
+    cluster. On success the flip is self-terminating: shared_placement=True
+    ends the condition for good.
+    """
+    if (cluster.shared_placement
+            or current_cluster_status != Cluster.STATUS_ACTIVE
+            or cluster.is_re_balancing):
+        return
+    sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    if not sp_nodes or any(n.status != StorageNode.STATUS_ONLINE for n in sp_nodes):
+        return
+    armed = cluster.shared_placement_migration_pending
+    if not armed and not cluster_ops.all_nodes_support_shared_placement(sp_nodes):
+        return
+    logger.info(
+        "Auto-enabling shared (per-chunk) placement on cluster %s: %s, "
+        "ACTIVE, all nodes online, not rebalancing", cluster_id,
+        "armed" if armed else "data plane capable")
+    try:
+        if cluster_ops.set_shared_placement(cluster_id, enable=True):
+            # set_shared_placement persisted shared_placement=True; disarm the
+            # request so it runs exactly once. Atomic so it doesn't clobber a
+            # concurrent cluster.status change.
+            db.atomic_update(
+                db.get_cluster_by_id(cluster_id),
+                lambda c: setattr(c, "shared_placement_migration_pending", False))
+            logger.info("shared_placement enabled on cluster %s", cluster_id)
+        else:
+            logger.warning(
+                "set_shared_placement returned False for cluster %s; "
+                "will retry next monitor cycle", cluster_id)
+    except Exception:
+        logger.exception(
+            "Auto shared_placement enable raised for cluster %s", cluster_id)
+
+
+def _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status):
+    """One-shot auto-migration to v2 distrib write protection — the exact
+    sibling of _maybe_enable_shared_placement above; see there for the full
+    trigger rationale.
+
+    update_cluster deliberately stamps write_protection_v2 back to False
+    before an upgrade's rolling restart, so after EVERY upgrade the runtime
+    switch has to run again. It used to be a manual
+    `sbctl cluster switch-write-protection`; the monitor now runs it once the
+    cluster settles, fired by the pending flag (armed by upgrade-complete) or
+    by the data-plane capability probe (which also heals clusters whose
+    upgrade never armed it). switch_write_protection aborts wholesale if any
+    online node rejects the runtime RPC and is idempotent, so a lost race is
+    a plain retry on the next cycle.
+    """
+    if (cluster.write_protection_v2
+            or current_cluster_status != Cluster.STATUS_ACTIVE
+            or cluster.is_re_balancing):
+        return
+    wp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    if not wp_nodes or any(n.status != StorageNode.STATUS_ONLINE for n in wp_nodes):
+        return
+    armed = cluster.write_protection_migration_pending
+    if not armed and not cluster_ops.all_nodes_support_write_protection_v2(wp_nodes):
+        return
+    logger.info(
+        "Auto-switching write protection to v2 on cluster %s: %s, ACTIVE, "
+        "all nodes online, not rebalancing", cluster_id,
+        "armed" if armed else "data plane capable")
+    try:
+        if cluster_ops.switch_write_protection(cluster_id):
+            db.atomic_update(
+                db.get_cluster_by_id(cluster_id),
+                lambda c: setattr(c, "write_protection_migration_pending", False))
+            logger.info("write-protection v2 enabled on cluster %s", cluster_id)
+        else:
+            logger.warning(
+                "switch_write_protection returned False for cluster %s; "
+                "will retry next monitor cycle", cluster_id)
+    except Exception:
+        logger.exception(
+            "Auto write-protection switch raised for cluster %s", cluster_id)
+
+
+def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
     # stranded whenever the cluster takes a recovery path (e.g.
     # DEGRADED -> ACTIVE).
     _requeue_stuck_auto_restarts(cluster_id)
+    # Same reasoning for stranded devices: sweep before the status decision so
+    # a re-admitted device stops counting toward affected_nodes on this tick.
+    _readmit_stranded_devices(cluster_id)
 
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
@@ -234,9 +949,11 @@ def update_cluster_status(cluster_id):
         JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
         JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
         JobSchedule.FN_LVOL_MIG,
+        JobSchedule.FN_LVOL_BATCH_MIG,
     }
     active_rebalancing_tasks = 0
-    for task in db.get_job_tasks(cluster_id):
+    cluster_tasks = db.get_job_tasks(cluster_id)
+    for task in cluster_tasks:
         if task.canceled:
             continue
         if task.status == JobSchedule.STATUS_DONE:
@@ -245,49 +962,64 @@ def update_cluster_status(cluster_id):
             active_rebalancing_tasks += 1
 
     cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = active_rebalancing_tasks > 0
-    cluster.write_to_db()
+    # Atomic: a full write here would clobber a concurrent cluster.status change
+    # committed by set_cluster_status (same lost-update class as incident
+    # 2026-06-18). Mutate only is_re_balancing on the freshly-read row.
+    is_re_balancing = active_rebalancing_tasks > 0
+    cluster = db.atomic_update(
+        cluster, lambda c, v=is_re_balancing: setattr(c, "is_re_balancing", v))
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
 
-    # One-shot auto-migration to shared (per-chunk) data placement.
-    # Armed (shared_placement_migration_pending) by exactly two events:
-    #   * cluster creation — for brand-new clusters
-    #   * cluster_ops.update_cluster, only AFTER every node's upgrade restart
-    #     has completed — never mid rolling-restart
-    # We require that explicit flag rather than firing on a bare
-    # shared_placement==False, because during a rolling upgrade the cluster
-    # passes through transient ACTIVE / not-rebalancing / all-online windows
-    # between node restarts; switching then would race the still-restarting
-    # nodes. With the flag set only at upgrade completion, switching here is
-    # safe once the cluster has settled.
-    if (cluster.shared_placement_migration_pending
-            and not cluster.shared_placement
-            and current_cluster_status == Cluster.STATUS_ACTIVE
-            and not cluster.is_re_balancing):
-        sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
-        if sp_nodes and all(n.status == StorageNode.STATUS_ONLINE for n in sp_nodes):
-            logger.info(
-                "Auto-enabling shared (per-chunk) placement on cluster %s: "
-                "armed, ACTIVE, all nodes online, not rebalancing", cluster_id)
-            try:
-                if cluster_ops.set_shared_placement(cluster_id, enable=True):
-                    # set_shared_placement persisted shared_placement=True;
-                    # disarm the request so it runs exactly once.
-                    done = db.get_cluster_by_id(cluster_id)
-                    done.shared_placement_migration_pending = False
-                    done.write_to_db()
-                    logger.info("shared_placement enabled on cluster %s", cluster_id)
-                else:
-                    logger.warning(
-                        "set_shared_placement returned False for cluster %s; "
-                        "will retry next monitor cycle", cluster_id)
-            except Exception:
-                logger.exception(
-                    "Auto shared_placement enable raised for cluster %s", cluster_id)
+    # Retention housekeeping happens in _run_periodic_housekeeping (main
+    # loop, every few minutes), NOT here. It used to run on every pass: the
+    # event sweep is an unbounded full read of the events table, and at 12k
+    # entities it alone pushed a pass past the callers' 3s re-arm period --
+    # the capture described in update_cluster_status. On an hours-old
+    # cluster with 30-day retention it also deleted precisely nothing for
+    # that cost.
 
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
+    # Suspend recovery: while the cluster is SUSPENDED, first drain every node
+    # to OFFLINE (auto-restart is paused until then), so recovery restarts from
+    # a clean slate instead of one-by-one onto stale/half-initialized peers.
+    #
+    # NOT when the suspension is operator-caused (deliberate `sn shutdown`s
+    # pushed the cluster over FTT): auto recovery would force-shutdown and
+    # restart the surviving healthy nodes to "fix" an intentional state.
+    # Recovery is the operator's call — restart the stopped nodes, or run
+    # `cluster restart` (clears the deliberate-shutdown markers, which
+    # re-arms this path).
+    if current_cluster_status == Cluster.STATUS_SUSPENDED:
+        if tasks_controller.is_suspension_operator_caused(cluster):
+            logger.info(
+                "Cluster %s suspension is operator-caused (deliberate node "
+                "shutdowns); auto drain/restart suppressed — restart the "
+                "stopped nodes or run `cluster restart`", cluster_id)
+        else:
+            try:
+                _drive_suspend_recovery(cluster)
+            except Exception:
+                logger.exception("Suspend-recovery drive failed for cluster %s", cluster_id)
+
+    _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status)
+    _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status)
+
+    if current_cluster_status == Cluster.STATUS_IN_ACTIVATION:
+        # Don't drive transitions while an activation is in flight, but check
+        # whether it has wedged (incident 2026-06-25) and revert if so.
+        _watchdog_stuck_activation(cluster)
+        return
+
+    # IN_SHRINK, like IN_EXPANSION, is owned by a topology flow that restores
+    # the previous status itself; driving transitions under it would clobber
+    # that ownership. _watchdog_stuck_shrink below covers a flow that dies
+    # holding it.
+    if current_cluster_status in [Cluster.STATUS_UNREADY,
+                                  Cluster.STATUS_IN_EXPANSION,
+                                  Cluster.STATUS_IN_SHRINK]:
+        if current_cluster_status == Cluster.STATUS_IN_SHRINK:
+            _watchdog_stuck_shrink(cluster)
         return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
@@ -300,33 +1032,20 @@ def update_cluster_status(cluster_id):
         return
     elif current_cluster_status == Cluster.STATUS_SUSPENDED and next_current_status \
             in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-        # needs activation
-        # check node status, check auto restart for nodes
-        can_activate = True
-        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status in [StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION,
-                               StorageNode.STATUS_RESTARTING]:
-                logger.error(f"can not activate cluster: node is not in correct status {node.get_id()}: {node.status}")
-                can_activate = False
-                break
-
-            # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
-            #     logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
-            #     can_activate = False
-            #     break
-            if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
-                logger.error("can not activate cluster: restart tasks found")
-                can_activate = False
-                break
-
-            if node.online_since:
-                diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
-                if diff.total_seconds() < 30:
-                    logger.error(f"can not activate cluster: node is online less than 30 seconds: {node.get_id()}")
-                    can_activate = False
-                    break
-
-        if can_activate:
+        # needs activation — but only once the outage has fully recovered.
+        # Auto-reactivation must NOT start while nodes are still UNREACHABLE
+        # or mid-restart: it either fires uselessly (race #1) or wedges the
+        # cluster in IN_ACTIVATION against a not-yet-online node (race #2).
+        # Wait until every node is back ONLINE one-by-one, allowing up to FTT
+        # deliberately shut-down nodes to stay down (incident 2026-06-25).
+        can_activate, reason = _activation_node_gate(
+            cluster_id,
+            db.get_storage_nodes_by_cluster_id(cluster_id),
+            cluster.max_fault_tolerance,
+        )
+        if not can_activate:
+            logger.warning("can not activate cluster: %s", reason)
+        else:
             cluster_ops.cluster_activate(cluster_id, force=True)
     else:
         cluster_ops.set_cluster_status(cluster_id, next_current_status)
@@ -346,6 +1065,38 @@ def update_cluster_status(cluster_id):
 # DOWN is NOT routed through auto-restart: SPDK is still alive and
 # cluster-internal traffic works -- only the client-facing port is
 # blocked. Recovery is port-unblock, not a destructive restart.
+
+
+#: Node ids whose ANA failover has already been applied for the CURRENT
+#: offline episode. Without this, the OFFLINE branch of check_node re-ran
+#: trigger_ana_failover_for_node on EVERY monitor cycle for as long as the
+#: node stayed offline: incident 2026-08-09 iteration 28 produced 2789
+#: nvmf_subsystem_listener_set_ana_state RPCs in 16 minutes (170/min, one
+#: per subsystem per cycle) against a single peer. Each of those is a real
+#: spdk_nvmf_subsystem_pause of a live subsystem (see _set_lvol_ana_on_node),
+#: so the churn lands on client-facing volumes exactly while the cluster is
+#: least able to absorb it. The promotion is idempotent in effect, so it only
+#: needs to run once per offline transition; the entry is dropped as soon as
+#: the node is observed in any non-OFFLINE state, so a later offline episode
+#: re-arms it.
+_ana_failover_applied: set = set()
+
+
+def _ana_failover_once(node) -> bool:
+    """Run ANA failover for ``node`` at most once per offline episode.
+
+    Returns True when the failover was actually invoked this call."""
+    node_id = node.get_id()
+    if node_id in _ana_failover_applied:
+        return False
+    storage_node_ops.trigger_ana_failover_for_node(node)
+    _ana_failover_applied.add(node_id)
+    return True
+
+
+def _ana_failover_rearm(node_id) -> None:
+    """Forget the one-shot marker so the next offline episode re-triggers."""
+    _ana_failover_applied.discard(node_id)
 
 
 def set_node_offline(node):
@@ -398,7 +1149,7 @@ def set_node_offline(node):
 
         try:
             logger.info(f"Triggering ANA failover for node {node.get_id()}")
-            storage_node_ops.trigger_ana_failover_for_node(node)
+            _ana_failover_once(node)
         except Exception as ana_e:
             logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
 
@@ -418,7 +1169,7 @@ def set_node_unreachable(node):
                            StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
-            update_cluster_status(cluster_id)
+            update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
@@ -469,15 +1220,37 @@ def _count_data_plane_votes(node):
     perpetually votes "connected" and the quorum gets stuck.
 
     Returns (disconnected_count, total_peers_checked).
+
+    Peers are probed IN PARALLEL and the whole vote is TTL-cached per target
+    node: the previous serial loop cost up to ~16s per down peer (two 8s
+    RPCs) — ~8 minutes at 31 peers — inside EVERY unreachable-node thread,
+    each recomputing the identical vote (2026-07-13 audit). The cache
+    collapses the N concurrent escalation threads onto one computation;
+    parallelism bounds it to the slowest single peer.
     """
+    node_id = node.get_id()
+    return _status_probe_cache.get_or_compute(
+        ("dp_votes", node_id), _DP_QUORUM_PROBE_TTL_SEC,
+        lambda: _count_data_plane_votes_uncached(node))
+
+
+def _count_data_plane_votes_uncached(node):
     node_id = node.get_id()
     cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
+    # ONLINE in the DB is not proof a peer can answer: node status lags reality
+    # by seconds. On 2026-09-01 this list still contained a node that had been
+    # host-rebooted 6s earlier, and dialling it cost a full RPC timeout inside
+    # a restart's port fence. health_controller.repairs_allowed() is the same
+    # gate the repair paths use; a peer that cannot answer contributes nothing
+    # to a liveness vote anyway.
+    from simplyblock_core.controllers import health_controller as _hc
     online_peers = [
         n for n in cluster_nodes
         if n.get_id() != node_id
         and n.status == StorageNode.STATUS_ONLINE
         and n.jm_vuid
+        and _hc.repairs_allowed(n)
     ]
 
     if not online_peers:
@@ -486,11 +1259,15 @@ def _count_data_plane_votes(node):
 
     ctrl_name = f"remote_jm_{node_id}"
     bdev_name = f"{ctrl_name}n1"
-    disconnected = 0
-    total = 0
+    # Vote per peer: True = disconnected, False = connected, None = abstain.
+    votes: dict = {}
 
-    for peer in online_peers:
-        peer_rpc = peer.rpc_client(timeout=5, retry=1)
+    def _vote_one_peer(peer):
+        # A liveness vote must not outlive its usefulness: a timeout here IS
+        # a failure to answer, and the caller treats a missing vote as an
+        # abstain. See constants.DP_VOTE_RPC_TIMEOUT_SEC.
+        peer_rpc = peer.rpc_client(timeout=constants.DP_VOTE_RPC_TIMEOUT_SEC,
+                                   retry=constants.DP_VOTE_RPC_RETRY)
 
         # Fast path: does the namespace bdev still exist on the peer?
         # A missing bdev means the controller has been torn down / is being
@@ -500,10 +1277,10 @@ def _count_data_plane_votes(node):
         # bdev_nvme_get_controllers on a `resetting` / `reconnect_is_delayed`
         # ctrlr can sit on locks during reset.
         try:
-            bdevs = peer_rpc.get_bdevs(bdev_name)
+            bdevs = peer_rpc.bdev_get(bdev_name)
         except Exception as e:
-            logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
-            continue
+            logger.debug("bdev_get(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
+            return
 
         if not bdevs:
             # If the peer never had a topology link to this node, it never
@@ -513,7 +1290,7 @@ def _count_data_plane_votes(node):
             # place to assert "this peer SHOULD have seen it".
             logger.debug("Data-plane check: peer %s has no %s bdev; abstaining",
                          peer.get_id(), bdev_name)
-            continue
+            return
 
         # Bdev exists -> controller must exist too. Now check its state.
         try:
@@ -521,26 +1298,50 @@ def _count_data_plane_votes(node):
         except Exception as e:
             logger.debug("bdev_nvme_controller_list(%s) on peer %s failed: %s",
                          ctrl_name, peer.get_id(), e)
-            continue
+            return
 
-        total += 1
         if not ret:
             logger.info("Data-plane check: peer %s has %s bdev but no controller -> disconnected",
                         peer.get_id(), bdev_name)
-            disconnected += 1
-            continue
+            votes[peer.get_id()] = True
+            return
 
         paths = ret[0].get("ctrlrs") or []
         enabled = any((p.get("state") == "enabled") for p in paths)
         if enabled:
             logger.info("Data-plane check: peer %s sees %s controller enabled",
                         peer.get_id(), node_id)
+            votes[peer.get_id()] = False
         else:
             states = [p.get("state") for p in paths] or ["no-paths"]
             logger.info("Data-plane check: peer %s reports %s controller state=%s -> disconnected",
                         peer.get_id(), node_id, states)
-            disconnected += 1
+            votes[peer.get_id()] = True
 
+    vote_threads = []
+    for peer in online_peers:
+        t = threading.Thread(target=_vote_one_peer, args=(peer,),
+                             name=f"dp-vote-{peer.get_id()[:8]}")
+        t.start()
+        vote_threads.append(t)
+    # Bounded join. An unbounded one made this the single biggest cost inside
+    # a restart's port fence (7.95s of 12.2s on 2026-09-01) because one vote
+    # thread was dialling a rebooting node. A thread still running when the
+    # ceiling expires simply never records a vote, and a missing vote is an
+    # abstain -- the same outcome as a peer that could not answer.
+    deadline = time.time() + constants.DP_VOTE_JOIN_TIMEOUT_SEC
+    for t in vote_threads:
+        t.join(timeout=max(0.0, deadline - time.time()))
+    slow = [t.name for t in vote_threads if t.is_alive()]
+    if slow:
+        logger.warning(
+            "Data-plane vote for %s: %d peer(s) did not answer within %.1fs "
+            "(%s); counting them as abstain",
+            node_id, len(slow), constants.DP_VOTE_JOIN_TIMEOUT_SEC,
+            ", ".join(slow))
+
+    disconnected = sum(1 for v in votes.values() if v)
+    total = len(votes)
     logger.info("Data-plane check for %s: %d/%d peers report disconnected", node_id, disconnected, total)
     return disconnected, total
 
@@ -590,12 +1391,12 @@ def set_node_schedulable(node):
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
             # initiate shutdown
             # initiate restart
-            tasks_controller.add_node_to_auto_restart(node)
+            # tasks_controller.add_node_to_auto_restart(node)
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     device_controller.device_set_unavailable(dev.get_id())
-            update_cluster_status(cluster_id)
+            update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to SCHEDULABLE state failed")
             logger.error(e)
@@ -605,7 +1406,7 @@ def set_node_down(node):
     node = db.get_storage_node_by_id(node.get_id())
     if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_IN_SHUTDOWN]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-        update_cluster_status(cluster_id)
+        update_cluster_status(node.cluster_id)
 
 
 def node_rpc_timeout_check_and_report(node):
@@ -627,43 +1428,121 @@ def node_port_check_fun(snode):
     node_port_check = True
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
+        port_lvs_owner: dict = {}
+        #: Ports that are checked and fed to the leak remediation but that
+        #: must NOT contribute to this node's health verdict — see below.
+        advisory_ports: set = set()
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status != "ready":
                     continue
-                # Skip port check during failback: if the primary or the
-                # other secondary (sec_1) for this lvstore is online/restarting,
-                # the port on this node may be intentionally blocked.
-                skip = False
+                # Advisory during failback: if the primary or the OTHER
+                # follower (sec_1 / tertiary) for this lvstore is
+                # online/restarting, the port on this node may be
+                # intentionally blocked (recreate_lvstore and the port-allow
+                # failback both block follower ports for the re-wiring
+                # window), so a False here is not evidence that THIS node is
+                # unhealthy. Both follower directions must be covered: a
+                # restarting tertiary blocks the acting-leader secondary's
+                # port just like a restarting secondary blocks the
+                # tertiary's — checking only secondary_node_id flipped the
+                # healthy secondary DOWN during a tertiary restart.
+                #
+                # The port is still CHECKED. It used to be dropped from the
+                # list altogether, which silently disabled leak detection on
+                # exactly the ports most likely to leak: k8s 2026-09-11
+                # 13:46, worker-5 held a fence on 4442 (worker-3's LVS_16)
+                # from 13:46:14. worker-3 flipped to in_restart at 13:47:05,
+                # 4442 dropped out of the list, and worker-5 "recovered" to
+                # online at 13:47:08 — not because the fence had lifted (it
+                # ran to 13:47:28) but because nobody was looking any more.
+                # The gate belongs on the verdict, not on the observation.
+                advisory = False
                 if n.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                    skip = True
+                    advisory = True
                 elif n.secondary_node_id and n.secondary_node_id != snode.get_id():
                     sec1 = db.get_storage_node_by_id(n.secondary_node_id)
                     if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                        skip = True
-                if not skip:
-                    ports.append(n.get_lvol_subsys_port(n.lvstore))
+                        advisory = True
+                if not advisory and n.tertiary_node_id and n.tertiary_node_id != snode.get_id():
+                    tert = db.get_storage_node_by_id(n.tertiary_node_id)
+                    if tert and tert.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+                        advisory = True
+                _p = n.get_lvol_subsys_port(n.lvstore)
+                ports.append(_p)
+                port_lvs_owner[_p] = n.get_id()
+                if advisory:
+                    advisory_ports.add(_p)
         if not snode.is_secondary_node:
-            ports.append(snode.get_lvol_subsys_port(snode.lvstore))
+            _p = snode.get_lvol_subsys_port(snode.lvstore)
+            ports.append(_p)
+            port_lvs_owner[_p] = snode.get_id()
 
-        for port in ports:
-            try:
-                ret = health_controller.check_port_on_node(snode, port)
+        # Batched: one nvmf_get_blocked_ports fetch answers every port, so
+        # carrying the advisory ports costs no extra RPC.
+        try:
+            port_results = health_controller.check_ports_on_node(snode, ports)
+            for port, ret in port_results.items():
+                if port in advisory_ports:
+                    logger.info(
+                        f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
+                        f"(advisory: peer owns this LVS and may be fencing it)")
+                    continue
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
-            except Exception as e:
+            _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner)
+        except Exception as e:
+            for port in ports:
                 health_controller._log_port_check_failure(db, snode, port, e)
 
-        node_data_nic_ping_check = False
+        # Data-NIC reachability via the node agent. _check_ping_from_node is
+        # tri-state: True (up), False (agent ran ping, it failed / carrier down),
+        # None (SnodeAPI ping_ip timed out -> inconclusive). A timeout must NOT
+        # flip the node DOWN: ignore it and re-evaluate next cycle. Only a
+        # definitive False with no NIC confirmed up is a real data-NIC failure.
+        data_results = []
         for data_nic in snode.data_nics:
             if data_nic.ip4_address:
                 data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
                 logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
-                node_data_nic_ping_check |= data_ping_check
+                data_results.append(data_ping_check)
 
-        node_port_check &= node_data_nic_ping_check
+        if any(r is True for r in data_results):
+            pass  # at least one data NIC confirmed reachable
+        elif any(r is False for r in data_results):
+            node_port_check = False  # node reports its data NIC down
+        else:
+            logger.info(
+                f"Data-nic ping for {snode.mgmt_ip} inconclusive "
+                f"(SnodeAPI ping_ip timed out); ignoring this cycle")
 
     return node_port_check
+
+
+# Bounded wait (s) for the parallel port/data-nic check to finish before we
+# read its result. The probe started in parallel with the liveness checks, so
+# by the time we collect it it has usually completed; if not, we treat it as
+# inconclusive for this cycle rather than blocking node-status evaluation.
+PORT_CHECK_JOIN_TIMEOUT_SEC = 5
+
+
+def _spawn_port_check(snode):
+    """Run node_port_check_fun in a background daemon thread so the LVS-port /
+    data-nic probes — which matter ONLY for an otherwise-online node and can
+    hang on a rebooting host's SnodeAPI — run in PARALLEL with the liveness
+    checks instead of serializing after them. Returns (thread, holder); read
+    holder['result'] after a bounded join (None = errored/never-finished)."""
+    holder = {"result": None}
+
+    def _run():
+        try:
+            holder["result"] = node_port_check_fun(snode)
+        except Exception as e:
+            logger.debug(f"Port check thread failed for {snode.get_id()}: {e}")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, holder
 
 
 class State:
@@ -675,8 +1554,299 @@ def decrement():
 def value():
     return State.counter
 
+#: How long a node's RPC interface may stay unreachable -- while SNodeAPI
+#: answers and the SPDK process is still running -- before the monitor aborts
+#: SPDK so auto-restart can rebuild it.
+#:
+#: This exists because a hung RPC channel is invisible to every other recovery
+#: path. On 2026-09-01 13:22 node 22f365ef handled its last RPC
+#: (bdev_distrib_status_events_update -> api_bdev_distrib_status_events_notify)
+#: and never completed it: the target JM lived on 172.31.98.212, which the
+#: soak had just shut down, and the notify blocked on that peer with no
+#: timeout. SPDK's JSON-RPC server reads one request at a time per connection,
+#: so the whole channel wedged -- 0 successful RPCs for 15 minutes while every
+#: poller kept running normally. Nothing escalated until 13:37, when the socket
+#: finally went from hanging to refusing and HealthCheck saw a connection
+#: error. A restart fixed it in ~70s.
+#:
+#: 60s is comfortably longer than a legitimately slow RPC (the proxy's own
+#: socket timeout is ~2s) and far shorter than the 900s a test waits for paths
+#: to heal.
+RPC_HANG_ABORT_SEC = 60
+
+#: node_id -> monotonic time of the first consecutive RPC failure. Per node on
+#: purpose: the older `State.counter` guard below is a single process-global
+#: int shared by every node's monitor thread, so a healthy node's decrement()
+#: clears a broken node's increment() and the ":FAILED" escalation is never
+#: reached (32 x ":TIMEOUT", 0 x ":FAILED" in the incident above).
+_rpc_hang_since: dict[str, float] = {}
+_rpc_hang_lock = threading.Lock()
+
+
+def _note_rpc_ok(node_id):
+    """Forget any recorded hang -- the node answered."""
+    with _rpc_hang_lock:
+        _rpc_hang_since.pop(node_id, None)
+
+
+def _rpc_hang_seconds(node_id):
+    """Seconds this node's RPC has been failing without interruption."""
+    with _rpc_hang_lock:
+        now = time.monotonic()
+        return now - _rpc_hang_since.setdefault(node_id, now)
+
+
+#: A client LVS port that SPDK fenced and nobody lifted. Keyed by
+#: (node_id, port) -> monotonic time first seen blocked.
+_blocked_port_since: dict = {}
+
+#: How long a port must stay blocked on an ONLINE node before the monitor
+#: treats it as a leak. Long enough that a legitimate in-flight fence (the
+#: restart flow holds one for well under a second, and SPDK's own conflict
+#: fence is expected to be resolved by the control plane) is never touched,
+#: far short of the client's ctrl_loss_tmo (30 x 2s = 60s) after which the
+#: kernel deletes the controller and the namespace starts failing IO.
+#:
+#: 25s was too close to that 60s budget to survive a missed observation: the
+#: monitor polls at ~6s, so detection at 25s plus one unblock RPC left about
+#: five ticks of margin in theory and ONE in practice, because the node has
+#: to be seen ONLINE on the same tick that crosses the threshold. 12s keeps
+#: a whole missed poll cycle inside the budget and is still ~20x longer than
+#: any legitimate fence the restart flow holds. The restart-owns-LVS gate,
+#: not this timeout, is what keeps the remediation off deliberate fences.
+STALE_PORT_BLOCK_SEC = 12.0
+
+
+def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
+    """Lift a client port that SPDK fenced and nothing ever released.
+
+    SPDK blocks lvs->subsystem_port on a writer conflict, on a leadership
+    change and when failed IO is queued (lvol.c: spdk_lvs_unfreeze_on_conflict,
+    spdk_lvs_change_leader_state, spdk_lvs_queued_failed_IO). That block is
+    correct and deliberate -- it is what prevents split-brain writes. But the
+    10s poller registered alongside it only releases lvs->hublvol_port; nothing
+    in-process ever releases the subsystem port. The release is the control
+    plane's job, and until now the control plane had detection without
+    remediation.
+
+    k8s 2026-09-05 08:57 (1fb83b67, LVS_13). worker-4 was never part of the
+    outage and was the surviving path for four volumes. It fenced port 4436 at
+    08:57:39 after a writer conflict. This monitor logged
+    "Check: node port 10.0.0.14, 4436 ... False" 78 times over 8m37s and did
+    nothing; tasks-runner-port-allow was idle for the whole hour. The fence
+    outlived the clients' ctrl_loss_tmo (60s), the kernel deleted every
+    controller, the namespace flipped from "no usable path - requeuing" to
+    "no available path - failing I/O", and four volumes took EIO. It was
+    finally cleared incidentally by an unrelated restart at 09:06:16.
+
+    Preconditions, all required:
+      * the node is ONLINE -- a fence on a node that is down is not a leak;
+      * no restart task owns that LVS -- the restart flow is the legitimate
+        author of port blocks during its phases and must not be raced;
+      * the block has persisted past STALE_PORT_BLOCK_SEC;
+      * and the node's hublvol for that LVS is healthy and connected.
+
+    That last one is not optional. Unblocking a peer that still has no
+    redirect just re-opens the path to a node that will promote itself on the
+    next write and fence itself again -- the same loop, with client IO let
+    back in each time round.
+    """
+    for port, ok in port_results.items():
+        key = (snode.get_id(), port)
+        if ok:
+            _blocked_port_since.pop(key, None)
+            continue
+        first_seen = _blocked_port_since.setdefault(key, time.monotonic())
+        held = time.monotonic() - first_seen
+        if held < STALE_PORT_BLOCK_SEC:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        owner_id = port_lvs_owner.get(port)
+        if not owner_id:
+            continue
+        try:
+            owner = db.get_storage_node_by_id(owner_id)
+        except Exception:
+            continue
+
+        if health_controller._restart_owns_lvs(owner, db):
+            logger.info(
+                "Port %s on %s blocked %.0fs but a restart owns %s; leaving it",
+                port, snode.get_id(), held, owner.lvstore)
+            continue
+
+        # Hublvol gate: only lift the fence once this node can actually
+        # redirect. See the docstring -- unblocking without a redirect
+        # reopens the loop.
+        try:
+            if owner_id == snode.get_id():
+                hub_ok = health_controller._check_node_hublvol(snode)
+            else:
+                hub_ok = health_controller._check_sec_node_hublvol(
+                    snode, auto_fix=False, primary_node_id=owner_id,
+                    repair_paths=False)
+        except Exception as e:
+            logger.warning(
+                "Port %s on %s blocked %.0fs; hublvol health check raised "
+                "(%s), not unblocking", port, snode.get_id(), held, e)
+            continue
+        if not hub_ok:
+            logger.warning(
+                "Port %s on %s blocked %.0fs for %s, but its hublvol is not "
+                "healthy -- NOT unblocking; a peer with no redirect would "
+                "promote itself and fence again",
+                port, snode.get_id(), held, owner.lvstore)
+            continue
+
+        logger.error(
+            "Port %s on %s has been blocked %.0fs on an ONLINE node with a "
+            "healthy hublvol and no restart owning %s -- SPDK fenced it and "
+            "nothing released it. Unblocking.",
+            port, snode.get_id(), held, owner.lvstore)
+        try:
+            from simplyblock_core.utils import port_block
+            port_block.set_port(snode, port, block=False, timeout=5, retry=1)
+            _blocked_port_since.pop(key, None)
+        except Exception as e:
+            logger.error("Failed to unblock stale port %s on %s: %s",
+                         port, snode.get_id(), e)
+
+
+#: node_id -> the ``online_since`` stamp we last verified nvme options for.
+#: online_since is re-stamped on every ->ONLINE transition, so this
+#: re-verifies exactly once per online episode (i.e. once per SPDK restart)
+#: rather than on every monitor tick.
+_nvme_opts_verified: dict = {}
+
+
+def _verify_nvme_options_once(snode):
+    node_id = snode.get_id()
+    marker = getattr(snode, "online_since", None)
+    if _nvme_opts_verified.get(node_id) == marker:
+        return
+    try:
+        ok, _drift = storage_node_ops.ensure_nvme_options(
+            snode, context="monitor node check")
+    except Exception as e:
+        logger.warning("nvme options check on %s raised: %s", node_id[:8], e)
+        return
+    if ok:
+        # Only remember a clean result. A drifted node is re-reported every
+        # episode until it is restarted, which is the intent: a node with no
+        # command timeout must not go quiet.
+        _nvme_opts_verified[node_id] = marker
+
+
+def _abort_hung_spdk(snode, hung_for):
+    """Kill SPDK on a node whose RPC hung while the process is still alive.
+
+    Deliberately a kill rather than a graceful shutdown: a graceful stop is
+    itself driven over the RPC channel that is wedged, so it would hang too.
+    The node is flipped OFFLINE afterwards, which is what arms the existing
+    auto-restart.
+    """
+    node_id = snode.get_id()
+    logger.error(
+        "Node %s RPC unreachable for %.0fs while SNodeAPI answers and SPDK is "
+        "running -- aborting SPDK so auto-restart can rebuild it",
+        node_id, hung_for)
+    # Capture WHY before destroying the evidence. A wedged RPC channel on a
+    # live process leaves nothing in the logs -- the pollers keep printing
+    # normally -- so without this the kill recovers the node and the cause is
+    # lost, which is exactly what happened on 2026-09-01. utime frozen across
+    # the samples means the thread is blocked; utime advancing means it is
+    # running but never returns to the RPC poller. Best-effort: a failed
+    # capture must never delay the abort.
+    try:
+        state = snode.client(timeout=20, retry=1).spdk_thread_state(snode.rpc_port)
+        logger.error("Hung SPDK thread state for %s: %s", node_id, state)
+    except Exception as e:
+        logger.warning("Could not capture thread state for %s before abort: %s",
+                       node_id, e)
+
+    try:
+        snode_api = snode.client(timeout=20, retry=1)
+        snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+    except Exception as e:
+        logger.error("Failed to abort hung SPDK on %s: %s", node_id, e)
+        return False
+    _note_rpc_ok(node_id)   # the hang is resolved; do not abort again next tick
+    try:
+        set_node_offline(snode)
+    except Exception as e:
+        logger.error("Aborted SPDK on %s but could not flip it OFFLINE: %s",
+                     node_id, e)
+    return True
+
+
+def _spdk_is_dead(snode):
+    """True if the node's SPDK is confirmed NOT running (or the node API can't
+    be reached, which for our purposes means it isn't serving)."""
+    try:
+        snode_api = snode.client(timeout=20, retry=1)
+        is_up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
+        return not is_up
+    except Exception as e:
+        logger.debug("spdk_process_is_up probe failed for %s: %s", snode.get_id(), e)
+        return True
+
+
+# Leaked-"in_creation" backstop: lvstore_status == "in_creation" suppresses
+# ALL monitor checks of a node. Legitimate windows are owned by a restart task
+# or a manual `sn restart` and last minutes; anything older with no active
+# restart task is a leak (a failed replica-rebuild phase that never restored
+# the peer's marker) and must be reclaimed or the node is never monitored
+# again.
+LVSTORE_IN_CREATION_STALE_SEC = 600
+
+#: How long the monitor will keep deferring to an "active" restart task before
+#: it stops trusting it and resumes its own liveness handling.
+#:
+#: The deferral below assumed a restart task always terminates (max_retry +
+#: transient-reset). Incident 2026-08-17 22:03 broke that assumption: a restart
+#: wedged *inside a single execution* — an unbounded JM-replication wait against
+#: a peer that had just been rebooted — so it never completed an attempt, never
+#: consumed a retry and never finished. The peer's own restart was in turn
+#: deferred by the one-restart-at-a-time rule, and this monitor stood down for
+#: 50 minutes, so the peer's SPDK was never brought back: a three-way deadlock.
+#: Comfortably longer than a healthy restart (measured 2-6 min on a 6-node
+#: multipath cluster) so a legitimate restart is never fought (the 2026-06-24
+#: monitor-vs-restart churn), but bounded so a wedged one cannot freeze
+#: recovery for good.
+RESTART_TASK_DEFER_MAX_SEC = 1200
+
+# node_id -> monotonic-ish first time this monitor saw the marker set.
+_lvstore_in_creation_first_seen: dict = {}
+
+# node_id -> first time we deferred to that node's active restart task.
+_restart_task_defer_first_seen: dict = {}
+
+
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
+
+    # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
+    # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
+    # shutdown crashed or its offline flip was lost (incident 2026-06-18: a
+    # concurrent full-object write reverted offline->in_shutdown, after which the
+    # monitor skipped the node forever and both re-shutdown and the peer's
+    # concurrent shutdown were rejected — a permanent deadlock). Reconcile to
+    # OFFLINE once SPDK is confirmed dead so the node is restartable again.
+    # auto_restart_disabled (set at shutdown) stays set, so this does NOT trigger
+    # an unwanted auto-restart of an intentionally-stopped node.
+    if snode.status == StorageNode.STATUS_IN_SHUTDOWN:
+        if _in_shutdown_longer_than(snode, IN_SHUTDOWN_RECONCILE_GRACE_SEC) and _spdk_is_dead(snode):
+            logger.warning(
+                "Node %s stuck in in_shutdown for >%ss with SPDK down; "
+                "reconciling to OFFLINE",
+                snode.get_id(), IN_SHUTDOWN_RECONCILE_GRACE_SEC)
+            storage_node_ops.set_node_status(
+                snode.get_id(), StorageNode.STATUS_OFFLINE, caused_by="monitor_reconcile")
+        else:
+            logger.info(f"Node status is: {snode.status}, skipping")
+        return False
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                             StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN,
@@ -685,8 +1855,73 @@ def check_node(snode):
         return False
 
     if snode.status == StorageNode.STATUS_ONLINE and snode.lvstore_status == "in_creation":
-        logger.info(f"Node lvstore is in creation: {snode.get_id()}, skipping")
-        return False
+        # Bounded skip. "in_creation" is a restart-window marker owned by a
+        # (possibly remote) restart flow; while it is set the monitor runs no
+        # checks at all, so a leaked marker turns into a permanent monitoring
+        # blackout: the node stays 'online/health True' even with SPDK dead
+        # (incident 2026-07-07 13:52 — peer d277d436 segfaulted inside the
+        # window of a failed replica-rebuild, marker never restored, node
+        # zombie-online for 1.5h while every dependent restart kept failing
+        # against it). Skip only while a restart task owns the node or the
+        # marker is younger than the grace window; past that, reclaim it and
+        # resume checking.
+        node_id = snode.get_id()
+        first_seen = _lvstore_in_creation_first_seen.setdefault(node_id, time.time())
+        owned = None
+        try:
+            owned = tasks_controller.get_active_node_restart_task(
+                snode.cluster_id, node_id)
+        except Exception as e:
+            logger.debug("Restart-task lookup for %s failed: %s", node_id, e)
+        if owned or (time.time() - first_seen) < LVSTORE_IN_CREATION_STALE_SEC:
+            logger.info(f"Node lvstore is in creation: {snode.get_id()}, skipping")
+            return False
+        logger.error(
+            "Node %s lvstore_status has been 'in_creation' for >%ss with no "
+            "active restart task — reclaiming to 'ready' and resuming checks "
+            "(leaked restart-window marker)",
+            node_id, LVSTORE_IN_CREATION_STALE_SEC)
+        _lvstore_in_creation_first_seen.pop(node_id, None)
+        fresh = db.get_storage_node_by_id(node_id)
+        if fresh.lvstore_status == "in_creation":
+            fresh.lvstore_status = "ready"
+            fresh.write_to_db()
+            snode = fresh
+    else:
+        _lvstore_in_creation_first_seen.pop(snode.get_id(), None)
+
+    # A restart task already owns this node's full lifecycle (shutdown ->
+    # IN_RESTART -> recreate_lvstore -> ONLINE). The monitor must not run its
+    # own liveness probes against a node in that window: while the restart
+    # impl brings SPDK back up (notably during recreate_lvstore) the JSON-RPC
+    # unix socket has not begun accept()ing yet, so spdk_process_is_up /
+    # check_node_rpc transiently fail and the monitor would flip the node
+    # OFFLINE and queue a SECOND restart that fights the one already in flight
+    # (incident 2026-06-24: device-25 JC abort, then ~90s of monitor-vs-restart
+    # kill/restart churn). Defer until the task reaches DONE/canceled; the
+    # restart runner owns recovery and has its own max_retry + transient-reset.
+    #
+    # That is true only for a task that keeps making attempts. A task wedged
+    # inside one execution never consumes a retry, so the deferral is bounded
+    # by RESTART_TASK_DEFER_MAX_SEC — see that constant for the 2026-08-17
+    # deadlock this guards against.
+    if tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id()):
+        deferred_since = _restart_task_defer_first_seen.setdefault(
+            snode.get_id(), time.time())
+        deferred_for = time.time() - deferred_since
+        if deferred_for < RESTART_TASK_DEFER_MAX_SEC:
+            logger.info(
+                "Node %s has an active restart task; monitor deferring liveness "
+                "checks until it completes (%.0fs so far)",
+                snode.get_id(), deferred_for)
+            return True
+        logger.error(
+            "Node %s has had an active restart task for %.0fs (> %ds) — the "
+            "task is not progressing. Resuming monitor liveness handling so a "
+            "wedged restart cannot block this node's recovery indefinitely.",
+            snode.get_id(), deferred_for, RESTART_TASK_DEFER_MAX_SEC)
+    else:
+        _restart_task_defer_first_seen.pop(snode.get_id(), None)
 
     logger.info(f"Checking node {snode.hostname}")
 
@@ -696,11 +1931,22 @@ def check_node(snode):
     # intentionally shut down via sbctl.  Auto-restart is only added by
     # set_node_offline() when the monitor itself detects a failure.
     if snode.status == StorageNode.STATUS_OFFLINE:
+        # One-shot per offline episode. This branch exists because another
+        # service may have set the node offline without triggering the
+        # failover, so it must stay — but re-issuing it on every cycle turns
+        # a one-time promotion into a sustained pause storm on the peer
+        # (incident 2026-08-09: 2789 set_ana_state calls over 16 minutes).
         try:
-            storage_node_ops.trigger_ana_failover_for_node(snode)
+            if _ana_failover_once(snode):
+                logger.info("ANA failover applied for offline node %s "
+                            "(not previously triggered)", snode.get_id())
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
         return True
+
+    # Any non-OFFLINE observation ends the episode: re-arm so a future
+    # offline transition triggers the promotion again.
+    _ana_failover_rearm(snode.get_id())
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
@@ -710,9 +1956,19 @@ def check_node(snode):
         set_node_unreachable(snode)
         return False
 
+    # Kick off the LVS-port / data-nic check NOW so it runs in parallel with
+    # the liveness checks below (its result is only consumed at the end, and
+    # only matters for an otherwise-online node). If a liveness check fails
+    # first we return early and this daemon thread is simply abandoned.
+    port_check_thread, port_check_holder = _spawn_port_check(snode)
+
     # 2- check node API
     try:
-        snode_api = snode.client(timeout=10, retry=2)
+        # Liveness probe: short timeout, no connect retries — a host that is
+        # rebooting stops accepting connections, and retrying with backoff only
+        # delays flipping it not-online (incident 2026-06-25: ~21s of detection
+        # latency on a host_reboot came from stacked SnodeAPI retries/timeouts).
+        snode_api = snode.client(timeout=5, retry=1, connect_retry=0)
         ret, _ = snode_api.is_live()
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {ret}")
         if not ret:
@@ -726,7 +1982,7 @@ def check_node(snode):
 
     # 3- check spdk process through node API
     try:
-        snode_api = snode.client(timeout=40, retry=2)
+        snode_api = snode.client(timeout=10, retry=1, connect_retry=0)
         is_up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
         logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {bool(is_up)}")
         if not is_up:
@@ -745,9 +2001,25 @@ def check_node(snode):
     #so we try it twice. If all other checks pass again, but only this one fails: it's the spdk process
     if not node_rpc_check:
         logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
+        # A hung RPC channel on a live SPDK recovers by nothing else: the
+        # process is up, SNodeAPI answers, ping passes, so every other check
+        # says healthy. Abort it once the hang outlives RPC_HANG_ABORT_SEC.
+        hung_for = _rpc_hang_seconds(snode.get_id())
+        if hung_for >= RPC_HANG_ABORT_SEC and not _spdk_is_dead(snode):
+            _abort_hung_spdk(snode, hung_for)
+            return False
         if value()==0:
            increment()
            return False
+    else:
+        _note_rpc_ok(snode.get_id())
+        # SPDK's global nvme options can only be set before the first
+        # controller attach (spdk_bdev_nvme_set_opts returns -EPERM after
+        # that), so an SPDK that came up without the control plane's init
+        # sequence keeps compiled-in defaults for its entire lifetime --
+        # including timeout_us=0, i.e. no command timeout armed at all.
+        # Checked once per online episode: one RPC per restart, not per tick.
+        _verify_nvme_options_once(snode)
 
     decrement()
     if not node_rpc_check or not node_rpc_check_1:
@@ -760,9 +2032,21 @@ def check_node(snode):
     #    t.start()
     #    node_rpc_timeout_threads[snode.get_id()] = t
 
-    node_port_check = node_port_check_fun(snode)
+    # Collect the port/data-nic check that ran in parallel with the liveness
+    # checks. Bounded wait: if it hasn't finished (e.g. a slow/hung SnodeAPI on
+    # a rebooting host) treat it as inconclusive and let the next cycle decide,
+    # rather than pinning this node's cycle. Only a definitive False escalates.
+    port_check_thread.join(PORT_CHECK_JOIN_TIMEOUT_SEC)
+    if port_check_thread.is_alive():
+        logger.info(
+            f"Check: port/data-nic for {snode.mgmt_ip} inconclusive "
+            f"(still running after {PORT_CHECK_JOIN_TIMEOUT_SEC}s); "
+            f"deferring port-down decision to next cycle")
+        node_port_check = None
+    else:
+        node_port_check = port_check_holder["result"]
 
-    if not node_port_check:
+    if node_port_check is False:
         cluster = db.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
             logger.error("Port check failed")
@@ -790,31 +2074,117 @@ def check_node(snode):
             snode.get_id(), snode.status,
         )
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        readmit_devices_after_node_online(snode.get_id())
+
+
+def readmit_devices_after_node_online(node_id):
+    """Re-admit a recovered node's devices right after it was set ONLINE.
+
+    Node bring-up owns device re-online (device_set_state refuses a device
+    ONLINE while its node is not ONLINE -- the stale re-online guard). The
+    full-restart path raw-writes its devices back online, but the fast
+    DOWN/UNREACHABLE -> ONLINE clear is a recovery WITHOUT restart (transient
+    mgmt blip / port flap / network outage), and no other path re-onlines
+    devices that were marked unavailable during the outage window: port_allow
+    runs seconds BEFORE the ONLINE flip so its re-admit is refused by the
+    guard, and device_monitor auto-restart only touches io_error devices. A
+    device left unavailable here counts toward affected_nodes forever, and a
+    later unrelated dual outage then suspends the whole cluster (incidents
+    2026-07-02, x3). So: now that the node IS online (guard passes), re-admit
+    its devices. REMOVED is terminal; FAILED transitions are owned by the
+    explicit device-restart / failure-migration paths.
+    """
+    try:
+        fresh = db.get_storage_node_by_id(node_id)
+        readmitted = 0
+        for dev in fresh.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_REMOVED,
+                              NVMeDevice.STATUS_FAILED):
+                continue
+            logger.info(
+                f"Re-admitting device {dev.get_id()} (was {dev.status}) "
+                f"after node {fresh.get_id()} cleared to ONLINE")
+            # connect_peers=False: the peer fan-out reconnects every ONLINE
+            # peer to THIS node's devices, and all of them flip within this
+            # loop — running it per device repeats the identical delta
+            # reconcile d times. Coalesce to one fan-out after the loop.
+            if not device_controller.device_set_online(dev.get_id(),
+                                                       connect_peers=False):
+                logger.error(
+                    f"Re-admit of device {dev.get_id()} after node "
+                    f"{fresh.get_id()} cleared to ONLINE was refused")
+            else:
+                readmitted += 1
+        if readmitted:
+            device_controller.connect_peers_to_node_devices(fresh)
+    except Exception as e:
+        logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
+
+
+#: Retention housekeeping cadence. The scans are unbounded full-table reads
+#: (events especially), so they run from the MAIN loop on a period, never
+#: inside the per-status-change recompute path.
+HOUSEKEEPING_INTERVAL_SEC = 300
+_housekeeping_last_run: dict = {}
+
+
+def _run_periodic_housekeeping(cluster_id):
+    """Delete expired tasks and events for one cluster, at most once per
+    HOUSEKEEPING_INTERVAL_SEC. Runs in the main loop thread; a slow sweep
+    here delays only the next main-loop tick, never a node's liveness
+    monitoring."""
+    now = time.time()
+    last = _housekeeping_last_run.get(cluster_id, 0)
+    if now - last < HOUSEKEEPING_INTERVAL_SEC:
+        return
+    _housekeeping_last_run[cluster_id] = now
+    try:
+        _delete_old_tasks(db.get_job_tasks(cluster_id))
+        _delete_old_logs(db.get_events(), cluster_id)
+    except Exception as e:
+        logger.error(f"Retention housekeeping failed for {cluster_id}: {e}")
 
 
 def loop_for_node(snode):
-    # global logger
-    # logger = logging.getLogger()
-    # logger_handler = logging.StreamHandler(stream=sys.stdout)
-    # logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
-    # logger.addHandler(logger_handler)
+    # Not catching errors: Failures should propagate to avoid cross-loop failures from sticking
     while True:
         check_node(snode)
         logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
-if __name__ == "__main__":
+#: Replacing a dead per-node thread recovers a transaction that timed out, but
+#: not an FDB client that has wedged: `db` is process-global, so a replacement
+#: thread inherits the same client and dies the same way. Past this many
+#: replacements of one node's thread inside the window, stop replacing and let
+#: the failure leave main() — the process exits and the orchestrator restarts
+#: us with a fresh client.
+THREAD_RESPAWN_WINDOW_SEC = 120
+THREAD_RESPAWN_CEILING = 5
+
+# node_id -> times this monitor replaced that node's thread, newest last.
+_thread_respawns: dict[str, list[float]] = {}
+
+
+def _record_thread_respawn(node_id) -> int:
+    """Note a replacement of ``node_id``'s thread and return how many fall
+    inside THREAD_RESPAWN_WINDOW_SEC."""
+    now = time.time()
+    recent = [
+        at for at in _thread_respawns.get(node_id, [])
+        if now - at < THREAD_RESPAWN_WINDOW_SEC
+    ]
+    recent.append(now)
+    _thread_respawns[node_id] = recent
+    return len(recent)
+
+
+def main():
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
 
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()
@@ -826,8 +2196,19 @@ if __name__ == "__main__":
             for node in nodes:
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    if node_id in threads_maps:
+                        respawns = _record_thread_respawn(node_id)
+                        if respawns > THREAD_RESPAWN_CEILING:
+                            raise RuntimeError(
+                                f"node {node_id}: monitor thread died {respawns} times in "
+                                f"{THREAD_RESPAWN_WINDOW_SEC}s, exiting so the orchestrator "
+                                "restarts this service with a fresh FDB client")
                     logger.info(f"Creating thread for node {node_id}")
-                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t = threading.Thread(
+                        target=loop_for_node,
+                        args=(node,),
+                        daemon=True,  # prevents main thread failures from keeping the process alive
+                    )
                     t.start()
                     threads_maps[node_id] = t
                     logger.debug(threads_maps[node_id])
@@ -837,4 +2218,9 @@ if __name__ == "__main__":
                 logger.debug("Iteration has been finished...")
             except Exception:
                 logger.error("Error while updating cluster status")
+            _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

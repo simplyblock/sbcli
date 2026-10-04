@@ -2,7 +2,7 @@
 K8s-native node migration E2E test.
 
 Migrates a randomly chosen storage node to a user-specified worker node
-by patching the StorageNode CRD with action=restart.  FIO runs as K8s
+by creating a StorageNodeOps CR with action=migrate.  FIO runs as K8s
 Jobs throughout the migration to verify I/O is not interrupted.
 
 No SSH to worker nodes is required (Talos-compatible).
@@ -54,18 +54,30 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         if isinstance(self.migrate_to_worker, str):
             self.migrate_to_worker = self.migrate_to_worker.strip()
 
+        # New SSD PCIe addresses for the target worker (comma-separated string)
+        new_ssd_pcie_raw = kwargs.get("new_ssd_pcie", "")
+        if isinstance(new_ssd_pcie_raw, str) and new_ssd_pcie_raw.strip():
+            self.new_ssd_pcie = [addr.strip() for addr in new_ssd_pcie_raw.split(",") if addr.strip()]
+        else:
+            self.new_ssd_pcie = []
+
+        # Whether to reattach volumes after migration
+        reattach_raw = kwargs.get("reattach_volume", "")
+        self.reattach_volume = str(reattach_raw).strip().lower() in ("true", "1", "yes")
+
         # K8s resource naming
         self.STORAGE_CLASS_NAME = "simplyblock-csi-sc"
+        self.XFS_STORAGE_CLASS_NAME = "simplyblock-csi-sc-xfs"
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
 
         # Sizing
         self.pvc_size = "10Gi"
-        self.fio_size = "1G"
+        self.fio_size = "4G"
         self.FIO_RUNTIME = 2000
 
         # Counts
-        self.fio_num_jobs = 2
+        self.fio_num_jobs = 1
 
         # Tracking
         self.pvc_details: dict[str, dict] = {}
@@ -73,6 +85,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.clone_details: dict[str, dict] = {}
 
         self.logger.info(f"Migrate to worker: {self.migrate_to_worker}")
+        self.logger.info(f"New SSD PCIe addresses: {self.new_ssd_pcie}")
+        self.logger.info(f"Reattach volumes: {self.reattach_volume}")
 
     # ── Setup ─────────────────────────────────────────────────────────────────
 
@@ -97,6 +111,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                     raise
                 self.logger.info(f"Retrying base APIs. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
+
+        self._validate_storage_node_health()
 
         self.client_machines = []
         self.fio_node = []
@@ -145,18 +161,27 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.k8s_utils.cleanup_stale_fio_resources()
         sleep_n_sec(5)
 
+        # Capture pre-test cluster state for comparison with post-test diagnostics
+        try:
+            self.collect_management_details(suffix="_pre_test")
+        except Exception as e:
+            self.logger.warning(f"Pre-test diagnostics collection failed: {e}")
+
     # ── FIO config ────────────────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> str:
+    def _build_fio_config(self, name: str) -> tuple[str, str]:
         bs = f"{2 ** random.randint(2, 7)}k"
-        return (
+        run_id = _rand_seq(6)
+        randseed = random.randint(1, 2**63)
+
+        main_config = (
             f"[global]\n"
             f"name={name}-fio\n"
-            f"filename_format=/spdkvol/fio-testfile.$jobnum\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
             f"rw=randrw\n"
             f"rwmixread=50\n"
             f"bs={bs}\n"
-            f"iodepth=256\n"
+            f"iodepth=1\n"
             f"direct=1\n"
             f"ioengine=libaio\n"
             f"size={self.fio_size}\n"
@@ -167,10 +192,32 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             f"verify=md5\n"
             f"verify_dump=1\n"
             f"verify_fatal=1\n"
-            f"verify_backlog=128\n"
+            f"verify_backlog=4096\n"
+            f"verify_backlog_batch=32\n"
+            f"randseed={randseed}\n"
+            f"max_latency=20s\n"
             f"\n"
             f"[job1]\n"
         )
+
+        warmup_config = (
+            f"[global]\n"
+            f"name={name}-warmup\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
+            f"rw=write\n"
+            f"bs=1m\n"
+            f"iodepth=32\n"
+            f"direct=1\n"
+            f"ioengine=libaio\n"
+            f"size={self.fio_size}\n"
+            f"numjobs={self.fio_num_jobs}\n"
+            f"group_reporting\n"
+            f"zero_buffers\n"
+            f"\n"
+            f"[job1]\n"
+        )
+
+        return main_config, warmup_config
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str):
         """Save FIO pod logs to log directory for post-mortem debugging."""
@@ -191,6 +238,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
     def run(self):
         self.logger.info("Starting Test: K8s Native Node Migration During FIO")
+        self.start_nvme_iostat_monitor()
 
         assert self.migrate_to_worker, (
             "migrate_to_worker is required — provide --migrate_to_worker <k8s-node-name>"
@@ -202,7 +250,10 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         cluster_id = self.cluster_id
         pool_name = self.pool_name
 
-        self.sbcli_utils.add_storage_pool(pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name)
+        if actual_pool and actual_pool != pool_name:
+            self.logger.info(f"Pool name resolved: {pool_name!r} -> {actual_pool!r}")
+            pool_name = actual_pool
         sleep_n_sec(10)
 
         self.k8s_utils.create_storage_class(
@@ -211,6 +262,14 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             pool_name=pool_name,
             ndcs=self.ndcs,
             npcs=self.npcs,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
         )
         self.k8s_utils.create_volume_snapshot_class(name=self.SNAPSHOT_CLASS_NAME)
 
@@ -226,15 +285,17 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             pvc_name = f"mig-pvc-{_rand_seq(4)}-{i}"
             job_name = f"fio-{pvc_name}"
             cm_name = f"fio-cfg-{pvc_name}"
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             self.k8s_utils.create_pvc(
                 name=pvc_name,
                 size=self.pvc_size,
-                storage_class=self.STORAGE_CLASS_NAME,
+                storage_class=sc_name,
             )
             self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
 
-            fio_config = self._build_fio_config(pvc_name)
+            fio_config, warmup_config = self._build_fio_config(pvc_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=job_name,
@@ -243,12 +304,15 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
 
             self.pvc_details[pvc_name] = {
                 "job_name": job_name,
                 "configmap_name": cm_name,
                 "snapshots": [],
+                "storage_class": sc_name,
+                "fs_type": fs_type,
             }
             sleep_n_sec(5)
 
@@ -273,15 +337,17 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             detail["snapshots"].append(snap_name)
             self.snapshot_details[snap_name] = {"pvc_name": pvc_name}
 
+            clone_sc = detail.get("storage_class", self.STORAGE_CLASS_NAME)
+            clone_fs_type = detail.get("fs_type", "ext4")
             self.k8s_utils.create_clone_pvc(
                 name=clone_name,
                 size=self.pvc_size,
-                storage_class=self.STORAGE_CLASS_NAME,
+                storage_class=clone_sc,
                 snapshot_name=snap_name,
             )
             self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
 
-            fio_config = self._build_fio_config(clone_name)
+            fio_config, warmup_config = self._build_fio_config(clone_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(clone_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=clone_job,
@@ -290,12 +356,15 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
 
             self.clone_details[clone_name] = {
                 "snap_name": snap_name,
                 "job_name": clone_job,
                 "configmap_name": clone_cm,
+                "storage_class": clone_sc,
+                "fs_type": clone_fs_type,
             }
             sleep_n_sec(5)
 
@@ -314,24 +383,58 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         migrate_node = random.choice(online_nodes)
         migrate_node_uuid = migrate_node["id"]
+        migrate_node_ip = migrate_node["mgmt_ip"]
         self.logger.info(
-            f"Randomly selected node {migrate_node_uuid} for migration "
-            f"to worker '{self.migrate_to_worker}'"
+            f"Randomly selected node {migrate_node_uuid} (IP: {migrate_node_ip}) "
+            f"for migration to worker '{self.migrate_to_worker}'"
         )
 
         migration_timestamp = int(datetime.now().timestamp())
 
-        self.k8s_utils.patch_storage_node_migrate(
+        # Ensure the storage-node pod on the migration target is healthy
+        # BEFORE creating the StorageNodeOps CR.  If worker-5 was labelled
+        # during cluster setup the DaemonSet will have scheduled a pod, but
+        # the operator may not have populated the per-node-config ConfigMap
+        # entry yet — causing the init container to crash with MAX_LVOL=0.
+        # Fix the pod now so the operator finds a healthy pod when it starts
+        # the migration and can resolve DNS immediately.
+        self.k8s_utils.wait_for_per_node_config(
+            self.migrate_to_worker, timeout=120
+        )
+        self.k8s_utils.delete_storage_node_pods_on_worker(
+            self.migrate_to_worker
+        )
+
+        ops_name, storage_node_cr = self.k8s_utils.patch_storage_node_migrate(
             node_uuid=migrate_node_uuid,
             target_worker=self.migrate_to_worker,
+            new_ssd_pcie=self.new_ssd_pcie if self.new_ssd_pcie else None,
+            reattach_volume=self.reattach_volume,
+        )
+
+        # Verify the StorageNodeOps CR was created
+        ops_json = self.k8s_utils.get_resource_json(
+            "storagenodeops.storage.simplyblock.io", ops_name,
+            namespace=self.k8s_utils.namespace,
+        )
+        ops_spec = ops_json.get("spec", {})
+        self.logger.info(f"StorageNodeOps spec after create: {ops_spec}")
+        assert ops_spec.get("action") == "migrate", (
+            f"StorageNodeOps verification failed: expected action=migrate, "
+            f"got: {ops_spec}"
+        )
+        assert ops_spec.get("storageNodeRef") == storage_node_cr, (
+            f"StorageNodeOps verification failed: expected "
+            f"storageNodeRef={storage_node_cr}, got: {ops_spec}"
         )
 
         # ── Step 5: Wait for migration to complete ────────────────────────
-        self.logger.info("Step 5: Waiting for migration to complete")
+        self.logger.info("Step 5: Waiting for StorageNodeOps to complete")
 
-        sleep_n_sec(30)
+        # Wait for the StorageNodeOps CR to reach Succeeded
+        self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
 
-        # Wait for node to come back online
+        # Also verify via sbcli that node is back online
         self.sbcli_utils.wait_for_storage_node_status(
             node_id=migrate_node_uuid,
             status="online",
@@ -348,10 +451,27 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         # Wait for migration/balancing tasks
         sleep_n_sec(60)
         self.validate_migration_for_node(
-            migration_timestamp, 2000, None, 60, no_task_ok=True
+            migration_timestamp, 2000, None, 60, no_task_ok=False
         )
         sleep_n_sec(30)
 
+        # Verify node actually moved to the target worker
+        self.logger.info(
+            f"Verifying node {migrate_node_uuid} migrated to worker "
+            f"'{self.migrate_to_worker}'"
+        )
+        updated_node = self.sbcli_utils.get_storage_node_details(migrate_node_uuid)
+        new_ip = updated_node[0]["mgmt_ip"]
+        spdk_pod = self.k8s_utils.get_spdk_pod_name(new_ip)
+        actual_worker = self.k8s_utils.get_pod_node_name(spdk_pod)
+        self.logger.info(
+            f"Node {migrate_node_uuid}: old IP={migrate_node_ip}, "
+            f"new IP={new_ip}, SPDK pod={spdk_pod}, worker={actual_worker}"
+        )
+        assert actual_worker == self.migrate_to_worker, (
+            f"Migration verification failed: node {migrate_node_uuid} is on "
+            f"worker '{actual_worker}', expected '{self.migrate_to_worker}'"
+        )
         self.logger.info(
             f"Node {migrate_node_uuid} successfully migrated to "
             f"worker '{self.migrate_to_worker}'"
@@ -363,16 +483,17 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.logger.info("Step 6: Validating all FIO jobs and node health")
 
         # Validate FIO on PVCs
+        fio_timeout = self.FIO_RUNTIME + 300
         for pvc_name, detail in self.pvc_details.items():
             self.logger.info(f"Validating FIO job for PVC: {pvc_name}")
             self._save_fio_pod_logs(detail["job_name"], pvc_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Validate FIO on clones
         for clone_name, detail in self.clone_details.items():
             self.logger.info(f"Validating FIO job for clone: {clone_name}")
             self._save_fio_pod_logs(detail["job_name"], clone_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Validate all nodes healthy
         final_nodes = self.sbcli_utils.get_storage_nodes()["results"]

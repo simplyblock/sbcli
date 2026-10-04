@@ -1,0 +1,37 @@
+# Findings ignored here are not fixable from our side: they are CPython
+# stdlib issues with no fix in any 3.14.x release of the image's interpreter,
+# whether because upstream declined the backport outright or simply hasn't
+# shipped one yet, so `only-fixed` does not filter them out — Grype sees a fix
+# version (an alpha/rc of the *next* minor) and reports the match.
+#
+# Each entry is scoped to the interpreter binary alone, so the same CVE in any
+# other package still fails the build.
+#
+# Re-check when the image moves to a Python minor that carries the fix (the
+# `PYTHON_VERSION` arg in docker/Dockerfile), or if upstream reverses a
+# will-not-fix decision, and drop the entry then.
+ignore:
+  # poplib command injection via newlines in user-controlled commands.
+  # Fixed in 3.15.0a6 only; upstream held off backporting to 3.14 because the
+  # change breaks existing behaviour and the main-branch commit still needs
+  # review against the relevant RFCs (python/cpython#143923).
+  # The control plane never imports poplib — it speaks JSON-RPC and HTTP, not
+  # POP3 — so nothing in the image reaches the affected code.
+  - vulnerability: CVE-2025-15367
+    package:
+      name: python
+      type: binary
+
+  # tarfile extraction filter bypass: when extracting a link on a system
+  # without link support, tarfile falls back to extracting the member and runs
+  # the extraction filter twice, ignoring one of the results, so a member the
+  # filter should skip can still be written (arbitrary file write).
+  # Fixed in 3.15.0 only; there is no 3.14.x release carrying it, so
+  # `only-fixed` does not filter it out.
+  # The control plane only *creates* tarballs (`tarfile.open(..., "w:gz")` in
+  # scripts/collect_logs.py) and never extracts an archive, so the affected
+  # extraction path is not reachable.
+  - vulnerability: CVE-2026-87910
+    package:
+      name: python
+      type: binary

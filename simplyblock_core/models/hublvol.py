@@ -1,4 +1,3 @@
-# coding=utf-8
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -6,12 +5,12 @@ from simplyblock_core.models.base_model import BaseModel
 class HubLVol(BaseModel):
     """Identifying information of a HubLVol
     """
-    uuid: str = ""
     nqn: str = ""
     bdev_name: str = ""
     nvmf_port: int = 0
     model_number: str = ""
     nguid: str = ""
+    hublvol_name: str = "hublvol"
 
     def get_remote_bdev_name(self):
         return f"{self.bdev_name}n1"

@@ -1,15 +1,31 @@
-from typing import Annotated, Any
+from collections.abc import Callable
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
+from uuid import UUID
+
+from fastapi import Query, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, BeforeValidator, Field
 
 from simplyblock_core import utils as core_utils
-
-from pydantic import BeforeValidator, Field
-
 
 Unsigned = Annotated[int, Field(ge=0)]
 Size = Annotated[Unsigned, BeforeValidator(core_utils.parse_size)]
 Percent = Annotated[int, Field(ge=0, le=100)]
 Port = Annotated[int, Field(ge=0, lt=65536)]
+# Records spell an unset reference as an empty string rather than omitting it.
+OptionalUUID = Annotated[UUID | None, BeforeValidator(lambda value: value or None)]
+# Records spell an unassigned slot in the cluster map as -1 rather than omitting it.
+OptionalIndex = Annotated[
+    Unsigned | None,
+    BeforeValidator(lambda value: None if isinstance(value, int) and value < 0 else value),
+]
+
+#: Re-exported rather than redefined: the manifest in the core layer needs the
+#: same type, and one definition is what keeps the two from drifting. Here so
+#: that API models find their scalar types in one place.
+NQN = core_utils.NQN
 
 
 def _validate_url_path(value: Any) -> str:
@@ -24,3 +40,29 @@ def _validate_url_path(value: Any) -> str:
     return value
 
 UrlPath = Annotated[str, _validate_url_path]
+
+CreationResponseFormat = Literal["empty", "full", "identifier"]
+CreationResponseFormatParameter = Annotated[CreationResponseFormat, Query(alias="response-format")]
+
+
+def creation_response(
+    request: Request,
+    response_format: CreationResponseFormat,
+    entity_id: UUID,
+    route_name: str,
+    route_kwargs: dict[str, UUID | str],
+    get_full: Callable[[UUID], BaseModel],
+    extra_headers: dict[str, str] | None = None,
+) -> Response:
+    headers = {"Location": str(request.app.url_path_for(route_name, **route_kwargs))}
+    if extra_headers:
+        headers.update(extra_headers)
+
+    if response_format == "empty":
+        return Response(status_code=201, headers=headers)
+    elif response_format == "identifier":
+        return JSONResponse(content=str(entity_id), status_code=201, headers=headers)
+    elif response_format == "full":
+        return JSONResponse(content=jsonable_encoder(get_full(entity_id)), status_code=201, headers=headers)
+    else:
+        raise ValueError(f"Unknown response format: {response_format!r}")

@@ -19,6 +19,8 @@ The `sbctl` tooling can be installed using our pypi package [sbctl](https://pypi
 pip install --upgrade sbctl
 ```
 
+Requires Python 3.9 or newer.
+
 ## Repository Components
 
 This repository contains the source code for the Simplyblock Control Plane core services and the command line interface
@@ -51,7 +53,7 @@ If commands or options are added, updated, or removed, the YAML file, the genera
 startup code of `sbctl`.
 
 ```bash
-./simplyblock_cli/scripts/generate.sh
+tox run -e generate
 ```
 
 Executing this command updates `simplyblock_cli/cli.py` according to the reference file.

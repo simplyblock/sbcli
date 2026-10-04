@@ -1,17 +1,17 @@
 import base64
+import logging
 import random
 import re
 import string
-from typing import Literal, Optional
 import traceback
+from typing import Literal
 
 from flask import jsonify
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretBytes, SecretStr, model_validator
 from werkzeug.exceptions import HTTPException
 
 from simplyblock_core import constants
 from simplyblock_core.utils.pci import PCIAddress
-
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
 IFNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\\.]{1,15}$')
@@ -40,18 +40,18 @@ def response_schema(result_schema: dict) -> dict:
 def _to_jsonable(obj):
     """Recursively convert objects to JSON-serializable structures.
 
+    - SecretStr/SecretBytes -> plaintext via get_secret_value() (v1 wire
+      responses are authorized; mirrors v2's @field_serializer(when_used='json')).
     - Pydantic BaseModel -> dict via model_dump()
     - dict -> dict with values converted
     - list/tuple -> list with items converted
     - set/frozenset -> list with items converted
     Otherwise returned as-is.
     """
+    if isinstance(obj, (SecretStr, SecretBytes)):
+        return obj.get_secret_value()
     if isinstance(obj, BaseModel):
-        # Pydantic v2: model_dump; v1: dict()
-        try:
-            return obj.model_dump()
-        except AttributeError:
-            return obj.dict()
+        return obj.model_dump()
     if isinstance(obj, dict):
         return {k: _to_jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -109,7 +109,7 @@ def get_int_value_or_default(data, key, default):
 
 
 def get_cluster_id(request):
-    if "Authorization" in request.headers and request.headers["Authorization"]:
+    if request.headers.get("Authorization"):
         au = request.headers["Authorization"]
         if len(au.split()) == 2:
             cluster_id = au.split()[0]
@@ -120,8 +120,9 @@ def get_cluster_id(request):
                     if tkn:
                         cluster_id = tkn.split(":")[0]
                         cluster_secret = tkn.split(":")[1]
-                except Exception as e:
-                    print(e)
+                except Exception:
+                    # Exception message can carry the decoded b64 payload.
+                    logging.exception("Failed to decode Basic Auth header")
                     return
 
             return cluster_id
@@ -158,7 +159,7 @@ def error_handler(exception: Exception):
 
 class RPCPortParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=0, le=65536)
-    cluster_id: Optional[str]
+    cluster_id: str | None
 
 
 class DeviceParams(BaseModel):
@@ -172,9 +173,9 @@ class NVMEConnectParams(BaseModel):
 
 
 class DisconnectParams(BaseModel):
-    nqn: Optional[str]
-    device_path: Optional[str]
-    all: Optional[Literal[True]]
+    nqn: str | None
+    device_path: str | None
+    all: Literal[True] | None
 
     @model_validator(mode='after')
     def verify_mutually_exclusive(self):

@@ -1,8 +1,8 @@
+import re
+import sys
+
 import jinja2
 import yaml
-import sys
-import re
-
 from jsonschema import validators
 
 
@@ -49,6 +49,9 @@ def argument_type(spec):
     if spec == 'list':
         return "list_type()"
 
+    if spec == 'secret':
+        return "SecretStr"
+
     return spec
 
 
@@ -87,8 +90,7 @@ def apply_deprecated_warning(item):
 
 
 def make_identifier(name):
-    if name.startswith("--"):
-        name = name[2:]
+    name = name.removeprefix("--")
     return re.sub("-", "_", name.lower())
 
 
@@ -210,7 +212,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})
-        with open("%s/cli.py" % base_path, "t+w") as target:
+        with open("%s/cli.py" % base_path, "w", newline="\n") as target:
             target.write(output)
 
         print("Successfully generated cli.py")

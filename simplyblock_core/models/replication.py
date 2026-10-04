@@ -1,0 +1,168 @@
+"""Replication targets and policies.
+
+Three levels: a source cluster has any number of **targets** (named
+destinations), each target has one or more **policies** (which own the cadence),
+and a volume optionally references one policy. Structurally this mirrors
+``BackupPolicy`` / ``BackupPolicyAttachment`` in ``models/backup.py``, including
+the ``cluster_id/uuid`` composite id.
+"""
+import datetime
+from typing import ClassVar
+
+from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index, Unique
+
+
+class ReplicationTarget(BaseModel):
+    """A named replication destination of a source cluster.
+
+    Replaces the single ``Cluster.snapshot_replication_target_*`` triple, which
+    could only hold one destination and was overwritten by every
+    ``cluster add-replication``.
+    """
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'target_name')),
+    )
+
+    STATUS_ACTIVE = 'active'
+    STATUS_INACTIVE = 'inactive'
+
+    _STATUS_CODE_MAP: ClassVar[dict] = {
+        STATUS_ACTIVE: 0,
+        STATUS_INACTIVE: 1,
+    }
+
+    cluster_id: str = ""          # SOURCE cluster this target belongs to
+    target_name: str = ""         # unique per source cluster
+    target_cluster_id: str = ""
+    # Always a UUID: resolving a pool NAME lazily is what made add_replication
+    # raise KeyError despite advertising "ID or name".
+    target_pool_uuid: str = ""
+    timeout_sec: int = 60 * 10
+    status: str = STATUS_ACTIVE
+
+    def get_id(self):
+        return "%s/%s" % (self.cluster_id, self.uuid)
+
+    def write_to_db(self, kv_store=None):
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
+        super().write_to_db(kv_store)
+
+
+class ReplicationPolicy(BaseModel):
+    """Cadence, mode and retention shared by a group of volumes."""
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'policy_name')),
+    )
+
+    STATUS_ACTIVE = 'active'
+    STATUS_INACTIVE = 'inactive'
+
+    _STATUS_CODE_MAP: ClassVar[dict] = {
+        STATUS_ACTIVE: 0,
+        STATUS_INACTIVE: 1,
+    }
+
+    MODE_FAILOVER = "failover"
+    MODE_MIGRATION = "migration"
+
+    # A replicated snapshot holds only its own clusters; deleting one
+    # swap-merges its segments into the successor CHAINED to it. Keep fewer than
+    # a pair and an arriving snapshot has nothing to chain onto, so the target
+    # ends up holding the newest delta over holes (see commit b34bb8d96).
+    MIN_KEEP_REPLICATED = 2
+
+    cluster_id: str = ""          # SOURCE cluster
+    policy_name: str = ""         # unique per source cluster
+    target_id: str = ""           # ReplicationTarget.get_id()
+    interval_min: int = 1         # internal snapshot cadence, 0 = user snaps only
+    mode: str = MODE_FAILOVER
+    keep_replicated: int = MIN_KEEP_REPLICATED
+    #: Tiered retention, e.g. "15m:2h,1h:11h,1d:7d" -- one snapshot every 15
+    #: minutes for the last 2 hours, then hourly for 11 hours, then daily for
+    #: 7 days. Empty keeps the flat keep_replicated behaviour. A schedule
+    #: never overrides MIN_KEEP_REPLICATED: the newest pair is always kept so
+    #: an arriving delta has a predecessor to chain onto.
+    retention_schedule: str = ""
+    #: All volumes attached to this policy form ONE consistency group: they
+    #: must share an LVS, cadence snapshots are taken as one frozen group
+    #: (bdev_lvol_snapshot_group), and fail-over generations are resolved
+    #: group-wide. Auto-creates/deletes a ConsistencyGroup record.
+    consistency_group: bool = False
+    status: str = STATUS_ACTIVE
+
+    def get_id(self):
+        return "%s/%s" % (self.cluster_id, self.uuid)
+
+    def write_to_db(self, kv_store=None):
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
+        super().write_to_db(kv_store)
+
+
+class ConsistencyGroup(BaseModel):
+    """A group of volumes that snapshot as one crash-consistent generation.
+
+    A group is born from its first labeled member volume and identified by a
+    ``group_name`` unique within its cluster (a PVC's
+    ``storage.simplyblock.io/consistency-group`` label on the Kubernetes path).
+    The field is deliberately NOT called ``name``: BaseModel.name is the class
+    name and the middle segment of every FDB key, so shadowing it moves the
+    record out of the class keyspace (see tests/unit/models/test_reserved_fields.py).
+    ``members`` maps lvol id to its membership EPOCH:
+
+        {"joined_seq": N, "removed_seq": M}
+
+    A member is included in group generation ``seq`` iff
+    ``joined_seq <= seq`` and (``removed_seq == 0`` or ``seq <= removed_seq``).
+    Late joiners deliberately do NOT inherit history: they join at
+    ``last_group_seq + 1``, i.e. the first group snapshot taken AFTER the
+    attach, because earlier group snapshots simply do not contain them.
+
+    ``policy_id`` is optional: it is set for the legacy path where a
+    replication policy owns the group, and empty for a standalone group. The
+    membership and generation model is identical either way.
+    """
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'group_name')),
+        # Indexed by the bare uuid: the field holds a ReplicationPolicy
+        # get_id(), and callers resolve a policy from either half of it.
+        Index('policy_id', arity=1, extract=lambda group: (
+            [(group.policy_id.split('/')[-1],)] if group.policy_id else []
+        )),
+    )
+
+    cluster_id: str = ""
+    #: group name, unique per cluster; the identity a labeled volume joins by.
+    group_name: str = ""
+    policy_id: str = ""           # ReplicationPolicy.get_id(), optional
+    #: pinned placement: every member volume lives on this node / LVS. Set by
+    #: the first member and enforced for all others.
+    node_id: str = ""
+    lvs_name: str = ""
+    #: monotonically increasing generation counter; group snapshot N stamps
+    #: every member snapshot it takes with group_seq = N.
+    last_group_seq: int = 0
+    members: dict = default_factory(dict)
+    status: str = "active"
+
+    def get_id(self):
+        return "%s/%s" % (self.cluster_id, self.uuid)
+
+    def write_to_db(self, kv_store=None):
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
+        super().write_to_db(kv_store)
+
+    def included_in_seq(self, lvol_id, seq):
+        m = (self.members or {}).get(lvol_id)
+        if not m or not seq:
+            return False
+        if m.get("joined_seq", 0) > seq:
+            return False
+        removed = m.get("removed_seq", 0)
+        return removed == 0 or seq <= removed

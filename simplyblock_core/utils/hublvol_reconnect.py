@@ -1,4 +1,3 @@
-# coding=utf-8
 """Cross-process coordinator for hublvol NVMe-oF (re)attach.
 
 All ``bdev_nvme_attach_controller`` / ``bdev_nvme_detach_controller`` calls
@@ -40,7 +39,6 @@ import time
 import uuid
 
 import fdb  # type: ignore[import-not-found]
-
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +87,38 @@ DEFAULT_DETACH_WAIT_SEC = 10.0
 #: ``cntlid N are duplicated`` (LVS_5918 incident, 2026-04-25 12:47:18).
 INTER_ATTACH_SLEEP_SEC = 3.0
 
+#: Optional gate the deferred (redundant-path) attaches wait on before their
+#: first RPC.
+#:
+#: Deferring those attaches to a daemon thread was supposed to move their cost
+#: "outside the IO-impact window". It did not: the thread honours
+#: INTER_ATTACH_SLEEP_SEC relative to the foreground attach, so it wakes ~3s
+#: later -- which, during a restart, is still inside the port fence. On
+#: 2026-09-01 the foreground attach landed at 16:28:24.607 (before the block)
+#: and the deferred one at 16:28:27.739, mid-fence, costing 1.04s of a 12.2s
+#: fence and then being destroyed anyway when the block converted to reject.
+#:
+#: A restart sets this to an Event it fires after the port is unblocked, so
+#: "deferred" means "after the fence" rather than "after a timer". Callers that
+#: set nothing keep the old timer-only behaviour.
+_defer_gate = None
+
+#: Ceiling on waiting for that gate, so a caller that never fires it (crash,
+#: abort along an unexpected path) cannot strand the daemon thread for ever.
+DEFER_GATE_WAIT_SEC = 60.0
+
+
+def set_defer_gate(event):
+    """Make deferred redundant-path attaches wait for ``event``."""
+    global _defer_gate
+    _defer_gate = event
+
+
+def clear_defer_gate():
+    """Drop the gate; deferred attaches resume timer-only behaviour."""
+    global _defer_gate
+    _defer_gate = None
+
 #: How long the FDB advisory lock lives if the holder crashes without
 #: releasing. Must be >> typical reconcile runtime (including detach-wait).
 #: Other callers block on the lock, not on the SPDK RPC, so this only bounds
@@ -106,6 +136,99 @@ DEFAULT_LOCK_TTL_SEC = 60
 HUBLVOL_CTRLR_LOSS_TIMEOUT_SEC = 3
 HUBLVOL_RECONNECT_DELAY_SEC = 1
 HUBLVOL_FAST_IO_FAIL_TIMEOUT_SEC = 1
+
+#: Multipath policy asserted on every hublvol remote bdev.
+#:
+#: A hublvol controller's path set spans two axes at once: the LVS leader's
+#: data NICs (ANA ``optimized``, storage_node.py:399) and the failover
+#: node's (ANA ``non_optimized``, storage_node.py:518). The two axes want
+#: opposite policies — round-robin across the leader's NICs, strict standby
+#: for the failover node — and ``active_active`` delivers exactly that,
+#: because SPDK load-balances only WITHIN an ANA state:
+#: ``_bdev_nvme_find_io_path`` (bdev_nvme.c:1150) returns the first
+#: available ``optimized`` path in its round-robin scan and reaches
+#: ``non_optimized`` only when no optimized path exists at all. So the
+#: leader/failover preference stays expressed purely in ANA and is not
+#: weakened by this setting.
+#:
+#: Without this call the bdev keeps SPDK's creation default
+#: ACTIVE_PASSIVE (bdev_nvme.c:4690): one NIC of the leader carries every
+#: hub IO and the second path is discovered only at failover time, which is
+#: how a tertiary ends up effectively single-pathed to its hub (the
+#: 2026-08-03 six-node cascade turned on exactly that).
+HUBLVOL_MP_POLICY = "active_active"
+
+#: Selector for :data:`HUBLVOL_MP_POLICY`. ``None`` leaves SPDK's
+#: ``active_active`` default (``round_robin`` with ``rr_min_io`` coerced to
+#: 1, bdev_nvme.c:5626), matching the remote-device/JM path in
+#: ``storage_node_ops._connect_device``. ``"queue_depth"`` is the
+#: alternative if per-IO alternation proves worse for mixed IO sizes.
+HUBLVOL_MP_SELECTOR = None
+
+#: Bounded wait for the namespace bdev to surface before asserting the
+#: policy. A controller attach can report ``enabled`` a few ms before the
+#: AER-driven ``n1`` bdev appears — ``connect_to_hublvol`` carries its own
+#: poll for the same reason.
+HUBLVOL_MP_POLICY_WAIT_TRIES = 10
+HUBLVOL_MP_POLICY_WAIT_SLEEP = 0.1
+
+
+def ensure_hublvol_active_active(rpc, ctrl_name, node_id="?", role="?",
+                                 wait=True, request_timeout=None):
+    """Assert :data:`HUBLVOL_MP_POLICY` on the hublvol bdev of ``ctrl_name``.
+
+    Idempotent, and deliberately non-fatal: callers gate their restart /
+    failback flow on the *attach* succeeding, not on the policy, and every
+    reconcile re-asserts it. A failure here degrades the hub to SPDK's
+    ACTIVE_PASSIVE default (one NIC carries hub IO) — worth a warning, not
+    worth failing a rejoin over.
+
+    ``wait=False`` skips the bdev-surfaced poll, for callers running inside
+    the LVS-rejoin freeze / client-port-block window where the sub-second
+    budget must not absorb a retry loop.
+
+    Returns True iff the policy was committed.
+    """
+    bdev_name = f"{ctrl_name}n1"
+    tries = HUBLVOL_MP_POLICY_WAIT_TRIES if wait else 1
+    for attempt in range(tries):
+        try:
+            if rpc.bdev_get(bdev_name):
+                break
+        except Exception as e:
+            logger.warning(
+                "hublvol %s on %s (%s): bdev_get(%s) raised %s; leaving "
+                "multipath policy at SPDK default",
+                ctrl_name, node_id, role, bdev_name, e)
+            return False
+        if attempt + 1 < tries:
+            time.sleep(HUBLVOL_MP_POLICY_WAIT_SLEEP)
+    else:
+        logger.warning(
+            "hublvol %s on %s (%s): %s not surfaced yet; leaving multipath "
+            "policy at SPDK default (next reconcile re-asserts)",
+            ctrl_name, node_id, role, bdev_name)
+        return False
+
+    try:
+        ret = rpc.bdev_nvme_set_multipath_policy(
+            bdev_name, HUBLVOL_MP_POLICY, selector=HUBLVOL_MP_SELECTOR,
+            request_timeout=request_timeout)
+    except Exception as e:
+        logger.warning(
+            "hublvol %s on %s (%s): set_multipath_policy(%s) raised %s",
+            ctrl_name, node_id, role, HUBLVOL_MP_POLICY, e)
+        return False
+    if not ret:
+        logger.warning(
+            "hublvol %s on %s (%s): set_multipath_policy(%s) returned falsy",
+            ctrl_name, node_id, role, HUBLVOL_MP_POLICY)
+        return False
+
+    logger.info(
+        "hublvol %s on %s (%s): multipath policy %s asserted on %s",
+        ctrl_name, node_id, role, HUBLVOL_MP_POLICY, bdev_name)
+    return True
 
 
 class HublvolReconnectError(Exception):
@@ -203,6 +326,10 @@ class _HublvolLock:
         self._token = uuid.uuid4().hex
         self._process_lock = None  # set in __enter__ when kv_store is None
         self.last_attach_at = 0.0
+        # Set by HublvolReconnectCoordinator.acquire_lock for locks whose
+        # lifetime is owned by the restart port-block flow.
+        self.externally_managed = False
+        self.pending_stamp = False
 
     def __enter__(self):
         if self._kv is None:
@@ -249,6 +376,11 @@ class _HublvolLock:
             # Release must never raise from __exit__; TTL will recover.
             logger.warning("Failed to release hublvol lock %s: %s", self._key, e)
         return False
+
+    def release(self):
+        """Explicit release for locks entered outside a ``with`` block (the
+        pre-acquired port-block-window flow). Never raises; TTL recovers."""
+        self.__exit__(None, None, None)
 
 
 def _ctrlrs_from_list(rpc, ctrl_name):
@@ -414,8 +546,32 @@ class HublvolReconnectCoordinator:
         self._cooldown = cooldown_sec
         self._lock_ttl = lock_ttl_sec
 
+    def acquire_lock(self, node_id, lvstore):
+        """Enter and return the hublvol advisory lock for ``(node_id,
+        lvstore)`` OUTSIDE of :meth:`reconcile`.
+
+        Purpose: the lock acquire is one FDB transaction (+0.1s poll
+        quantums when contended) — measured avg 858ms/std 487 inside restart
+        port-block windows (2026-07-21, n=11). Pre-acquiring BEFORE the
+        client port is blocked and passing the entered lock to
+        ``reconcile(lock=...)`` moves that transaction out of the
+        latency-critical window without changing what the lock excludes —
+        the exclusion span only grows (pre-block .. post-unblock), it never
+        shrinks. Caller MUST call ``lock.release()`` in a finally block;
+        the TTL recovers from a crashed holder.
+        """
+        lock = _HublvolLock(self._db.kv_store, node_id, lvstore,
+                            ttl_sec=self._lock_ttl)
+        lock.__enter__()
+        # Externally-managed locks defer the success stamp (one FDB txn) to
+        # the caller's release point — post-unblock — instead of paying it
+        # inside the port-block window (#2, 2026-07-21).
+        lock.externally_managed = True
+        lock.pending_stamp = False
+        return lock
+
     def reconcile(self, node, primary_node, peer_nodes, role="secondary",
-                  rpc_timeout=None):
+                  rpc_timeout=None, lock=None):
         """Observe, then converge, the hublvol controller state.
 
         Returns True if the controller ends up with at least one
@@ -427,6 +583,13 @@ class HublvolReconnectCoordinator:
         abort fast. ``None`` (default) leaves the rpc client's own
         timeout in place — appropriate for post-freeze background
         reconciliation.
+
+        ``lock``: an already-entered advisory lock from
+        :meth:`acquire_lock` for the SAME ``(node, primary_node.lvstore)``
+        pair. When given, reconcile runs under it and does NOT release it —
+        ownership stays with the caller (the port-block-window flow
+        acquires before the block and releases after the unblock). When
+        None (default), the lock is acquired and released here, unchanged.
         """
         if primary_node.hublvol is None:
             raise ValueError(
@@ -444,9 +607,20 @@ class HublvolReconnectCoordinator:
                 f"no data-NIC IPs to attach for hublvol {ctrl_name} on "
                 f"{node.get_id()}")
 
+        if lock is not None:
+            return self._reconcile_under_lock(
+                lock, node, ctrl_name, nqn, port, expected, role,
+                rpc_timeout)
         with _HublvolLock(self._db.kv_store, node.get_id(),
                           primary_node.lvstore,
-                          ttl_sec=self._lock_ttl) as lock:
+                          ttl_sec=self._lock_ttl) as owned_lock:
+            return self._reconcile_under_lock(
+                owned_lock, node, ctrl_name, nqn, port, expected, role,
+                rpc_timeout)
+
+    def _reconcile_under_lock(self, lock, node, ctrl_name, nqn, port,
+                              expected, role, rpc_timeout):
+        if True:  # preserve the original with-block body indentation
             rpc = node.rpc_client()
 
             # 1. Cooldown: coalesce a second arrival inside the window.
@@ -500,7 +674,23 @@ class HublvolReconnectCoordinator:
                     node, role, rpc_timeout=rpc_timeout)
 
             if ok:
-                lock.stamp_attach()
+                # Round-robin the leader's data NICs; the failover node's
+                # paths stay passive via ANA. Skip the bdev-surfaced poll
+                # when we're inside the freeze window (rpc_timeout set) —
+                # the deferred redundant-path worker re-asserts off the
+                # critical path, as does the next reconcile.
+                ensure_hublvol_active_active(
+                    rpc, ctrl_name, node.get_id(), role,
+                    wait=(rpc_timeout is None),
+                    request_timeout=rpc_timeout)
+                if getattr(lock, "externally_managed", False):
+                    # Deferred: the owning restart flow stamps at its release
+                    # point AFTER the port unblock (one FDB txn out of the
+                    # latency-critical window). Cooldown semantics shift a
+                    # few seconds later — strictly more conservative.
+                    lock.pending_stamp = True
+                else:
+                    lock.stamp_attach()
             return ok
 
     def _fresh_multipath_attach(self, rpc, ctrl_name, nqn, port, expected,
@@ -578,7 +768,13 @@ class HublvolReconnectCoordinator:
                     "hublvol %s on %s (%s): cannot prepare controller for "
                     "path %s, trying next",
                     ctrl_name, node.get_id(), role, ip)
-                last_attach_at = time.monotonic()
+                # No cooldown stamp: INTER_ATTACH_SLEEP_SEC exists to stop a
+                # second attach racing a controller that was just CREATED
+                # ("cntlid N are duplicated"). Nothing was created here, so
+                # there is nothing to race, and sleeping 3s before the next
+                # candidate is pure fence time. With 4 candidates that was up
+                # to 9s inside a 7.5s budget -- the alternatives could never
+                # actually be tried.
                 continue
             if decision == "skip":
                 logger.debug(
@@ -600,8 +796,9 @@ class HublvolReconnectCoordinator:
                 ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
                                  multipath=attach_mode,
                                  rpc_timeout=rpc_timeout)
-                last_attach_at = time.monotonic()
                 if ret:
+                    # Stamp only on success -- see the "failed" branch above.
+                    last_attach_at = time.monotonic()
                     remaining = paths_list[i + 1:]
                     logger.info(
                         "hublvol %s on %s (%s): attached path %s; deferring "
@@ -627,7 +824,6 @@ class HublvolReconnectCoordinator:
                     "trying next path",
                     ctrl_name, node.get_id(), ip)
             except Exception as e:
-                last_attach_at = time.monotonic()
                 logger.warning(
                     "hublvol %s on %s: attach path %s raised: %s, "
                     "trying next path",
@@ -636,6 +832,29 @@ class HublvolReconnectCoordinator:
         logger.error(
             "hublvol %s on %s: no path attached (expected=%s)",
             ctrl_name, node.get_id(), [p[0] for p in paths_list])
+
+        # Believe the controller, not the attach return values. A path that is
+        # already present makes its attach fail with -EALREADY, and a path
+        # added to an existing controller returns no bdev name at all; either
+        # can make every attempt in the loop above look like a failure while
+        # the controller is in fact enabled with the paths we wanted. Declaring
+        # failure then is fatal out of all proportion: the caller aborts
+        # recreate_lvstore and the node oscillates offline <-> in_restart for
+        # ever (multipath soak 2026-08-19 iteration 4, where LVS_1/hublvol had
+        # BOTH paths enabled while reconcile insisted none were attached).
+        # rpc_client.bdev_nvme_attach_controller now reports those shapes as
+        # success; this is the belt-and-braces check for anything else that
+        # returns falsy on an attach that actually landed.
+        ctrlrs = _ctrlrs_from_list(rpc, ctrl_name)
+        if ctrlrs and any(c.get("state") == "enabled" for c in ctrlrs):
+            attached = _attached_ips(ctrlrs)
+            landed = [ip for ip, _ in paths_list if ip in attached]
+            if landed:
+                logger.warning(
+                    "hublvol %s on %s: attach calls reported failure but the "
+                    "controller is enabled with %s — treating as attached",
+                    ctrl_name, node.get_id(), landed)
+                return True
         return False
 
     def _defer_remaining_attaches(self, rpc, ctrl_name, nqn, port,
@@ -650,15 +869,30 @@ class HublvolReconnectCoordinator:
         caller can return immediately and proceed to
         ``bdev_lvol_connect_hublvol`` / port-unblock.
 
+        If a defer gate is set (see :func:`set_defer_gate`), the thread waits
+        for it before its first RPC. Without that, "deferred" only meant "on
+        another thread after a 3s sleep", which during a restart lands the
+        attach inside the port fence -- exactly the cost the deferral was
+        meant to avoid.
+
         The background thread logs success/failure per path and never
         propagates exceptions.
         """
         if not remaining:
             return
+        gate = _defer_gate
 
         node_id = node.get_id()
 
         def _worker():
+            if gate is not None and not gate.is_set():
+                # Wait for the port fence to be released. Bounded so a caller
+                # that never fires the gate cannot strand this thread.
+                if not gate.wait(DEFER_GATE_WAIT_SEC):
+                    logger.warning(
+                        "hublvol %s on %s (%s) bg: defer gate not released "
+                        "within %.0fs; proceeding anyway",
+                        ctrl_name, node_id, role, DEFER_GATE_WAIT_SEC)
             local_last = last_attach_at
             for ip, trtype in remaining:
                 now = time.monotonic()
@@ -708,6 +942,16 @@ class HublvolReconnectCoordinator:
                     logger.warning(
                         "hublvol %s on %s (%s) bg: attach path %s raised: %s",
                         ctrl_name, node_id, role, ip, e)
+
+            # Re-assert the multipath policy now that the redundant paths
+            # are in. This is the off-critical-path assertion: the
+            # foreground call in _reconcile_under_lock runs with wait=False
+            # inside the freeze window and may have found the bdev not yet
+            # surfaced, and a policy set before the second NIC landed still
+            # needs to hold for it (mp_policy lives on the nvme_bdev and is
+            # copied into each new channel, bdev_nvme.c:949 — adding a path
+            # never resets it, so this is belt-and-braces, not a fixup).
+            ensure_hublvol_active_active(rpc, ctrl_name, node_id, role)
 
         threading.Thread(
             target=_worker,

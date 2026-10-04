@@ -1,14 +1,11 @@
-#!/usr/bin/env python
-# encoding: utf-8
 
 import logging
 
 from flask import Blueprint, request
 
+from simplyblock_core import db_controller
 from simplyblock_core.controllers import device_controller
 from simplyblock_web import utils
-
-from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +92,8 @@ def device_remove(uuid):
     except KeyError:
         return utils.get_response_error(f"device not found: {uuid}", 404)
 
-    data = device_controller.device_remove(uuid)
+    data = device_controller.device_remove(
+        uuid, cause=device_controller.CAUSE_ADMIN_REMOVE)
     return utils.get_response(data)
 
 

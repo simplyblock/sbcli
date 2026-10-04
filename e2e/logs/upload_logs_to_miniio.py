@@ -1,9 +1,18 @@
-import os
-import paramiko
-import boto3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "paramiko",
+# ]
+# ///
 import argparse
-import time
+import os
 import subprocess
+import time
+
+import boto3
+import paramiko
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Fetch and upload logs from Docker and/or Kubernetes.")

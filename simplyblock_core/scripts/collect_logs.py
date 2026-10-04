@@ -42,11 +42,13 @@ Examples
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -60,12 +62,36 @@ except ImportError:
     )
     sys.exit(1)
 
+try:
+    from kubernetes import client as k8s_client
+    from kubernetes import config as k8s_config
+    from kubernetes.client.rest import ApiException
+    from kubernetes.stream import stream as k8s_stream
+except ImportError:
+    print(
+        "ERROR: the 'kubernetes' library is required.\n"
+        "       Install it with:  pip3 install kubernetes",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 # Maximum records per single Graylog search page.
 PAGE_SIZE = 1000
+
+# OpenSearch scroll batch size — deliberately separate from the Graylog page
+# size: Graylog's REST search caps pages around 1000, but the scroll API
+# comfortably serves 10k-hit pages. Sharing the Graylog value meant ~87,165
+# strictly serial round trips for one 87.16M-line container (run 2026-09-03);
+# 10k pages cut that by 90%.
+OS_PAGE_SIZE = 10_000
+
+# Attempts per scroll continuation before declaring the file partial. The
+# scroll context lives 2m, so short backoffs fit comfortably inside it.
+OS_SCROLL_RETRIES = 3
 
 # OpenSearch max_result_window is set to 100 000 during cluster initialisation
 # (see simplyblock_core/cluster_ops.py :: _set_max_result_window).
@@ -94,16 +120,19 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerRestart",
     "TasksRunnerMigration",
     "TasksRunnerLVolMigration",
+    "TasksRunnerBatchMigration",
     "TasksRunnerFailedMigration",
     "TasksRunnerClusterStatus",
     "TasksRunnerNewDeviceMigration",
     "TasksNodeAddRunner",
+    "TasksRunnerClusterExpand",
     "TasksRunnerPortAllow",
     "TasksRunnerJCCompResume",
     "TasksRunnerLVolSyncDelete",
     "TasksRunnerBackup",
-    "TasksRunnerBackupMerge",
+    "BackupMergeService",
     "HAProxy",
+    "BackupService",
 ]
 
 CONTROL_PLANE_SERVICES_KUBERNETES = [
@@ -122,15 +151,18 @@ CONTROL_PLANE_SERVICES_KUBERNETES = [
     "tasks-node-add-runner",
     "tasks-runner-restart",
     "tasks-runner-migration",
+    "tasks-runner-lvol-migration",
     "tasks-runner-failed-migration",
     "tasks-runner-cluster-status",
     "tasks-runner-new-device-migration",
     "tasks-runner-port-allow",
     "tasks-runner-jc-comp-resume",
     "tasks-runner-sync-lvol-del",
+    "tasks-runner-cluster-expand",
+    "tasks-runner-node-removal",
+    "tasks-runner-snapshot-replication",
     "tasks-runner-backup",
     "tasks-runner-backup-merge",
-    "tasks-runner-snapshot-replication",
 ]
 
 # ---------------------------------------------------------------------------
@@ -308,8 +340,8 @@ def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
         else:
             # Split into 10-minute chunks to stay under max_result_window
             print("    NOTE: >100 k entries – collecting via 10-minute sub-windows")
-            t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+            t = datetime.fromisoformat(from_iso)
+            t_end = datetime.fromisoformat(to_iso)
             chunk = timedelta(minutes=10)
             while t < t_end:
                 chunk_end = min(t + chunk, t_end)
@@ -443,8 +475,8 @@ def opensearch_diagnose(session, os_url, from_iso, to_iso):
     print("  OpenSearch Diagnostic Report")
     print("=" * 64)
 
-    from_ms = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp() * 1000)
-    to_ms   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+    to_ms   = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
 
     # 1. List all indices
     print("\n[D1] All indices:")
@@ -519,8 +551,8 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     # Graylog's OpenSearch index maps the timestamp field with format
     # "uuuu-MM-dd HH:mm:ss.SSS" (space separator, no timezone suffix).
     # epoch_millis is accepted regardless of the field's stored date format.
-    from_ms = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp() * 1000)
-    to_ms   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+    to_ms   = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
 
     # One-time index discovery + probe (cached)
     if probe_cache is None:
@@ -546,24 +578,31 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     # Use query_string wildcards so partial names work:
     #   "WebAppAPI"  matches "simplyblock_WebAppAPI.1.abc123"
     #   "spdk_8080"  matches "/spdk_8080"
-    must_clauses: list[Any] = [
+    filter_clauses: list[Any] = [
         {"range": {ts_f: {"gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}},
     ]
     if container_name:
         esc = container_name.replace("/", "\\/").replace(":", "\\:")
-        must_clauses.append({
+        # Anchor the name at the end or at a separator instead of matching any
+        # substring: '*WebAppAPI*' also matched WebAppAPI2/3/4/5 and duplicated
+        # their logs into this file. The anchored variants still cover every
+        # runtime naming scheme — exact/suffix ('/spdk_4428'), Swarm
+        # ('simplyblock_WebAppAPI.1.<hash>'), and compose
+        # ('simplyblock_WebAppAPI_1' / 'simplyblock-WebAppAPI-1').
+        filter_clauses.append({
             "query_string": {
                 "default_field": cname_f,
-                "query": f"*{esc}*",
+                "query": f"*{esc} OR *{esc}.* OR *{esc}_* OR *{esc}-*",
                 "analyze_wildcard": True,
             }
         })
     if pod_name:
         esc_pod = pod_name.replace("/", "\\/").replace(":", "\\:")
-        must_clauses.append({
+        # Pod names only use '-' as a separator; same anchoring rationale.
+        filter_clauses.append({
             "query_string": {
                 "default_field": "kubernetes_pod_name",
-                "query": f"*{esc_pod}*",
+                "query": f"*{esc_pod} OR *{esc_pod}-*",
                 "analyze_wildcard": True,
             }
         })
@@ -573,14 +612,14 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
         # When it is a list we OR them so any matching format succeeds.
         candidates = source if isinstance(source, (list, tuple)) else [source]
         if len(candidates) == 1:
-            must_clauses.append({
+            filter_clauses.append({
                 "query_string": {
                     "default_field": "source",
                     "query": f'"{candidates[0]}"',
                 }
             })
         else:
-            must_clauses.append({
+            filter_clauses.append({
                 "bool": {
                     "should": [
                         {"query_string": {"default_field": "source",
@@ -592,9 +631,12 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
             })
 
     body = {
-        "query": {"bool": {"must": must_clauses}},
+        # Filter context, not must: none of these clauses needs relevance
+        # scoring (the output is ordered by the timestamp sort), and filters
+        # skip scoring and are cacheable across the per-container queries.
+        "query": {"bool": {"filter": filter_clauses}},
         "sort": [{ts_f: {"order": "asc"}}],
-        "size": PAGE_SIZE,
+        "size": OS_PAGE_SIZE,
         "_source": [ts_f, "source", cname_f, "level", "message"],
     }
 
@@ -634,21 +676,34 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
                     src["container_name"] = src.get(cname_f, "")
                 fh.write(_fmt(src) + "\n")
                 written += 1
-            if len(hits) < PAGE_SIZE or not scroll_id:
+            if not scroll_id:
                 break
-            try:
-                sc_r = session.post(
-                    f"{os_url}/_search/scroll",
-                    json={"scroll": "2m", "scroll_id": scroll_id},
-                    timeout=60,
-                )
-                sc_r.raise_for_status()
-                sc_data = sc_r.json()
-                scroll_id = sc_data.get("_scroll_id", scroll_id)
-                hits = sc_data.get("hits", {}).get("hits", [])
-            except requests.RequestException as exc:
-                print(f"    WARN: scroll continuation failed: {exc}", file=sys.stderr)
-                break
+            # The scroll protocol terminates with an EMPTY page. A short page
+            # is legitimate mid-stream (shard boundaries), so stopping on one
+            # silently truncated the file; keep going until hits is empty.
+            hits = []
+            for attempt in range(1, OS_SCROLL_RETRIES + 1):
+                try:
+                    sc_r = session.post(
+                        f"{os_url}/_search/scroll",
+                        json={"scroll": "2m", "scroll_id": scroll_id},
+                        timeout=60,
+                    )
+                    sc_r.raise_for_status()
+                    sc_data = sc_r.json()
+                    scroll_id = sc_data.get("_scroll_id", scroll_id)
+                    hits = sc_data.get("hits", {}).get("hits", [])
+                    break
+                except requests.RequestException as exc:
+                    if attempt == OS_SCROLL_RETRIES:
+                        # Loud and specific: a silent partial bundle costs a
+                        # support round trip to discover.
+                        print(f"    ERROR: scroll continuation failed after "
+                              f"{OS_SCROLL_RETRIES} attempts: {exc}\n"
+                              f"           {out_path} is PARTIAL "
+                              f"({written}/{total} entries)", file=sys.stderr)
+                    else:
+                        time.sleep(2 * attempt)
 
     # Release scroll context
     if scroll_id:
@@ -701,48 +756,71 @@ def fetch(
 
 
 # ---------------------------------------------------------------------------
-# kubectl pod-log helpers
+# Kubernetes API helpers
 # ---------------------------------------------------------------------------
 
 
-def _kubectl(*args, timeout=60) -> str:
-    """Run kubectl with the given args and return stdout. Returns '' on failure."""
+def _load_k8s_config(kubeconfig=None):
+    """Load kubernetes config: in-cluster service-account first, then kubeconfig file.
+
+    Falls back to ~/.kube/config (or $KUBECONFIG) when not running inside a pod.
+    Pass --kubeconfig to override the file path explicitly.
+
+    Returns True on success, False when no config is available. A missing config
+    is not fatal: it only means the Kubernetes-pod-log step is skipped, and the
+    logs already gathered from docker and Graylog/OpenSearch must survive rather
+    than being discarded by a hard exit.
+    """
     try:
-        r = subprocess.run(
-            ["kubectl"] + list(args),
-            capture_output=True, text=True, timeout=timeout,
-        )
-        return r.stdout
-    except Exception as exc:
-        print(f"    WARN: kubectl {' '.join(args[:4])} … failed: {exc}", file=sys.stderr)
-        return ""
+        k8s_config.load_incluster_config()
+        return True
+    except k8s_config.ConfigException:
+        pass
+    try:
+        k8s_config.load_kube_config(config_file=kubeconfig)
+        return True
+    except k8s_config.ConfigException as exc:
+        print(f"  !! could not load kubernetes config: {exc}", file=sys.stderr)
+        return False
 
 
-def _kubectl_list_pods(namespace: str, prefix: str) -> list[str]:
+def _list_pods(api, namespace: str, prefix: str) -> list[str]:
     """Return pod names in *namespace* whose name starts with *prefix*."""
-    out = _kubectl("get", "pods", "-n", namespace,
-                   "--no-headers", "-o", "custom-columns=:metadata.name")
-    return [p for p in out.splitlines() if p.startswith(prefix)]
+    try:
+        ret = api.list_namespaced_pod(namespace)
+        return [pod.metadata.name for pod in ret.items
+                if pod.metadata.name.startswith(prefix)]
+    except ApiException as exc:
+        print(f"    WARN: could not list pods in {namespace}: {exc}", file=sys.stderr)
+        return []
 
 
-def _kubectl_containers(namespace: str, pod: str) -> list[str]:
+def _get_containers(api, namespace: str, pod: str) -> list[str]:
     """Return init + regular container names for *pod*."""
-    out = _kubectl(
-        "get", "pod", pod, "-n", namespace,
-        "-o",
-        "jsonpath={range .spec.initContainers[*]}{.name}{'\\n'}{end}"
-        "{range .spec.containers[*]}{.name}{'\\n'}{end}",
-    )
-    return [c for c in out.splitlines() if c]
+    try:
+        p = api.read_namespaced_pod(pod, namespace)
+        names = []
+        if p.spec.init_containers:
+            names += [c.name for c in p.spec.init_containers]
+        if p.spec.containers:
+            names += [c.name for c in p.spec.containers]
+        return names
+    except ApiException as exc:
+        print(f"    WARN: could not read pod {pod}: {exc}", file=sys.stderr)
+        return []
 
 
-def collect_k8s_pod_logs(namespace: str, pod: str, out_dir: Path,
+def collect_k8s_pod_logs(api, namespace: str, pod: str, out_dir: Path,
                           from_iso: str, to_iso: str) -> None:
+    """Write current + previous logs for every container in *pod* to *out_dir*.
+
+    Files are named <pod>_<container>.log
     """
-    Write current + previous logs for every container in *pod* to *out_dir*.
-    Files are named  <pod>_<container>.log
-    """
-    containers = _kubectl_containers(namespace, pod)
+    since_dt = datetime.fromisoformat(from_iso)
+    # since_seconds is relative to now; we also filter the lower bound in
+    # post-processing to stay precise despite the relative approximation.
+    since_seconds = max(1, int((datetime.now(UTC) - since_dt).total_seconds()))
+    containers = _get_containers(api, namespace, pod)
     for container in containers:
         log_file = out_dir / f"{pod}_{container}.log"
         print(f"      {pod} / {container}")
@@ -751,50 +829,74 @@ def collect_k8s_pod_logs(namespace: str, pod: str, out_dir: Path,
             fh.write(f"=== From: {from_iso} | Until: {to_iso} ===\n\n")
 
             fh.write("--- current logs ---\n")
-            out = _kubectl("logs", pod, "-c", container, "-n", namespace,
-                           "--timestamps", f"--since-time={from_iso}", timeout=120)
-            # Trim lines beyond to_iso
-            for line in out.splitlines():
-                if line[:26] > to_iso[:26]:
-                    break
-                fh.write(line + "\n")
+            try:
+                logs = api.read_namespaced_pod_log(
+                    pod, namespace,
+                    container=container,
+                    timestamps=True,
+                    since_seconds=since_seconds,
+                ) or ""
+                for line in logs.splitlines():
+                    ts = line[:26]
+                    if ts < from_iso[:26]:
+                        continue
+                    if ts > to_iso[:26]:
+                        break
+                    fh.write(line + "\n")
+            except ApiException as exc:
+                fh.write(f"(could not retrieve logs: {exc})\n")
 
             fh.write("\n--- previous (last crash) logs ---\n")
-            prev = _kubectl("logs", pod, "-c", container, "-n", namespace,
-                            "--timestamps", "--previous", timeout=60)
-            fh.write(prev if prev.strip() else "(no previous logs)\n")
+            try:
+                prev = api.read_namespaced_pod_log(
+                    pod, namespace,
+                    container=container,
+                    timestamps=True,
+                    previous=True,
+                ) or ""
+                fh.write(prev.strip() + "\n" if prev.strip() else "(no previous logs)\n")
+            except ApiException as exc:
+                # 400 = no terminated container found (normal — not every container crashes)
+                fh.write("(no previous logs)\n" if exc.status == 400
+                         else f"(could not retrieve previous logs: {exc})\n")
 
 
-def collect_k8s_csi_dmesg(namespace: str, pod: str, out_dir: Path,
+def collect_k8s_csi_dmesg(api, namespace: str, pod: str, out_dir: Path,
                             from_iso: str, to_iso: str) -> None:
-    """
-    Collect dmesg from the csi-node container of a CSI pod,
+    """Collect dmesg from the csi-node container of a CSI pod,
     filtered to the requested time window using the kernel boot epoch.
     """
-    from_epoch = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp())
-    to_epoch   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp())
+    from_epoch = int(datetime.fromisoformat(from_iso).timestamp())
+    to_epoch   = int(datetime.fromisoformat(to_iso).timestamp())
 
     log_file = out_dir / f"{pod}_csi-node_dmesg.log"
     print(f"      {pod} / csi-node (dmesg)")
 
-    # Derive boot epoch from /proc/uptime inside the container
-    uptime_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                          "--", "cat", "/proc/uptime", timeout=10)
+    def _exec(cmd: list[str], timeout: int = 10) -> str:
+        try:
+            return k8s_stream(
+                api.connect_get_namespaced_pod_exec,
+                pod, namespace,
+                container="csi-node",
+                command=cmd,
+                stderr=True, stdin=False, stdout=True, tty=False,
+                _request_timeout=timeout,
+            )
+        except Exception as exc:
+            print(f"    WARN: exec {cmd[:2]} failed: {exc}", file=sys.stderr)
+            return ""
+
+    uptime_out = _exec(["cat", "/proc/uptime"])
     try:
-        boot_epoch = int(datetime.now(timezone.utc).timestamp()) - int(float(uptime_out.split()[0]))
+        boot_epoch = int(datetime.now(UTC).timestamp()) - int(float(uptime_out.split()[0]))
     except Exception:
         boot_epoch = 0
 
     # Prefer human-readable reltime; fall back to monotonic seconds
-    dmesg_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                         "--", "dmesg", "--kernel", "--time-format=reltime",
-                         "--nopager", timeout=30)
+    dmesg_out = _exec(["dmesg", "--kernel", "--time-format=reltime", "--nopager"], timeout=30)
     if not dmesg_out.strip():
-        dmesg_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                             "--", "dmesg", "--kernel", "--nopager", timeout=30)
-        # Filter by monotonic timestamp
+        dmesg_out = _exec(["dmesg", "--kernel", "--nopager"], timeout=30)
         filtered = []
-        import re
         for line in dmesg_out.splitlines():
             m = re.match(r'^\[\s*([0-9]+\.[0-9]+)\]', line)
             if m:
@@ -891,7 +993,16 @@ def main():
         metavar="NS",
         help=(
             "Kubernetes namespace to collect CSI / storage-node DS pod logs from "
-            "(default: simplyblock).  Pass an empty string to skip kubectl collection."
+            "(default: simplyblock).  Pass an empty string to skip collection."
+        ),
+    )
+    parser.add_argument(
+        "--kubeconfig",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a kubeconfig file.  When omitted, in-cluster service-account "
+            "credentials are tried first, then $KUBECONFIG / ~/.kube/config."
         ),
     )
     parser.add_argument(
@@ -917,7 +1028,7 @@ def main():
         sys.exit(1)
 
     if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=timezone.utc)
+        start_dt = start_dt.replace(tzinfo=UTC)
 
     end_dt = start_dt + timedelta(minutes=args.duration_minutes)
     from_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -1172,58 +1283,66 @@ def main():
 
         # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
 
+        # Kubernetes pod logs only exist in a kubernetes deployment. A docker
+        # deployment has no pods and no kubeconfig, so this step is skipped
+        # there rather than failing on a config lookup that cannot succeed.
         k8s_ns = args.namespace
-        if k8s_ns:
+        if args.mode != "kubernetes":
+            print(f"\n[7] Skipping Kubernetes pod logs (deploy mode is {args.mode}).")
+        elif not k8s_ns:
+            print("\n[7] Skipping Kubernetes pod logs (namespace collection disabled).")
+        elif not _load_k8s_config(args.kubeconfig):
+            print("\n[7] Skipping Kubernetes pod logs (no kubernetes config available).")
+        else:
             print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
+            v1 = k8s_client.CoreV1Api()
             k8s_dir = log_root / "k8s_pods"
             k8s_dir.mkdir()
 
             # 9a. simplyblock-csi-node* pods — all containers + dmesg
-            csi_pods = _kubectl_list_pods(k8s_ns, "simplyblock-csi-node")
+            csi_pods = _list_pods(v1, k8s_ns, "simplyblock-csi-node")
             if csi_pods:
                 csi_dir = k8s_dir / "csi-node"
                 csi_dir.mkdir()
                 print(f"  CSI node pods ({len(csi_pods)}) …")
                 for pod in csi_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, csi_dir, from_iso, to_iso)
-                    collect_k8s_csi_dmesg(k8s_ns, pod, csi_dir, from_iso, to_iso)
+                    collect_k8s_pod_logs(v1, k8s_ns, pod, csi_dir, from_iso, to_iso)
+                    collect_k8s_csi_dmesg(v1, k8s_ns, pod, csi_dir, from_iso, to_iso)
             else:
                 print(f"  No simplyblock-csi-node pods found in namespace {k8s_ns}.")
 
             # 9b. simplyblock-csi-controller* pods — all containers
-            csi_ctrl_pods = _kubectl_list_pods(k8s_ns, "simplyblock-csi-controller")
+            csi_ctrl_pods = _list_pods(v1, k8s_ns, "simplyblock-csi-controller")
             if csi_ctrl_pods:
                 csi_ctrl_dir = k8s_dir / "csi-controller"
                 csi_ctrl_dir.mkdir()
                 print(f"  CSI controller pods ({len(csi_ctrl_pods)}) …")
                 for pod in csi_ctrl_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, csi_ctrl_dir, from_iso, to_iso)
+                    collect_k8s_pod_logs(v1, k8s_ns, pod, csi_ctrl_dir, from_iso, to_iso)
             else:
                 print(f"  No simplyblock-csi-controller pods found in namespace {k8s_ns}.")
 
             # 9c. simplyblock-manager* pods — all containers
-            mgr_pods = _kubectl_list_pods(k8s_ns, "simplyblock-manager")
+            mgr_pods = _list_pods(v1, k8s_ns, "simplyblock-manager")
             if mgr_pods:
                 mgr_dir = k8s_dir / "simplyblock-manager"
                 mgr_dir.mkdir()
                 print(f"  Simplyblock manager pods ({len(mgr_pods)}) …")
                 for pod in mgr_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, mgr_dir, from_iso, to_iso)
+                    collect_k8s_pod_logs(v1, k8s_ns, pod, mgr_dir, from_iso, to_iso)
             else:
                 print(f"  No simplyblock-manager pods found in namespace {k8s_ns}.")
 
             # 9d. simplyblock-storage-node-ds* pods — all containers
-            sn_ds_pods = _kubectl_list_pods(k8s_ns, "simplyblock-storage-node-ds")
+            sn_ds_pods = _list_pods(v1, k8s_ns, "simplyblock-storage-node-ds")
             if sn_ds_pods:
                 sn_ds_dir = k8s_dir / "storage-node-ds"
                 sn_ds_dir.mkdir()
                 print(f"  Storage-node DS pods ({len(sn_ds_pods)}) …")
                 for pod in sn_ds_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, sn_ds_dir, from_iso, to_iso)
+                    collect_k8s_pod_logs(v1, k8s_ns, pod, sn_ds_dir, from_iso, to_iso)
             else:
                 print(f"  No simplyblock-storage-node-ds pods found in namespace {k8s_ns}.")
-        else:
-            print("\n[7] Skipping Kubernetes pod logs (--namespace not set).")
 
         # ── 10. sbctl cluster / node snapshots ───────────────────────────────
 
@@ -1300,7 +1419,7 @@ def main():
         # ── 11. Write a collection manifest ──────────────────────────────────
 
         manifest = {
-            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "collected_at": datetime.now(UTC).isoformat(),
             "window_from": from_iso,
             "window_to": to_iso,
             "duration_minutes": args.duration_minutes,

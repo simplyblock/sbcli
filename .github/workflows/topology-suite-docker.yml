@@ -1,0 +1,416 @@
+name: Docker Topology Suite (Per-Test Bootstrap)
+run-name: "Topology Docker | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.TEST_CLASSES }} | NDCS:${{ inputs.BOOTSTRAP_DATA_CHUNKS }} NPCS:${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # =========================
+      # Test selection
+      # =========================
+      TEST_CLASSES:
+        description: "Comma-separated topology test class names (each gets its own full bootstrap cycle)"
+        required: true
+        default: "TestAddNodesDuringFioRun,TestSequentialNodeAdd,TestAddNodeSnapshotCloneOnNewNode,TestBackupAfterNodeAdd,TestBackupWithFioOnNewNode"
+
+      # =========================
+      # Cluster / Lab inputs
+      # =========================
+      STORAGE_PRIVATE_IPS:
+        description: "Space-separated storage node IPs (also used for cleanup)"
+        required: true
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+      API_INVOKE_URL:
+        description: "API invoke URL"
+        required: true
+        default: "http://192.168.10.210/"
+      BASTION_IP:
+        description: "Bastion IP"
+        required: true
+        default: "192.168.10.210"
+      MNODES:
+        description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
+        required: true
+        default: "192.168.10.210"
+      GRAFANA_ENDPOINT:
+        description: "Grafana endpoint"
+        required: true
+        default: "http://192.168.10.210/grafana"
+      SBCLI_BRANCH:
+        description: "sbcli repo branch to clone for tests"
+        required: true
+        default: "main"
+      CUSTOM_IMAGES:
+        description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
+        required: false
+
+      # =========================
+      # SSH / client inputs
+      # =========================
+      SSH_USER:
+        description: "SSH user"
+        required: true
+        default: "root"
+      KEY_PATH:
+        description: "SSH private key path on runner"
+        required: true
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+      CLIENTNODES:
+        description: "Space-separated client node IPs"
+        required: true
+        default: "192.168.10.165 192.168.10.166"
+
+      # =========================
+      # Cleanup inputs
+      # =========================
+      NFS_MOUNTPOINT:
+        description: "NFS mountpoint to unmount everywhere"
+        required: true
+        default: "/mnt/nfs_share"
+
+      # =========================
+      # Bootstrap params
+      # =========================
+      BOOTSTRAP_MAX_SUBSYS:
+        description: "bootstrap: --max-subsys"
+        required: true
+        default: "75"
+      BOOTSTRAP_DATA_CHUNKS:
+        description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
+        required: true
+        default: "1"
+      BOOTSTRAP_PARITY_CHUNKS:
+        description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
+        required: true
+        default: "2"
+      BOOTSTRAP_JOURNAL_PARTITION:
+        description: "bootstrap: --journal-partition"
+        required: true
+        default: "1"
+      BOOTSTRAP_DATA_NIC:
+        description: "bootstrap: --data-nics (space or comma-separated; default eth1)"
+        required: true
+        default: "eth1"
+      BOOTSTRAP_HA_JM_COUNT:
+        description: "bootstrap: --ha-jm-count"
+        required: true
+        default: "4"
+      BOOTSTRAP_IS_SINGLE_NODE:
+        description: "Bootstrap: deploy as single-node (--is-single-node)"
+        type: boolean
+        required: false
+        default: false
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        description: "Bootstrap: enable node affinity (--enable-node-affinity)"
+        type: boolean
+        required: false
+        default: true
+      EXTRA_CLUSTER_ARGS:
+        description: "Additional arguments for cluster create command"
+        required: false
+        type: string
+      EXTRA_SN_ARGS:
+        description: "Additional arguments for storage-node add-node command"
+        required: false
+        type: string
+
+      # =========================
+      # Add-node inputs
+      # =========================
+      NEW_NODE_IPS:
+        description: "Space-separated IPs of spare nodes (cleaned but NOT added to cluster). Used for add-node/migration tests."
+        required: true
+        type: string
+
+      # =========================
+      # Security inputs
+      # =========================
+      CLUSTER_SECURITY:
+        description: "Cluster setup mode."
+        required: false
+        type: choice
+        default: "backup"
+        options:
+          - none
+          - backup
+
+concurrency:
+  group: simplyblock-topology-docker-${{ inputs.MNODES }}
+  cancel-in-progress: false
+
+# ============================================================================
+# JOBS
+# ============================================================================
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Parse TEST_CLASSES into a JSON matrix
+  # ─────────────────────────────────────────────────────────────────────────
+  setup-matrix:
+    name: Parse test list
+    runs-on: [self-hosted]
+    outputs:
+      test_matrix: ${{ steps.parse.outputs.matrix }}
+      test_count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Convert TEST_CLASSES to JSON array
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra tests <<< "${{ inputs.TEST_CLASSES }}"
+          json="["
+          first=true
+          for i in "${!tests[@]}"; do
+            t=$(echo "${tests[$i]}" | xargs)
+            [[ -z "$t" ]] && continue
+            [[ "$first" == "true" ]] && first=false || json+=","
+            json+="\"$t\""
+          done
+          json+="]"
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
+          echo "count=${#tests[@]}" >> "$GITHUB_OUTPUT"
+          echo "Parsed ${#tests[@]} topology tests: ${json}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Sequential test runs — full bootstrap + test per entry
+  # Each matrix entry calls the reusable e2e-bootstrap workflow, which does:
+  #   pre-clean → bootstrap → run e2e test → post-clean → log collection
+  # ─────────────────────────────────────────────────────────────────────────
+  run-tests:
+    name: "Topology: ${{ matrix.test }}"
+    needs: setup-matrix
+    strategy:
+      matrix:
+        test: ${{ fromJson(needs.setup-matrix.outputs.test_matrix) }}
+      max-parallel: 1
+      fail-fast: false
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    with:
+      TEST_CLASS: ${{ matrix.test }}
+      RUN_LABEL: ${{ matrix.test }}
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
+      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
+      BASTION_IP: ${{ inputs.BASTION_IP }}
+      MNODES: ${{ inputs.MNODES }}
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
+      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
+      CUSTOM_IMAGES: ${{ inputs.CUSTOM_IMAGES }}
+      SSH_USER: ${{ inputs.SSH_USER }}
+      KEY_PATH: ${{ inputs.KEY_PATH }}
+      CLIENTNODES: ${{ inputs.CLIENTNODES }}
+      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
+      BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS }}
+      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
+      BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
+      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION }}
+      BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT }}
+      BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC }}
+      BOOTSTRAP_IS_SINGLE_NODE: ${{ inputs.BOOTSTRAP_IS_SINGLE_NODE == true }}
+      BOOTSTRAP_ENABLE_NODE_AFFINITY: ${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY == true }}
+      EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
+      NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
+      send_slack_notification: false
+    secrets: inherit
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Combine per-test summaries into a single parent summary
+  # ─────────────────────────────────────────────────────────────────────────
+  combine-summary:
+    name: Combined Summary
+    needs: [setup-matrix, run-tests]
+    if: always()
+    runs-on: [self-hosted]
+    steps:
+      - name: Download all summary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-summary-*
+          path: summaries/
+
+      - name: Combine summaries
+        shell: bash
+        run: |
+          {
+            echo "# Docker Topology Suite — Combined Results"
+            echo ""
+            echo "**Tests:** ${{ needs.setup-matrix.outputs.test_count }} | **Overall:** ${{ needs.run-tests.result }}"
+            echo ""
+
+            # Extract and display consolidated log directories
+            echo "## Log Directories"
+            echo ""
+            log_found=0
+            for dir in summaries/test-summary-*/; do
+              [[ -d "$dir" ]] || continue
+              [[ -f "${dir}test-summary.md" ]] || continue
+              content="$(cat "${dir}test-summary.md")"
+              tname="$(echo "$content" | grep -oP 'Summary\s*[—-]\s*\K\S+' | head -1)"
+              [[ -z "$tname" ]] && tname="$(basename "$dir")"
+              test_log="$(echo "$content" | grep -oP '\*\*Test logs:\*\*\s*`\K[^`]+' | head -1)"
+              run_dir="$(echo "$content" | grep -oP '\*\*(RUN_BASE_DIR|Run dir):\*\*\s*`\K[^`]+' | head -1)"
+              if [[ -n "$test_log" || -n "$run_dir" ]]; then
+                log_found=$((log_found + 1))
+                echo "**${tname}**"
+                [[ -n "$test_log" ]] && echo "- Test logs: \`${test_log}\`"
+                if [[ -n "$run_dir" ]]; then
+                  run_dir="${run_dir%/}"
+                  echo "- E2E run dir: \`${run_dir}/\`"
+                  echo "- Graylog: \`${run_dir}/graylog_collected/\`"
+                fi
+                echo ""
+              fi
+            done
+            if [[ "$log_found" -eq 0 ]]; then
+              echo "> No log directories detected."
+              echo ""
+            fi
+
+            # Append individual test summaries
+            found=0
+            for dir in summaries/test-summary-*/; do
+              [[ -d "$dir" ]] || continue
+              if [[ -f "${dir}test-summary.md" ]]; then
+                found=$((found + 1))
+                echo "---"
+                echo ""
+                cat "${dir}test-summary.md"
+                echo ""
+              fi
+            done
+            if [[ "$found" -eq 0 ]]; then
+              echo "> No individual test summaries were found."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Combined Slack Notification
+        if: always()
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          OVERALL_STATUS: ${{ needs.run-tests.result }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          TEST_COUNT: ${{ needs.setup-matrix.outputs.test_count }}
+          TEST_CLASSES: ${{ inputs.TEST_CLASSES }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request
+
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+
+          overall  = os.environ.get("OVERALL_STATUS", "unknown")
+          run_url  = os.environ.get("SLACK_RUN_URL", "")
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          count    = os.environ.get("TEST_COUNT", "?")
+
+          ok     = overall == "success"
+          icon   = ":white_check_mark:" if ok else ":x:"
+          status = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          # Parse per-test results from downloaded summary artifacts
+          test_lines = []
+          summary_dir = "summaries"
+          if os.path.isdir(summary_dir):
+              for d in sorted(os.listdir(summary_dir)):
+                  md_path = os.path.join(summary_dir, d, "test-summary.md")
+                  if not os.path.isfile(md_path):
+                      continue
+                  content = open(md_path).read()
+                  # Extract test name — try "Summary — <Name>" first,
+                  # fall back to "Test class: `<Name>`" (e2e-bootstrap format)
+                  name_m = re.search(r'Summary\s*[-—]\s*(\S+)', content)
+                  if not name_m:
+                      name_m = re.search(r'\*\*Test class:\*\*\s*`([^`]+)`', content)
+                  tname = name_m.group(1) if name_m else d
+                  # Extract result — handle both "SUCCESS"/"FAILED" and emoji prefixed "✅ SUCCESS"
+                  res_m = re.search(r'\*\*Result:\*\*\s*(.+?)(?:\s*[&<\n]|$)', content)
+                  result = res_m.group(1).strip() if res_m else "?"
+                  r_icon = ":white_check_mark:" if "success" in result.lower() else ":x:"
+                  # Extract counts — handle both inline "**Total:** N" and
+                  # table format "| ✅ Passed | N |" from e2e-bootstrap
+                  total_m  = re.search(r'\*\*Total[:\*]*\*?\*?\s*\|?\s*\*?\*?(\d+)', content)
+                  passed_m = re.search(r'(?:\*\*Passed:\*\*|[✅] Passed)\s*\|?\s*(\d+)', content)
+                  failed_m = re.search(r'(?:\*\*Failed:\*\*|[❌] Failed)\s*\|?\s*(\d+)', content)
+                  total  = total_m.group(1) if total_m else "?"
+                  passed = passed_m.group(1) if passed_m else "?"
+                  failed = failed_m.group(1) if failed_m else "?"
+                  # Extract test logs path (from e2e framework)
+                  test_log_m = re.search(r'\*\*Test logs:\*\*\s*`([^`]+)`', content)
+                  test_log_path = test_log_m.group(1) if test_log_m else None
+                  # Extract RUN_BASE_DIR / Run dir path (workflow run directory)
+                  log_m = re.search(r'\*\*(?:RUN_BASE_DIR|Run dir):\*\*\s*`([^`]+)`', content)
+                  run_dir_path = log_m.group(1).rstrip('/') if log_m else None
+                  line = f"  {r_icon} `{tname}` — {passed}/{total} passed, {failed} failed"
+                  if test_log_path:
+                      line += f"\n        :open_file_folder: `{test_log_path}`"
+                  if run_dir_path:
+                      line += f"\n        :file_folder: `{run_dir_path}/`"
+                      line += f"\n        :scroll: `{run_dir_path}/graylog_collected/`"
+                  test_lines.append(line)
+
+          lines = [
+              f"{icon} *SimplyBlock Docker Topology Suite*{mention}",
+              f"*Status:* {status}",
+              f"*Branch:* `{branch}`  |  *Tests:* {count}",
+              "",
+          ]
+          if test_lines:
+              lines.append("*Per-test results:*")
+              lines.extend(test_lines)
+          else:
+              lines.append("_(no per-test summaries found)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+          ]
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+          PYEOF

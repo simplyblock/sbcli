@@ -145,8 +145,6 @@
 #     main()
 
 
-#!/usr/bin/env python3
-
 """
 FIO Corruption Analysis Script
 - Connects to a remote machine via SSH
@@ -157,11 +155,13 @@ FIO Corruption Analysis Script
 - Copies all results to local machine
 """
 
+import os
+import posixpath
+from pathlib import Path
+
 import paramiko
 from scp import SCPClient
-import os
-from pathlib import Path
-import posixpath
+
 
 def create_ssh_client(host, key_path):
     k = paramiko.Ed25519Key.from_private_key_file(key_path)
@@ -230,7 +230,7 @@ def main():
     length_bytes = int(os.environ.get("FIO_LENGTH_BYTES", "32768"))
 
     if not all([remote_host, fio_file_path]):
-        raise EnvironmentError("One or more required environment variables are missing.")
+        raise OSError("One or more required environment variables are missing.")
 
     ssh_key_path = os.path.join(Path.home(), ".ssh", "simplyblock-us-east-2.pem")
     ssh = create_ssh_client(remote_host, ssh_key_path)

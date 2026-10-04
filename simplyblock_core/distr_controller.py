@@ -1,13 +1,12 @@
-# coding=utf-8
 import datetime
 import logging
 import re
 import threading
 
 from simplyblock_core import utils
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
 
@@ -25,33 +24,45 @@ def _remote_device_from_device(device, status, remote_bdev=None):
 
 
 def _persist_target_device_event(device, status, target_node):
+    # Atomic CAS on the node row, NOT read + full-object write_to_db: this
+    # runs once per cluster node per device event, so a 16-node restart wave
+    # has many concurrent read-modify-write cycles against the same node
+    # records. The full-object write silently reverted a node's freshly
+    # committed in_restart -> online status flip to in_restart, which blinded
+    # every guard downstream (2026-07-29 double restart). The mutator only
+    # touches the device entries; a concurrent status/field update on the
+    # same node survives.
     db_controller = DBController()
+
+    def _mutate(node):
+        if node.get_id() == device.node_id:
+            for dev in node.nvme_devices:
+                if dev.get_id() == device.get_id():
+                    dev.status = status
+                    break
+        else:
+            new_remote_devices = []
+            found = False
+            for rem_dev in node.remote_devices:
+                if rem_dev.get_id() == device.get_id():
+                    rem_dev.status = status
+                    if not rem_dev.remote_bdev and status == NVMeDevice.STATUS_ONLINE:
+                        rem_dev.remote_bdev = f"remote_{device.alceml_bdev}n1"
+                    found = True
+                new_remote_devices.append(rem_dev)
+            if not found and status == NVMeDevice.STATUS_ONLINE:
+                new_remote_devices.append(_remote_device_from_device(device, status))
+            node.remote_devices = new_remote_devices
+        return True
+
     node = db_controller.get_storage_node_by_id(target_node.get_id())
-    if node.get_id() == device.node_id:
-        for dev in node.nvme_devices:
-            if dev.get_id() == device.get_id():
-                dev.status = status
-                break
-    else:
-        new_remote_devices = []
-        found = False
-        for rem_dev in node.remote_devices:
-            if rem_dev.get_id() == device.get_id():
-                rem_dev.status = status
-                if not rem_dev.remote_bdev and status == NVMeDevice.STATUS_ONLINE:
-                    rem_dev.remote_bdev = f"remote_{device.alceml_bdev}n1"
-                found = True
-            new_remote_devices.append(rem_dev)
-        if not found and status == NVMeDevice.STATUS_ONLINE:
-            new_remote_devices.append(_remote_device_from_device(device, status))
-        node.remote_devices = new_remote_devices
-    node.write_to_db(db_controller.kv_store)
+    db_controller.atomic_update(node, _mutate)
 
 
 def send_node_status_event(node, node_status, target_node=None):
     db_controller = DBController()
     node_id = node.get_id()
-    if node_status == StorageNode.STATUS_SCHEDULABLE:
+    if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_PENDING_REMOVAL]:
         node_status = StorageNode.STATUS_UNREACHABLE
     logger.info(f"Sending event updates, node: {node_id}, status: {node_status}")
     node_status_event = {
@@ -167,7 +178,38 @@ def send_dev_status_event(device, status, target_node=None):
     return all(results) if results else False
 
 
-def disconnect_device(device):
+def disconnect_device(device, detach_controllers=True):
+    """Drop the peers' remote controllers for ``device``.
+
+    ``detach_controllers=False`` leaves them attached deliberately. Only an
+    operator-initiated removal (``CAUSE_ADMIN_REMOVE``) should detach, for two
+    reasons:
+
+    * bdev_nvme_detach_controller cancels SPDK's auto-reconnect poller, so a
+      device that is only transiently unreachable can no longer come back on
+      its own. And since device self-repair now re-attaches after a non-admin
+      removal, detach-then-attach is exactly the sequence that has produced
+      duplicate IO qpair IDs on the target.
+    * it frequently does not even achieve the removal. 2026-09-05: the detach
+      of remote_alceml_794a1db1 left "NVMe path ... still exists after delete"
+      because distrib never released all 15 of its io_channels, and the
+      controller then sat in the deleting state logging "Submitting Keep Alive
+      failed" every few seconds from 21:56:02 to 22:08:47 -- 13 minutes of a
+      wedged controller and error spam, having removed nothing.
+
+    Graceful shutdown keeps its own detach loop
+    (storage_node_ops._detach_remote_controllers_from_peers): there the node
+    really is going away, and cancelling the peers' reconnect pollers so they
+    cannot reattach to a dying node is the whole point.
+    """
+    if not detach_controllers:
+        logger.info(
+            "Device %s removal is not operator-initiated: leaving peers' "
+            "remote controllers attached so SPDK can reconnect and the "
+            "device can be repaired without a fresh attach",
+            device.get_id())
+        return
+
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
@@ -191,6 +233,10 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
     local_node_index = 0
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
+    # Index the target's remote-device records once: the per-device linear
+    # scan below made every map build O(D²) in total cluster devices — and a
+    # map is built per target per push (n pushes per recovering node).
+    target_remote_by_id = {rd.get_id(): rd for rd in target_node.remote_devices}
     for index, snode in enumerate(snodes):
         if snode.is_secondary_node:  # pass
             continue
@@ -207,11 +253,10 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 name = dev.alceml_bdev
                 local_node_index = index
             else:
-                for dev2 in target_node.remote_devices:
-                    if dev2.get_id() == dev.get_id():
-                        name = dev2.remote_bdev
-                        dev_status = dev.status
-                        break
+                dev2 = target_remote_by_id.get(dev.get_id())
+                if dev2 is not None:
+                    name = dev2.remote_bdev
+                    dev_status = dev.status
             if not name:
                 name = f"remote_{dev.alceml_bdev}n1"
                 if dev_status == NVMeDevice.STATUS_ONLINE:
@@ -229,14 +274,24 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": -1}
             else:
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": dev.cluster_device_order}
-                node_w += dev_w_gib
+            # Keep the failed device's weight in the node total so the parent (node) weight
+            # stays constant across full-map regens. id=-1 already marks the slot dead to the
+            # data plane; dropping its weight here would shrink the node's share of the
+            # placement tree and trigger a full-cluster rebalance on the next distr_send_cluster_map.
+            node_w += dev_w_gib
 
         node_status = snode.status
-        if node_status == StorageNode.STATUS_SCHEDULABLE:
+        if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_PENDING_REMOVAL]:
             node_status = StorageNode.STATUS_UNREACHABLE
         map_cluster[snode.get_id()] = {
             "status": node_status,
             "devices": dev_map}
+        # Failure-domain anti-affinity: hand the per-node failure-domain id to
+        # the data plane (32-bit int, default -1; a value >= 0 activates the
+        # feature) so it spreads chunks across distinct domains. Set at node
+        # level in map_cluster, alongside "status" and "devices".
+        if cluster.enable_failure_domain and snode.failure_domain >= 0:
+            map_cluster[snode.get_id()]["failure_domain"] = snode.failure_domain
         map_prob[snode.get_id()] = {
             "weight": node_w,
             "items": [d for k, d in dev_w_map.items()]}
@@ -258,9 +313,33 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
     return cl_map
 
 
+# Node states in which the node is not serving client IO. A node in any of
+# these legitimately appears offline/unreachable in peers' data-plane cluster
+# maps, and its devices legitimately appear `unavailable` there. Neither is a
+# health failure: without this, one transiently down/unreachable node flips the
+# whole cluster's Storage-node Health=False until it recovers (incident
+# 2026-06-30 — a node's SPDK process died, leaving a device `online` in the CP
+# DB while peers' cluster maps reported it `unavailable`, failing the distr-map
+# check ~350x and flagging Health=False cluster-wide for the entire window).
+# DOWN is intentionally excluded: a DOWN node only has its client-facing LVS
+# port firewall-blocked; SPDK and its devices stay alive and reachable to peers.
+_NODE_NOT_SERVING = frozenset({
+    StorageNode.STATUS_OFFLINE,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_SCHEDULABLE,
+    StorageNode.STATUS_RESTARTING,
+    StorageNode.STATUS_IN_SHUTDOWN,
+})
+
+
 def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     db_controller = DBController()
-    node_pattern = re.compile(r".*uuid_node=(.*)  status=(.*)$", re.IGNORECASE)
+    # status is a single token; do NOT greedily swallow trailing fields such as
+    # the failure-domain suffix the data plane now appends to node lines
+    # (e.g. "uuid_node=<uuid>  status=online  failure_domain=0"). A greedy
+    # ".*$" here captured "online  failure_domain=0" and mismatched the DB's
+    # desired "online", flipping Health=False cluster-wide (2026-06-25).
+    node_pattern = re.compile(r".*uuid_node=(.*?)  status=(\S+)", re.IGNORECASE)
     device_pattern = re.compile(
         r".*storage_ID=(.*)  status=(.*)  uuid_device=(.*)  storage_bdev_name=(.*)$", re.IGNORECASE)
 
@@ -299,10 +378,16 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
                     StorageNode.STATUS_SCHEDULABLE,
                     StorageNode.STATUS_RESTARTING,
                     StorageNode.STATUS_IN_SHUTDOWN,
+                    StorageNode.STATUS_IN_REMOVAL,
+                    StorageNode.STATUS_PENDING_REMOVAL
                 ):
                     node_status = StorageNode.STATUS_UNREACHABLE
                 data["Desired Status"] = node_status
-                if node_status == status:
+                # An exact match is ok; so is any pairing of two "not serving"
+                # states (e.g. CP=unreachable vs. data-plane=offline) — both
+                # mean the node isn't serving, so it is not a real mismatch.
+                if node_status == status or (
+                        node_status in _NODE_NOT_SERVING and status in _NODE_NOT_SERVING):
                     data["Results"] = "ok"
                 else:
                     data["Results"] = "failed"
@@ -324,7 +409,15 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
             try:
                 sd =  devices[device_id]
                 data["Desired Status"] = sd.status
+                owner = nodes.get(sd.node_id) if nodes else None
                 if sd.status == status:
+                    data["Results"] = "ok"
+                elif status == NVMeDevice.STATUS_UNAVAILABLE and \
+                        owner is not None and owner.status in _NODE_NOT_SERVING:
+                    # The device's owning node is not serving IO, so peers
+                    # correctly report its devices `unavailable` in the cluster
+                    # map even while the CP DB still shows the device `online`
+                    # (until escalation reconciles it). Not a health failure.
                     data["Results"] = "ok"
                 else:
                     data["Results"] = "failed"

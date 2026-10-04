@@ -1,0 +1,5 @@
+target/main:
+  - base-branch: '^main$'
+
+target/R26.3:
+  - base-branch: '^R26\.3$'

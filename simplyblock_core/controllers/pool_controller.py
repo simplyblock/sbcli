@@ -1,21 +1,40 @@
-# coding=utf-8
 
 import logging as lg
-
-import json
 import random
 import string
 import time
 import uuid
 
+from pydantic import SecretStr
+
 from simplyblock_core import utils
-from simplyblock_core.controllers import pool_events, lvol_controller
+from simplyblock_core.controllers import lvol_controller, ops_gate, pool_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms import KMSException, create_kms_connection
+from simplyblock_core.kms import KMSException, create_kms_connection, pool_kek_name
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 
 logger = lg.getLogger()
+
+
+async def watch_pools(cluster_id):
+    """Stream pool changes for one cluster (same scope as get_pools)."""
+    db = DBController()
+    async for batch in db.watch(
+            Pool, scope=(cluster_id,),
+            select=lambda models: db.get_pools(cluster_id, source=models),
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
+
+
+async def watch_pool(cluster_id, pool_id):
+    """Stream changes for a single pool."""
+    db = DBController()
+    async for batch in db.watch(
+            Pool, scope=(cluster_id,), entity_id=pool_id,
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
 
 
 def _generate_string(length):
@@ -26,15 +45,14 @@ def _generate_string(length):
 def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id,
                  cr_name=None, cr_namespace=None, cr_plural=None, qos_host=None, sec_options=None, dhchap=False):
     db_controller = DBController()
+    ops_gate.assert_object_ops_allowed("pool create", cluster_id=cluster_id)
     if not name:
         logger.error("Pool name is empty!")
         return False
 
-    pool_list = db_controller.get_pools()
-    for p in pool_list:
-        if p.pool_name == name and p.cluster_id == cluster_id:
-            logger.error(f"Pool found with the same name: {name}")
-            return False
+    if db_controller.pool_name_taken(cluster_id, name):
+        logger.error(f"Pool found with the same name: {name}")
+        return False
 
     try:
         cluster = db_controller.get_cluster_by_id(cluster_id)
@@ -64,7 +82,9 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool = Pool()
     pool.uuid = str(uuid.uuid4())
     pool.cluster_id = cluster.get_id()
-    pool.numeric_id = _generate_numeric_id(pool_list)
+    # Deployment-wide, not per cluster: numeric ids are allocated as max+1 over
+    # every pool, so this one read cannot be narrowed by an index.
+    pool.numeric_id = _generate_numeric_id(db_controller.get_pools())
     pool.pool_name = name
     pool.pool_max_size = pool_max
     pool.lvol_max_size = lvol_max
@@ -98,13 +118,13 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool.dhchap = bool(dhchap)
     if pool.dhchap:
-        pool.dhchap_key = utils.generate_dhchap_key(length=32)
-        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
+        pool.dhchap_key = SecretStr(utils.generate_dhchap_key(length=32))
+        pool.dhchap_ctrlr_key = SecretStr(utils.generate_dhchap_key(length=32))
 
 
     try:
         with create_kms_connection(cluster) as kms:
-            kms.create_key_encryption_key(pool.get_id())
+            kms.create_key_encryption_key(pool_kek_name(pool.get_id()))
             logger.info("Created pool key")
     except KMSException:
         logger.exception("Failed to create pool key")
@@ -205,12 +225,24 @@ def qos_exists_on_child_lvol(db_controller: DBController, pool_uuid):
             return True
     return False
 
-def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
+def set_pool(uuid, pool_max=None, lvol_max=None, max_rw_iops=0,
              max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name="",
              lvols_cr_name="", lvols_cr_namespace="", lvols_cr_plural=""):
+    """Update a pool. ``pool_max``/``lvol_max`` of None mean "not specified,
+    leave unchanged"; 0 means "explicitly reset to unlimited".
+
+    They default to None rather than 0 because this is a partial update: the
+    CLI passes ``args.pool_max``/``args.lvol_max`` unconditionally and argparse
+    supplies None for a flag the user omitted (the `set` subcommand declares no
+    default, unlike `add`), and the v1 API only forwards the keys present in the
+    request body. With a 0 default, omitting one size silently reset that field
+    to unlimited instead of preserving it.
+    """
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(uuid)
+        ops_gate.assert_object_ops_allowed("pool parameter change",
+                                           cluster_id=pool.cluster_id)
     except KeyError:
         msg = f"Pool not found: {uuid}"
         logger.error(msg)
@@ -222,11 +254,10 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
         return False, msg
 
     if name and name != pool.pool_name:
-        for p in db_controller.get_pools():
-            if p.pool_name == name and p.cluster_id == pool.cluster_id:
-                msg = f"Pool found with the same name: {name}"
-                logger.error(msg)
-                return False, msg
+        if db_controller.pool_name_taken(pool.cluster_id, name):
+            msg = f"Pool found with the same name: {name}"
+            logger.error(msg)
+            return False, msg
         pool.pool_name = name
 
     if lvols_cr_name and lvols_cr_name != pool.lvols_cr_name:
@@ -285,37 +316,49 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
             if err:
                 return False, err
 
-    if pool_max == 0:
-        pool.pool_max_size = 0
-    elif pool_max > 0:
-        total_lvol_size = 0
-        for lvol in db_controller.get_lvols_by_pool_id(uuid):
-            total_lvol_size += lvol.size
-        if total_lvol_size > pool_max:
-            msg = f"Pool max size can't be less than total provisioned size of lvols: {utils.humanbytes(total_lvol_size)}"
+    # None => the caller did not specify this size, so leave it alone. Without
+    # this guard None fell through `== 0` (False) into `> 0` and raised
+    # "TypeError: '>' not supported between instances of 'NoneType' and 'int'",
+    # which is what `pool set <id> --pool-max 4TB` hit: --lvol-max was omitted,
+    # so args.lvol_max was None and got passed positionally regardless.
+    if pool_max is not None:
+        if pool_max == 0:
+            pool.pool_max_size = 0
+        elif pool_max > 0:
+            total_lvol_size = 0
+            for lvol in db_controller.get_lvols_by_pool_id(uuid):
+                total_lvol_size += lvol.size
+            if total_lvol_size > pool_max:
+                msg = f"Pool max size can't be less than total provisioned size of lvols: {utils.humanbytes(total_lvol_size)}"
+                logger.error(msg)
+                return False, msg
+            pool.pool_max_size = pool_max
+        else:
+            msg = "pool_max can not be negative"
             logger.error(msg)
             return False, msg
-        pool.pool_max_size = pool_max
-    else:
-        msg = "pool_max can not be negative"
-        logger.error(msg)
-        return False, msg
 
-    if lvol_max == 0:
-        pool.lvol_max_size = 0
-    elif lvol_max > 0:
-        lvol_size_max = 0
-        for lvol in db_controller.get_lvols_by_pool_id(uuid):
-            lvol_size_max = max(lvol_size_max, lvol.size)
-        if lvol_size_max > lvol_max:
-            msg = f"LVol max size can't be less than max provisioned size of lvols: {utils.humanbytes(lvol_size_max)}"
+    if lvol_max is not None:
+        if lvol_max == 0:
+            pool.lvol_max_size = 0
+        elif lvol_max > 0:
+            lvol_size_max = 0
+            for lvol in db_controller.get_lvols_by_pool_id(uuid):
+                lvol_size_max = max(lvol_size_max, lvol.size)
+            if lvol_size_max > lvol_max:
+                msg = f"LVol max size can't be less than max provisioned size of lvols: {utils.humanbytes(lvol_size_max)}"
+                logger.error(msg)
+                return False, msg
+            # Was `pool.pool_max_size = lvol_max`, which wrote the per-lvol
+            # limit into the whole-pool limit -- so a non-zero --lvol-max
+            # silently overwrote pool_max_size and never set lvol_max_size at
+            # all. The `== 0` branch above already used the right field, which
+            # is what makes the mismatch visible.
+            pool.lvol_max_size = lvol_max
+        else:
+            msg = "lvol_max can not be negative"
             logger.error(msg)
             return False, msg
-        pool.pool_max_size = lvol_max
-    else:
-        msg = "lvol_max can not be negative"
-        logger.error(msg)
-        return False, msg
 
     # Apply QoS settings via RPC
     for hostname in db_controller.get_hostnames_by_pool_id(uuid):
@@ -333,15 +376,12 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 def delete_pool(uuid):
     db_controller = DBController()
     try:
-        pool = (
-                db_controller.get_pool_by_id(uuid)
-                if utils.UUID_PATTERN.match(uuid) is not None
-                else db_controller.get_pool_by_name(uuid)
-        )
-        pool = db_controller.get_pool_by_id(uuid)
+        pool = db_controller.get_pool_by_id_or_name(uuid)
     except KeyError as e:
         logger.error(e)
         return False
+
+    ops_gate.assert_object_ops_allowed("pool delete", cluster_id=pool.cluster_id)
 
     if pool.status == Pool.STATUS_INACTIVE:
         logger.error("Pool is disabled")
@@ -359,7 +399,7 @@ def delete_pool(uuid):
 
     with create_kms_connection(cluster) as kms:
         try:
-            kms.delete_key_encryption_key(pool.get_id())
+            kms.delete_key_encryption_key(pool_kek_name(pool.get_id()))
             logger.info("Deleted pool key")
         except KMSException:
             logger.exception("Failed to delete pool key")
@@ -368,12 +408,11 @@ def delete_pool(uuid):
     return True
 
 
-def list_pools(is_json, cluster_id=None):
+def list_pools(cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
     all_lvols = db_controller.get_mini_lvols() or []
-    all_snapshots = db_controller.get_mini_snapshots() or []
     for pool in pools:
         lvols_count = 0
         for lvol in all_lvols:
@@ -382,7 +421,7 @@ def list_pools(is_json, cluster_id=None):
         data.append({
             "UUID": pool.get_id(),
             "Name": pool.pool_name,
-            "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snapshots)),
+            "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
             "Max size": utils.humanbytes(pool.pool_max_size),
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
             "LVols": f"{lvols_count}",
@@ -392,10 +431,7 @@ def list_pools(is_json, cluster_id=None):
             "Status": pool.status,
         })
 
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        return utils.print_table(data)
+    return data
 
 
 def set_status(pool_id, status):
@@ -413,7 +449,7 @@ def set_status(pool_id, status):
     logger.info("Done")
 
 
-def get_pool(pool_id, is_json):
+def get_pool(pool_id):
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(pool_id)
@@ -421,12 +457,7 @@ def get_pool(pool_id, is_json):
         logger.error(f"Pool not found {pool_id}")
         return False
 
-    data = pool.get_clean_dict()
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        data2 = [{"key": key, "value": data[key]} for key in data]
-        return utils.print_table(data2)
+    return pool.get_clean_dict()
 
 
 def get_capacity(pool_id):
@@ -493,25 +524,35 @@ def get_io_stats(pool_id, history, records_count=20):
     ])
 
 
-def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
+def get_pool_total_capacity(pool_id):
+    """Pool volumes' size plus snapshots' used size, read fresh (admission must see a just-created volume)."""
     db_controller = DBController()
     try:
         db_controller.get_pool_by_id(pool_id)
     except KeyError:
         logger.error(f"Pool not found {pool_id}")
         return False
-    total = 0
-    if not all_lvols:
-        all_lvols = db_controller.get_lvols_by_pool_id(pool_id)
-    for lvol in all_lvols:
-        total += lvol.size
-
-    if not all_snaps:
-        all_snaps = db_controller.get_mini_snapshots()
-    for snap in all_snaps:
-        if snap.lvol.pool_uuid == pool_id:
-            total += snap.used_size
+    total = sum(lvol.size for lvol in db_controller.get_lvols_by_pool_id(pool_id))
+    total += sum(snap.used_size for snap in db_controller.get_snapshots_by_pool_id(pool_id))
     return total
+
+
+def get_cluster_snapshot_utilization(cluster_id, all_snaps=None):
+    """Actual (used) bytes held by every snapshot in the cluster, in
+    effective (client-visible) units.
+
+    Snapshots occupy real capacity that provisioned-lvol accounting does not
+    cover: a 100T cluster with 80T provisioned and 15T of snapshot
+    utilisation has 5T of admissible headroom, not 20T. Admission checks
+    must add this on top of the provisioned sum (the pool-level
+    get_pool_total_capacity above already follows the same model), or a
+    cluster can run out of physical space without any overprovisioning.
+    """
+    db_controller = DBController()
+    pool_ids = {p.get_id() for p in db_controller.get_pools(cluster_id)}
+    if all_snaps is None:
+        all_snaps = db_controller.get_mini_snapshots()
+    return sum(s.used_size for s in all_snaps if s.lvol.pool_uuid in pool_ids)
 
 
 def get_pool_total_rw_iops(pool_id):

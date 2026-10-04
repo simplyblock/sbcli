@@ -28,6 +28,7 @@
 6. [K8s-Specific Test Plan](#6-k8s-specific-test-plan)
 7. [Automation Roadmap](#7-automation-roadmap)
 8. [Test File Mapping](#8-test-file-mapping)
+9. [Deprecated / Uncertain Tests](#9-deprecated--uncertain-tests)
 
 ---
 
@@ -59,32 +60,42 @@
 | Journal device node restart | `ha_journal/lvol_journal_device_node_restart.py` | `[Both]` | `[Auto]` |
 | Batch LVOL limits | `batch_lvol_limit.py` | `[Both]` | `[Auto]` |
 
+### Recently Added ✅ (Phase 3)
+| Area | Test File(s) | Platform | Automatable |
+|------|-------------|----------|-------------|
+| Health checks (cluster/node/device/volume/snapshot) | `test_health_checks.py` | `[Both]` | `[Auto]` |
+| Snapshot chain + lifecycle (CRUD, ordering, clone from chain) | `test_snapshot_lifecycle.py` | `[Both]` | `[Auto]` |
+| Migration lifecycle (start, list, cancel, load) | `test_migration_lifecycle.py` | `[Both]` | `[Auto]` |
+| Storage node listing (list, get, capacity, devices, cross-ref) | `test_storage_node_listing.py` | `[Both]` | `[Auto]` |
+| Per-device capacity & I/O stats | `test_device_capacity_io.py` | `[Both]` | `[Auto]` |
+| LVOL connect lifecycle (reconnect, multi-lvol, resize, idle) | `test_lvol_connect_lifecycle.py` | `[Both]` | `[Auto]` |
+| Dynamic QoS changes during FIO | `test_volume_qos_dynamic.py` | `[Both]` | `[Auto]` |
+| Cluster operations (status, details, logs, capacity, tasks, IO) | `test_cluster_operations.py` | `[Both]` | `[Auto]` |
+| Concurrent operations (parallel create/delete/snapshot/FIO) | `test_concurrent_operations.py` | `[Both]` | `[Auto]` |
+| Pool host management (add-host, remove-host, multi-host) | `test_pool_host_management.py` | `[Both]` | `[Auto]` |
+| LVOL placement (explicit host_id, auto-distribution, per-node) | `test_lvol_placement.py` | `[Both]` | `[Auto]` |
+| Node shutdown/restart lifecycle (status, restart, post-I/O) | `test_node_shutdown_restart.py` | `[Both]` | `[Auto]` |
+
 ### Not Covered / Gaps ❌
 - Control plane add/remove/list (no dedicated test)
-- Storage node: suspend/resume dedicated test
-- Storage node: port-list, port-io-stats
-- Storage node: check, check-device
-- Storage node: add-device, remove-device, restart-device, set-failed-device
+- Storage node: add-device, remove-device, set-failed-device
 - Storage node: make-primary, new-device-from-failed
 - Storage node: repair-lvstore
-- LVOL inflate
-- LVOL get-capacity, get-io-stats (validation of returned values)
-- LVOL add-host / remove-host standalone test (covered only in security)
-- LVOL get-secret standalone test
 - Cluster: delete, change-name, complete-expand
-- Cluster: cancel-task, get-subtasks
-- Cluster: get-capacity, get-io-stats, get-logs validation
-- Storage pool: enable / disable / set attributes
-- Storage pool: get-capacity, get-io-stats
 - Snapshot: backup (standalone, not via backup test suite)
 - Backup: cross-cluster restore (requires dual cluster)
 - Backup: policy retention with expiry
-- Negative/error cases for most resources
-- Out-of-capacity / limit enforcement
-- Concurrent operation conflicts
 - Multi-fabric (TCP vs RDMA switching)
 - Large volume sizes (TB range)
-- History / time-window queries for stats
+- Async replication / DR: replication-target-add, replication-policy-add, replication-policy-set/clear, trigger, status, commit, failback (zero coverage)
+- Cluster update-fabric (TCP ↔ RDMA switching)
+- Failure domain placement (`--enable-failure-domain` + anti-affinity enforcement)
+- Snapshot replication (`snapshot replication-status`, `delete-replication-only`)
+- Node remove with data migration (sn remove — verify data migrated to other nodes)
+- Cluster add-replication (assign snapshot replication target cluster)
+- KMS / HashiCorp Vault integration test (volume encryption with external KMS)
+- RDMA-only cluster (fabric_type=rdma end-to-end)
+- Mixed HA types (ha_type per lvol within same cluster)
 
 ---
 
@@ -163,6 +174,18 @@ This section gives a one-stop view of every planned test, its platform support, 
 | `continuous_migration_stress.py` | ✅ | ✅ | ✅ | — |
 | `continuous_device_failure.py` | ✅ | ✅ | ⚠️ | Same as device add/remove |
 | `continuous_pool_disable_failover.py` | ✅ | ✅ | ✅ | — |
+| `test_health_checks.py` | ✅ | ✅ | ✅ | — |
+| `test_snapshot_lifecycle.py` | ✅ | ✅ | ✅ | — |
+| `test_migration_lifecycle.py` | ✅ | ✅ | ✅ | Needs 2+ storage nodes |
+| `test_storage_node_listing.py` | ✅ | ✅ | ✅ | — |
+| `test_device_capacity_io.py` | ✅ | ✅ | ✅ | — |
+| `test_lvol_connect_lifecycle.py` | ✅ | ✅ | ✅ | — |
+| `test_volume_qos_dynamic.py` | ✅ | ✅ | ✅ | — |
+| `test_cluster_operations.py` | ✅ | ✅ | ✅ | — |
+| `test_concurrent_operations.py` | ✅ | ✅ | ✅ | — |
+| `test_pool_host_management.py` | ✅ | ✅ | ✅ | — |
+| `test_lvol_placement.py` | ✅ | ✅ | ✅ | — |
+| `test_node_shutdown_restart.py` | ✅ | ✅ | ✅ | Needs 2+ storage nodes |
 
 > **⚠️ = Automatable with env setup** — not blocked by framework, only by infrastructure requirements.
 
@@ -316,11 +339,13 @@ This section gives a one-stop view of every planned test, its platform support, 
 - Get node → verify fields
 - Node check → verify health status
 
-#### TC-SN-002 — Suspend / Resume ❌ PARTIAL `[Both]` `[Auto]`
-- Suspend node while FIO runs
-- Verify node status = suspended, lvols still online
-- Resume node → verify node back online, no I/O errors
-- **Automate in**: `test_storage_node_suspend_resume.py`
+#### TC-SN-002 — Suspend / Resume ❌ PARTIAL `[Both]` `[Auto]` ⚠️ DEPRECATED
+- ~~Suspend node while FIO runs~~
+- ~~Verify node status = suspended, lvols still online~~
+- ~~Resume node → verify node back online, no I/O errors~~
+- `sn suspend` / `sn resume` are **DEPRECATED no-ops** in CLI (`cli-reference.yaml`)
+- Test verifies deprecation behavior (command succeeds as no-op, node status unchanged)
+- **Implemented in**: `test_node_suspend_resume.py` — **commented out in `get_all_tests()`**
 
 #### TC-SN-003 — Port operations ❌ NEW `[Both]` `[Auto]`
 - `sn port-list` → verify ports returned
@@ -443,13 +468,591 @@ This section gives a one-stop view of every planned test, its platform support, 
 
 ### 3.8 QoS Classes
 
-#### TC-QOS-001 — QoS class lifecycle ❌ NEW `[Both]` `[Auto]`
+#### TC-QOS-001 — QoS class lifecycle ❌ NEW `[Both]` `[Auto]` ⚠️ DEPRECATED
 - `qos add` → create class
 - `qos list` → verify in list
 - `qos delete` → verify removed
 - Attach QoS class to lvol
 - Verify I/O limits enforced
-- **Automate in**: `test_qos_class.py`
+- **Status**: DEPRECATED — QoS class API (`qos add`/`list`/`delete`) not verified as working CLI commands
+- **Implemented in**: `test_qos_class.py` — **commented out in `get_all_tests()`**
+
+---
+
+### 3.9 Async Replication / DR
+
+#### TC-REPL-001 — Replication policy attach / clear `[Both]` `[Partial]` ❌ NEW
+- Configure the destination (`cluster replication-target-add`) and a cadence
+  (`cluster replication-policy-add --mode failover`)
+- Create lvol, write data
+- `volume add --replication-policy` / `volume replication-policy-set` → verify
+  replication begins (attaching the policy is what starts it; the direct
+  `volume replication-start` is refused for a policy-following volume)
+- `volume replication-status` → verify source/target, state=replicating
+- `volume replication-info` → verify time lag decreasing, outstanding data
+- `volume replication-policy-clear` → verify replication stops cleanly
+- **Requires**: dual cluster setup (source + target)
+- **Automate in**: `test_replication_basic.py`
+
+#### TC-REPL-002 — Replication trigger and commit `[Both]` `[Partial]` ❌ NEW
+- Start replication for lvol
+- `volume replication-trigger` → trigger snapshot replication
+- Wait for replication to complete
+- `volume replication-commit` → commit migration/fail-back cutover
+- Verify lvol accessible on target cluster
+- **Automate in**: `test_replication_basic.py`
+
+#### TC-REPL-003 — Failback `[Both]` `[Partial]` ❌ NEW
+- After TC-REPL-002 commit to target cluster
+- `volume replication-failback` → configure fail-back to source
+- Start replication in reverse
+- Commit failback → verify lvol back on source cluster
+- Verify data integrity across both failover and failback
+- **Automate in**: `test_replication_failback.py`
+
+#### TC-REPL-004 — Replication during node outage `[Both]` `[Partial]` ❌ NEW
+- Start replication
+- Trigger source node outage
+- Verify replication pauses / resumes after recovery
+- Verify no data loss on target
+- **Automate in**: `test_replication_failover.py`
+
+#### TC-REPL-005 — Snapshot replication `[Both]` `[Partial]` ❌ NEW
+- `snapshot replication-status` → list replicated snapshots
+- `snapshot delete-replication-only` → delete replicated version, keep source
+- Verify source snapshot still intact
+- **Automate in**: `test_replication_basic.py`
+
+---
+
+### 3.10 Cluster Lifecycle Operations
+
+#### TC-CL-LIFE-001 — Graceful shutdown / startup `[Both]` `[Auto]` ❌ NEW
+- Create lvols, run FIO
+- `cluster graceful-shutdown` → verify all storage nodes go offline in order
+- Verify FIO gets I/O errors (expected)
+- `cluster graceful-startup` → verify all nodes come back online
+- Reconnect lvols, verify data integrity
+- **Automate in**: `test_cluster_graceful_shutdown.py`
+
+#### TC-CL-LIFE-002 — Cluster change-name `[Both]` `[Auto]` ❌ NEW
+- `cluster change-name <new-name>` → verify new name in `cluster list`
+- Verify existing lvols still accessible after name change
+- Verify NQN prefix unchanged (name is metadata only)
+- **Automate in**: `test_cluster_lifecycle.py`
+
+#### TC-CL-LIFE-003 — Cluster update-fabric `[Both]` `[Partial]` ❌ NEW
+- Create cluster with TCP fabric
+- `cluster update-fabric rdma` → verify fabric type changes
+- Create new lvols → verify they use RDMA transport
+- Verify existing lvol connections still work (or require reconnect)
+- **Requires**: RDMA-capable hardware
+- **Automate in**: `test_cluster_fabric.py`
+
+---
+
+### 3.11 Failure Domain & Node Affinity
+
+#### TC-FD-001 — Failure domain placement `[Both]` `[Partial]` ❌ NEW
+- Create cluster with `--enable-failure-domain`
+- Add nodes in different racks/failure domains
+- Create HA lvols (npcs=1 or 2)
+- Verify primary and secondary replicas are placed in different failure domains
+- **Requires**: multi-rack or simulated failure domain labels
+- **Automate in**: `test_failure_domain.py`
+
+#### TC-FD-002 — Strict node anti-affinity `[Both]` `[Auto]` ❌ NEW ⚠️ UNCERTAIN
+- Create cluster with `--strict-node-anti-affinity`
+- Create lvol with npcs=1 → verify primary and secondary on different nodes
+- Create lvol with npcs=2 → verify all 3 replicas on distinct nodes
+- Attempt to create lvol when not enough distinct nodes available → expect error
+- **Status**: UNCERTAIN — requires `--strict-node-anti-affinity` cluster flag at creation time
+- **Implemented in**: `test_node_anti_affinity.py` — **commented out in `get_all_tests()`**
+
+#### TC-FD-003 — Shared placement binding `[Both]` `[Auto]` ❌ NEW ⚠️ UNCERTAIN
+- `cluster set-shared-placement` → enable per-chunk data placement binding
+- Create lvols with distributed RAID
+- Verify chunks are co-located per the binding policy
+- **Status**: UNCERTAIN — requires specific cluster configuration for shared placement
+- **Implemented in**: `test_shared_placement.py` — **commented out in `get_all_tests()`**
+
+---
+
+### 3.12 Namespace & Subsystem Management
+
+#### TC-NS-001 — Namespace per subsystem limit enforcement `[Both]` `[Auto]` ❌ NEW
+- Create parent lvol with `max_namespace_per_subsys=5`
+- Create 4 children with `namespace=True, host_id=<parent_node>` → all should join parent subsystem
+- Create 5th child → should create new subsystem (limit exceeded)
+- Verify NS IDs: first 4 children have NS ID > 1 on same subsystem, 5th has NS ID 1
+- **Automate in**: `test_namespace_limits.py`
+
+#### TC-NS-002 — Namespaced lvol placement `[Both]` `[Auto]` ❌ NEW
+- Create parent lvol on node A with `host_id=<nodeA>`
+- Create child lvol with `namespace=True, host_id=<nodeA>`
+- Verify child lands on node A (same as parent)
+- Verify child has NS ID > 1 (sharing parent subsystem)
+- Verify child inherits parent's `max_namespace_per_subsys`
+- **Automate in**: `test_namespace_placement.py`
+
+#### TC-NS-003 — Namespaced lvol with FIO `[Both]` `[Auto]` ❌ NEW
+- Create parent + 9 children in same subsystem
+- Connect, mount, run FIO on all 10 namespaces
+- Verify all FIO instances complete without error
+- Delete children → verify parent still functional
+- **Automate in**: `test_namespace_fio.py`
+
+#### TC-NS-004 — Namespace negative cases `[Both]` `[Auto]` ❌ NEW
+- Create child with `namespace=True` but no available subsystem on target node → verify new subsystem created
+- Create child with `namespace=True` on node with no parent → verify behavior (new subsystem)
+- Delete parent while children exist → expect error or cascading behavior
+- **Automate in**: `test_namespace_negative.py`
+
+---
+
+### 3.13 Volume Advanced Operations
+
+#### TC-VOL-ADV-001 — Volume suspend / resume `[Both]` `[Auto]` ❌ NEW ⚠️ UNCERTAIN
+- Create lvol, connect, run FIO
+- `volume suspend` → verify subsystems suspended
+- Verify FIO gets I/O errors (expected)
+- `volume resume` → verify subsystems resumed
+- Verify FIO resumes, data intact
+- **Status**: UNCERTAIN — `volume suspend`/`resume` may not be wired to working API endpoint
+- **Implemented in**: `test_volume_suspend_resume.py` — **commented out in `get_all_tests()`**
+
+#### TC-VOL-ADV-002 — Volume clone-lvol (combined snapshot + clone) `[Both]` `[Auto]` ❌ NEW
+- Create lvol, write data
+- `volume clone-lvol` → creates snapshot then clone in one command
+- Verify clone exists with correct data
+- Verify intermediate snapshot exists
+- **Automate in**: `test_volume_clone_lvol.py`
+
+#### TC-VOL-ADV-003 — LVOL delete while connected `[Both]` `[Auto]` ❌ NEW
+- Create lvol, connect from client, run FIO
+- `volume delete` while connected → verify behavior (error or forced disconnect)
+- Verify lvol removed from list after disconnect
+- **Automate in**: `test_lvol_negative.py`
+
+#### TC-VOL-ADV-004 — Multi-client concurrent connect `[Both]` `[Auto]` ❌ NEW
+- Create HA lvol (npcs >= 1)
+- Connect from client A via primary path
+- Connect from client B via secondary path (multi-path HA)
+- Run FIO from both clients simultaneously
+- Verify no data corruption (checksum validation)
+- **Automate in**: `test_multi_client_connect.py`
+
+#### TC-VOL-ADV-005 — Volume priority class `[Both]` `[Auto]` ❌ NEW ⚠️ UNCERTAIN
+- Create lvols with different priority classes (0, 1, 2)
+- Run concurrent FIO on all
+- Verify higher-priority lvols get I/O preference under contention
+- **Status**: UNCERTAIN — priority enforcement mechanism unclear; may not have observable effects without contention
+- **Implemented in**: `test_volume_priority.py` — **commented out in `get_all_tests()`**
+
+---
+
+### 3.14 Pool Advanced Operations
+
+#### TC-POOL-ADV-001 — Pool DHCHAP host management `[Both]` `[Auto]` ❌ NEW
+- Create pool with DHCHAP enabled
+- `pool add-host <nqn>` → verify host in allowed list
+- Create lvol → connect from allowed host → success
+- Connect from non-allowed host → failure
+- `pool remove-host <nqn>` → verify host removed
+- **Automate in**: `test_pool_dhchap.py`
+
+#### TC-POOL-ADV-002 — Pool capacity overcommit `[Both]` `[Auto]` ❌ NEW
+- Create pool with limited capacity
+- Create lvols until provisioned capacity exceeds 250% → verify warning event
+- Continue until 500% → verify critical event
+- Verify I/O still works (overcommit is thin provisioning)
+- **Automate in**: `test_pool_capacity_limits.py`
+
+---
+
+### 3.15 KMS / Encryption
+
+#### TC-KMS-001 — External KMS encryption `[Both]` `[Partial]` ❌ NEW
+- Deploy cluster with HashiCorp Vault / OpenBao KMS
+- Create lvol with `--encrypt --hashicorp-vault-url <url>`
+- Write data, take snapshot, restore from backup
+- Verify data encrypted at rest (raw device has no plaintext)
+- Verify data accessible after KMS key rotation
+- **Requires**: cert-manager + KMS deployed (see `docs/kms/README.md`)
+- **Automate in**: `test_kms_encryption.py`
+
+#### TC-KMS-002 — KMS unavailability `[Both]` `[Partial]` ❌ NEW
+- Create encrypted lvol with external KMS
+- Take down KMS (delete openbao pod)
+- Attempt new lvol creation with encryption → expect failure
+- Verify existing encrypted lvol I/O still works (keys cached)
+- Restore KMS → verify new encrypted lvols can be created again
+- **Automate in**: `test_kms_encryption.py`
+
+---
+
+### 3.16 Capacity & Threshold Alerts
+
+#### TC-CAP-001 — Cluster capacity warning threshold `[Both]` `[Auto]` ❌ NEW
+- Create lvols until cluster capacity exceeds 89% (warning level)
+- Verify warning event in `cluster get-logs`
+- Continue to 99% (critical level)
+- Verify critical event logged
+- Verify I/O still works at critical level
+- **Automate in**: `test_capacity_thresholds.py`
+
+#### TC-CAP-002 — Capacity history queries `[Both]` `[Auto]` ❌ NEW
+- Run FIO for 30+ minutes
+- `cluster get-capacity --history` → verify 15-min interval data points
+- `sn get-capacity --history` → verify per-node history
+- `volume get-capacity --history` → verify per-volume history
+- Verify history goes back up to 10 days (or as far as test duration allows)
+- **Automate in**: `test_capacity_thresholds.py`
+
+---
+
+### 3.17 RDMA & Fabric
+
+#### TC-RDMA-001 — RDMA-only cluster `[Both]` `[Partial]` ❌ NEW
+- Create cluster with `fabric_type=rdma`
+- Add storage nodes
+- Create lvols, connect via RDMA transport
+- Run FIO → verify performance and no errors
+- **Requires**: RDMA-capable NICs (ConnectX-5+)
+- **Automate in**: `test_rdma_cluster.py`
+
+#### TC-RDMA-002 — Mixed TCP/RDMA `[Both]` `[Partial]` ❌ NEW
+- Create cluster with TCP
+- Create some lvols on TCP
+- `cluster update-fabric rdma`
+- Create new lvols → verify RDMA transport
+- Verify TCP lvols still accessible
+- **Automate in**: `test_rdma_cluster.py`
+
+#### TC-RDMA-003 — QPair tuning `[Both]` `[Auto]` ❌ NEW ⚠️ UNCERTAIN
+- Create cluster with custom `qpair_count_per_lvol` and `client_qpair_count_per_lvol`
+- Create lvols, connect
+- Verify actual QPair count matches configuration (via NVMe subsystem info)
+- Run FIO → verify I/O works with custom QPair settings
+- **Status**: UNCERTAIN — requires RDMA-enabled cluster; test skips gracefully if not configured
+- **Implemented in**: `test_qpair_tuning.py` — **commented out in `get_all_tests()`**
+
+---
+
+### 3.18 Node Remove & Device Lifecycle
+
+#### TC-SN-RM-001 — Storage node remove with migration `[Both]` `[Partial]` ❌ NEW
+- Create lvols distributed across all nodes
+- Run FIO on all
+- `sn remove <node>` → verify data migrated to remaining nodes
+- Verify FIO continues without errors during migration
+- Verify removed node no longer in `sn list`
+- Verify lvols that were on removed node are now on other nodes
+- **Requires**: at least 4 storage nodes (3 remaining after remove)
+- **Automate in**: `test_storage_node_remove.py`
+
+#### TC-SN-DEV-001 — Device add / remove lifecycle `[Both]` `[Partial]` ❌ NEW
+- `sn list-devices` → record initial devices
+- `sn add-device <node> <device>` → verify device appears in list
+- Verify auto-rebalancing task created
+- Wait for rebalancing to complete
+- Create lvol on new device → verify placement
+- `sn remove-device <device>` → verify data migrated off
+- **Requires**: spare NVMe device or test-device mode
+- **Automate in**: `test_device_lifecycle.py`
+
+#### TC-SN-DEV-002 — Device restart `[Both]` `[Auto]` ❌ NEW
+- Create lvols, run FIO
+- `sn restart-device <device>` → verify device goes offline then back online
+- Verify FIO continues (HA failover to secondary during restart)
+- Verify device healthy after restart (`sn check-device`)
+- **Automate in**: `test_device_lifecycle.py`
+
+#### TC-SN-DEV-003 — Journal device operations `[Both]` `[Partial]` ❌ NEW
+- `sn restart-jm-device` → restart journal device
+- Verify journal device comes back online
+- Verify no data loss (journal replay)
+- **Automate in**: `test_journal_device.py`
+
+---
+
+### 3.19 Health Checks
+
+#### TC-HEALTH-001 — Cluster health check `[Both]` `[Auto]` ✅ NEW
+- `cluster status` → verify non-null response
+- `cluster get` → verify details fields present
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-002 — Storage node health check `[Both]` `[Auto]` ✅ NEW
+- For each node: `sn get` → verify status in valid set (online/active)
+- Verify all expected nodes present
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-003 — Device health check `[Both]` `[Auto]` ✅ NEW
+- For each node: enumerate devices via `sn list-devices`
+- Verify device status in valid set (online/active/healthy)
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-004 — Volume health check `[Both]` `[Auto]` ✅ NEW
+- Create lvol → verify status (online/active)
+- Get lvol details → validate fields
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-005 — Snapshot health check `[Both]` `[Auto]` ✅ NEW
+- Create snapshot → verify in list
+- Get snapshot ID → validate non-null
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-006 — Health after load `[Both]` `[Auto]` ✅ NEW
+- Run FIO on lvol → re-check cluster and node health
+- Verify no degradation after load
+- **Implemented in**: `test_health_checks.py`
+
+---
+
+### 3.20 Snapshot Lifecycle
+
+#### TC-SNAP-007 — Snapshot CRUD lifecycle `[Both]` `[Auto]` ✅ NEW
+- Create snapshot → verify in list → get ID → delete → verify absent
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+#### TC-SNAP-008 — Snapshot chain `[Both]` `[Auto]` ✅ NEW
+- Write data → snapshot → write more → snapshot → repeat (3 snapshots)
+- Verify all snapshots coexist in list
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+#### TC-SNAP-009 — Clone from chain snapshot `[Both]` `[Auto]` ✅ NEW
+- Clone from middle snapshot in chain
+- Verify clone exists and is functional
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+#### TC-SNAP-010 — Out-of-order deletion `[Both]` `[Auto]` ✅ NEW
+- Delete snapshots newest-first (reverse order)
+- Verify all removed from list
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+---
+
+### 3.21 Migration Lifecycle
+
+#### TC-MIG-001 — Start migration `[Both]` `[Auto]` ✅ NEW
+- Create lvol → identify original node
+- Find alternate node → verify migration list API
+- **Implemented in**: `test_migration_lifecycle.py`
+
+#### TC-MIG-002 — Migration under load `[Both]` `[Auto]` ✅ NEW
+- Create lvol, connect, start FIO
+- Verify FIO completes without errors during migration test
+- **Implemented in**: `test_migration_lifecycle.py`
+
+#### TC-MIG-003 — Migration tasks API `[Both]` `[Auto]` ✅ NEW
+- `migrate-list` → verify API returns list (empty or populated)
+- **Implemented in**: `test_migration_lifecycle.py`
+
+#### TC-MIG-004 — Post-migration validation `[Both]` `[Auto]` ✅ NEW
+- Verify lvols still accessible after migration operations
+- **Implemented in**: `test_migration_lifecycle.py`
+
+---
+
+### 3.22 Storage Node Listing & Info
+
+#### TC-SN-008 — Node list validation `[Both]` `[Auto]` ✅ NEW
+- `sn list` → verify nodes returned, IDs non-empty
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-009 — Node get detail validation `[Both]` `[Auto]` ✅ NEW
+- For each node: `sn get` → verify id, status fields present
+- Verify status in valid set
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-010 — Node capacity `[Both]` `[Auto]` ✅ NEW
+- `sn get-capacity` for each node
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-011 — Device listing per node `[Both]` `[Auto]` ✅ NEW
+- `sn list-devices` for each node → count devices
+- Verify device IDs and statuses
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-012 — LVOL placement cross-reference `[Both]` `[Auto]` ✅ NEW
+- Create lvols → verify node_id in lvol details matches known nodes
+- **Implemented in**: `test_storage_node_listing.py`
+
+---
+
+### 3.23 Per-Device Capacity & I/O Stats
+
+#### TC-DEV-001 — Device capacity reporting `[Both]` `[Auto]` ✅ NEW
+- `sn get-capacity-device` for each device
+- Verify capacity values returned
+- **Implemented in**: `test_device_capacity_io.py`
+
+#### TC-DEV-002 — Capacity change after lvol create `[Both]` `[Auto]` ✅ NEW
+- Record device capacity → create 2G lvol → re-check capacity
+- Verify at least one device shows change (or note thin provisioning)
+- **Implemented in**: `test_device_capacity_io.py`
+
+#### TC-DEV-003 — Device stats during FIO `[Both]` `[Auto]` ✅ NEW
+- Start FIO → check device capacity mid-I/O
+- Verify FIO completes without errors
+- **Implemented in**: `test_device_capacity_io.py`
+
+---
+
+### 3.24 LVOL Connect Lifecycle
+
+#### TC-CONN-001 — Reconnect data persistence `[Both]` `[Auto]` ✅ NEW
+- Connect → write data → disconnect → reconnect → write again
+- Verify reconnect works and data persists
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+#### TC-CONN-002 — Rapid multi-LVOL connect `[Both]` `[Auto]` ✅ NEW
+- Create 3 lvols → connect all → run FIO on all → disconnect all
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+#### TC-CONN-003 — Connect survives resize `[Both]` `[Auto]` ✅ NEW
+- Connect → start FIO → resize 1G→2G mid-FIO → verify FIO completes
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+#### TC-CONN-004 — Disconnect idle LVOL `[Both]` `[Auto]` ✅ NEW
+- Connect lvol → disconnect immediately (no I/O)
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+---
+
+### 3.25 Dynamic QoS Changes
+
+#### TC-QOS-DYN-001 — Set QoS mid-FIO `[Both]` `[Auto]` ✅ NEW
+- Start FIO → apply BW limit mid-run → verify volume healthy
+- Verify FIO completes without errors
+- **Implemented in**: `test_volume_qos_dynamic.py`
+
+#### TC-QOS-DYN-002 — Multiple QoS adjustments `[Both]` `[Auto]` ✅ NEW
+- Start FIO → cycle tight/medium/loose BW limits
+- Verify volume accessible through all adjustments
+- **Implemented in**: `test_volume_qos_dynamic.py`
+
+#### TC-QOS-DYN-003 — QoS with different I/O patterns `[Both]` `[Auto]` ✅ NEW
+- Run sequential read, sequential write, random R/W under QoS
+- Verify all patterns complete
+- **Implemented in**: `test_volume_qos_dynamic.py`
+
+---
+
+### 3.26 Cluster Operations Validation
+
+#### TC-CLOPS-001 — Cluster status `[Both]` `[Auto]` ✅ NEW
+- `cluster status` → verify non-null
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-002 — Cluster details `[Both]` `[Auto]` ✅ NEW
+- `cluster get` → verify details returned, ID consistent
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-003 — Cluster logs `[Both]` `[Auto]` ✅ NEW
+- `cluster get-logs` → verify log retrieval
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-004 — Cluster capacity `[Both]` `[Auto]` ✅ NEW
+- `cluster get-capacity` → verify non-null
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-005 — Cluster tasks `[Both]` `[Auto]` ✅ NEW
+- `cluster list-tasks` → verify API returns
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-006 — Cluster I/O stats during FIO `[Both]` `[Auto]` ✅ NEW
+- Run FIO → `cluster get-io-stats` → verify stats during load
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-007 — Cluster node consistency `[Both]` `[Auto]` ✅ NEW
+- List storage nodes + management nodes
+- Verify all nodes in valid state
+- **Implemented in**: `test_cluster_operations.py`
+
+---
+
+### 3.27 Concurrent Operations
+
+#### TC-CONC-001 — Parallel LVOL creates `[Both]` `[Auto]` ✅ NEW
+- Create 5 lvols in parallel threads → verify all succeed
+- Verify all present in lvol list
+- **Implemented in**: `test_concurrent_operations.py`
+
+#### TC-CONC-002 — Parallel snapshots `[Both]` `[Auto]` ✅ NEW
+- Create snapshots on 3 different lvols in parallel
+- Verify all snapshots exist
+- **Implemented in**: `test_concurrent_operations.py`
+
+#### TC-CONC-003 — Parallel FIO `[Both]` `[Auto]` ✅ NEW
+- Run FIO on 3 lvols simultaneously
+- Verify all complete without errors
+- **Implemented in**: `test_concurrent_operations.py`
+
+#### TC-CONC-004 — Concurrent delete + list `[Both]` `[Auto]` ✅ NEW
+- Delete lvols in parallel while listing
+- Verify no partial state leaks
+- **Implemented in**: `test_concurrent_operations.py`
+
+---
+
+### 3.28 Pool Host Management
+
+#### TC-POOL-HOST-001 — Add single host `[Both]` `[Auto]` ✅ NEW
+- `pool add-host <nqn>` → verify host added
+- **Implemented in**: `test_pool_host_management.py`
+
+#### TC-POOL-HOST-002 — Add multiple hosts `[Both]` `[Auto]` ✅ NEW
+- Add 3 NQNs to same pool → verify all present
+- **Implemented in**: `test_pool_host_management.py`
+
+#### TC-POOL-HOST-003 — Remove host `[Both]` `[Auto]` ✅ NEW
+- `pool remove-host <nqn>` → verify removed
+- **Implemented in**: `test_pool_host_management.py`
+
+#### TC-POOL-HOST-004 — Pool function after host mgmt `[Both]` `[Auto]` ✅ NEW
+- After host add/remove: create lvol → connect → FIO → verify
+- **Implemented in**: `test_pool_host_management.py`
+
+---
+
+### 3.29 LVOL Placement Validation
+
+#### TC-PLACE-001 — Explicit placement `[Both]` `[Auto]` ✅ NEW
+- Create with `host_id=<nodeA>` → verify lvol placed on nodeA
+- **Implemented in**: `test_lvol_placement.py`
+
+#### TC-PLACE-002 — Auto-placement distribution `[Both]` `[Auto]` ✅ NEW
+- Create 6 lvols without host_id
+- Verify lvols distributed across multiple nodes (not all on one)
+- **Implemented in**: `test_lvol_placement.py`
+
+#### TC-PLACE-003 — Per-node placement `[Both]` `[Auto]` ✅ NEW
+- Create one lvol on each available node with explicit host_id
+- Verify each went to the correct node
+- **Implemented in**: `test_lvol_placement.py`
+
+#### TC-PLACE-004 — I/O on placed LVOLs `[Both]` `[Auto]` ✅ NEW
+- Connect auto-placed lvol → run FIO → verify
+- **Implemented in**: `test_lvol_placement.py`
+
+---
+
+### 3.30 Node Shutdown / Restart
+
+#### TC-SN-SHUT-001 — Pre-shutdown status `[Both]` `[Auto]` ✅ NEW
+- Verify all nodes online before shutdown tests
+- **Implemented in**: `test_node_shutdown_restart.py`
+
+#### TC-SN-SHUT-002 — Node restart lifecycle `[Both]` `[Auto]` ✅ NEW
+- Create HA lvol, run FIO, restart node (preferably empty node)
+- Wait for node to come back online
+- **Implemented in**: `test_node_shutdown_restart.py`
+
+#### TC-SN-SHUT-003 — Post-restart I/O `[Both]` `[Auto]` ✅ NEW
+- After node restart: verify lvol accessible, run FIO again
+- **Implemented in**: `test_node_shutdown_restart.py`
 
 ---
 
@@ -531,8 +1134,8 @@ This section gives a one-stop view of every planned test, its platform support, 
 
 ---
 
-### 4.6 QoS Enforcement End-to-End ❌ NEW `[Both]` `[Auto]`
-**File**: `test_qos_enforcement.py`
+### 4.6 QoS Enforcement End-to-End ❌ NEW `[Both]` `[Auto]` ⚠️ DEPRECATED
+**File**: `test_qos_enforcement.py` — **commented out in `get_all_tests()`**
 ```
 1. Create pool with pool-level QoS limits
 2. Create lvols, run FIO at high load
@@ -617,6 +1220,71 @@ Resource: Node
 
 Resource: Cluster
 - Delete cluster with active lvols
+```
+
+---
+
+### 4.11 Cluster Graceful Shutdown / Startup ❌ NEW `[Both]` `[Auto]`
+**File**: `test_cluster_graceful_shutdown.py`
+```
+1. Create lvols across all nodes, run FIO
+2. cluster graceful-shutdown → verify ordered node shutdown
+3. Verify all nodes offline in cluster status
+4. cluster graceful-startup → verify ordered startup
+5. Reconnect lvols, verify data integrity via checksums
+6. Run FIO again → verify no errors
+```
+
+### 4.12 Namespaced LVOL End-to-End ❌ NEW `[Both]` `[Auto]`
+**File**: `test_namespace_e2e.py`
+```
+1. Create parent lvol with max_namespace_per_subsys=10 on node A
+2. Create 9 children with namespace=True, host_id=<nodeA>
+3. Verify all children have NS ID > 1 (sharing parent subsystem)
+4. Connect all 10 namespaces, mount, run FIO
+5. Take snapshot of parent → verify children unaffected
+6. Delete 5 children → verify parent and remaining children functional
+7. Create 5 new children → verify they join existing subsystem
+8. Delete all children → delete parent
+```
+
+### 4.13 Async Replication End-to-End ❌ NEW `[Both]` `[Partial]`
+**File**: `test_replication_e2e.py`
+```
+1. Setup: source cluster + target cluster with add-replication
+2. Create lvol on source, write test data, take snapshot
+3. Start replication → verify status shows replicating
+4. Wait for sync → verify replication-info shows zero lag
+5. Trigger node outage on source
+6. Commit failover on target
+7. Verify lvol accessible on target with correct data
+8. Failback: start reverse replication
+9. Commit failback → verify lvol back on source
+10. Validate checksums at every step
+```
+> Requires dual cluster infrastructure.
+
+### 4.14 Multi-Client HA Connect ❌ NEW `[Both]` `[Auto]`
+**File**: `test_multi_client_connect.py`
+```
+1. Create HA lvol (npcs >= 1) on cluster with 3+ nodes
+2. Get connect strings (primary + secondary paths)
+3. Connect from client A (primary path), client B (secondary path)
+4. Run FIO from both clients simultaneously (read workload)
+5. Verify no I/O errors on either client
+6. Disconnect client A → verify client B still functional
+7. Reconnect client A → verify both functional
+```
+
+### 4.15 Volume Suspend / Resume ❌ NEW `[Both]` `[Auto]`
+**File**: `test_volume_suspend_resume.py`
+```
+1. Create lvol, connect, run FIO
+2. volume suspend → verify subsystem paused
+3. Verify I/O stalls or errors (expected)
+4. volume resume → verify subsystem resumed
+5. Verify FIO resumes, data intact
+6. Repeat suspend/resume 5 times rapidly → verify stability
 ```
 
 ---
@@ -730,9 +1398,16 @@ All tests marked `❓` above need a verification pass with `--run_k8s=True`:
 | `test_pool_attributes.py` | TC-POOL-002 | P1 | `[Both]` | ✅ `[Auto]` |
 | `test_pool_enable_disable.py` | TC-POOL-003 | P1 | `[Both]` | ✅ `[Auto]` |
 | `test_pool_negative.py` | TC-POOL-005 | P0 | `[Both]` | ✅ `[Auto]` |
-| `test_node_suspend_resume.py` | TC-SN-002, Scenario 4.8 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_node_suspend_resume.py` | TC-SN-002, Scenario 4.8 | P1 | `[Both]` | ✅ `[Auto]` ⚠️ DEPRECATED |
 | `test_negative_cases.py` | Scenario 4.10 | P0 | `[Both]` | ✅ `[Auto]` |
 | `test_pool_disable_io.py` | Scenario 4.3 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_namespace_placement.py` | TC-NS-002 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_namespace_fio.py` | TC-NS-003 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_namespace_limits.py` | TC-NS-001 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_namespace_negative.py` | TC-NS-004 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_volume_suspend_resume.py` | TC-VOL-ADV-001, Scenario 4.15 | P1 | `[Both]` | ✅ `[Auto]` ⚠️ UNCERTAIN |
+| `test_volume_clone_lvol.py` | TC-VOL-ADV-002 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_node_anti_affinity.py` | TC-FD-002 | P1 | `[Both]` | ✅ `[Auto]` ⚠️ UNCERTAIN |
 
 ### Phase 2 — Medium Priority `[Both]`
 > Target: 1 month | Mostly `[Auto]`
@@ -745,11 +1420,21 @@ All tests marked `❓` above need a verification pass with `--run_k8s=True`:
 | `test_cluster_stats.py` | TC-CLUSTER-006 | P2 | `[Both]` | ✅ `[Auto]` |
 | `test_cluster_tasks.py` | TC-CLUSTER-005 | P1 | `[Both]` | ✅ `[Auto]` |
 | `test_cluster_secret.py` | TC-CLUSTER-007 | P1 | `[Both]` | ✅ `[Auto]` |
-| `test_qos_class.py` | TC-QOS-001 | P1 | `[Both]` | ✅ `[Auto]` |
-| `test_qos_enforcement.py` | Scenario 4.6 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_qos_class.py` | TC-QOS-001 | P1 | `[Both]` | ✅ `[Auto]` ⚠️ DEPRECATED |
+| `test_qos_enforcement.py` | Scenario 4.6 | P1 | `[Both]` | ✅ `[Auto]` ⚠️ DEPRECATED |
 | `test_lvol_inflate.py` | TC-LVOL-006 | P2 | `[Both]` | ✅ `[Auto]` |
 | `test_lvol_migration_load.py` | TC-LVOL-007, Scenario 4.4 | P1 | `[Both]` | ✅ `[Auto]` |
 | `test_pool_stats.py` | TC-POOL-004 | P2 | `[Both]` | ✅ `[Auto]` |
+| `test_cluster_graceful_shutdown.py` | TC-CL-LIFE-001, Scenario 4.11 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_multi_client_connect.py` | TC-VOL-ADV-004, Scenario 4.14 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_pool_dhchap.py` | TC-POOL-ADV-001 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_pool_capacity_limits.py` | TC-POOL-ADV-002, TC-CAP-001 | P2 | `[Both]` | ✅ `[Auto]` |
+| `test_capacity_thresholds.py` | TC-CAP-002 | P2 | `[Both]` | ✅ `[Auto]` |
+| `test_qpair_tuning.py` | TC-RDMA-003 | P2 | `[Both]` | ✅ `[Auto]` ⚠️ UNCERTAIN |
+| `test_shared_placement.py` | TC-FD-003 | P2 | `[Both]` | ✅ `[Auto]` ⚠️ UNCERTAIN |
+| `test_volume_priority.py` | TC-VOL-ADV-005 | P2 | `[Both]` | ✅ `[Auto]` ⚠️ UNCERTAIN |
+| `test_namespace_e2e.py` | Scenario 4.12 | P1 | `[Both]` | ✅ `[Auto]` |
+| `test_device_restart.py` | TC-SN-DEV-002 | P2 | `[Both]` | ✅ `[Auto]` |
 
 ### Phase 3 — Complex / Env-dependent
 > Target: 2 months
@@ -765,6 +1450,17 @@ All tests marked `❓` above need a verification pass with `--run_k8s=True`:
 | `test_control_plane.py` | TC-CP-001, 002 | P3 | `[Both]` | ⚠️ `[Partial]` — `cp remove` risky in shared env |
 | `test_storage_node_primary.py` | TC-SN-005 | P2 | `[Both]` | ✅ `[Auto]` |
 | `test_storage_node_repair.py` | TC-SN-006 | P2 | `[Both]` | ⚠️ `[Partial]` — needs controlled lvstore corruption |
+| `test_storage_node_remove.py` | TC-SN-RM-001 | P1 | `[Both]` | ⚠️ `[Partial]` — needs 4+ nodes |
+| `test_device_lifecycle.py` | TC-SN-DEV-001 | P1 | `[Both]` | ⚠️ `[Partial]` — needs spare device or test mode |
+| `test_journal_device.py` | TC-SN-DEV-003 | P2 | `[Both]` | ⚠️ `[Partial]` |
+| `test_failure_domain.py` | TC-FD-001 | P1 | `[Both]` | ⚠️ `[Partial]` — needs multi-rack labels |
+| `test_cluster_fabric.py` | TC-CL-LIFE-003 | P2 | `[Both]` | ⚠️ `[Partial]` — needs RDMA hardware |
+| `test_rdma_cluster.py` | TC-RDMA-001, 002 | P2 | `[Both]` | ⚠️ `[Partial]` — needs RDMA hardware |
+| `test_kms_encryption.py` | TC-KMS-001, 002 | P1 | `[Both]` | ⚠️ `[Partial]` — needs cert-manager + KMS |
+| `test_replication_basic.py` | TC-REPL-001, 002, 005 | P1 | `[Both]` | ⚠️ `[Partial]` — needs dual cluster |
+| `test_replication_failback.py` | TC-REPL-003 | P1 | `[Both]` | ⚠️ `[Partial]` — needs dual cluster |
+| `test_replication_failover.py` | TC-REPL-004 | P1 | `[Both]` | ⚠️ `[Partial]` — needs dual cluster |
+| `test_replication_e2e.py` | Scenario 4.13 | P1 | `[Both]` | ⚠️ `[Partial]` — needs dual cluster |
 
 ### Phase 4 — Stress Tests
 > Target: 3 months
@@ -839,6 +1535,13 @@ e2e/e2e_tests/
 ├── test_node_suspend_resume.py       P1 [Both][Auto]
 ├── test_pool_disable_io.py           P1 [Both][Auto]
 ├── test_negative_cases.py            P0 [Both][Auto]
+├── test_namespace_placement.py       P1 [Both][Auto]
+├── test_namespace_fio.py             P1 [Both][Auto]
+├── test_namespace_limits.py          P1 [Both][Auto]
+├── test_namespace_negative.py        P1 [Both][Auto]
+├── test_volume_suspend_resume.py     P1 [Both][Auto]
+├── test_volume_clone_lvol.py         P1 [Both][Auto]
+├── test_node_anti_affinity.py        P1 [Both][Auto]
 │
 │ ── Phase 2 (P1/P2) ── [Both][Auto/Partial] ───────────────────────
 ├── test_lvol_inflate.py              P2 [Both][Auto]
@@ -852,6 +1555,16 @@ e2e/e2e_tests/
 ├── test_qos_class.py                 P1 [Both][Auto]
 ├── test_qos_enforcement.py           P1 [Both][Auto]
 ├── test_pool_stats.py                P2 [Both][Auto]
+├── test_cluster_graceful_shutdown.py P1 [Both][Auto]
+├── test_multi_client_connect.py      P1 [Both][Auto]
+├── test_pool_dhchap.py               P1 [Both][Auto]
+├── test_pool_capacity_limits.py      P2 [Both][Auto]
+├── test_capacity_thresholds.py       P2 [Both][Auto]
+├── test_qpair_tuning.py              P2 [Both][Auto]
+├── test_shared_placement.py          P2 [Both][Auto]
+├── test_volume_priority.py           P2 [Both][Auto]
+├── test_namespace_e2e.py             P1 [Both][Auto]
+├── test_device_restart.py            P2 [Both][Auto]
 │
 │ ── Phase 3 (P1/P2) ── [Both][Partial] ────────────────────────────
 ├── test_cluster_full_lifecycle.py    P1 [Both][Partial]
@@ -863,6 +1576,17 @@ e2e/e2e_tests/
 ├── test_control_plane.py             P3 [Both][Partial]
 ├── test_storage_node_primary.py      P2 [Both][Auto]
 ├── test_storage_node_repair.py       P2 [Both][Partial]
+├── test_storage_node_remove.py       P1 [Both][Partial]
+├── test_device_lifecycle.py          P1 [Both][Partial]
+├── test_journal_device.py            P2 [Both][Partial]
+├── test_failure_domain.py            P1 [Both][Partial]
+├── test_cluster_fabric.py            P2 [Both][Partial]
+├── test_rdma_cluster.py              P2 [Both][Partial]
+├── test_kms_encryption.py            P1 [Both][Partial]
+├── test_replication_basic.py         P1 [Both][Partial]
+├── test_replication_failback.py      P1 [Both][Partial]
+├── test_replication_failover.py      P1 [Both][Partial]
+├── test_replication_e2e.py           P1 [Both][Partial]
 │
 │ ── Phase 5 (K8s-only) ─────────────────────────────────────────────
 └── k8s/
@@ -875,6 +1599,37 @@ e2e/stress_test/
 ├── continuous_device_failure.py      P1 [Both][Partial]
 └── continuous_pool_disable_failover.py P2 [Both][Auto]
 ```
+
+---
+
+## 9. Deprecated / Uncertain Tests
+
+The following tests have been implemented but are **commented out** in `get_all_tests()` in `e2e/__init__.py`.
+They are still importable and present in `ALL_TESTS` (for `--testname` fuzzy matching) but will NOT run in
+the default E2E suite until verified.
+
+| Test Class | File | Status | Reason |
+|-----------|------|--------|--------|
+| `TestNodeSuspendResume` | `test_node_suspend_resume.py` | **DEPRECATED** | `sn suspend` / `sn resume` are marked as DEPRECATED no-ops in `cli-reference.yaml`. The CLI prints a deprecation warning and returns immediately. Test verifies the no-op behavior. |
+| `TestVolumeSuspendResume` | `test_volume_suspend_resume.py` | **UNCERTAIN** | `volume suspend` / `volume resume` — unclear if wired to a working API endpoint. May return 404 or no-op. Needs manual verification before enabling. |
+| `TestNodeAntiAffinity` | `test_node_anti_affinity.py` | **UNCERTAIN** | Requires cluster created with `--strict-node-anti-affinity` flag. Standard CI clusters may not have this enabled. Test skips gracefully if flag not set. |
+| `TestQosClass` | `test_qos_class.py` | **DEPRECATED** | QoS class API (`qos add` / `qos list` / `qos delete`) — not verified to exist as working CLI commands. May need API-side implementation first. |
+| `TestQosEnforcement` | `test_qos_enforcement.py` | **DEPRECATED** | QoS enforcement (pool-level + per-lvol class) — depends on `TestQosClass` working. Pool-level QoS limits are covered separately in `test_pool_attributes.py`. |
+| `TestVolumePriority` | `test_volume_priority.py` | **UNCERTAIN** | Volume priority class assignment — unclear enforcement mechanism. The `--priority` flag on lvol create may not have observable effects in CI without contention. |
+| `TestSharedPlacement` | `test_shared_placement.py` | **UNCERTAIN** | `cluster set-shared-placement` — advanced feature for per-chunk data placement binding. Requires specific cluster configuration that may not be available in CI. |
+| `TestQpairTuning` | `test_qpair_tuning.py` | **UNCERTAIN** | QPair tuning requires RDMA-enabled cluster with specific NIC hardware. Test skips gracefully if RDMA not configured but should not be in default suite. |
+
+### How to enable
+
+To run any of these tests explicitly:
+```bash
+# Run a single deprecated/uncertain test by name
+python e2e.py --testname TestNodeSuspendResume
+
+# Or import and add to a custom test list in __init__.py
+```
+
+To re-enable in the default suite, uncomment the corresponding line in `get_all_tests()` in `e2e/__init__.py`.
 
 ---
 

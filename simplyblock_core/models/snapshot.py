@@ -1,19 +1,50 @@
-# coding=utf-8
+from typing import ClassVar
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index, Unique
 from simplyblock_core.models.lvol_model import LVol, LVolMini
 
 
 class SnapShot(BaseModel):
+
+    _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+        Index('pool_uuid'),
+        Index('lvol_node_id', arity=1, extract=lambda snap: (
+            [(snap.lvol.node_id,)] if snap.lvol else []
+        )),
+        Index('lvol_uuid', arity=1, extract=lambda snap: (
+            [(snap.lvol.get_id(),)] if snap.lvol else []
+        )),
+        Unique(('cluster_id', 'snap_name')),
+        # Creation order within one lvol: the tail is the chain predecessor,
+        # found by a reverse range read of limit 1. Ordered, so its segments
+        # are the fixed-width encoding `encode_value` reserves for that.
+        Index('lvol_snaps', ordered=True, arity=3, extract=lambda snap: (
+            [(snap.lvol.get_id(), int(snap.created_at or 0), int(snap.vuid or 0))]
+            if snap.lvol else []
+        )),
+    )
 
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
     STATUS_IN_REPLICATION = 'in_replication'
 
+    # User-created snapshots are kept indefinitely on the replication target.
+    # Internal snapshots are taken automatically at a fixed interval purely to
+    # drive replication; only the most recent successfully-replicated internal
+    # snapshot is retained on the target (older ones are pruned).
+    TYPE_USER = 'user'
+    TYPE_INTERNAL = 'internal'
+
     base_bdev: str = ""
     blobid: int = 0
     cluster_id: str = ""
+    #: Whole seconds, so snapshots taken within one second of each other are
+    #: indistinguishable by it. It cannot order a lineage; prev_snap_uuid can.
     created_at: int = 0
     health_check: bool = True
     lvol: LVol = None # type: ignore[assignment]
@@ -23,6 +54,13 @@ class SnapShot(BaseModel):
     used_size: int = 0
     snap_bdev: str = ""
     snap_name: str = ""
+    #: Ref-count bookkeeping only, never a lineage pointer. It names the
+    #: snapshot holding the ref_count that this snapshot's volume contributes
+    #: to as a clone, reached by dereferencing the clone source's own
+    #: snap_ref_id (snapshot_controller.py:913-924). It is therefore written
+    #: once per clone rather than once per snapshot -- every snapshot a given
+    #: clone takes carries the same value -- and for a clone of a clone's
+    #: snapshot it names neither the snapshot cloned from nor any blob parent.
     snap_ref_id: str = ""
     snap_uuid: str = ""
     vuid: int = 0
@@ -31,9 +69,29 @@ class SnapShot(BaseModel):
     fabric: str = "tcp"
     target_replicated_snap_uuid: str = ""
     source_replicated_snap_uuid: str = ""
+    snap_type: str = "user"
+    #: consistency-group provenance: which group and which group generation
+    #: this snapshot belongs to (0 = not a group snapshot).
+    group_id: str = ""
+    group_seq: int = 0
+    #: The volume's own snapshot sequence, in creation order. prev_snap_uuid
+    #: is also the blob parent: a snapshot's blob holds only the clusters
+    #: written since that predecessor. It is empty on the first snapshot taken
+    #: on a volume, whose blob was created over whatever the volume was cloned
+    #: from -- lvol.cloned_from_snap, frozen in the embedded LVol at the moment
+    #: of the snapshot, so a later inflate of the volume cannot retract it.
+    #: Those two, not snap_ref_id, are the ancestry a restore has to walk back.
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
-    instances: list = []
+    instances: list[dict] = default_factory(list)
+    # Uniquely identifies the data block device that backs this snapshot.
+    # It is created once Snapshot is created from an LVol
+    # On Snapshot transfer or replicate this field is the same
+    # This value can be used to identify the same snapshot on other nodes
+    data_uuid: str = ""
+
+    def watch_scope(self):
+        return (self.pool_uuid,)
 
     def write_to_db(self, kv_store=None):
         super().write_to_db(kv_store)
@@ -61,6 +119,8 @@ class SnapShotMini(BaseModel):
     vuid: int = 0
     created_at: int = 0
     used_size: int = 0
+    snap_type: str = "user"
+    deleted: bool = False
 
     def from_snapshot(self, snapshot: SnapShot):
         self.uuid = snapshot.uuid
@@ -76,4 +136,6 @@ class SnapShotMini(BaseModel):
         self.vuid = snapshot.vuid
         self.created_at = snapshot.created_at
         self.used_size = snapshot.used_size
+        self.snap_type = snapshot.snap_type
+        self.deleted = snapshot.deleted
         return self

@@ -641,7 +641,7 @@ class NicFailoverSoak:
 
                 # Check remote NVMe controllers
                 _, ctrl_json, _ = host.run(
-                    f"sudo docker exec {container} bash -c '{rpc} bdev_nvme_get_controllers'",
+                    f"sudo docker exec -u root {container} bash -c '{rpc} bdev_nvme_get_controllers'",
                     timeout=30, check=False,
                     label=f"get controllers {node['uuid'][:12]}")
                 ctrls = json.loads(ctrl_json) if ctrl_json.strip() else []
@@ -649,22 +649,27 @@ class NicFailoverSoak:
                     name = c["name"]
                     if not name.startswith("remote_"):
                         continue
-                    for ct in c.get("ctrlrs", []):
-                        state = ct.get("state", "?")
-                        traddr = ct["trid"]["traddr"]
-                        alt_count = len(ct.get("alternate_trids", []))
-                        total_paths = 1 + alt_count
-                        if state != "enabled" or total_paths != 2:
-                            self.logger.log(
-                                f"  {node['uuid'][:12]}: FAIL - {name[:40]} "
-                                f"state={state} paths={total_paths} (primary={traddr})")
-                            all_ok = False
-                        else:
-                            pass  # OK, don't spam logs
+                    # SPDK reports ONE ``ctrlrs`` entry per trid — i.e. one per
+                    # data NIC — each with an EMPTY ``alternate_trids``. The
+                    # path count is therefore the number of entries, not
+                    # ``1 + alternate_trids`` of a single entry: counting per
+                    # entry makes every healthy 2-path controller look
+                    # 1-pathed and fails the check on a correct cluster.
+                    entries = c.get("ctrlrs", [])
+                    total_paths = sum(
+                        1 + len(e.get("alternate_trids", [])) for e in entries)
+                    states = [e.get("state", "?") for e in entries]
+                    addresses = ",".join(
+                        e.get("trid", {}).get("traddr", "?") for e in entries)
+                    if total_paths != 2 or any(s != "enabled" for s in states):
+                        self.logger.log(
+                            f"  {node['uuid'][:12]}: FAIL - {name[:40]} "
+                            f"states={states} paths={total_paths} ({addresses})")
+                        all_ok = False
 
                 # Check NVMf subsystem listeners
                 _, subs_json, _ = host.run(
-                    f"sudo docker exec {container} bash -c '{rpc} nvmf_get_subsystems'",
+                    f"sudo docker exec -u root {container} bash -c '{rpc} nvmf_get_subsystems'",
                     timeout=30, check=False,
                     label=f"get subsystems {node['uuid'][:12]}")
                 subs = json.loads(subs_json) if subs_json.strip() else []

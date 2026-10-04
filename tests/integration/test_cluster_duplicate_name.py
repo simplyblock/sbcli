@@ -1,0 +1,335 @@
+"""
+test_cluster_duplicate_name.py – integration tests for duplicate cluster
+name prevention, running against the real FoundationDB provisioned by
+``tests/integration/conftest.py``.
+
+Tests cover:
+  - add_cluster() raises ValueError when a cluster with the same name exists
+  - add_cluster() succeeds (and persists) when the name is unique
+  - add_cluster() skips the uniqueness check when name is None
+  - create_cluster() raises ValueError when a cluster with the same name exists
+  - create_cluster() succeeds (and persists) when no clusters exist yet
+  - set_name() raises ValueError when another cluster already has the name
+  - set_name() allows renaming a cluster to its own current name
+  - set_name() persists a unique new name
+  - change_cluster_name() raises ValueError when another cluster has the name
+  - change_cluster_name() allows renaming a cluster to its own current name
+  - change_cluster_name() persists a unique new name
+
+The database layer is NOT mocked: real ``Cluster`` objects are written to
+FoundationDB through ``DBController`` and read back through the same code
+paths ``cluster_ops`` uses. Only side-effects *above* the DB (docker swarm,
+deploy scripts, mgmt-node provisioning, interface-IP lookup) are mocked, and
+only for ``create_cluster`` — whose duplicate-name guard is the sole part
+exercised for the "raises" case, so those mocks never engage there.
+"""
+
+import threading
+from unittest.mock import patch
+
+import pytest
+from pydantic import SecretStr
+
+from simplyblock_core import cluster_ops
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster, DeployConfig
+
+# ---------------------------------------------------------------------------
+# Fixtures — real FDB, wiped before every test for isolation.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def db():
+    controller = DBController()
+    if controller.kv_store is None:
+        pytest.skip("FoundationDB is not available")
+    return controller
+
+
+@pytest.fixture(autouse=True)
+def _clean_keyspace(db):
+    # The tier-wide fixture only wipes once per module; wipe per-test here so
+    # clusters seeded by one test never leak into the next.
+    db.kv_store.clear_range(b"\x00", b"\xff")
+    yield
+
+
+def _seed_cluster(db, uuid="cluster-1", name="test-cluster", mode="docker"):
+    """Persist a real Cluster to FDB and return it."""
+    c = Cluster()
+    c.uuid = uuid
+    c.cluster_name = name
+    c.mode = mode
+    c.status = Cluster.STATUS_ACTIVE
+    c.write_to_db(db.kv_store)
+    return c
+
+
+def _seed_deploy_config(db, mode="docker"):
+    """Persist a real DeployConfig to FDB, mirroring what create_cluster()
+    writes for a docker deployment (or what add_cluster() now bootstraps for
+    the first kubernetes cluster) — add_cluster() requires one to exist for
+    any cluster after the first."""
+    cfg = DeployConfig()
+    cfg.mode = mode
+    cfg.grafana_endpoint = "http://grafana.example"
+    cfg.grafana_secret = SecretStr("graf-secret")
+    cfg.db_connection = SecretStr("db-conn")
+    cfg.write_to_db(db.kv_store)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# add_cluster()
+# ---------------------------------------------------------------------------
+
+def _add_cluster(name):
+    return cluster_ops.add_cluster(
+        blk_size=4096,
+        page_size_in_blocks=2,
+        cap_warn=80,
+        cap_crit=90,
+        prov_cap_warn=80,
+        prov_cap_crit=90,
+        distr_ndcs=1,
+        distr_npcs=1,
+        distr_bs=4096,
+        distr_chunk_bs=4096,
+        ha_type="single",
+        enable_node_affinity=False,
+        qpair_count=4,
+        max_queue_size=128,
+        inflight_io_threshold=64,
+        strict_node_anti_affinity=False,
+        is_single_node=True,
+        name=name,
+    )
+
+
+class TestAddClusterDuplicateName:
+
+    def test_raises_when_name_already_exists(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="my-cluster")
+
+        with pytest.raises(ValueError, match="my-cluster"):
+            _add_cluster("my-cluster")
+
+    def test_raises_when_one_of_many_clusters_matches(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="alpha")
+        _seed_cluster(db, uuid="cluster-2", name="beta")
+
+        with pytest.raises(ValueError, match="beta"):
+            _add_cluster("beta")
+
+    def test_succeeds_and_persists_when_name_is_unique(self, db):
+        # An existing docker cluster + its DeployConfig makes add_cluster
+        # inherit the shared mode/connection and skip the k8s/first-cluster
+        # provisioning branch entirely — only the grafana-user side-effect
+        # (a real HTTP call) needs mocking.
+        _seed_cluster(db, uuid="cluster-1", name="other-cluster")
+        _seed_deploy_config(db)
+
+        with patch("simplyblock_core.cluster_ops._create_update_user"):
+            new_id = _add_cluster("new-cluster")
+
+        stored = db.get_cluster_by_id(new_id)
+        assert stored.cluster_name == "new-cluster"
+
+    def test_no_name_skips_duplicate_check(self, db):
+        # name=None must bypass the uniqueness check: a second cluster is
+        # created even though one already exists. (The str-typed cluster_name
+        # field round-trips None as "None" through FDB, so assert on the
+        # created id / cluster count rather than the stored name.)
+        _seed_cluster(db, uuid="cluster-1", name="some-cluster")
+        _seed_deploy_config(db)
+
+        with patch("simplyblock_core.cluster_ops._create_update_user"):
+            new_id = _add_cluster(None)
+
+        assert db.get_cluster_by_id(new_id).uuid == new_id
+        assert len(db.get_clusters()) == 2
+
+    def test_bootstraps_deploy_config_for_first_cluster(self, db, monkeypatch):
+        # No clusters and no DeployConfig yet: add_cluster() must bootstrap
+        # kubernetes mode itself (deriving the FDB connection string,
+        # registering the mgmt node) and persist the result as the
+        # DeployConfig subsequent add_cluster() calls will read.
+        monkeypatch.delenv("ENABLE_MONITORING", raising=False)
+        with patch("simplyblock_core.cluster_ops.utils.get_fdb_cluster_string",
+                    return_value=SecretStr("fdb-conn-string")), \
+             patch("simplyblock_core.cluster_ops.mgmt_node_ops.add_mgmt_node") as mock_add_mgmt, \
+             patch("simplyblock_core.cluster_ops.utils.patch_prometheus_configmap"), \
+             patch("simplyblock_core.cluster_ops._create_update_user"):
+            new_id = _add_cluster("first-cluster")
+
+        mock_add_mgmt.assert_called_once_with("0.0.0.0", "kubernetes", new_id)
+
+        stored = db.get_cluster_by_id(new_id)
+        assert stored.mode == "kubernetes"
+        assert stored.db_connection.get_secret_value() == "fdb-conn-string"
+
+        cfg = db.get_deploy_config()
+        assert cfg.mode == "kubernetes"
+        assert cfg.db_connection.get_secret_value() == "fdb-conn-string"
+
+    def test_concurrent_calls_for_same_name_create_only_one_cluster(self, db):
+        # Reproduces the 2026-07-28 incident directly: a control-plane
+        # readiness flap let the operator's retries race through
+        # add_cluster()'s duplicate-name check simultaneously, producing 6
+        # separate clusters named "simplyblock-cluster" instead of one. Fire
+        # several concurrent add_cluster() calls for the same name (the
+        # first-cluster bootstrap path — no pre-existing cluster/DeployConfig,
+        # matching the real incident) and assert the cluster_create DbLock lets
+        # exactly one through.
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(_add_cluster("race-cluster"))
+            except ValueError as e:
+                errors.append(e)
+
+        with patch("simplyblock_core.cluster_ops.utils.get_fdb_cluster_string",
+                    return_value=SecretStr("fdb-conn-string")), \
+             patch("simplyblock_core.cluster_ops.mgmt_node_ops.add_mgmt_node"), \
+             patch("simplyblock_core.cluster_ops.utils.patch_prometheus_configmap"), \
+             patch("simplyblock_core.cluster_ops._create_update_user"):
+            threads = [threading.Thread(target=worker) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert len(results) == 1, f"expected exactly 1 success, got {len(results)}: {results}"
+        assert len(errors) == 4, f"expected exactly 4 rejections, got {len(errors)}: {errors}"
+        assert all("race-cluster" in str(e) for e in errors)
+
+        matching = [c for c in db.get_clusters() if c.cluster_name == "race-cluster"]
+        assert len(matching) == 1
+        assert matching[0].get_id() == results[0]
+
+
+# ---------------------------------------------------------------------------
+# create_cluster()
+# ---------------------------------------------------------------------------
+
+def _create_cluster(name):
+    return cluster_ops.create_cluster(
+        blk_size=4096,
+        page_size_in_blocks=2,
+        cli_pass=SecretStr("pass"),
+        cap_warn=80,
+        cap_crit=90,
+        prov_cap_warn=80,
+        prov_cap_crit=90,
+        ifname="eth0",
+        mgmt_ip=None,
+        log_del_interval=7,
+        metrics_retention_period=30,
+        contact_point=None,
+        grafana_endpoint=None,
+        distr_ndcs=1,
+        distr_npcs=1,
+        distr_bs=4096,
+        distr_chunk_bs=4096,
+        ha_type="single",
+        mode="docker",
+        enable_node_affinity=False,
+        qpair_count=4,
+        client_qpair_count=4,
+        max_queue_size=128,
+        inflight_io_threshold=64,
+        disable_monitoring=True,
+        strict_node_anti_affinity=False,
+        name=name,
+        tls_secret=None,
+        ingress_host_source=None,
+        dns_name=None,
+        fabric="tcp",
+        is_single_node=True,
+        client_data_nic="",
+    )
+
+
+class TestCreateClusterDuplicateName:
+
+    def test_raises_when_name_already_exists(self, db):
+        # The duplicate-name guard fires before any docker/deploy work, so no
+        # infra mocking is needed — the ValueError is raised straight away.
+        _seed_cluster(db, uuid="cluster-1", name="first-cluster")
+
+        with pytest.raises(ValueError, match="first-cluster"):
+            _create_cluster("first-cluster")
+
+    def test_succeeds_and_persists_when_no_clusters_exist(self, db):
+        # No pre-existing cluster → the guard passes and create_cluster runs
+        # its full docker deploy flow. Mock only the side-effects above the DB
+        # (docker swarm, deploy scripts, mgmt-node provisioning, iface lookup);
+        # the cluster is still written to and read back from the real FDB.
+        with patch("simplyblock_core.cluster_ops.scripts"), \
+             patch("simplyblock_core.cluster_ops.docker"), \
+             patch("simplyblock_core.cluster_ops.mgmt_node_ops"), \
+             patch("simplyblock_core.cluster_ops.utils.get_iface_ip", return_value="10.0.0.1"):
+            new_id = _create_cluster("brand-new")
+
+        stored = db.get_cluster_by_id(new_id)
+        assert stored.cluster_name == "brand-new"
+
+
+# ---------------------------------------------------------------------------
+# set_name()
+# ---------------------------------------------------------------------------
+
+class TestSetNameDuplicateName:
+
+    def test_raises_when_another_cluster_has_the_name(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="old-name")
+        _seed_cluster(db, uuid="cluster-2", name="taken-name")
+
+        with pytest.raises(ValueError, match="taken-name"):
+            cluster_ops.set_name("cluster-1", "taken-name")
+
+    def test_allows_renaming_to_own_current_name(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="my-cluster")
+
+        result = cluster_ops.set_name("cluster-1", "my-cluster")  # must not raise
+
+        assert result.cluster_name == "my-cluster"
+
+    def test_persists_unique_new_name(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="old-name")
+        _seed_cluster(db, uuid="cluster-2", name="other-cluster")
+
+        cluster_ops.set_name("cluster-1", "brand-new-name")
+
+        assert db.get_cluster_by_id("cluster-1").cluster_name == "brand-new-name"
+
+
+# ---------------------------------------------------------------------------
+# change_cluster_name()
+# ---------------------------------------------------------------------------
+
+class TestChangeClusterNameDuplicateName:
+
+    def test_raises_when_another_cluster_has_the_name(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="old-name")
+        _seed_cluster(db, uuid="cluster-2", name="taken-name")
+
+        with pytest.raises(ValueError, match="taken-name"):
+            cluster_ops.change_cluster_name("cluster-1", "taken-name")
+
+    def test_allows_renaming_to_own_current_name(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="my-cluster")
+
+        cluster_ops.change_cluster_name("cluster-1", "my-cluster")  # must not raise
+
+        assert db.get_cluster_by_id("cluster-1").cluster_name == "my-cluster"
+
+    def test_persists_unique_new_name(self, db):
+        _seed_cluster(db, uuid="cluster-1", name="old-name")
+        _seed_cluster(db, uuid="cluster-2", name="other-cluster")
+
+        cluster_ops.change_cluster_name("cluster-1", "unique-name")
+
+        assert db.get_cluster_by_id("cluster-1").cluster_name == "unique-name"

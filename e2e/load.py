@@ -1,16 +1,29 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "matplotlib",
+#     "paramiko",
+#     "ping3",
+#     "requests>=2.34.0",
+#     "urllib3>=2.7.0",
+# ]
+# ///
 ### simplyblock Load test framework
 import argparse
-import traceback
 import os
 import subprocess
 import time
+import traceback
+
 from __init__ import get_load_tests
-from logger_config import setup_logger
-from exceptions.custom_exception import TestNotFoundException, MultipleExceptions
 from e2e_tests.cluster_test_base import TestClusterBase
+from exceptions.custom_exception import MultipleExceptions, TestNotFoundException
+from logger_config import setup_logger
+from utils.common_utils import CommonUtils
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
-from utils.common_utils import CommonUtils
 
 logger = setup_logger(__name__)
 
@@ -102,7 +115,7 @@ tests = get_load_tests()
 selected_test = None
 
 for cls in tests:
-    if args.testname.lower() in cls.__name__.lower():
+    if args.testname.lower() == cls.__name__.lower():
         selected_test = cls
         break
 
@@ -136,6 +149,11 @@ except Exception as e:
         logger.error("Test failed. Logs and notification may still proceed.")
     raise MultipleExceptions({selected_test.__name__: [e]})
 finally:
+    try:
+        test_obj.export_graylog_logs()
+        test_obj.extract_delay_qpair_logs()
+    except Exception as _exc:
+        logger.warning(f"Log extraction failed: {_exc}")
     test_obj.teardown()
     if check_for_dumps():
         logger.info("Found a core dump during test execution. Cluster is unstable.")

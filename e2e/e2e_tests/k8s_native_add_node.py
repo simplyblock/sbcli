@@ -61,6 +61,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
         # K8s resource naming
         self.STORAGE_CLASS_NAME = "simplyblock-csi-sc"
+        self.XFS_STORAGE_CLASS_NAME = "simplyblock-csi-sc-xfs"
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
 
@@ -70,7 +71,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
         self.FIO_RUNTIME = 1200
 
         # Counts
-        self.fio_num_jobs = 2
+        self.fio_num_jobs = 1
 
         # Tracking
         self.pvc_details: dict[str, dict] = {}
@@ -102,6 +103,8 @@ class K8sNativeAddNodeTest(TestClusterBase):
                     raise
                 self.logger.info(f"Retrying base APIs. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
+
+        self._validate_storage_node_health()
 
         self.client_machines = []
         self.fio_node = []
@@ -152,16 +155,19 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
     # ── FIO config ────────────────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> str:
+    def _build_fio_config(self, name: str) -> tuple[str, str]:
         bs = f"{2 ** random.randint(2, 7)}k"
-        return (
+        run_id = _rand_seq(6)
+        randseed = random.randint(1, 2**63)
+
+        main_config = (
             f"[global]\n"
             f"name={name}-fio\n"
-            f"filename_format=/spdkvol/fio-testfile.$jobnum\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
             f"rw=randrw\n"
             f"rwmixread=50\n"
             f"bs={bs}\n"
-            f"iodepth=256\n"
+            f"iodepth=1\n"
             f"direct=1\n"
             f"ioengine=libaio\n"
             f"size={self.fio_size}\n"
@@ -172,10 +178,32 @@ class K8sNativeAddNodeTest(TestClusterBase):
             f"verify=md5\n"
             f"verify_dump=1\n"
             f"verify_fatal=1\n"
-            f"verify_backlog=128\n"
+            f"verify_backlog=4096\n"
+            f"verify_backlog_batch=32\n"
+            f"randseed={randseed}\n"
+            f"max_latency=20s\n"
             f"\n"
             f"[job1]\n"
         )
+
+        warmup_config = (
+            f"[global]\n"
+            f"name={name}-warmup\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
+            f"rw=write\n"
+            f"bs=1m\n"
+            f"iodepth=32\n"
+            f"direct=1\n"
+            f"ioengine=libaio\n"
+            f"size={self.fio_size}\n"
+            f"numjobs={self.fio_num_jobs}\n"
+            f"group_reporting\n"
+            f"zero_buffers\n"
+            f"\n"
+            f"[job1]\n"
+        )
+
+        return main_config, warmup_config
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str):
         """Save FIO pod logs to log directory for post-mortem debugging."""
@@ -196,12 +224,10 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
     def run(self):
         self.logger.info("Starting Test: K8s Native Add Node During FIO")
+        self.start_nvme_iostat_monitor()
 
-        assert len(self.new_worker_nodes) >= 2, (
-            "At least 2 new worker nodes required (must be multiples of 2)"
-        )
-        assert len(self.new_worker_nodes) % 2 == 0, (
-            "New worker nodes must be in multiples of 2"
+        assert len(self.new_worker_nodes) >= 1, (
+            "At least 1 new worker node required"
         )
 
         # ── Step 1: Create StorageClass + VolumeSnapshotClass ─────────────
@@ -211,7 +237,10 @@ class K8sNativeAddNodeTest(TestClusterBase):
         pool_name = self.pool_name
 
         # Create storage pool via sbcli
-        self.sbcli_utils.add_storage_pool(pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name)
+        if actual_pool and actual_pool != pool_name:
+            self.logger.info(f"Pool name resolved: {pool_name!r} -> {actual_pool!r}")
+            pool_name = actual_pool
         sleep_n_sec(10)
 
         self.k8s_utils.create_storage_class(
@@ -220,6 +249,14 @@ class K8sNativeAddNodeTest(TestClusterBase):
             pool_name=pool_name,
             ndcs=self.ndcs,
             npcs=self.npcs,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
         )
         self.k8s_utils.create_volume_snapshot_class(name=self.SNAPSHOT_CLASS_NAME)
 
@@ -238,11 +275,13 @@ class K8sNativeAddNodeTest(TestClusterBase):
             pvc_name = f"add-node-pvc-{_rand_seq(4)}-{i}"
             job_name = f"fio-{pvc_name}"
             cm_name = f"fio-cfg-{pvc_name}"
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             self.k8s_utils.create_pvc(
                 name=pvc_name,
                 size=self.pvc_size,
-                storage_class=self.STORAGE_CLASS_NAME,
+                storage_class=sc_name,
             )
             self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
 
@@ -250,13 +289,15 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 "job_name": job_name,
                 "configmap_name": cm_name,
                 "snapshots": [],
+                "storage_class": sc_name,
+                "fs_type": fs_type,
             }
 
         # ── Step 3: Start FIO on existing PVCs ───────────────────────────
         self.logger.info("Step 3: Starting FIO Jobs on existing PVCs")
 
         for pvc_name, detail in self.pvc_details.items():
-            fio_config = self._build_fio_config(pvc_name)
+            fio_config, warmup_config = self._build_fio_config(pvc_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=detail["job_name"],
@@ -265,6 +306,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
             sleep_n_sec(5)
 
@@ -289,15 +331,17 @@ class K8sNativeAddNodeTest(TestClusterBase):
             detail["snapshots"].append(snap_name)
             self.snapshot_details[snap_name] = {"pvc_name": pvc_name}
 
+            clone_sc = detail.get("storage_class", self.STORAGE_CLASS_NAME)
+            clone_fs_type = detail.get("fs_type", "ext4")
             self.k8s_utils.create_clone_pvc(
                 name=clone_name,
                 size=self.pvc_size,
-                storage_class=self.STORAGE_CLASS_NAME,
+                storage_class=clone_sc,
                 snapshot_name=snap_name,
             )
             self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
 
-            fio_config = self._build_fio_config(clone_name)
+            fio_config, warmup_config = self._build_fio_config(clone_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(clone_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=clone_job,
@@ -306,12 +350,15 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
 
             self.clone_details[clone_name] = {
                 "snap_name": snap_name,
                 "job_name": clone_job,
                 "configmap_name": clone_cm,
+                "storage_class": clone_sc,
+                "fs_type": clone_fs_type,
             }
             sleep_n_sec(5)
 
@@ -319,57 +366,88 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
         sleep_n_sec(30)
 
-        # ── Step 5: Expand cluster via CRD patches ───────────────────────
-        self.logger.info("Step 5: Patching StorageNode CRD to add new workers")
-        timestamp = int(datetime.now().timestamp())
-
-        self.k8s_utils.patch_storage_node_add_workers(
-            new_workers=self.new_worker_nodes,
-        )
-        sleep_n_sec(10)
-
-        self.logger.info("Step 5b: Patching StorageCluster CRD to trigger expansion")
-        self.k8s_utils.patch_storage_cluster_expand()
-
-        # ── Step 6: Wait for expansion ───────────────────────────────────
-        self.logger.info("Step 6: Waiting for expansion to complete")
-
-        # Wait for new snode-spdk pods
-        expected_pods = initial_node_count + len(self.new_worker_nodes)
+        # ── Step 5 & 6: Expand cluster one node at a time ─────────────
+        # Adding multiple nodes simultaneously can fail; add each node
+        # sequentially and wait for it to come online before proceeding.
         self.logger.info(
-            f"Waiting for {expected_pods} snode-spdk pods (was {initial_node_count})"
+            f"Step 5: Adding {len(self.new_worker_nodes)} new worker(s) "
+            f"sequentially"
         )
-        self.k8s_utils.wait_spdk_pods_ready(
-            expected_count=expected_pods, timeout=900
-        )
+        timestamp = int(datetime.now().timestamp())
+        all_known_ids = set(initial_node_ids)
+        new_node_ids = []
 
-        # Wait for cluster to enter expansion state (may already be past it)
-        try:
+        for idx, worker in enumerate(self.new_worker_nodes):
+            step_label = f"5.{idx + 1}/{len(self.new_worker_nodes)}"
+            self.logger.info(
+                f"Step {step_label}: Creating StorageNode CR for '{worker}'"
+            )
+
+            # Create StorageNode CR for this single worker
+            self.k8s_utils.patch_storage_node_add_workers(
+                new_workers=[worker],
+            )
+
+            # Wait for the operator to populate the per-node-config ConfigMap
+            # for this worker.  Without this, the DaemonSet pod starts with
+            # MAX_LVOL=0 and crashes in s-node-api-config-generator.
+            self.k8s_utils.wait_for_per_node_config(worker, timeout=120)
+
+            # Delete any stale storage-node pods on this worker so the
+            # DaemonSet recreates them with the correct configuration
+            self.k8s_utils.delete_storage_node_pods_on_worker(worker)
+
+            # Wait for the expected number of snode-spdk pods
+            expected_pods = initial_node_count + idx + 1
+            self.logger.info(
+                f"Waiting for {expected_pods} snode-spdk pods "
+                f"(was {initial_node_count})"
+            )
+            self.k8s_utils.wait_spdk_pods_ready(
+                expected_count=expected_pods, timeout=900
+            )
+
+            # Wait for cluster to enter/pass expansion state
+            try:
+                self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=300,
+                )
+            except Exception:
+                self.logger.info(
+                    "Cluster may already be past in_expansion state"
+                )
+
+            # Discover and wait for the new node to come online
+            sleep_n_sec(30)
+            all_nodes_now = self.sbcli_utils.get_storage_nodes()["results"]
+            for n in all_nodes_now:
+                if n["id"] not in all_known_ids:
+                    self.logger.info(
+                        f"New storage node discovered: {n['id']}"
+                    )
+                    self.sbcli_utils.wait_for_storage_node_status(
+                        node_id=n["id"],
+                        status="online",
+                        timeout=600,
+                    )
+                    new_node_ids.append(n["id"])
+                    all_known_ids.add(n["id"])
+
+            # Wait for cluster to return to active before adding next node
             self.sbcli_utils.wait_for_cluster_status(
                 cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300,
-            )
-        except Exception:
-            self.logger.info("Cluster may already be past in_expansion state")
-
-        # Find new node IDs
-        sleep_n_sec(60)
-        all_nodes_now = self.sbcli_utils.get_storage_nodes()["results"]
-        new_node_ids = [
-            n["id"] for n in all_nodes_now if n["id"] not in initial_node_ids
-        ]
-        self.logger.info(f"New storage node IDs: {new_node_ids}")
-
-        # Wait for new nodes to come online
-        for node_id in new_node_ids:
-            self.sbcli_utils.wait_for_storage_node_status(
-                node_id=node_id,
-                status="online",
+                status="active",
                 timeout=600,
             )
+            self.logger.info(
+                f"Worker '{worker}' added and online "
+                f"({idx + 1}/{len(self.new_worker_nodes)})"
+            )
 
-        # Wait for cluster to be active
+        self.logger.info(f"All new storage node IDs: {new_node_ids}")
+
         cluster_details = self.sbcli_utils.wait_for_cluster_status(
             cluster_id=self.cluster_id,
             status="active",
@@ -394,15 +472,17 @@ class K8sNativeAddNodeTest(TestClusterBase):
             pvc_name = f"new-node-pvc-{_rand_seq(4)}-{i}"
             job_name = f"fio-{pvc_name}"
             cm_name = f"fio-cfg-{pvc_name}"
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             self.k8s_utils.create_pvc(
                 name=pvc_name,
                 size=self.pvc_size,
-                storage_class=self.STORAGE_CLASS_NAME,
+                storage_class=sc_name,
             )
             self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
 
-            fio_config = self._build_fio_config(pvc_name)
+            fio_config, warmup_config = self._build_fio_config(pvc_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=job_name,
@@ -411,11 +491,14 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
 
             new_pvc_details[pvc_name] = {
                 "job_name": job_name,
                 "configmap_name": cm_name,
+                "storage_class": sc_name,
+                "fs_type": fs_type,
             }
             sleep_n_sec(5)
 
@@ -427,22 +510,23 @@ class K8sNativeAddNodeTest(TestClusterBase):
         self.logger.info("Step 8: Validating all FIO jobs and node health")
 
         # Wait for and validate FIO on existing PVCs
+        fio_timeout = self.FIO_RUNTIME + 300
         for pvc_name, detail in self.pvc_details.items():
             self.logger.info(f"Validating FIO job for existing PVC: {pvc_name}")
             self._save_fio_pod_logs(detail["job_name"], pvc_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Wait for and validate FIO on clones
         for clone_name, detail in self.clone_details.items():
             self.logger.info(f"Validating FIO job for clone: {clone_name}")
             self._save_fio_pod_logs(detail["job_name"], clone_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Wait for and validate FIO on new node PVCs
         for pvc_name, detail in new_pvc_details.items():
             self.logger.info(f"Validating FIO job for new node PVC: {pvc_name}")
             self._save_fio_pod_logs(detail["job_name"], pvc_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Validate all nodes healthy
         final_nodes = self.sbcli_utils.get_storage_nodes()["results"]

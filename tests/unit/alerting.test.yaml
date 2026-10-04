@@ -1,0 +1,76 @@
+# Test fixture for tests/unit/test_alerting_config_template.py -- NOT a
+# deployment artifact. Every receiver is disabled and every optional key is
+# commented out, so parsing this must yield ALERTING_DEFAULTS unchanged.
+#
+# It mirrors the shape accepted by `sbctl cluster create --alerting-config-path`.
+#
+# The structure is identical to the `controlplane.observability.grafana.
+# notifications` block of the simplyblock-operator Helm chart values, so one
+# file describes the receivers for both the docker and the kubernetes
+# deployment.
+#
+# Anything left commented out keeps the default shown next to it; an explicit
+# `null` does the same, matching Helm's behaviour.
+#
+# A receiver that is enabled but missing its required key is rejected at
+# `cluster create` time: Grafana would otherwise accept the contact point and
+# then silently drop every notification.
+
+# Slack incoming webhook.
+# Required when enabled: url
+slack:
+  enabled: false
+  # Webhook URL, e.g. https://hooks.slack.com/services/T000/B000/XXXX
+  # url: ""
+
+# Microsoft Teams incoming webhook.
+# Required when enabled: url
+teams:
+  enabled: false
+  # Webhook URL of the Teams channel connector.
+  # url: ""
+
+# PagerDuty Events API v2.
+# Required when enabled: integrationKey
+pagerduty:
+  enabled: false
+  # Integration key of a PagerDuty service ("Events API v2" integration).
+  # integrationKey: ""
+  # One of: critical, error, warning, info.
+  # severity: "critical"
+  # Free-form grouping fields forwarded to PagerDuty as-is.
+  # class: ""
+  # component: ""
+  # group: ""
+
+# Opsgenie Alert API.
+# Required when enabled: apiKey
+opsgenie:
+  enabled: false
+  # API key of an Opsgenie API integration.
+  # apiKey: ""
+  # Use https://api.eu.opsgenie.com/v2/alerts for EU-hosted accounts.
+  # apiUrl: "https://api.opsgenie.com/v2/alerts"
+  # Close the Opsgenie alert when the Grafana alert resolves.
+  # autoClose: true
+  # Let the alert's own priority override the Opsgenie default.
+  # overridePriority: false
+  # How Grafana labels are sent. One of: tags, details, both.
+  # sendTagsAs: "tags"
+
+# Generic HTTP webhook, for anything without a dedicated receiver.
+# Required when enabled: url
+webhook:
+  enabled: false
+  # Endpoint receiving the notification payload.
+  # url: ""
+  # One of: POST, PUT.
+  # httpMethod: "POST"
+  # Basic auth. Mutually exclusive with the authorization* keys below.
+  # username: ""
+  # password: ""
+  # Authorization header, e.g. scheme "Bearer" with the token as credentials.
+  # authorizationScheme: ""
+  # authorizationCredentials: ""
+  # Cap on alerts per notification. 0 means no limit.
+  # maxAlerts: 0

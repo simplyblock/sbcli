@@ -1,26 +1,62 @@
+import errno
+import hashlib
 import json
 import threading
-import time
+from collections import OrderedDict
+from enum import IntEnum
 from json import JSONDecodeError
-from typing import Any, Optional
+from typing import Any, ClassVar
 
-import requests
-from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
 import jsonschema
+import requests
 from jsonschema.exceptions import ValidationError
-
-from simplyblock_core import utils, constants
-from simplyblock_core.settings import Settings
+from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError, HTTPError, ReadTimeout
 from urllib3 import Retry
+
+from simplyblock_core import constants, utils
+from simplyblock_core.settings import Settings
+from simplyblock_core.utils.helpers import single_or_none
+from simplyblock_core.utils.secrets import redact_rpc_params, unwrap_secrets_for_send
 
 logger = utils.get_logger()
 
-# Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
-# Key: (host, port, method_name), Value: (timestamp, result)
-_rpc_cache: dict[tuple, tuple[float, Any]] = {}
-_rpc_cache_lock = threading.Lock()
-RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
+
+def namespace_matches(ns, dev_name=None, nsid=None, uuid=None):
+    """True iff a namespace dict from ``nvmf_get_subsystems`` is the namespace
+    identified by ``(dev_name, nsid, uuid)``.
+
+    Identity matches on EITHER the namespace UUID or the bdev name, because
+    SPDK reports ``bdev_name`` as whichever name the bdev was registered
+    under. For an lvol that is its **raw UUID**, not the ``<lvs>/<lvol>``
+    alias carried in ``lvol.top_bdev`` — so comparing bdev_name alone reports
+    "no namespace" for a namespace that is plainly present.
+
+    That false negative is not cosmetic. Soak 2026-08-11, first outage pair:
+    on both recovered nodes every lvol subsystem ended up with its namespace
+    attached and **zero listeners**, because ``add_lvol_thread``'s
+    post-condition ("refusing to add a listener for an empty subsystem", the
+    guard added for the 2026-08-09 listener-without-namespace incident) read
+    the namespace as absent and skipped listener creation. 4 of 6 volumes
+    silently lost a path, the control plane still reported every lvol ``ha``,
+    and fio never errored because the primary path still served IO. The
+    lvol-monitor repair loop detected it correctly and then re-refused it on
+    every cycle for the same reason, so the state was permanent.
+
+    A contradicting UUID still disqualifies a bdev_name match: the same bdev
+    name carrying a different volume UUID is a real conflict, not a match.
+    """
+    if nsid is not None and ns.get("nsid") != nsid:
+        return False
+    ns_uuid = str(ns.get("uuid") or "").lower()
+    want_uuid = str(uuid or "").lower()
+    if want_uuid and ns_uuid:
+        # Both sides know the UUID: it is authoritative in both directions.
+        return ns_uuid == want_uuid
+    if dev_name is not None:
+        return ns.get("bdev_name") == dev_name
+    return True
 
 
 _response_schema = {
@@ -79,15 +115,190 @@ _response_schema = {
 }
 
 
+def nvme_bdev_opts_params():
+    """The bdev_nvme global options this control plane intends to run with.
+
+    Single source of truth for bdev_nvme_set_options() and for verification
+    via RPCClient.get_effective_nvme_options() -- checking the live SPDK
+    against a stale second copy of the intent would be worse than not
+    checking at all.
+
+    bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an aborted
+    IO on the alternate path of an NVMe-oF multipath bdev, per
+    https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are multipath
+    whenever an FTT>=1 cluster exists, regardless of how many data NICs the
+    local node has, so the retries are set unconditionally. See
+    constants.BDEV_RETRY / constants.TRANSPORT_RETRY for the chosen values
+    and the worst-case retry budget.
+    """
+    params = {
+        "bdev_retry_count": constants.BDEV_RETRY,
+        "transport_retry_count": constants.TRANSPORT_RETRY,
+        "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
+        "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
+        "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
+        "keep_alive_timeout_ms": constants.KATO,
+        "timeout_us": constants.NVME_TIMEOUT_US,
+        "pci_timeout_us": constants.PCIE_TIMEOUT_US,
+        "transport_ack_timeout": constants.ACK_TO,
+        # action_on_timeout=abort caused multi-minute IO hangs when a
+        # remote target wedged: the timeout_cb sent an NVMe abort that
+        # itself never completed against the wedged qpair, and the bdev
+        # IO sat pending until something else (keep-alive, reset on
+        # abort_cpl failure) eventually disconnected the qpair. reset
+        # tears down the qpair immediately, which fails the in-flight
+        # IOs back up to the bdev/distrib layer with a clean error.
+        "action_on_timeout": "reset"
+    }
+    return params
+
+
+class RPCErrorCode(IntEnum):
+    invalid_state = -1
+    invalid_request = -32600
+    method_not_found = -32601
+    invalid_params = -32602
+    internal_error = -32603
+    parser_error = -32700
+
+
 class RPCException(Exception):
-    def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
-        super().__init__(message, code, data)
+    """Base class for all client-raised operational errors."""
+
+
+class RPCConnectionError(RPCException):
+    """Network/connection-level failure (couldn't reach the server)."""
+
+
+class RPCHTTPError(RPCException):
+    """Non-2xx HTTP status (raise_for_status failure)."""
+    def __init__(self, message, status_code, response_text=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+
+
+class RPCProtocolError(RPCException):
+    """Response wasn't valid/well-formed JSON-RPC."""
+
+
+class RPCRemoteError(RPCException):
+    def __init__(self, message: str, code: int, data: Any = None):
+        super().__init__(message)
         self.code = code
-        self.message = message
         self.data = data
 
 
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
+
+
+#: JSON-RPC's "method not found". Used to tell "this build is older than the
+#: RPC" apart from "the call failed", which callers must treat differently.
+RPC_METHOD_NOT_FOUND = -32601
+#: Returned instead of a result when the target does not implement the method.
+RPC_UNSUPPORTED = "__rpc_unsupported__"
+#: ``jc_remove_jm``: the JM is still referenced by at least one jm_vuid, so JC
+#: refuses to release it and the bdev must NOT be deleted. Deliberately a
+#: module-local constant rather than a member of RPCErrorCode: the JC codes are
+#: a separate, JC-specific space whose small negatives collide with that enum's
+#: generic meanings (-1 there is invalid_state). See RPCClient.jc_remove_jm.
+JC_REMOVE_JM_STILL_IN_USE = -22
+#: ``jc_remove_jm``: JC does not know this JM at all. After a successful
+#: ``jc_replace_jm`` this is the NORMAL answer, not a failure -- measured live
+#: 2026-09-02 on spdk R26.3: replacing the JM out of every vuid on a node also
+#: drops it from JC, so the follow-up release finds nothing left to do.
+JC_REMOVE_JM_NOT_USED = -13
+
+
+def _build_session(host, port, username, password: SecretStr, retry: int,
+                   settings: Settings) -> requests.Session:
+    """Build one fully-configured ``requests.Session``. Split out of
+    ``RPCClient.__init__`` so ``RPCSessionPool`` can memoize it."""
+    session = requests.session()
+    if settings.tls_connect != "disabled":
+        session.verify = str(settings.tls_certificate_authority)
+    session.auth = (username, password.get_secret_value())
+    retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                    allowed_methods=RPCClient.DEFAULT_ALLOWED_METHODS)
+    session.mount("http://", HTTPAdapter(max_retries=retries))
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    if settings.tls_connect == "authenticated":
+        session.cert = (str(settings.tls_certificate), str(settings.tls_key))
+    return session
+
+
+class RPCSessionPool:
+    """Process-local cache of configured ``requests.Session`` objects,
+    shared across ``RPCClient`` instances instead of building a fresh one
+    (TCP+TLS+auth setup) per instance.
+
+    Key is ``(host, port, username, password, tls_connect, retry)`` —
+    ``retry`` is included because it's baked into the mounted ``Retry`` at
+    ``Session``-construction time; ``timeout`` is deliberately excluded
+    because it's already applied per-call (``effective_timeout`` in
+    ``_request2``/``_request3``) and never touches the ``Session`` itself.
+
+    Bounded LRU rather than unbounded, in case a node's identity churns
+    (IP failover, credential rotation) faster than ``evict()`` is called.
+    """
+
+    _MAX_ENTRIES = 256
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sessions: OrderedDict[tuple, requests.Session] = OrderedDict()
+
+    @staticmethod
+    def _fingerprint(password: SecretStr) -> str:
+        # Hashed rather than stored raw so the key tuple never carries the
+        # plaintext secret (e.g. into a repr() in a stack trace). Not a
+        # security comparison, so a plain hash is fine here.
+        return hashlib.sha256(password.get_secret_value().encode()).hexdigest()
+
+    def get(self, host, port, username, password: SecretStr, retry: int,
+            settings: Settings) -> requests.Session:
+        key = (host, port, username, self._fingerprint(password),
+               settings.tls_connect, retry)
+        with self._lock:
+            session = self._sessions.get(key)
+            if session is not None:
+                self._sessions.move_to_end(key)
+                return session
+        # Built outside the lock — no sockets are opened here, so a race
+        # costs at most a duplicate build, never a lock held during I/O.
+        session = _build_session(host, port, username, password, retry, settings)
+        with self._lock:
+            existing = self._sessions.get(key)
+            if existing is not None:
+                self._sessions.move_to_end(key)
+                return existing
+            self._sessions[key] = session
+            if len(self._sessions) > self._MAX_ENTRIES:
+                self._sessions.popitem(last=False)
+        return session
+
+    def evict(self, host, port) -> None:
+        """Drop every cached session for ``(host, port)`` (all retry
+        buckets/credentials). Call wherever a node's ``mgmt_ip`` or RPC
+        credentials change, so a stale session isn't reused afterward."""
+        with self._lock:
+            for key in [k for k in self._sessions if k[0] == host and k[1] == port]:
+                del self._sessions[key]
+
+    def clear(self) -> None:
+        """Drop every cached session. Test-only, for pool-reset fixtures."""
+        with self._lock:
+            self._sessions.clear()
+
+
+#: One pool per process, shared by every RPCClient constructed in it.
+_session_pool = RPCSessionPool()
+
+
+def evict_cached_session(host, port) -> None:
+    """Public wrapper around ``_session_pool.evict()`` for callers outside
+    this module (e.g. ``storage_node_ops`` on node restart/failover)."""
+    _session_pool.evict(host, port)
 
 
 class RPCClient:
@@ -102,10 +313,10 @@ class RPCClient:
     # Connection-error retries (`connect=`) are independent of this set and
     # still apply, since a failed *connect* means the request never reached the
     # node and is safe to resend.
-    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
-    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
+    DEFAULT_ALLOWED_METHODS: ClassVar[list] = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
+    RPC_NO_PRINT_OUTPUT: ClassVar[list] = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat", "bdev_get_histogram"]
 
-    def __init__(self, host, port, username, password, timeout=180, retry=3):
+    def __init__(self, host, port, username, password: SecretStr, timeout=180, retry=3):
         self.host = host
         self.port = port
         settings = Settings()
@@ -114,39 +325,15 @@ class RPCClient:
         self.username = username
         self.password = password
         self.timeout = timeout
-        self.session = requests.session()
-        if settings.tls_connect != "disabled":
-            self.session.verify = str(settings.tls_certificate_authority)
-        self.session.auth = (self.username, self.password)
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
-                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
-        self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        if settings.tls_connect == "authenticated":
-            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
-
-    def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
-        """Like _request but returns a cached result if one exists within cache_ttl seconds."""
-        cache_key = (self.host, self.port, method, json.dumps(params, sort_keys=True) if params else None)
-        now = time.monotonic()
-        with _rpc_cache_lock:
-            if cache_key in _rpc_cache:
-                ts, cached_result = _rpc_cache[cache_key]
-                if now - ts < cache_ttl:
-                    logger.debug("Cache hit for %s on %s:%s", method, self.host, self.port)
-                    return cached_result
-        result = self._request(method, params)
-        if result is not None:
-            with _rpc_cache_lock:
-                _rpc_cache[cache_key] = (now, result)
-        return result
+        self.retry = retry
+        self.session = _session_pool.get(host, port, username, password, retry, settings)
 
     def _request(self, method, params=None, request_timeout=None):
         ret, _ = self._request2(method, params, request_timeout=request_timeout)
         return ret
 
     def _request2(self, method, params=None, request_timeout=None):
-        payload = {'id': 1, 'method': method}
+        payload: dict = {'id': 1, 'method': method}
         if params:
             payload['params'] = params
         # Per-call override of the client-level HTTP timeout. Used by callers
@@ -155,8 +342,16 @@ class RPCClient:
         # window, where a single attach has to land within hundreds of ms).
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
-            response = self.session.post(self.url, data=json.dumps(payload), timeout=effective_timeout)
+            logger.debug("From: %s, Requesting method: %s, params: %s",
+                         self.host, method, redact_rpc_params(params))
+            # Tell the SPDK proxy how long we are willing to wait, so it bounds
+            # its own SPDK round-trip (and the semaphore slot it holds) to this
+            # instead of the proxy-global timeout. Prevents an abandoned/stuck
+            # RPC from squatting a proxy slot for minutes and starving other RPCs.
+            wire_payload = unwrap_secrets_for_send(payload)
+            response = self.session.post(
+                self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
+                headers={"X-RPC-Timeout": str(effective_timeout)})
         except Exception:
             raise RPCException("connection error")
 
@@ -169,10 +364,11 @@ class RPCClient:
         if ret_code == 200:
             try:
                 data = response.json()
-                if method not in self.RPC_NO_PRINT_OUTPUT:
-                    logger.debug("Response json: %s", json.dumps(data))
+                if method not in self.RPC_NO_PRINT_OUTPUT and Settings().log_response_bodies:
+                    logger.debug("Response json: %s", utils.dump_json(data))
             except Exception:
-                logger.debug("Response ret_content: %s", ret_content)
+                if Settings().log_response_bodies:
+                    logger.debug("Response ret_content: %s", ret_content)
                 return ret_content, None
 
             if 'result' in data:
@@ -190,25 +386,34 @@ class RPCClient:
         return None, None
 
     def _request3(self, method: str, **kwargs):
-        logger.debug("Requesting method: %s, params: %s", method, kwargs)
+        logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
+        wire_payload = unwrap_secrets_for_send({
+            'id': 1,
+            'method': method,
+            'params': kwargs,
+        })
         try:
-            response = self.session.post(self.url, data=json.dumps({
-                'id': 1,
-                'method': method,
-                'params': kwargs,
-            }), timeout=self.timeout)
+            response = self.session.post(
+                self.url, data=json.dumps(wire_payload), timeout=self.timeout,
+                headers={"X-RPC-Timeout": str(self.timeout)})
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
-        except (
-                ConnectionError, Timeout, TooManyRedirects, HTTPError,  # requests
-                JSONDecodeError,  # json
-                ValidationError,  # jsonschema
-        ) as e:
-            raise RPCException('Request failed') from e
+        except ConnectionError as e:
+            raise RPCConnectionError("Could not reach remote") from e
+        except ReadTimeout as e:
+            raise RPCConnectionError("Did not get a response from remote within timeout") from e
+        except HTTPError as e:
+            raise RPCHTTPError(
+                f"HTTP {response.status_code} from remote",
+                status_code=response.status_code,
+                response_text=response.text,
+            ) from e
+        except (JSONDecodeError, ValidationError) as e:
+            raise RPCProtocolError("Invalid result payload") from e
 
         if (error := data.get('error')) is not None:
-            raise RPCException(**error)
+            raise RPCRemoteError(**error)
 
         return data['result']
 
@@ -216,15 +421,16 @@ class RPCClient:
     def get_version(self):
         return self._request("spdk_get_version")
 
-    def subsystem_list(self, nqn_name=None):
-        data = self._request("nvmf_get_subsystems")
-        if data and nqn_name:
-            for d in data:
-                if d['nqn'] == nqn_name:
-                    return [d]
-            return []
-        else:
-            return data
+    def subsystem_list(self) -> list[dict]:
+        return self._request3("nvmf_get_subsystems")
+
+    def subsystem_get(self, nqn: str) -> dict | None:
+        try:
+            return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
+        except RPCRemoteError as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
 
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
@@ -240,10 +446,23 @@ class RPCClient:
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
-    def keyring_file_add_key(self, name, path):
-        """Register a file-based key in SPDK's keyring by path."""
-        params = {"name": name, "path": path}
-        return self._request("keyring_file_add_key", params)
+    def keyring_file_add_key(self, name: str, path: str, *, allow_existing: bool = False):
+        """Register a file-based key in SPDK's keyring by path.
+
+        Args:
+            name: Key name for the SPDK keyring.
+            path: Path to the key file on the storage node.
+            allow_existing: When True, silently succeed if the key is already
+                registered (SPDK errno -17). When False (default) an existing
+                key raises RPCException.
+        """
+        try:
+            return self._request3("keyring_file_add_key", name=name, path=path)
+        except RPCRemoteError as e:
+            if allow_existing and e.code == -17:
+                logger.debug("Key %s already in SPDK keyring, reusing", name)
+                return None
+            raise
 
     def keyring_file_remove_key(self, name):
         """Remove a key from SPDK's keyring."""
@@ -274,10 +493,8 @@ class RPCClient:
         return self._request("nvmf_subsystem_remove_host", params)
 
     def transport_list(self, trtype=None):
-        params = None
-        if trtype:
-            params = {"trtype": trtype}
-        return self._request("nvmf_get_transports", params)
+        kwargs = {"trtype": trtype} if trtype else {}
+        return self._request3("nvmf_get_transports", **kwargs)
 
     def transport_create(self, trtype, qpair_count=6, shared_bufs=24576):
         """
@@ -295,7 +512,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": constants.QPAIR_COUNT,
-            "max_queue_depth": 256,
+            "max_queue_depth": 128,
             "abort_timeout_sec": 5,
             "zcopy": True,
             "in_capsule_data_size": 8192,
@@ -321,10 +538,7 @@ class RPCClient:
         return self._request("sock_impl_set_options", params)
 
     def transport_create_caching(self, trtype):
-        params = {
-            "trtype": trtype,
-        }
-        return self._request("nvmf_create_transport", params)
+        return self._request3("nvmf_create_transport", trtype=trtype)
 
     def listeners_list(self, nqn):
         params = {"nqn": nqn}
@@ -350,17 +564,18 @@ class RPCClient:
             params["ana_state"] = ana_state
         return self._request("nvmf_subsystem_add_listener", params)
 
-    def bdev_nvme_controller_list(self, name=None):
-        params = None
-        if name:
-            params = {"name": name}
-        return self._request("bdev_nvme_get_controllers", params)
-
-    def bdev_nvme_controller_list_2(self, name=None):
-        params = None
-        if name:
-            params = {"name": name}
-        return self._request2("bdev_nvme_get_controllers", params)
+    def bdev_nvme_controller_list(self, name=None) -> list[dict]:
+        """Every attached NVMe-oF controller, or -- filtered by ``name`` --
+        the (at most one) matching controller. An unmatched ``name`` yields
+        ``[]``; any other RPC error still raises."""
+        kwargs = {"name": name} if name else {}
+        try:
+            return self._request3("bdev_nvme_get_controllers", **kwargs)
+        except RPCRemoteError as e:
+            # bdev_nvme_rpc.c sends EINVAL un-negated here, unlike ENODEV elsewhere.
+            if name and abs(e.code) == errno.EINVAL:
+                return []
+            raise
 
     def bdev_nvme_controller_attach(self, name, pci_addr, max_bdevs=1024):
         return self._request3(
@@ -375,9 +590,38 @@ class RPCClient:
         params = {"traddr": pci_addr, "ns_id": 1, "label": name}
         return self._request2("ultra21_alloc_ns_mount", params)
 
-    def bdev_nvme_detach_controller(self, name):
+    def bdev_nvme_detach_controller(self, name, traddr=None, trsvcid=None,
+                                    trtype="TCP", adrfam="ipv4"):
+        """Detach a controller, or -- with a trid -- only the paths on that
+        address.
+
+        Note the SPDK semantics before using this to prune: bdev_nvme_delete()
+        walks EVERY nvme_ctrlr under the bdev and removes each one whose
+        path matches, so a trid detach removes *all* controllers on that
+        address, not one of them. There is deliberately no way to single out
+        one of two identical trids -- the duplicate-path repair in
+        storage_node_ops therefore detaches the address and re-attaches it
+        once, rather than trying to drop a single copy.
+        """
         params = {"name": name}
+        if traddr:
+            params.update({"traddr": traddr, "trtype": trtype, "adrfam": adrfam})
+            if trsvcid:
+                params["trsvcid"] = str(trsvcid)
         return self._request2("bdev_nvme_detach_controller", params)
+
+    def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
+        """Remove a single transport path from an NVMe controller without
+        detaching the whole controller. Used during single-node cluster
+        expansion to prune the dead failover path on a sibling sec_2 node
+        after its sec_1 was re-homed to a different node."""
+        return self._request3(
+            "bdev_nvme_remove_trid",
+            name=name,
+            traddr=traddr,
+            trsvcid=str(trsvcid),
+            trtype=trtype,
+        )
 
     def ultra21_alloc_ns_init(self, pci_addr):
         params = {
@@ -397,47 +641,21 @@ class RPCClient:
                               idempotent=True):
         """Add a namespace to an NVMe-oF subsystem.
 
-        Idempotency: by default, looks up the subsystem first and if a
-        namespace already exists with a matching ``bdev_name`` (and matching
-        ``nsid`` / ``uuid`` if those were specified), returns the existing
-        nsid instead of issuing the RPC. This is safe for every call site —
-        SPDK would reject the duplicate with -EEXIST anyway, and a single
-        cluster_activate cycle in 2026-05-14 logs (suspend→activate on
-        cluster 3d4914e7-…) emitted ``nvmf_subsystem_add_ns`` twice for the
-        same lvol 12 seconds apart, indicating the activation flow can
-        legitimately re-enter the add path. Callers that need the strict
-        behavior (e.g. tests asserting on RPC traffic) can pass
-        ``idempotent=False``.
+        Idempotency: by default, a rejected add is followed by a subsystem
+        lookup — if a namespace already exists with a matching ``bdev_name``
+        (and matching ``nsid`` / ``uuid`` if those were specified), the
+        existing nsid is returned instead of the error. The probe used to run
+        BEFORE every add, but ``nvmf_get_subsystems`` has no filter parameter:
+        it serializes every subsystem with all namespaces, an O(total-lvols)
+        response paid on every single add (3× per HA create). Duplicate adds
+        are the rare re-entry case (e.g. a cluster_activate cycle in
+        2026-05-14 logs emitted the same add twice, 12s apart), so the probe
+        belongs on the error path. Callers that need the strict behavior
+        (e.g. tests asserting on RPC traffic) can pass ``idempotent=False``.
 
         Returns the nsid as the SPDK RPC would, or the existing nsid when
         the no-op branch fires.
         """
-        if idempotent:
-            try:
-                subs = self.subsystem_list(nqn_name=nqn) or []
-                if subs:
-                    for ns in subs[0].get("namespaces", []) or []:
-                        if ns.get("bdev_name") != dev_name:
-                            continue
-                        if nsid is not None and ns.get("nsid") != nsid:
-                            continue
-                        if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
-                            # Same bdev at a different nsid is fine to no-op,
-                            # but a mismatched uuid on the same bdev is a real
-                            # conflict — fall through to let SPDK reject.
-                            continue
-                        existing_nsid = ns.get("nsid")
-                        logger.info(
-                            "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
-                            "skipping duplicate add",
-                            nqn, dev_name, existing_nsid)
-                        return existing_nsid, None
-            except Exception as e:
-                # Don't let an idempotency probe block the legitimate add.
-                logger.debug(
-                    "nvmf_subsystem_add_ns idempotency probe failed for %s: %s — "
-                    "proceeding with add", nqn, e)
-
         params = {
             "nqn": nqn,
             "namespace": {
@@ -456,10 +674,35 @@ class RPCClient:
 
         if eui64:
             params['namespace']['eui64'] = eui64
-            params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
 
+        # ptpl_file is what makes a namespace advertise RESCAP bit 0, i.e.
+        # Persist Through Power Loss reservations. It used to be set only
+        # alongside eui64, which no caller passes, so it never reached the
+        # wire. Punctuation is stripped so one namespace cannot end up with two
+        # reservation files across a restart.
+        ptpl_id = eui64 or nguid or uuid
+        if ptpl_id:
+            params['namespace']['ptpl_file'] = f"/mnt/ns_resv{str(ptpl_id).replace('-', '')}.json"
 
-        return self._request2("nvmf_subsystem_add_ns", params)
+        ret, err = self._request2("nvmf_subsystem_add_ns", params)
+        if err and idempotent:
+            try:
+                for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
+                    if not namespace_matches(ns, dev_name=dev_name, nsid=nsid,
+                                             uuid=uuid):
+                        continue
+                    existing_nsid = ns.get("nsid")
+                    logger.info(
+                        "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
+                        "treating rejected duplicate add as success",
+                        nqn, dev_name, existing_nsid)
+                    return existing_nsid, None
+            except Exception as e:
+                # Don't let the idempotency probe mask the original error.
+                logger.debug(
+                    "nvmf_subsystem_add_ns idempotency probe failed for %s: %s — "
+                    "returning original error", nqn, e)
+        return ret, err
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
         params = {
@@ -467,7 +710,37 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
+    def nvmf_subsystem_ns_update(self, nqn, nsid, bdev_name):
+        """Atomically swap the bdev backing *nsid* in *nqn* for *bdev_name*.
+
+        Keeps the same nsid, UUID, NGUID, and ANA group — the client sees the
+        namespace as unchanged (no AER namespace-change event, no rediscovery
+        delay).  Available in SPDK ≥ 24.01.
+
+        Returns the SPDK result on success, or None if the RPC is unavailable
+        or the call fails (caller should fall back to remove + add_ns).
+        """
+        try:
+            return self._request3("nvmf_subsystem_ns_update",
+                                  nqn=nqn, nsid=nsid, bdev_name=bdev_name)
+        except Exception as e:
+            logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
+            return None
+
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True,
+                                              ana=None, anagrpid=None):
+        """Set a listener's ANA state, optionally for a SINGLE ANA group.
+
+        Without ``anagrpid`` the state applies to the whole subsystem, which is
+        wrong once a subsystem carries several namespaces: volumes sharing one
+        subsystem (and therefore one controller on the client) can be migrated,
+        suspended or failed over independently, and a subsystem-wide flip would
+        drag the others with it. In SPDK every namespace gets its own ANA group
+        whose id equals the namespace id, so pass ``anagrpid=lvol.ns_id`` to
+        confine the change to that volume. The parameter is optional in the SPDK
+        RPC decoder, so omitting it keeps the old subsystem-wide behaviour for
+        single-namespace subsystems such as the hublvols.
+        """
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -486,6 +759,9 @@ class RPCClient:
         if ana:
             params['ana_state'] = ana
 
+        if anagrpid is not None:
+            params['anagrpid'] = int(anagrpid)
+
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
     def get_device_stats(self, uuid):
@@ -496,7 +772,7 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=50):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1):
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
@@ -524,16 +800,37 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
 
-    def delete_lvol(self, name, del_async=False):
-        params = {"name": name,
-                  "sync": del_async}
+    def delete_lvol(self, name, sync=False, special_delete=False):
+        params = {
+            "name": name,
+            "sync": sync,
+            "special_delete": special_delete,
+        }
         return self._request2("bdev_lvol_delete", params)
 
-    def get_bdevs(self, name=None):
-        params = None
-        if name:
-            params = {"name": name}
-        return self._request("bdev_get_bdevs", params)
+    def bdev_list(self) -> list[dict]:
+        """Every bdev on the SPDK app thread. Scales with lvol+snapshot
+        count, not device count — run 20260725 (~21k object bdevs): 18s+ per
+        dump, KATO starved, JC/JM exclusions, node aborts. Reserve this for
+        cold paths that genuinely need the full inventory (node-add on a
+        near-empty node); anything periodic must use ``bdev_get`` (single
+        name) or ``bdev_nvme_controller_list`` (scales with attached
+        controllers) instead."""
+        return self._request3("bdev_get_bdevs")
+
+    def bdev_get(self, name) -> dict | None:
+        """Single bdev lookup by exact name, mirroring ``subsystem_get``.
+        ``None`` means the bdev does not exist (SPDK answers ENODEV, or the
+        filtered lookup comes back empty). Raises ``RPCConnectionError`` /
+        ``RPCHTTPError`` / ``RPCProtocolError`` for a transport-level failure,
+        or ``RPCRemoteError`` for any other RPC error — callers must not read
+        an unknown answer as "absent"."""
+        try:
+            return single_or_none(self._request3("bdev_get_bdevs", name=name))
+        except RPCRemoteError as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
 
     def resize_lvol(self, lvol_bdev, blockcnt):
         params = {
@@ -543,15 +840,10 @@ class RPCClient:
         return self._request("ultra21_lvol_set", params)
 
     def resize_clone(self, clone_bdev, blockcnt):
-        params = {
-            "clone_bdev": clone_bdev,
-            "blockcnt": blockcnt
-        }
-        return self._request("ultra21_lvol_set", params)
+        return self._request3("ultra21_lvol_set", clone_bdev=clone_bdev, blockcnt=blockcnt)
 
     def lvol_read_only(self, name):
-        params = {"name": name}
-        return self._request("bdev_lvol_set_read_only", params)
+        return self._request3("bdev_lvol_set_read_only", name=name)
 
     def lvol_create_snapshot(self, lvol_id, snapshot_name):
         ret, _ = self.lvol_create_snapshot2(lvol_id, snapshot_name)
@@ -584,8 +876,7 @@ class RPCClient:
         }
         return self._request("bdev_crypto_create", params)
 
-    def lvol_crypto_key_create(self, name, key, key2):
-        # todo: mask the keys so that they don't show up in logs
+    def lvol_crypto_key_create(self, name, key: SecretStr, key2: SecretStr):
         params = {
             "cipher": "AES_XTS",
             "key": key,
@@ -599,8 +890,7 @@ class RPCClient:
         return self._request("bdev_crypto_delete", params)
 
     def lvol_compress_delete(self, name):
-        params = {"name": name}
-        return self._request("bdev_compress_delete", params)
+        return self._request3("bdev_compress_delete", name=name)
 
     def ultra21_bdev_pass_create(self, base_bdev, vuid, pt_name):
         params = {
@@ -624,7 +914,7 @@ class RPCClient:
             "inflight_io_threshold": inflight_io_threshold or 12
         }
 
-        return self._request("qos_vbdev_create", params)
+        return self._request3("qos_vbdev_create", **params)
 
     def qos_vbdev_delete(self, name):
         params = {"name": name}
@@ -676,7 +966,8 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True, shared_placement=False):
+                            full_page_unmap=True, shared_placement=False,
+                            write_protection_v2=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -688,12 +979,9 @@ class RPCClient:
             //  This node (device) number, in the group, defined by ha_comm_addrs.
           "ha_inode_self": 1
         """
-        try:
-            ret = self.get_bdevs(name)
-            if ret:
-                return ret
-        except Exception:
-            pass
+        ret = self.bdev_get(name)
+        if ret:
+            return ret
         params = {
             "name": name,
             "jm_names": ",".join(jm_names),
@@ -714,7 +1002,16 @@ class RPCClient:
             params['ha_inode_self'] = ha_inode_self
         if distrib_cpu_mask:
             params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
-        if write_protection:
+        # Write protection has two generations and a distrib is created with
+        # exactly one of them. v2 supersedes v1 -- the data plane derives the
+        # old flag from the new one (b_write_protection = b_write_protection ||
+        # b_write_protection_v2), so sending both is redundant and sending the
+        # wrong one for the cluster's generation is a correctness problem. The
+        # caller decides via cluster.write_protection_v2; see
+        # storage_node_ops.apply_write_protection_mode.
+        if write_protection_v2:
+            params["write_protection_v2"] = True
+        elif write_protection:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
@@ -747,6 +1044,31 @@ class RPCClient:
             params["name"] = name
         return self._request("distr_shared_placement", params)
 
+    def distr_write_protection_v2(self, name=None, enable=True):
+        """Activate (or deactivate) v2 write protection on distrib bdevs at
+        runtime.
+
+        This is the one-shot migration RPC for bdevs that already exist:
+        a distrib created by an older release carries v1 write protection and
+        cannot gain v2 by being told about it at create time -- it is already
+        created. `sbctl cluster switch-write-protection` sends this to every
+        online node after an upgrade, then stamps cluster.write_protection_v2
+        so subsequent (re-)creations use the v2 create parameter instead.
+
+        Args:
+            name: target a single distrib bdev. If None / empty, applies to
+                every distrib bdev on this node -- which is what the cluster
+                switch wants.
+            enable: True activates v2.
+
+        Returns True on success; raises on RPC error (the data plane answers
+        with an error response carrying ndev/nfail when some devices failed).
+        """
+        params: dict = {"enable": bool(enable)}
+        if name:
+            params["name"] = name
+        return self._request("distr_write_protection_v2", params)
+
     def jm_set_shared_placement(self, name, enable=True):
         """Flip the shared_placement mode of a JM bdev at runtime.
 
@@ -778,19 +1100,16 @@ class RPCClient:
         params = {"name": name}
         return self._request2("bdev_alceml_delete", params)
 
-    def get_lvol_stats(self, uuid=""):
+    def get_lvol_stats(self, name=""):
         params = {}
-        if uuid:
-            params["uuid"] = uuid
+        if name:
+            params["name"] = name
         return self._request("bdev_get_iostat", params)
 
     def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4, superblock=False):
-        try:
-            ret = self.get_bdevs(name)
-            if ret:
-                return ret
-        except Exception:
-            pass
+        ret = self.bdev_get(name)
+        if ret:
+            return ret
         params = {
             "name": name,
             "raid_level": raid_level,
@@ -897,15 +1216,40 @@ class RPCClient:
             params["reconnect_delay_sec"] = int(reconnect_delay_sec)
         if fast_io_fail_timeout_sec is not None:
             params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
-        return self._request("bdev_nvme_attach_controller", params,
-                             request_timeout=request_timeout)
+        # Two SPDK success shapes are falsy, and callers gate on truthiness:
+        #
+        #  * adding a path to an EXISTING multipath controller creates no new
+        #    bdev, so the RPC succeeds and returns an empty name list;
+        #  * re-adding a path that is already present fails with -EALREADY
+        #    ("A controller named X already exists with the specified network
+        #    path", bdev_nvme_rpc.c) — which means the path is there, i.e. the
+        #    strongest possible success signal.
+        #
+        # Returning those as falsy made hublvol reconcile report "no path
+        # attached" for a controller whose paths were both enabled, so
+        # recreate_lvstore failed and the node oscillated offline <-> in_restart
+        # indefinitely (multipath soak 2026-08-19 iteration 4). Report success
+        # as True and keep the name list when SPDK actually created bdevs.
+        result, error = self._request2("bdev_nvme_attach_controller", params,
+                                       request_timeout=request_timeout)
+        if error:
+            code = error.get("code") if isinstance(error, dict) else None
+            message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+            if code == -errno.EALREADY or "already exists with the specified network path" in message:
+                logger.info(
+                    "bdev_nvme_attach_controller: %s already has path %s:%s — "
+                    "treating as attached", name, traddr, trsvcid)
+                return True
+            logger.error(
+                "bdev_nvme_attach_controller failed for %s %s:%s: %s",
+                name, traddr, trsvcid, error)
+            return None
+        # Empty list == path added to an existing controller (no new bdev).
+        return result if result else True
 
     def bdev_split(self, base_bdev, split_count):
-        params = {
-            "base_bdev": base_bdev,
-            "split_count": split_count
-        }
-        return self._request("bdev_split_create", params)
+        return self._request3("bdev_split_create",
+                              base_bdev=base_bdev, split_count=split_count)
 
     def bdev_PT_NoExcl_create(self, name, base_bdev_name):
         params = {
@@ -927,6 +1271,29 @@ class RPCClient:
         }
         return self._request("bdev_passtest_create", params)
 
+    def bdev_delay_create(self, name, base_name, avg_read_latency=0, p99_read_latency=0,
+                          avg_write_latency=0, p99_write_latency=0):
+        # Transparent pass-through when all latencies are 0; arm later via
+        # bdev_delay_update_latency to make the device "hang".
+        params = {
+            "base_bdev_name": base_name,
+            "name": name,
+            "avg_read_latency": avg_read_latency,
+            "p99_read_latency": p99_read_latency,
+            "avg_write_latency": avg_write_latency,
+            "p99_write_latency": p99_write_latency,
+        }
+        return self._request("bdev_delay_create", params)
+
+    def bdev_delay_update_latency(self, name, latency_type, latency_us):
+        # latency_type: one of avg_read, p99_read, avg_write, p99_write
+        params = {
+            "delay_bdev_name": name,
+            "latency_type": latency_type,
+            "latency_us": latency_us,
+        }
+        return self._request("bdev_delay_update_latency", params)
+
     def bdev_passtest_mode(self, name, mode):
         params = {
             "pt_name": name,
@@ -940,34 +1307,38 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
+    def framework_get_config(self, name):
+        """Dump one SPDK subsystem's effective configuration.
+
+        Reads back what is actually in force on a running SPDK rather than
+        what we believe we told it. bdev_nvme writes its global options into
+        this dump (bdev_nvme.c, bdev_nvme_config_json), so the ``bdev``
+        subsystem carries the real timeout_us / transport_ack_timeout /
+        keep_alive_timeout_ms.
+        """
+        return self._request3("framework_get_config", name=name)
+
+    def get_effective_nvme_options(self):
+        """The bdev_nvme global options actually in force; {} if unknown.
+
+        There is no bdev_nvme_get_options RPC in our SPDK, so this picks the
+        bdev_nvme_set_options entry out of the ``bdev`` subsystem config dump.
+        """
+        try:
+            cfg = self.framework_get_config("bdev")
+        except Exception as e:
+            logger.warning("framework_get_config(bdev) failed: %s", e)
+            return {}
+        if isinstance(cfg, dict):
+            cfg = cfg.get("config") or cfg.get("subsystems") or []
+        for entry in cfg or []:
+            if isinstance(entry, dict) and entry.get("method") == "bdev_nvme_set_options":
+                return entry.get("params") or {}
+        return {}
+
     def bdev_nvme_set_options(self):
-        # bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an
-        # aborted IO on the alternate path of an NVMe-oF multipath bdev,
-        # per https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are
-        # multipath whenever an FTT≥1 cluster exists, regardless of how
-        # many data NICs the local node has — so the retries are set
-        # unconditionally. See ``constants.BDEV_RETRY`` /
-        # ``constants.TRANSPORT_RETRY`` for the chosen values and the
-        # worst-case retry budget.
-        params = {
-            "bdev_retry_count": constants.BDEV_RETRY,
-            "transport_retry_count": constants.TRANSPORT_RETRY,
-            "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
-            "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
-            "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
-            "keep_alive_timeout_ms": constants.KATO,
-            "timeout_us": constants.NVME_TIMEOUT_US,
-            "transport_ack_timeout": constants.ACK_TO,
-            # action_on_timeout=abort caused multi-minute IO hangs when a
-            # remote target wedged: the timeout_cb sent an NVMe abort that
-            # itself never completed against the wedged qpair, and the bdev
-            # IO sat pending until something else (keep-alive, reset on
-            # abort_cpl failure) eventually disconnected the qpair. reset
-            # tears down the qpair immediately, which fails the in-flight
-            # IOs back up to the bdev/distrib layer with a clean error.
-            "action_on_timeout": "reset"
-        }
-        return self._request("bdev_nvme_set_options", params)
+        return self._request("bdev_nvme_set_options", nvme_bdev_opts_params())
+
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
         params = {"bdev_auto_examine": False}
@@ -1005,7 +1376,7 @@ class RPCClient:
         return self._request("accel_set_options", params)
 
     def distr_status_events_get(self):
-        return self._request("distr_status_events_get")
+        return self._request3("distr_status_events_get")
 
     def distr_status_events_discard_then_get(self, nev_discard, nev_read):
         params = {
@@ -1019,24 +1390,15 @@ class RPCClient:
         return self._request("alceml_get_pages_usage", params)
 
     def bdev_ocf_create(self, name, mode, cache_name, core_name):
-        params = {
-            "name": name,
-            "mode": mode,
-            "cache_bdev_name": cache_name,
-            "core_bdev_name": core_name}
-        return self._request("bdev_ocf_create", params)
+        return self._request3("bdev_ocf_create", name=name, mode=mode,
+                              cache_bdev_name=cache_name, core_bdev_name=core_name)
 
     def bdev_ocf_delete(self, name):
-        params = {"name": name}
-        return self._request("bdev_ocf_delete", params)
+        return self._request3("bdev_ocf_delete", name=name)
 
     def bdev_malloc_create(self, name, block_size, num_blocks):
-        params = {
-            "name": name,
-            "block_size": block_size,
-            "num_blocks": num_blocks,
-        }
-        return self._request("bdev_malloc_create", params)
+        return self._request3("bdev_malloc_create", name=name,
+                              block_size=block_size, num_blocks=num_blocks)
 
     def ultra21_lvol_bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
         params = {
@@ -1049,13 +1411,9 @@ class RPCClient:
         return self._request("ultra21_lvol_bmap_init", params)
 
     def ultra21_lvol_mount_snapshot(self, snapshot_name, lvol_bdev, base_bdev):
-        params = {
-            "modus": "SNAPSHOT",
-            "lvol_bdev": lvol_bdev,
-            "base_bdev": base_bdev,
-            "snapshot_bdev": snapshot_name
-        }
-        return self._request("ultra21_lvol_mount", params)
+        return self._request3("ultra21_lvol_mount", modus="SNAPSHOT",
+                              lvol_bdev=lvol_bdev, base_bdev=base_bdev,
+                              snapshot_bdev=snapshot_name)
 
     def ultra21_lvol_mount_lvol(self, lvol_name, base_bdev):
         params = {
@@ -1088,10 +1446,9 @@ class RPCClient:
             params["shared_placement"] = True
         if jm_cpu_mask:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
-        # Compression thread: enabled per-branch (constants.JM_COMPRESSION_THREAD_ENABLED).
-        # compression_cpu_mask is a hex mask string co-located with jc-singleton on
-        # nodes <32 vCPU, or a dedicated core on >=32 vCPU; the data plane wants it as
-        # an int, matching bdb_lcpu_mask above.
+        # Compression thread: currently always off (no caller passes True).
+        # compression_cpu_mask is a hex mask string; the data plane wants it
+        # as an int, matching bdb_lcpu_mask above.
         if compression_thread:
             params["compression_thread"] = True
             if compression_cpu_mask:
@@ -1109,22 +1466,15 @@ class RPCClient:
         return self._request("ultra21_util_get_malloc_stats", params)
 
     def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev, blockcnt):
-        params = {
-            "modus": "CLONE",
-            "clone_bdev": clone_name,
-            "base_bdev": base_bdev,
-            "lvol_bdev": snap_bdev,
-            "blockcnt": blockcnt,
-        }
-        return self._request("ultra21_lvol_mount", params)
+        return self._request3("ultra21_lvol_mount", modus="CLONE",
+                              clone_bdev=clone_name, base_bdev=base_bdev,
+                              lvol_bdev=snap_bdev, blockcnt=blockcnt)
 
     def alceml_unmap_vuid(self, name, vuid):
-        params = {"name": name, "vuid": vuid}
-        return self._request("alceml_unmap_vuid", params)
+        return self._request3("alceml_unmap_vuid", name=name, vuid=vuid)
 
     def jm_delete(self):
-        params = {"name": 0, "vuid": 0}
-        return self._request("jm_delete", params)
+        return self._request3("jm_delete", name=0, vuid=0)
 
     def framework_start_init(self):
         return self._request("framework_start_init")
@@ -1135,6 +1485,46 @@ class RPCClient:
 
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
+
+    def bdev_aio_create(self, name, filename, block_size=0):
+        """Create an SPDK AIO bdev over a Linux block device (lblk cluster
+        mode). ``filename`` is the device path — prefer the stable
+        /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
+        logical block size."""
+        params = {"name": name, "filename": filename}
+        if block_size:
+            params["block_size"] = block_size
+        return self._request("bdev_aio_create", params)
+
+    def bdev_aio_delete(self, name):
+        return self._request3("bdev_aio_delete", name=name)
+
+    def bdev_aio_rescan(self, name):
+        """Re-read the backing device's size (device grow pickup)."""
+        return self._request3("bdev_aio_rescan", name=name)
+
+    def bdev_set_qd_sampling_period(self, name, period_us):
+        """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
+        queue_depth/io_time — the hung-IO watchdog's signal for AIO base
+        bdevs (period 0 disables)."""
+        params = {"name": name, "period": period_us}
+        return self._request("bdev_set_qd_sampling_period", params)
+
+    def bdev_enable_histogram(self, name, enable=True, opc=None):
+        # opc filters to a single I/O type (e.g. "read"/"write"); requires
+        # SPDK >= 24.01. Toggling disable->enable clears the collected data,
+        # which is the only way to reset the (cumulative) histogram.
+        params = {"name": name, "enable": enable}
+        if opc:
+            params["opc"] = opc
+        return self._request("bdev_enable_histogram", params)
+
+    def bdev_get_histogram(self, name):
+        # Returns {"histogram": <base64 of uint64 buckets>, "bucket_shift",
+        # "tsc_rate"}. Counts are cumulative since enable; diff two snapshots
+        # to get a time window.
+        params = {"name": name}
+        return self._request("bdev_get_histogram", params)
 
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {
@@ -1156,8 +1546,7 @@ class RPCClient:
         return self._request("nbd_get_disks", params)
 
     def bdev_jm_unmap_vuid(self, name, vuid):
-        params = {"name": name, "vuid": vuid}
-        return self._request("bdev_jm_unmap_vuid", params)
+        return self._request3("bdev_jm_unmap_vuid", name=name, vuid=vuid)
 
     def nvmf_set_config(self, poll_groups_mask, dhchap_digests=None, dhchap_dhgroups=None):
         params = {"poll_groups_mask": poll_groups_mask}
@@ -1189,7 +1578,7 @@ class RPCClient:
         }
         if qos_high_priority:
             params["qos_high_priority"] = qos_high_priority
-        return self._request("distr_migration_to_primary_start", params)
+        return self._request3("distr_migration_to_primary_start", **params)
 
     def distr_migration_status(self, name):
         params = {"name": name}
@@ -1237,6 +1626,9 @@ class RPCClient:
         params = {"lvs_name": name}
         return self._request("bdev_lvol_get_lvstores", params)
 
+    def bdev_lvol_rename(self, old_name, new_name):
+        return self._request3("bdev_lvol_rename", old_name=old_name, new_name=new_name)
+
     def bdev_lvol_resize(self, name, size_in_mib):
         params = {
             "name": name,
@@ -1249,11 +1641,8 @@ class RPCClient:
         return self._request("bdev_lvol_inflate", params)
 
     def bdev_distrib_toggle_cluster_full(self, name, cluster_full=False):
-        params = {
-            "name": name,
-            "cluster_full": cluster_full,
-        }
-        return self._request("bdev_distrib_toggle_cluster_full", params)
+        return self._request3("bdev_distrib_toggle_cluster_full",
+                              name=name, cluster_full=cluster_full)
 
     def log_set_print_level(self, level):
         params = {
@@ -1269,10 +1658,55 @@ class RPCClient:
         return self._request("bdev_lvs_dump", params)
 
     def jc_explicit_synchronization(self, jm_vuid):
-        params = {
-            "jm_vuid": jm_vuid
-        }
-        return self._request("jc_explicit_synchronization", params)
+        return self._request3("jc_explicit_synchronization", jm_vuid=jm_vuid)
+
+    def jc_replace_jm(self, name_old: str, replacements: list):
+        """Swap the JM bdev backing one or more live JC members from
+        ``name_old`` to a per-member ``name_new`` in place -- JC re-syncs
+        each new JM's journal in the background and, from then on, treats
+        it as the member for that slot. Replaces the old
+        override_name_on_node naming trick (which faked the replacement
+        under the removed peer's old name so JC wouldn't need touching):
+        this RPC updates JC's live state directly, so the caller can
+        connect the replacement(s) under their own natural name.
+
+        A single storage node can run more than one local JC instance
+        against the SAME ``name_old`` bdev at once -- its own redundancy
+        set, plus one instance per primary it hosts as secondary/tertiary
+        (each such role uses a distinct ``jm_vuid``, up to 3 total per
+        node). This call covers ALL of them in one shot:
+
+        ``replacements``: 1..3 dicts, each ``{"jm_vuid": int, "name_new":
+        str}`` -- ``jm_vuid`` identifies which local JC instance to patch
+        (must currently use ``name_old``), ``name_new`` is the bdev to use
+        instead (must already exist as a bdev; the caller connects it
+        first). The SAME ``name_new`` may cover multiple ``jm_vuid``
+        entries -- reusing a bdev already in use by a DIFFERENT jm_vuid on
+        this node is fine, only reusing one already in THIS jm_vuid's own
+        member list is rejected. Must cover every jm_vuid on this node
+        that currently uses ``name_old``, or the whole call is rejected.
+
+        Raises RPCRemoteError with one of the documented codes on
+        rejection/failure:
+            -10 JC is closing
+            -11 invalid JM names (empty, or name_new == name_old)
+            -12 another JM replacement is already in progress
+            -13 name_old is not used by JC
+            -14 this jm_vuid uses name_new already
+            -15 the JM of name_old is being removed
+            -16 invalid number of replacements (0, or more than 3)
+            -17 the replacements do not cover all jm_vuids that use name_old
+            -18 the same jm_vuid is given twice
+            -19 unknown jm_vuid
+            -20 this jm_vuid does not use name_old
+            -3  JC started closing during the operation
+            -4  the JM context has disappeared during the operation
+            -5  failed to prepare or substitute the JM contexts (OOM)
+            -6  timed out connecting to the new JM bdev(s)
+                (c_jc_tmo_ms_replace_jm_open) -- NOT undone in this case:
+                JC keeps retrying to connect. Check the JM bdevs and log.
+        """
+        return self._request3("jc_replace_jm", name_old=name_old, replacements=replacements)
 
     def listeners_del(self, nqn, trtype, traddr, trsvcid):
         """"
@@ -1307,6 +1741,17 @@ class RPCClient:
             "bs_nonleadership": bs_nonleadership,
         })
 
+    def bdev_lvol_update_lvstore(self, lvs):
+        """Reload the lvstore's blob metadata from disk (spdk_lvs_update_live).
+
+        Pure md refresh — does NOT change leadership. Must be called on a
+        non-leader LVS (the SPDK side asserts leader == false). Used before a
+        control-plane leadership grant so the grant never serves stale blob
+        metadata (the 2026-07-06 LVS_13 hazard of a bare set_leader)."""
+        return self._request("bdev_lvol_update_lvstore", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
+
     def bdev_lvol_set_lvs_signal(self, lvs):
         """Send a fabric-level signal to an LVS to drop leadership.
 
@@ -1333,10 +1778,7 @@ class RPCClient:
         return self._request("bdev_lvol_register", params)
 
     def nvmf_subsystem_get_controllers(self, nqn):
-        params = {
-            "nqn": nqn
-        }
-        return self._request("nvmf_subsystem_get_controllers", params)
+        return self._request3("nvmf_subsystem_get_controllers", nqn=nqn)
 
     def lvol_crypto_key_delete(self, name):
         params = {
@@ -1402,16 +1844,23 @@ class RPCClient:
         return self._request("bdev_lvol_get_lvol_delete_status", params)
 
     def bdev_lvol_set_lvs_read_only(self, lvs_name, read_only=False):
-        params = {
-            "lvs_name": lvs_name,
-            "read_only": read_only,
-        }
-        return self._request("bdev_lvol_set_lvs_read_only", params)
+        return self._request3("bdev_lvol_set_lvs_read_only",
+                              lvs_name=lvs_name, read_only=read_only)
 
-    def bdev_lvol_create_hublvol(self, lvs):
-        return self._request('bdev_lvol_create_hublvol', {
+    def bdev_lvol_create_hublvol(self, lvs, name=None):
+        # Only send "name" when explicitly requested. Older data-plane SPDK
+        # images (pre 3fcea32f8, 2026-06-16) have no "name" decoder, and
+        # spdk_json_decode_object rejects unknown keys outright — sending it
+        # unconditionally fails bdev_lvol_create_hublvol on those images, so
+        # the hublvol bdev (and its NVMe-oF listener) never gets created on
+        # activate. SPDK itself defaults name to "hublvol" when omitted, so
+        # leaving it out is behaviour-identical on new images too.
+        params = {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
-        })
+        }
+        if name is not None:
+            params["name"] = name
+        return self._request('bdev_lvol_create_hublvol', params)
 
     def bdev_lvol_delete_hublvol(self, lvs):
         return self._request('bdev_lvol_delete_hublvol', {
@@ -1422,6 +1871,36 @@ class RPCClient:
         return self._request('bdev_lvol_connect_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "remote_bdev": bdev,
+        })
+
+    def jc_set_dual_node(self, enable):
+        """Tell the journal component whether this is a DUAL-NODE cluster.
+
+        The JC aborts its whole SPDK application when the number of reachable
+        journal members drops below jc_ha_nmin_jms(), which is 2 unless the
+        dual-node flag is set, and 1 when it is. On a 2-node cluster losing
+        the peer leaves exactly 1 of 2 JMs, so without this flag the SURVIVING
+        node aborts itself the moment its partner stops -- a single graceful
+        `sn shutdown` takes the entire cluster down (soak case 6: "JC detected
+        a network outage nd=1 njms=2" / "JC aborts the node due to network
+        outage" / core dump, every client path gone, XFS shut down).
+        The fork implements the tolerance; nothing ever switched it on.
+        """
+        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+
+    def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
+        """One crash-consistent snapshot per consistency-group member.
+
+        ``snapshots`` is a list of {"lvol_name": "LVS_1/LVOL_5",
+        "snapshot_name": "SNAP_123"}; all members must be in ``lvs_name``.
+        IO on every member is frozen before the first snapshot and released
+        after the last; a mid-sequence failure unfreezes first and then
+        garbage-collects the snapshots already taken (SPDK side).
+        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...] or False.
+        """
+        return self._request2("bdev_lvol_snapshot_group", {
+            "lvs_name": lvs_name,
+            "snapshots": snapshots,
         })
 
     def jc_suspend_compression(self, jm_vuid, suspend=False):
@@ -1445,12 +1924,46 @@ class RPCClient:
             params["ana_state"] = ana_state
         return self._request2("nvmf_subsystem_add_listener", params)
 
-    def bdev_nvme_set_multipath_policy(self, name, policy):  # policy: active_active or active_passive
+    def bdev_nvme_set_multipath_policy(self, name, policy, selector=None,
+                                       rr_min_io=None, request_timeout=None):
+        """Set the multipath policy on an NVMe bdev.
+
+        ``policy``: ``active_active`` or ``active_passive``.
+
+        ``selector`` (``active_active`` only): ``round_robin`` or
+        ``queue_depth``. Omitting it lets SPDK default to ``round_robin``
+        with ``rr_min_io`` coerced to 1 (bdev_nvme.c:5626), i.e. the path
+        alternates on every IO.
+
+        Note that ``active_active`` load-balances only WITHIN an ANA state:
+        ``_bdev_nvme_find_io_path`` (bdev_nvme.c:1150) returns the first
+        available ``optimized`` path and reaches ``non_optimized`` only when
+        no optimized path exists. Setting it therefore never overrides an
+        ANA-expressed primary/failover preference.
+        """
         params = {
             "name": name,
             "policy": policy,
         }
-        return self._request("bdev_nvme_set_multipath_policy", params)
+        if selector:
+            params["selector"] = selector
+        if rr_min_io is not None:
+            params["rr_min_io"] = rr_min_io
+        return self._request("bdev_nvme_set_multipath_policy", params,
+                             request_timeout=request_timeout)
+
+    def bdev_jm_get_status(self, jm_vuid):
+        """Journal status for one JM group.
+
+        Returns (on res > 0) a dict with jm_vuid, generation_id,
+        total_records, total_bytes, uncompressed_bytes, compression_threshold
+        and compression_status -- total_records is the record count the
+        compression-backlog alert keys on.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("bdev_jm_get_status", params)
 
     def jc_get_jm_status(self, jm_vuid):
         """
@@ -1475,7 +1988,7 @@ class RPCClient:
         params = {
             "jm_vuid": jm_vuid,
         }
-        return self._request("jc_disable_replication", params)
+        return self._request3("jc_disable_replication", **params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
         params = {
@@ -1497,6 +2010,76 @@ class RPCClient:
         }
         return self._request("bdev_distrib_set_qos_weights", params)
 
+    def jm_get_events(self):
+        """Fetch every event the JM currently holds.
+
+        Each entry looks like::
+
+            {"timestamp": "2026-08-19T18:59:59.010000Z",
+             "event_type": "jm_compression", "jm_vuid": "1",
+             "status": "compression_started", "error_code": 0}
+
+        ``status`` is one of compression_started / compression_finished /
+        compression_failed, and a non-zero ``error_code`` means failure.
+
+        Returns the list ([] when the JM holds nothing), ``RPC_UNSUPPORTED``
+        when the target build has no such RPC, or None when the call failed.
+        The sentinel matters: without it, a cluster running an SPDK build from
+        before this RPC existed would log a JSON-RPC error every poll forever.
+        """
+        result, error = self._request2("jm_get_events")
+        if error:
+            if error.get("code") == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            logger.error(f"jm_get_events failed: {error}")
+            return None
+        return result or []
+
+    def jc_remove_jm(self, name):
+        """Close JC's descriptor + IO channel on a JM bdev and drop its JC
+        context, so the bdev itself can then safely be deleted.
+
+        ``name``: the JM bdev name (e.g. ``remote_jm_<uuid>n1``). It must be
+        known to JC and **unused by every jm_vuid** -- swap it out of each one
+        with ``jc_replace_jm`` first.
+
+        This is the step that must come BEFORE deleting the bdev. Detaching the
+        controller while JC still holds a descriptor leaves JC referencing a
+        bdev that no longer exists (observed live 2026-09-02: a JC member list
+        naming a ``remote_jm_*`` bdev absent from that node's
+        ``bdev_get_bdevs``).
+
+        Only one removal may be in progress cluster-side at a time.
+
+        Returns True on success, or ``RPC_UNSUPPORTED`` on a build without the
+        RPC (checked, not assumed -- ``spdk:main-latest`` as of 2026-09-02 does
+        not expose it, so callers must degrade rather than fail). Any other
+        error raises ``RPCRemoteError``, whose ``.code`` distinguishes:
+
+            -10 JC is closing
+            -11 invalid (empty) JM name
+            -12 this JM is already being removed, or another removal is running
+            -13 this JM is not used by JC (unknown name)
+            -21 involved in a pending jc_replace_jm
+            -22 STILL IN USE by one or more jm_vuids
+             -3 JC started closing during the operation
+             -6 timed out closing the JM (c_jc_tmo_ms_remove_jm)
+
+        -22 is the useful one for node removal: it is positive proof that some
+        jm_vuid on this node still references the JM, including one the control
+        plane cannot enumerate (a vuid whose primary has already been removed
+        appears in no `decisions` map and under no back-reference). Treat it as
+        "do not delete this bdev", never as a transient failure.
+        """
+        result, error = self._request2("jc_remove_jm", {"name": name})
+        if error:
+            if error.get("code") == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            raise RPCRemoteError(
+                f"jc_remove_jm({name}) failed: {error.get('message')}",
+                error.get("code", 0), error.get("data"))
+        return result
+
     def jc_compression_get_status(self, jm_vuid):
         """
         Return value:
@@ -1517,40 +2100,31 @@ class RPCClient:
         }
         return self._request2("jc_compression", params)
 
-    def _request_raise(self, method, params=None):
-        """Like ``_request`` but surfaces the JSON-RPC ``error`` instead of
-        swallowing it. ``_request`` returns only the ``result`` half of the
-        tuple, so a method-not-found (-32601) collapses to a silent ``None``;
-        callers that branch on the error (e.g. ``port_block``'s RPC-then-
-        iptables fallback) need it raised. Transport failures still arrive as
-        ``RPCException("connection error")`` from ``_request2``.
-        """
-        result, error = self._request2(method, params)
-        if error is not None:
-            raise RPCException(**error)
-        return result
-
     def nvmf_port_block(self, port, is_reject=False):
-        params = {
-            "port": port,
-            "reject": bool(is_reject),
-        }
-        return self._request_raise("nvmf_port_block", params)
+        params = {"port": port}
+        if is_reject:
+            params["reject"] = is_reject
+        return self._request3("nvmf_port_block", **params)
 
     def nvmf_port_unblock(self, port):
-        params = {
-            "port": port,
-        }
-        return self._request_raise("nvmf_port_unblock", params)
+        return self._request3("nvmf_port_unblock", port=port)
 
     def nvmf_get_blocked_ports(self):
-        return self._request_raise("nvmf_get_blocked_ports")
+        return self._request3("nvmf_get_blocked_ports")
 
     def bdev_raid_get_bdevs(self):
         params = {
             "category": "online"
         }
         return self._request("bdev_raid_get_bdevs", params)
+
+    def rpc_get_methods(self):
+        """Names of every RPC method the node's running SPDK app exposes
+        (standard SPDK ``rpc_get_methods``). Used to probe data-plane
+        capabilities without side effects — e.g. whether the image carries
+        the runtime shared-placement RPCs (see
+        cluster_ops.all_nodes_support_shared_placement)."""
+        return self._request("rpc_get_methods")
 
     def bdev_lvs_dump_tree(self, lvstore_uuid):
         params = {
@@ -1566,23 +2140,48 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
+                           allow_partial=False):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
 
         Returns the RPC result (truthy on success) or None on error.
         Poll progress with :meth:`bdev_lvol_transfer_stat`.
+
+        *allow_partial* opts this transfer into the dirty-bitmap delta path: the
+        SPDK side then ships only the ranges written since the previous snapshot
+        instead of every allocated cluster. It is a REQUEST, not a guarantee --
+        the fork gates the bitmap path on the snapshot carrying a COMPLETE
+        dirty generation and silently sends a full transfer whenever it does
+        not, so passing it can never produce less data than the destination
+        needs *from this transfer*.
+
+        What it does NOT excuse is the destination's starting content: a partial
+        transfer only ships the delta, so everything outside the delta must
+        already be on the destination. Pass it only when the landing volume is a
+        clone of the destination's copy of the PREVIOUS snapshot. Passing it for
+        a transfer into a fresh empty volume would silently drop every cluster
+        the delta does not cover.
         """
-        return self._request("bdev_lvol_transfer", {
+        params = {
             "lvol_name": name,
+            "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
             "operation": operation,
-        })
+        }
+        # The delta path is DISABLED (PR #1276, commit 52e75afb2): the SPDK
+        # fork's fragment write path corrupts partial transfers, so
+        # allow_partial is never emitted and every transfer is a full one,
+        # regardless of what the caller requests. Re-enable the emission once
+        # the fork is fixed.
+        # if allow_partial:
+        #     params["allow_partial"] = True
+        return self._request("bdev_lvol_transfer", params)
 
-    def bdev_lvol_transfer_stat(self, name):
+    def bdev_lvol_transfer_stat(self, name: str):
         """
         Return transfer status for *name* (source composite bdev).
 
@@ -1621,70 +2220,166 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
 
-    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name):
+    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation):
         """
-        Start the final (live) migration of a writable lvol from source to target.
-        The source I/O is frozen for the brief delta transfer.
+        Start the final (live) transfer of a writable lvol from source to target.
+        The source I/O is frozen for the brief delta transfer, then resumed.
+
+        Used both for intra-cluster migration (``operation="migrate"``, metadata
+        only) and cross-cluster replication cutover / fail-back
+        (``operation="replicate"``, metadata + data).
 
         Args:
             lvol_name:     source lvol composite bdev name
-            lvol_id:       blobid of the target lvol (from :meth:`bdev_lvol_get_lvols`)
-            snapshot_name: composite name of the last transferred snapshot on source
-            block_size:    constant – pass ``2``
-            bdev_name:     bdev exposed by connecting to the target hub lvol
+            lvol_id:       map_id of the target lvol (from :meth:`bdev_lvol_get_lvols`)
+            snapshot_name: composite name of the last transferred snapshot on target
+            batch_size:    cluster batch size – pass ``2`` for the final step
+            gateway:       target hub lvol bdev name (NVMe-oF attached on source)
+            operation:     ``"migrate"`` or ``"replicate"``
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
-        return self._request("bdev_lvol_final_migration", {
+        return self._request("bdev_lvol_transfer_final_step", {
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
             "cluster_batch": batch_size,
-            "gateway": bdev_name,
+            "gateway": gateway,
+            "operation": operation,
         })
+
+    def bdev_lvol_batch_transfer_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
+        """
+        Start the final transfer step for a batch of lvols simultaneously.
+
+        Intended for shared-namespace subsystems where multiple lvols must be
+        frozen, transferred, and resumed together to keep their namespace IDs
+        consistent across source and target.  Each list argument must have the
+        same length; position N in each list describes one lvol.
+
+        Args:
+            lvol_names:     list of source lvol composite bdev names
+            lvol_ids:       list of map_ids of the corresponding target lvols
+                            (from :meth:`bdev_lvol_get_lvols`)
+            snapshot_names: list of composite names of the last transferred
+                            snapshot for each lvol on the target
+            batch_size:     cluster batch size – pass ``2`` for the final step
+            gateway:        target hub lvol bdev name (NVMe-oF attached on source);
+                            shared across all lvols in the batch
+            operation:      ``"migrate"`` or ``"replicate"``
+
+        Poll per-lvol progress with :meth:`bdev_lvol_transfer_stat` using
+        the corresponding entry from *lvol_names*.
+        """
+        return self._request3("bdev_lvol_batch_transfer_final_step",
+                              lvol_names=lvol_names,
+                              ids=lvol_ids,
+                              snapshots=snapshot_names,
+                              cluster_batch=batch_size,
+                              gateway=gateway,
+                              operation=operation)
 
     # ---- S3 Backup RPCs ----
 
-    def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
-                       snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key="",
-                       bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
-        """Create the S3 bdev device.
-        Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
+    def bdev_s3_create(self, name: str, bucket_name: str,
+                       secondary_target: int, with_compression: bool,
+                       snapshot_backups: bool, verify_tls: bool = True,
+                       use_path_style: bool = False,
+                       region: str | None = None,
+                       endpoint: str | None = None,
+                       access_key_id: SecretStr | None = None,
+                       secret_access_key: SecretStr | None = None,
+                       bdb_lcpu_mask: int | None = None,
+                       s3_lcpu_mask: int | None = None,
+                       s3_thread_pool_size: int | None = None,
+                       s3_request_timeout_ms: int | None = None,
+                       s3_request_hard_abort_ms: int | None = None,
+                       s3_request_max_attempts: int | None = None,
+                       s3_retry_burst: int | None = None,
+                       s3_retry_refill_ms: int | None = None,
+    ):
+        """Create an S3 bdev for one bucket.
+
+        A device serves exactly one bucket with one set of credentials, so
+        reading a second bucket means creating a second device. Attach it to an
+        lvstore with bdev_lvol_s3_bdev.
+
+        What the device cannot function without has no default. What the data
+        plane has its own default for is Optional and omitted from the payload
+        when absent. Nothing here uses ``0`` or ``""`` to mean "unset": the data
+        plane already reads zero that way for the masks and the pool size
+        (bdev_s3_impl.cpp:1204, 1222, 1239), so an explicit 0 would behave as
+        absent while reading as a deliberate choice.
+
         Args:
-            name: Bdev name
-            secondary_target: 0=S3, 1=FileSystem
-            with_compression: Enable ISA-L compression
-            snapshot_backups: Snapshot backup mode
-            local_testing: Use local endpoint (e.g. MinIO)
-            local_endpoint: Local endpoint URL
-            access_key_id: AWS access key (optional if using IAM roles)
-            secret_access_key: AWS secret key (optional if using IAM roles)
-            bdb_lcpu_mask: CPU mask for the SPDK thread of this bdev (uint64)
-            s3_lcpu_mask: CPU mask for the internal AWS S3 thread pool (uint64)
-            s3_thread_pool_size: AWS S3 thread pool size (default 32 on data plane)
+            bucket_name: the bucket this device reads and writes. A device
+                without one cannot service any I/O.
+            region: the bucket's region. Absent means the SDK resolves it, the
+                same way it resolves credentials -- the data plane leaves its
+                config untouched when this is not given.
+            secondary_target: 0=S3, 1=FileSystem. The caller holds a
+                SecondaryTarget enum and converts at this boundary.
+            with_compression: enable ISA-L compression.
+            snapshot_backups: selects the backup object layout
+                ({s3_id}/{mid}/{extent}) rather than the tiering one.
+            verify_tls: verify the endpoint's certificate.
+            use_path_style: path-style addressing, needed by MinIO and most
+                S3-compatible stores.
+            endpoint: an S3-compatible endpoint, e.g. "http://minio:9000".
+                Absent means the SDK resolves AWS's endpoint from the region.
+            access_key_id / secret_access_key: absent means the node's instance
+                role, via the SDK's default credential provider chain. Callers
+                derive them from an S3Credentials pair, so they arrive together
+                or not at all.
+            bdb_lcpu_mask: CPU mask for this bdev's SPDK thread. Absent lets the
+                data plane derive one from the app core mask.
+            s3_lcpu_mask: CPU mask for the AWS SDK thread pool. Absent leaves the
+                data plane's own choice, which pins onto SPDK reactor cores --
+                so callers that care should compute one.
+            s3_thread_pool_size: AWS SDK thread pool size. Absent means the data
+                plane's default of 32.
+            s3_request_timeout_ms: how long a single AWS SDK call may hang
+                before the watchdog cooperatively aborts it. Absent means the
+                data plane's default of 5000.
+            s3_request_hard_abort_ms: grace period *after*
+                s3_request_timeout_ms before the watchdog forces the request
+                to a terminal FAILED state, bypassing the AWS SDK entirely --
+                not a standalone threshold. Absent means the data plane's
+                default of 10000.
+            s3_request_max_attempts: attempts the bdev makes at the AWS SDK
+                per I/O, including the first. Absent means the data plane's
+                default.
+            s3_retry_burst: retry budget shared by all requests of this
+                device. Absent means the data plane's default.
+            s3_retry_refill_ms: refill period for the retry budget, one
+                token per this many ms. Absent means the data plane's
+                default.
         """
-        params = {
+        params: dict[str, Any] = {
             "name": name,
+            "bucket_name": bucket_name,
             "secondary_target": secondary_target,
             "with_compression": with_compression,
             "snapshot_backups": snapshot_backups,
+            "verify_tls": verify_tls,
+            "use_path_style": use_path_style,
         }
-        if local_testing:
-            params["local_testing"] = True
-        if local_endpoint:
-            params["local_endpoint"] = local_endpoint
-        if access_key_id:
-            params["access_key_id"] = access_key_id
-        if secret_access_key:
-            params["secret_access_key"] = secret_access_key
-        if bdb_lcpu_mask:
-            params["bdb_lcpu_mask"] = bdb_lcpu_mask
-        if s3_lcpu_mask:
-            params["s3_lcpu_mask"] = s3_lcpu_mask
-        if s3_thread_pool_size:
-            params["s3_thread_pool_size"] = s3_thread_pool_size
-        return self._request("bdev_s3_create", params)
+        optional: dict[str, Any] = {
+            "region": region,
+            "endpoint": endpoint,
+            "access_key_id": access_key_id,
+            "secret_access_key": secret_access_key,
+            "bdb_lcpu_mask": bdb_lcpu_mask,
+            "s3_lcpu_mask": s3_lcpu_mask,
+            "s3_thread_pool_size": s3_thread_pool_size,
+            "s3_request_timeout_ms": s3_request_timeout_ms,
+            "s3_request_hard_abort_ms": s3_request_hard_abort_ms,
+            "s3_request_max_attempts": s3_request_max_attempts,
+            "s3_retry_burst": s3_retry_burst,
+            "s3_retry_refill_ms": s3_retry_refill_ms,
+        }
+        params.update({k: v for k, v in optional.items() if v is not None})
+        return self._request3("bdev_s3_create", **params)
 
     def bdev_lvol_create_poller_group(self, cpu_mask):
         """Create helper poll group threads for S3 backup transfers.
@@ -1692,11 +2387,9 @@ class RPCClient:
         Args:
             cpu_mask: hex CPU mask for helper threads (e.g. '0x1')
         """
-        return self._request("bdev_lvol_create_poller_group", {
-            "cpu_mask": cpu_mask,
-        })
+        return self._request3("bdev_lvol_create_poller_group", cpu_mask=cpu_mask)
 
-    def bdev_lvol_s3_bdev(self, lvs_name, bdev_name):
+    def bdev_lvol_s3_bdev(self, lvs_name: str, bdev_name: str):
         """Attach an S3 bdev to the given lvstore.
         The S3 bdev must already exist (created via bdev_s3_create).
         Called once per lvstore at setup time (cluster activate, node restart)."""
@@ -1705,67 +2398,125 @@ class RPCClient:
             "s3_bdev": bdev_name,
         })
 
-    def bdev_s3_add_bucket_name(self, name, bucket_name):
-        """Register a bucket name with the S3 bdev.
-        Must be called after bdev_s3_create and before any backup/recovery operations.
-        Args:
-            name: S3 bdev name (e.g. 's3_LVS_1234')
-            bucket_name: S3/MinIO bucket name to use for data storage
-        Returns (result, error) tuple.
-        """
-        return self._request2("bdev_s3_add_bucket_name", {
-            "name": name,
-            "bucket_name": bucket_name,
-        })
-
-    def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
+    def bdev_lvol_s3_backup(self, s3_id: int, snapshot_names: list[str],
+                            s3_bdev: str, cluster_batch: int = 1):
         """Start an async backup of snapshots to S3.
         Args:
-            s3_id: unique backup identifier (uint32)
-            snapshot_names: list of snapshot composite bdev names
+            s3_id: unique backup identifier (uint32, < 2**30)
+            snapshot_names: snapshot composite bdev names, NEWEST first -- the
+                data plane unions their cluster maps first-writer-wins, so the
+                newest snapshot's allocation must be seen first.
+            s3_bdev: which S3 device to write through. Required: an lvstore may
+                carry several, and "the first" is ambiguous.
             cluster_batch: batch size in clusters (default 1)
         Returns RPC result (truthy on success). Poll with bdev_lvol_transfer_stat.
+
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another backup/recovery/merge transfer in flight -- the caller
+                should retry once that transfer completes, not treat this as a
+                failure. Concurrent transfers against the same device corrupt
+                the shared channel state.
         """
         params = {
             "s3_id": s3_id,
             "snapshot_names": snapshot_names,
+            "s3_bdev": s3_bdev,
             "cluster_batch": cluster_batch,
         }
-        return self._request("bdev_lvol_s3_backup", params)
+        return self._request3("bdev_lvol_s3_backup", **params)
 
-    # Backup/recovery/merge polling: use bdev_lvol_transfer_stat(lvol_name)
-    # which reads lvol->transfer_status on the data plane. Works for backup
-    # (pass snapshot bdev name) and recovery (pass target lvol name).
-    # Merge has lvol=NULL on data plane so transfer_stat cannot poll it.
+    # Backup/recovery polling: use bdev_lvol_transfer_stat(lvol_name) which
+    # reads lvol->transfer_status on the data plane. Works for backup (pass
+    # snapshot bdev name) and recovery (pass target lvol name). Merge has
+    # lvol=NULL on data plane, so it's polled separately via
+    # bdev_lvol_s3_merge_stat(s3_id, old_s3_id) below.
 
-    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
+    def bdev_lvol_s3_merge(self, s3_id: int, old_s3_id: int, cluster_batch: int,
+                           s3_bdev: str, lvs_name: str | None = None,
+                           allow_exist: bool = True):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
-        This shortens the backup chain."""
-        params = {
+
+        This shortens the backup chain. Both backups must live in the bucket
+        served by s3_bdev -- a merge reads one and writes the other.
+
+        allow_exist: if True (default), an EEXIST response -- a matching
+        merge already queued/running on the data plane, e.g. from a prior
+        call whose RPC connection dropped before the response arrived -- is
+        treated the same as a fresh success (returns True) rather than
+        raised. A caller that needs to distinguish "started this call" from
+        "already running" can pass allow_exist=False.
+
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another transfer in flight -- retry rather than fail; see
+                bdev_lvol_s3_backup.
+        """
+        params: dict[str, Any] = {
             "s3_id": s3_id,
             "old_s3_id": old_s3_id,
             "cluster_batch": cluster_batch,
+            "s3_bdev": s3_bdev,
         }
         if lvs_name:
             params["lvs_name"] = lvs_name
-        return self._request("bdev_lvol_s3_merge", params)
+        try:
+            return self._request3("bdev_lvol_s3_merge", **params)
+        except RPCRemoteError as e:
+            if allow_exist and e.code == -17:
+                logger.debug("Merge %s -> %s already in progress", old_s3_id, s3_id)
+                return True
+            raise
 
-    def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
+    def bdev_lvol_s3_merge_stat(self, s3_id, old_s3_id):
+        """Return merge status for the (s3_id, old_s3_id) pair.
+
+        Result dict keys:
+          ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
+        """
+        return self._request("bdev_lvol_s3_merge_stat", {"s3_id": s3_id, "old_s3_id": old_s3_id})
+
+    def bdev_lvol_s3_recovery(self, lvol_name: str, s3_ids: list[int],
+                              cluster_batch: int, s3_bdev: str):
         """Restore a chain of S3 backups into a new lvol.
         Args:
             lvol_name: target lvol name to restore into
-            s3_ids: list of S3 backup IDs (uint32) forming the chain (oldest first)
+            s3_ids: list of S3 backup IDs (uint32) forming the chain, NEWEST
+                first: the data plane claims each cluster for the first id that
+                offers it (prepare_s3_clusters is first-writer-wins), so the
+                newest backup's data must win.
             cluster_batch: batch size in clusters
-        """
-        return self._request("bdev_lvol_s3_recovery", {
-            "lvol_name": lvol_name,
-            "cluster_batch": cluster_batch,
-            "s3_ids": s3_ids,
-        })
+            s3_bdev: which S3 device to read from. Required: a restore from a
+                foreign bucket attaches a second device, so "the first" is
+                ambiguous exactly when it matters.
 
-    def bdev_lvol_s3_delete(self, s3_ids):
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another transfer in flight -- retry rather than fail; see
+                bdev_lvol_s3_backup.
+        """
+        return self._request3("bdev_lvol_s3_recovery",
+                              lvol_name=lvol_name,
+                              cluster_batch=cluster_batch,
+                              s3_ids=s3_ids,
+                              s3_bdev=s3_bdev)
+
+    def bdev_s3_delete(self, name: str):
+        """Delete an S3 bdev.
+
+        Used to release the device a restore attached for a foreign bucket.
+        """
+        return self._request3("bdev_s3_delete", name=name)
+
+    def bdev_lvol_s3_delete(self, s3_ids: list[int]):
         """Delete all S3 backups for the given IDs (list of uint32)."""
         # RPC still missing on data plane — use dummy
         return self._request("bdev_lvol_s3_delete", {
             "s3_ids": s3_ids,
         })
+
+    def bdev_nvme_get_controller_health_info(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_nvme_get_controller_health_info", params)

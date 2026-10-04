@@ -1,10 +1,10 @@
 import uuid
-from typing import ContextManager
+from contextlib import AbstractContextManager
 from unittest.mock import patch
 
 import pytest
 
-from simplyblock_core import utils, storage_node_ops
+from simplyblock_core import storage_node_ops, utils
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import JMDevice, RemoteJMDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -111,14 +111,14 @@ def test_humanbytes(args, expected):
     (2 ** 70, 'ZiB', 1.),
 ])
 def test_convert_size(size, unit, expected):
-    if isinstance(expected, ContextManager):
+    if isinstance(expected, AbstractContextManager):
         with expected:
             utils.convert_size(size, unit)
     else:
         assert utils.convert_size(size, unit) == expected
 
 
-def test_singleton():
+def test_single():
     with pytest.raises(ValueError):
         helpers.single([])
 
@@ -126,6 +126,14 @@ def test_singleton():
 
     with pytest.raises(ValueError):
         helpers.single([1, 2])
+
+
+def test_single_or_none():
+    assert helpers.single_or_none([]) is None
+    assert helpers.single_or_none([1]) == 1
+
+    with pytest.raises(ValueError):
+        helpers.single_or_none([1, 2])
 
 
 @pytest.mark.parametrize('input,expected', [
@@ -146,7 +154,7 @@ def test_singleton():
     ("0-5:-1", pytest.raises(ValueError)),
 ])
 def test_parse_thread_siblings_list(input, expected):
-    if isinstance(expected, ContextManager):
+    if isinstance(expected, AbstractContextManager):
         with expected:
             parse_thread_siblings_list(input)
     else:

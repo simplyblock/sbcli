@@ -18,9 +18,10 @@ Navigate to your project directory:
 cd sbcli/e2e
 ```
 
-Run requirements installation.
+Tests are PEP 723 scripts: each declares its interpreter and dependencies inline and
+provisions them on first run, so there is nothing to install beyond [uv](https://docs.astral.sh/uv/).
 ```sh
-python3 -m pip install -r requirements.txt
+python3 -m pip install uv
 ```
 
 ---
@@ -49,7 +50,7 @@ export CLUSTER_ID=<Your_Cluster_ID>
 To run an **E2E test**:
 
 ```sh
-nohup python3 e2e.py --testname RandomE2ETest --run_ha True > e2e_output.log 2>&1 &
+nohup ./e2e.py --testname RandomE2ETest --run_ha True > e2e_output.log 2>&1 &
 ```
 
 **Note:**
@@ -75,7 +76,7 @@ export CLIENT_IP="<IP1> <IP2>"
 Then run:
 
 ```sh
-nohup python3 stress.py --testname RandomFailoverTest --send_debug_notification True --upload_logs True > stress_output.log 2>&1 &
+nohup ./stress.py --testname RandomFailoverTest --send_debug_notification True --upload_logs True > stress_output.log 2>&1 &
 ```
 
 **Note:**
@@ -92,7 +93,7 @@ For **Upgrade Testing**, no additional variables are needed.
 Run:
 
 ```sh
-nohup python3 upgrade.py --testname RandomUpgradeTest > upgrade_output.log 2>&1 &
+nohup ./upgrade_e2e.py --testname RandomUpgradeTest > upgrade_output.log 2>&1 &
 ```
 
 ---
@@ -116,7 +117,7 @@ export GITHUB_RUN_ID="<Name of folder on MINIO>"
 Run the upload script:
 
 ```sh
-python3 logs/upload_logs_to_miniio.py
+./logs/upload_logs_to_miniio.py
 ```
 
 ---
@@ -133,7 +134,7 @@ export MINIO_SECRET_KEY="MinIOSecretKey"
 Navigate to your desired directory and run:
 
 ```sh
-python3 download_logs_from_minio.py "e2e-run-logs/<Folder to download>/"
+./logs/download_logs_from_minio.py "e2e-run-logs/<Folder to download>/"
 ```
 
 ---

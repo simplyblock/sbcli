@@ -1,15 +1,12 @@
-#!/usr/bin/env python
-# encoding: utf-8
 
 import logging
 
-from flask import Blueprint
-from flask import request
+from flask import Blueprint, request
 
-from simplyblock_web import utils
-from simplyblock_core import db_controller, utils as core_utils
+from simplyblock_core import db_controller
+from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import snapshot_controller
-
+from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +38,9 @@ def delete_snapshot(uuid):
 @bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
     cluster_id = utils.get_cluster_id(request)
-    snaps = db.get_snapshots()
+    snaps = db.get_snapshots(cluster_id)
     data = []
     for snap in snaps:
-        if snap.cluster_id != cluster_id:
-            continue
         d = snap.get_clean_dict()
         d["created_at"] = str(snap.created_at)
         data.append(d)

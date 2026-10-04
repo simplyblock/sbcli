@@ -42,7 +42,7 @@ USER = "root"
 IFACE = "eth0"
 DATA_IFACE = "eth1"
 BRANCH = "inline-checksum-validation"
-MAX_LVOL = "100"
+MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, values were silently clamped at placement time, so a node reserved huge pages for subsystems it could never serve. cluster create rejects it since 8bcedce79.
 
 # Same volume plan layout as the AWS variant; consumed by downstream perf tooling.
 VOLUME_PLAN = [
