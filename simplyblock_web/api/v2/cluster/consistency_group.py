@@ -32,6 +32,7 @@ from .._dtos import (
     ConsistencyGroupGenerationMemberDTO,
     ConsistencyGroupMemberDTO,
     ConsistencyGroupMemberJoinDTO,
+    ConsistencyGroupLineageMemberDTO,
     ConsistencyGroupJoinPlanDTO,
     ConsistencyGroupColocateDTO,
     ConsistencyGroupMigrationCreateDTO,
@@ -39,6 +40,7 @@ from .._dtos import (
     ConsistencyGroupMigrationItemDTO,
     ConsistencyGroupReplicationIntentDTO,
     ConsistencyGroupReplicationStatusDTO,
+    ConsistencyGroupResolutionDTO,
 )
 
 logger = logging.getLogger(__name__)
@@ -327,6 +329,27 @@ def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> Con
                      else {"role": "none", "state": "not_replicating"})
     agg = consistency_group_controller.aggregate_group_replication_info(infos)
     return ConsistencyGroupReplicationStatusDTO.from_info(agg)
+
+
+@instance_api.get('/replication/resolution', name='clusters:consistency-groups:replication:resolution',
+                  response_model=ConsistencyGroupResolutionDTO)
+def replication_resolution(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupResolutionDTO:
+    """Where the group's data lives now, keyed by the handles its PVs keep.
+
+    After a relocate the group a VGR names is empty -- its demoted members were
+    deleted so the way back stays open -- and its data lives in the peer group of
+    the same name. The CSI driver resolves the VGR's original group handle here:
+    the group holding live members, and each protected volume's original handle
+    with the volume serving it now (2026-10-04: WordPress's VRG waited for
+    destination info for ever against the emptied source group). Never a 404
+    for an existing group: ``active_group_id`` is empty when nothing serves it.
+    """
+    res = replication_policy_controller.resolve_group(group)
+    return ConsistencyGroupResolutionDTO(
+        cluster_id=group.cluster_id, group_id=group.uuid,
+        active_cluster_id=res["active_cluster_id"], active_group_id=res["active_group_id"],
+        members=[ConsistencyGroupLineageMemberDTO(**m) for m in res["members"]],
+    )
 
 
 @instance_api.post('/replication/failover', name='clusters:consistency-groups:replication:failover')

@@ -260,6 +260,35 @@ class TestGroupFailback:
         assert resp.status_code == 500
 
 
+class TestGroupResolution:
+
+    def test_reports_the_live_group_and_the_pv_handles(self, client, db, cluster,
+                                                       replication_policy_controller):
+        """A VGR keeps its original group handle across a relocate; the driver
+        resolves it here to the group holding the data and each PV's handle to
+        the volume serving it (2026-10-04, WordPress's VRG waiting on destination
+        info against the emptied source group)."""
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        replication_policy_controller.resolve_group.return_value = {
+            "active_cluster_id": "cl-b", "active_group_id": "g-b",
+            "members": [{"origin_handle": "cl-a:pool-a:orig", "active_handle": "cl-b:pool-b:clone"}],
+        }
+        resp = client.get(f'{BASE}/replication/resolution')
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "cluster_id": factories.CLUSTER_ID, "group_id": factories.CONSISTENCY_GROUP_ID,
+            "active_cluster_id": "cl-b", "active_group_id": "g-b",
+            "members": [{"origin_handle": "cl-a:pool-a:orig", "active_handle": "cl-b:pool-b:clone"}],
+        }
+
+    def test_a_group_nothing_serves_reports_no_active_group(self, client, db, cluster,
+                                                            replication_policy_controller):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        replication_policy_controller.resolve_group.return_value = {
+            "active_cluster_id": "", "active_group_id": "", "members": []}
+        resp = client.get(f'{BASE}/replication/resolution')
+        assert resp.status_code == 200
+        assert resp.json()["active_group_id"] == "" and resp.json()["members"] == []
 class TestGroupColocationRoutes:
     """Co-location routes (docs/consistency-group-colocation.md)."""
 

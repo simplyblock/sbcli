@@ -760,6 +760,121 @@ def _resolve_peer_group(group, policy):
     return None
 
 
+def _lvol_handle(lvol, cluster_id=""):
+    """``<cluster>:<pool>:<lvol>`` -- the handle a PersistentVolume carries for
+    *lvol*. *cluster_id* is used when given (a relationship records it); else it
+    is the cluster of the volume's node."""
+    if not cluster_id:
+        try:
+            cluster_id = db.get_storage_node_by_id(lvol.node_id).cluster_id
+        except KeyError:
+            cluster_id = ""
+    pool = getattr(lvol, "pool_uuid", "") or ""
+    if not (cluster_id and pool):
+        return ""
+    return f"{cluster_id}:{pool}:{lvol.get_id()}"
+
+
+def _lineage_origin(lvol_id, reps):
+    """The volume a lineage started from: follow relationships TARGET -> SOURCE
+    back to the oldest source. Returns ``(lvol_record, cluster_id)`` of that
+    origin, or ``(None, "")`` when *lvol_id* is no relationship's target (it is
+    its own origin; the caller has its record). *reps* is
+    db.get_lvol_replication_objects() (oldest first)."""
+    origin, cluster = None, ""
+    current = lvol_id
+    for _ in range(64):                           # defensive hop bound
+        step = None
+        for rep in reversed(reps):                # newest first
+            tgt = rep.target_lvol.get_id() if rep.target_lvol else ""
+            if tgt == current and rep.source_lvol is not None:
+                step = rep
+                break
+        if step is None:
+            break
+        origin, cluster = step.source_lvol, step.source_cluster_id
+        if origin.get_id() == current:
+            break
+        current = origin.get_id()
+    return origin, cluster
+
+
+def resolve_group(group):
+    """Where the data of consistency group *group* lives NOW, keyed the way
+    PersistentVolumes keep it.
+
+    A PV keeps its original volume handle across every move, and a VGR keeps its
+    original group handle. After a relocate the source group is legitimately
+    empty (its demoted members are deleted, so a relocate back is possible) and
+    the data lives in the peer group of the same name, as clones whose
+    relationships lead back to the original volumes (failover_from_replicated_copy,
+    fail-back). The CSI driver resolves the original group handle through this:
+
+    * ``active``: the group holding live members -- *group* itself while it has
+      any, else its peer group (_resolve_peer_group) when that has; None when
+      neither has (nothing serves the data).
+    * ``members``: one entry per lineage with a live volume at its end:
+      ``origin_handle`` (the handle the PV carries: the oldest volume of the
+      lineage, from the relationship record, which outlives the volume) and
+      ``active_handle`` (the volume serving the data now).
+
+    The lineages are found from the open members of both groups and from every
+    relationship whose source or target volume record names either group, so a
+    group emptied by a relocate still lists the PVs it protected."""
+    policy = None
+    if group.policy_id:
+        try:
+            policy = db.get_replication_policy_by_id(group.policy_id)
+        except KeyError:
+            policy = None
+    peer = _resolve_peer_group(group, policy)
+    group_ids = {group.get_id()} | ({peer.get_id()} if peer is not None else set())
+
+    def open_members(g):
+        if g is None:
+            return []
+        return [v for v in db.get_lvols(g.cluster_id)
+                if getattr(v, "group_id", "") == g.get_id()
+                and v.status != LVol.STATUS_IN_DELETION]
+
+    own, peer_own = open_members(group), open_members(peer)
+    active = group if own else (peer if peer_own else None)
+
+    reps = db.get_lvol_replication_objects()
+    candidates = {v.get_id(): v for v in own + peer_own}
+    for rep in reps:
+        for side in (rep.source_lvol, rep.target_lvol):
+            if side is not None and getattr(side, "group_id", "") in group_ids:
+                candidates.setdefault(side.get_id(), side)
+
+    members: dict[str, dict[str, str]] = {}
+    for lvol_id, record in candidates.items():
+        origin, origin_cluster = _lineage_origin(lvol_id, reps)
+        if origin is None:
+            origin, origin_cluster = record, ""
+        if origin.get_id() in members:
+            continue
+        active_id = _resolve_active_lvol(origin.get_id())
+        try:
+            live = db.get_lvol_by_id(active_id)
+        except KeyError:
+            continue                              # the lineage ended: nothing to resolve to
+        if live.status == LVol.STATUS_IN_DELETION:
+            continue
+        origin_handle = _lvol_handle(origin, origin_cluster)
+        active_handle = _lvol_handle(live)
+        if origin_handle and active_handle:
+            members[origin.get_id()] = {"origin_handle": origin_handle,
+                                        "active_handle": active_handle}
+    return {
+        "active_cluster_id": active.cluster_id if active is not None else "",
+        # The bare group uuid: a "cg:<cluster>:<group>" handle carries that, while
+        # get_id() is "<cluster>/<uuid>".
+        "active_group_id": active.uuid if active is not None else "",
+        "members": sorted(members.values(), key=lambda m: m["origin_handle"]),
+    }
+
+
 def _failover_group_from_target_copies(group):
     """Fail *group* over from its newest complete replicated generation, cloning
     every member from its copy on the peer (replication_recovery_points). The
