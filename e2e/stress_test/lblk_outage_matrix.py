@@ -1121,27 +1121,38 @@ class _LblkOutageMatrix(_LblkBase):
         unavailable -- and the suite passed the cycle and cut another node.
         The gate only looked at data, and the data was fine.
         """
-        try:
-            self.sbcli_utils.wait_for_cluster_status(
-                self.cluster_id, status="active",
-                timeout=self.CLUSTER_SETTLE_SEC)
-        except Exception as exc:                      # noqa: BLE001
-            raise LblkPreconditionError(
-                f"[matrix] cluster did not return to active {where} within "
-                f"{self.CLUSTER_SETTLE_SEC}s: {str(exc)[:200]}. Refusing to "
-                f"start the next outage on a degraded cluster -- the result "
-                f"would not be a single-node outage.") from exc
-
-        offline = []
-        for n in self.sbcli_utils.get_storage_nodes()["results"]:
-            if n.get("status") != "online":
-                offline.append(f"{n.get('mgmt_ip')}={n.get('status')}")
-        if offline:
-            raise LblkPreconditionError(
-                f"[matrix] cluster is active but {len(offline)} storage "
-                f"node(s) are not online {where}: {', '.join(offline)}. "
-                f"Cutting another node now would exceed the 1/1 fault "
-                f"tolerance this run is configured for.")
+        # One budget for both conditions, polled together. They were
+        # sequential at first -- wait for the cluster, then snapshot the
+        # nodes -- and run 20261004-164452 failed cycle 15 on
+        # ".244=in_restart" when that node reached online FOURTEEN SECONDS
+        # later. The cluster reports active while a node is still finishing
+        # its restart, so a node check with no patience of its own fails a
+        # cycle that was about to be fine.
+        deadline = time.time() + self.CLUSTER_SETTLE_SEC
+        status, not_online = None, []
+        while True:
+            try:
+                details = self.sbcli_utils.get_cluster_details(
+                    cluster_id=self.cluster_id) or {}
+                status = details.get("status")
+                not_online = [
+                    f"{n.get('mgmt_ip')}={n.get('status')}"
+                    for n in self.sbcli_utils.get_storage_nodes()["results"]
+                    if n.get("status") != "online"]
+            except Exception as exc:                  # noqa: BLE001
+                status, not_online = f"<unreadable: {str(exc)[:80]}>", []
+            if status == "active" and not not_online:
+                break
+            if time.time() >= deadline:
+                raise LblkPreconditionError(
+                    f"[matrix] cluster did not settle {where} within "
+                    f"{self.CLUSTER_SETTLE_SEC}s: status={status!r}"
+                    + (f", not online: {', '.join(not_online)}"
+                       if not_online else "")
+                    + ". Refusing to start the next outage -- cutting another "
+                      "node now would exceed the 1/1 fault tolerance this run "
+                      "is configured for.")
+            sleep_n_sec(10)
         self.logger.info("[matrix] cluster active, all nodes online %s", where)
 
     def _assert_static_unchanged(self, context):
