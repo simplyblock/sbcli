@@ -35,3 +35,17 @@ ignore:
     package:
       name: python
       type: binary
+
+  # tempfile.TemporaryDirectory cleanup race: an attacker who can modify the
+  # tree while it is being removed can swap a directory for a symlink, so the
+  # cleanup deletes files (or resets permissions/flags) outside the directory.
+  # Fixed in 3.15.0rc3 only (python/cpython#157579); there is no 3.14.x
+  # release carrying it, so `only-fixed` does not filter it out.
+  # We do use TemporaryDirectory (utils/__init__.py, scripts/collect_logs.py),
+  # but only for directories we create ourselves with mkdtemp's 0700 mode, and
+  # nothing else writes into them, so there is no attacker able to modify the
+  # tree during cleanup.
+  - vulnerability: CVE-2026-12345
+    package:
+      name: python
+      type: binary
