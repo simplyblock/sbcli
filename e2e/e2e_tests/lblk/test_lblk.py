@@ -947,7 +947,7 @@ class _LblkBase(TestClusterBase):
             return
 
         k8s = self._ensure_k8s_utils()
-        peers = self._peer_ips(node_ip)
+        peers = self._peer_data_ips(node_ip)
         # Cut the STORAGE path to the peers, not every packet between nodes.
         #
         # Dropping all node-to-node traffic took the cluster down with the
@@ -992,12 +992,9 @@ class _LblkBase(TestClusterBase):
         if not peers:
             raise LblkPreconditionError(
                 f"[lblk] no peer storage nodes to isolate {node_ip} from")
-        ports = self.STORAGE_PORTS
         add = "; ".join(
-            f"iptables -A INPUT -s {p} -p tcp -m multiport --ports {ports} "
-            f"-j DROP; "
-            f"iptables -A OUTPUT -d {p} -p tcp -m multiport --ports {ports} "
-            f"-j DROP" for p in peers)
+            f"iptables -A INPUT -s {p} -j DROP; "
+            f"iptables -A OUTPUT -d {p} -j DROP" for p in peers)
         undo = self._undo_rules(peers)
         k8s.exec_in_spdk_container(node_ip, f"sudo sh -c {shlex.quote(add)}")
         # Verify, because a silent no-op here is indistinguishable from a
@@ -1006,12 +1003,20 @@ class _LblkBase(TestClusterBase):
             node_ip, "sudo iptables -S INPUT; sudo iptables -S OUTPUT")
         applied = sum(1 for p in peers if f"-s {p}/32" in (out or "")
                       or f"-d {p}/32" in (out or ""))
-        # A rule that matched every port would sever OVN's geneve overlay and
-        # take FoundationDB down with it -- see the comment above.
-        if "-j DROP" in (out or "") and "multiport" not in (out or ""):
+        # The old warning here fired when a rule had no port match, because
+        # on the MANAGEMENT network that would sever OVN's geneve overlay and
+        # take FoundationDB with it. These rules are on the data network now,
+        # where an all-ports cut is the intent, so the check is gone -- it
+        # would fire on every correct cut. The equivalent hazard is inverted:
+        # warn if a rule somehow landed on the mgmt subnet.
+        mgmt_hit = [ln for ln in (out or "").splitlines()
+                    if "-j DROP" in ln and "192.168." in ln]
+        if mgmt_hit:
             self.logger.warning(
-                "[lblk] a DROP rule on %s has no port match; that blocks the "
-                "cluster network, not just storage", node_ip)
+                "[lblk] a DROP rule on %s is on the MANAGEMENT network: %s. "
+                "That is the network simplyblock-monitoring uses; if the "
+                "monitor is on this node it will report its peers as failed.",
+                node_ip, mgmt_hit[:2])
         if applied < len(peers):
             self._restore_network(node_ip)
             raise LblkPreconditionError(
@@ -1112,11 +1117,48 @@ class _LblkBase(TestClusterBase):
     #: something else is holding the rules, absent means it never got there.
     NET_UNDO_MARKER = "/tmp/sb_net_undo.stamp"
 
-    def _peer_ips(self, node_ip):
-        """Every other storage node's mgmt_ip."""
-        return [n["mgmt_ip"] for n
-                in self.sbcli_utils.get_storage_nodes()["results"]
-                if n.get("mgmt_ip") and n["mgmt_ip"] != node_ip]
+    def _peer_data_ips(self, node_ip):
+        """Every other storage node's DATA-network address.
+
+        This is what a network outage cuts, and the distinction is the whole
+        reason run 20261003-080237 went wrong.
+
+        The lab has two networks. Management (192.168.10.0/24) carries
+        spdk-proxy, the SNodeAPI, OVN's geneve overlay, FoundationDB, the
+        kubelet -- and `simplyblock-monitoring`, which is scheduled onto one of
+        the storage nodes. Data (10.10.10.0/24, ens16np0) carries NVMe-oF and
+        nothing else: lvol listeners sit at 10.10.10.<n>:4432 and that is the
+        path clients and peers actually do IO over.
+
+        Cutting management meant that when the monitor happened to live on the
+        node being cut, our own OUTPUT rule starved it of its peers. It
+        reported three healthy nodes as failed and the cluster degraded off a
+        30s cut. Cutting data isolates the node's IO path and leaves the
+        monitor able to do its job.
+
+        Falls back to mgmt_ip for a node with no data NIC recorded, with a
+        warning -- a silent fallback would quietly reintroduce the bug.
+        """
+        peers = []
+        for n in self.sbcli_utils.get_storage_nodes()["results"]:
+            if n.get("mgmt_ip") == node_ip:
+                continue
+            ip = ""
+            for nic in (n.get("data_nics") or []):
+                ip = nic.get("ip4_address") or ""
+                if ip:
+                    break
+            if not ip:
+                ip = n.get("mgmt_ip") or ""
+                if ip:
+                    self.logger.warning(
+                        "[lblk] storage node %s has no data NIC address; "
+                        "falling back to its mgmt IP for the cut. That is the "
+                        "network the health monitor uses, so this cut may "
+                        "degrade peers that are actually fine.", ip)
+            if ip:
+                peers.append(ip)
+        return peers
 
     #: The node's own service ports, source or destination.
     #:
@@ -1124,17 +1166,27 @@ class _LblkBase(TestClusterBase):
     #: upwards per subsystem; SPDK's JSON-RPC is RPC_BASE_PORT 8080 and the
     #: SNodeAPI is SNODE_API_PORT 50001. Ranges rather than exact ports
     #: because each is a base that the cluster allocates from.
+    #:
+    #: No longer used by the network cut, which now drops everything between
+    #: the target and its peers on the DATA subnet. Kept because the ranges
+    #: are the reference for which ports are storage ports, and because
+    #: 4420:4499 is exactly what caught spdk-proxy and blinded the monitor --
+    #: worth keeping visible so the mistake is not made again.
     STORAGE_PORTS = "4420:4499,8080:8099,50001:50020"
 
     @classmethod
     def _undo_rules(cls, peers):
-        ports = cls.STORAGE_PORTS
+        """Delete what :meth:`_network_outage` added. Safe to run repeatedly.
+
+        Must mirror the add exactly -- iptables -D matches on the whole rule,
+        so a stale port clause here would delete nothing and leave the node
+        cut. Three passes because a rule can have been added more than once if
+        a cycle was retried.
+        """
         return "; ".join(
             f"for i in 1 2 3; do "
-            f"iptables -D INPUT -s {p} -p tcp -m multiport --ports {ports} "
-            f"-j DROP 2>/dev/null; "
-            f"iptables -D OUTPUT -d {p} -p tcp -m multiport --ports {ports} "
-            f"-j DROP 2>/dev/null; done" for p in peers
+            f"iptables -D INPUT -s {p} -j DROP 2>/dev/null; "
+            f"iptables -D OUTPUT -d {p} -j DROP 2>/dev/null; done" for p in peers
         ) + "; true"
 
     def _restore_network(self, node_ip):
@@ -1158,7 +1210,7 @@ class _LblkBase(TestClusterBase):
         if not self.k8s_test:
             return True
         k8s = self._ensure_k8s_utils()
-        undo = self._undo_rules(self._peer_ips(node_ip))
+        undo = self._undo_rules(self._peer_data_ips(node_ip))
         show = "iptables -S INPUT; iptables -S OUTPUT"
         out = None
         try:

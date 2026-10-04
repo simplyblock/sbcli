@@ -2237,6 +2237,19 @@ class TestClusterBase:
                         )
                     except Exception as e:
                         self.logger.warning(f"[node_dump] fetch_io_dumps failed for {node_id}: {e}")
+                    # /var/lib/simplyblock: staged volumes and active volume
+                    # stacks. Dev asked for this -- it is the state that says
+                    # what the node believed it was serving, which is the
+                    # question every path-loss run has ended on. Own try for
+                    # the same reason as above.
+                    try:
+                        self.ssh_obj.fetch_volume_state(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_volume_state failed for {node_id}: {e}")
                 elif phase == "both":
                     self.logger.info(
                         f"[node_dump] fetch_distrib_logs SKIPPED for {node_id} "

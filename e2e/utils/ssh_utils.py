@@ -3483,6 +3483,73 @@ class SshUtils:
 
         return all_ok
 
+    #: Biggest single file worth pulling out of /var/lib/simplyblock.
+    #: The tree holds small JSON/metadata describing staged volumes and active
+    #: volume stacks; anything much larger than this is not that, and copying
+    #: it over ssh at teardown on every node is not a trade worth making.
+    VOLUME_STATE_MAX_BYTES = 2 * 1024 * 1024
+
+    def fetch_volume_state(self, storage_node_ip, storage_node_id, logs_path):
+        """Pull /var/lib/simplyblock off a storage node.
+
+        Asked for by dev: the tree holds staged volumes and active volume
+        stacks, which is the state that says what a node believed it was
+        serving. Every path-loss run so far ends on the same unanswered
+        question -- run 20261003-080237 finishes with no new controller ever
+        being created on any client -- and nothing is captured today that would
+        show whether the node still had the subsystem staged.
+
+        Unlike io_dump this directory always exists, so finding it empty or
+        missing is itself worth a warning rather than an info line.
+
+        Returns the number of files collected. Never raises: this runs in
+        teardown and a diagnostic that cannot be fetched must not turn a
+        passing test red.
+        """
+        node_id_short = str(storage_node_id)[:8]
+        dest = f"{logs_path}/{storage_node_ip}_{node_id_short}/volume_state"
+        root = "/var/lib/simplyblock"
+        try:
+            listing, _err = self.exec_command(
+                storage_node_ip,
+                f"sudo find {root} -type f -size -{self.VOLUME_STATE_MAX_BYTES}c "
+                f"-printf '%P\n' 2>/dev/null || true",
+                supress_logs=True)
+            names = [n.strip() for n in (listing or "").splitlines() if n.strip()]
+            if not names:
+                self.logger.warning(
+                    "[volume-state] %s: %s is empty or unreadable. It should "
+                    "hold the staged volumes and active volume stacks, so an "
+                    "empty tree is itself worth noting.", storage_node_ip, root)
+                return 0
+            self.logger.info("[volume-state] %s: collecting %d file(s) -> %s",
+                             storage_node_ip, len(names), dest)
+            got = 0
+            for name in names:
+                try:
+                    data = self.read_file(storage_node_ip, f"{root}/{name}")
+                    if not data:
+                        continue
+                    # %P keeps the tree shape, so recreate it rather than
+                    # flattening -- which directory a file sits in is part of
+                    # what distinguishes a staged volume from an active stack.
+                    out_path = os.path.join(dest, *name.split("/"))
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "w") as fh:
+                        fh.write(data)
+                    got += 1
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.warning(
+                        "[volume-state] %s: could not fetch %s: %s",
+                        storage_node_ip, name, str(exc)[:120])
+            self.logger.info("[volume-state] %s: collected %d file(s)",
+                             storage_node_ip, got)
+            return got
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[volume-state] %s: collection failed: %s",
+                                storage_node_ip, str(exc)[:160])
+            return 0
+
     def fetch_io_dumps(self, storage_node_ip, storage_node_id, logs_path):
         """Pull /etc/simplyblock/io_dump off a storage node, if it has one.
 
