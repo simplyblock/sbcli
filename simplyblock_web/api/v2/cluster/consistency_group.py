@@ -17,8 +17,10 @@ from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import (
+    cg_colocation,
     consistency_group_controller,
     lvol_controller,
+    migration_controller,
     replication_policy_controller,
 )
 from simplyblock_core.controllers.consistency_group_controller import ConsistencyGroupError
@@ -30,6 +32,11 @@ from .._dtos import (
     ConsistencyGroupGenerationMemberDTO,
     ConsistencyGroupMemberDTO,
     ConsistencyGroupMemberJoinDTO,
+    ConsistencyGroupJoinPlanDTO,
+    ConsistencyGroupColocateDTO,
+    ConsistencyGroupMigrationCreateDTO,
+    ConsistencyGroupMigrationDTO,
+    ConsistencyGroupMigrationItemDTO,
     ConsistencyGroupReplicationIntentDTO,
     ConsistencyGroupReplicationStatusDTO,
 )
@@ -118,6 +125,98 @@ def join_member(cluster: Cluster, group: ConsistencyGroupResource,
         if m["lvol_id"] == body.lvol_id:
             return ConsistencyGroupMemberDTO(**m)
     raise HTTPException(500, f'volume {body.lvol_id} joined but is not listed as a member')
+
+
+@instance_api.post('/members/plan', name='clusters:consistency-groups:members:plan',
+                   response_model=ConsistencyGroupJoinPlanDTO)
+def plan_member_join(cluster: Cluster, group: ConsistencyGroupResource,
+                     body: ConsistencyGroupMemberJoinDTO) -> ConsistencyGroupJoinPlanDTO:
+    """The steps joining an EXISTING volume takes, without taking any
+    (co-location design §5). A volume off the group's pinned node/LVS needs a
+    live migration first: ``migrate`` names the volumes that move with it (its
+    subsystem siblings) and the node. 409 when the join can never succeed (the
+    volume is in another group or pool, or its siblings are another group's)."""
+    try:
+        volume = db.get_lvol_by_id(body.lvol_id)
+    except KeyError:
+        raise HTTPException(404, f'volume {body.lvol_id} not found')
+    try:
+        plan = cg_colocation.late_join_plan(group, volume)
+    except cg_colocation.ColocationError as e:
+        raise HTTPException(409, str(e))
+    return ConsistencyGroupJoinPlanDTO(steps=plan.steps, target_node_id=plan.target_node_id,
+                                       migrate_lvol_ids=plan.migrate_ids, target_nqn=plan.target_nqn)
+
+
+@instance_api.post('/members/{lvol_id}/colocate', name='clusters:consistency-groups:members:colocate',
+                   status_code=204, responses={204: {"content": None}})
+def colocate_member(cluster: Cluster, group: ConsistencyGroupResource, lvol_id: str,
+                    body: ConsistencyGroupColocateDTO) -> Response:
+    """Move a member's namespace into its group's subsystem, flipping a
+    non-member out when it is full. 409 names why not now: namespace moves
+    disabled, or a connected host and no client device-mapper swap."""
+    try:
+        volume = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        raise HTTPException(404, f'volume {lvol_id} not found')
+    try:
+        cg_colocation.colocate_member(group, volume, client_swap_ready=body.client_swap_ready)
+    except cg_colocation.ColocationError as e:
+        raise HTTPException(409, str(e))
+    return Response(status_code=204)
+
+
+def _group_migration_dto(group, created=None) -> ConsistencyGroupMigrationDTO:
+    record = created or group.migration or {}
+    return ConsistencyGroupMigrationDTO(
+        target_node_id=record.get("target_node_id", ""),
+        status=migration_controller.group_migration_status(group.get_id()),
+        items=[ConsistencyGroupMigrationItemDTO(**it) for it in record.get("items") or []])
+
+
+@instance_api.get('/migration', name='clusters:consistency-groups:migration',
+                  response_model=ConsistencyGroupMigrationDTO)
+def get_group_migration(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupMigrationDTO:
+    return _group_migration_dto(group)
+
+
+@instance_api.post('/migration', name='clusters:consistency-groups:migration:create',
+                   response_model=ConsistencyGroupMigrationDTO)
+def create_group_migration(cluster: Cluster, group: ConsistencyGroupResource,
+                           body: ConsistencyGroupMigrationCreateDTO) -> ConsistencyGroupMigrationDTO:
+    """Pre-create the migration of the group's whole scope to a node: one
+    migration per subsystem, all or none. Attach every item's connect strings
+    on the client side, then POST .../migration/start."""
+    members = [m["lvol_id"] for m in consistency_group_controller.list_members(group)
+               if not m.get("removed_seq")]
+    if not members:
+        raise HTTPException(409, f'consistency group {group.get_id()} has no member')
+    try:
+        created = migration_controller.create_group_migration(
+            members[0], body.target_node_id, host_nqn=body.host_nqn)
+    except (migration_controller.MigrationConflictError, migration_controller.PreconditionError) as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    return _group_migration_dto(fresh, created)
+
+
+@instance_api.post('/migration/start', name='clusters:consistency-groups:migration:start',
+                   status_code=204, responses={204: {"content": None}})
+def start_group_migration(cluster: Cluster, group: ConsistencyGroupResource) -> Response:
+    try:
+        migration_controller.start_group_migration(group.get_id())
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return Response(status_code=204)
+
+
+@instance_api.delete('/migration', name='clusters:consistency-groups:migration:cancel',
+                     status_code=204, responses={204: {"content": None}})
+def cancel_group_migration(cluster: Cluster, group: ConsistencyGroupResource) -> Response:
+    migration_controller.cancel_group_migration(group.get_id())
+    return Response(status_code=204)
 
 
 @instance_api.delete('/members/{lvol_id}', name='clusters:consistency-groups:members:detach',
