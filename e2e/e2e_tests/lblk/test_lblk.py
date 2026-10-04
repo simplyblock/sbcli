@@ -947,6 +947,7 @@ class _LblkBase(TestClusterBase):
             return
 
         k8s = self._ensure_k8s_utils()
+        self._warn_if_monitor_here(node_ip)
         peers = self._peer_data_ips(node_ip)
         # Cut the STORAGE path to the peers, not every packet between nodes.
         #
@@ -1116,6 +1117,48 @@ class _LblkBase(TestClusterBase):
     #: appears not to have been restored: present means the timer fired and
     #: something else is holding the rules, absent means it never got there.
     NET_UNDO_MARKER = "/tmp/sb_net_undo.stamp"
+
+    def _warn_if_monitor_here(self, node_ip):
+        """Say where simplyblock-monitoring is before cutting *node_ip*.
+
+        Pure observability, and it exists because its absence cost a week.
+        Run 20261003-080237 cut the node that happened to be hosting
+        simplyblock-monitoring; our own OUTPUT rule starved the monitor of its
+        peers, it demoted all three, and the resulting cluster collapse was
+        written up twice as a product defect before dev spotted the
+        co-location. Nothing in the logs said where the monitor was.
+
+        The cut now targets the data network, which the monitor does not use,
+        so this should be harmless -- but "should be" is exactly what was
+        believed last time. One line per cycle makes the next instance
+        obvious instead of invisible.
+        """
+        if not self.k8s_test:
+            return
+        k8s = self._ensure_k8s_utils()
+        try:
+            node = k8s._get_k8s_node_name(node_ip)
+            out, _err = k8s._exec_kubectl(
+                f"kubectl get pods -n {k8s.namespace} -o wide --no-headers "
+                f"2>/dev/null | grep -i monitoring || true",
+                supress_logs=True, timeout=120)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.info("[lblk] could not locate the monitor: %s",
+                             str(exc)[:120])
+            return
+        for line in (out or "").splitlines():
+            cols = line.split()
+            if len(cols) < 7:
+                continue
+            if cols[6] == node:
+                self.logger.warning(
+                    "[lblk] simplyblock-monitoring (%s) is on %s, the node "
+                    "about to be cut. The cut is on the data network and the "
+                    "monitor talks to peers over mgmt, so it should keep "
+                    "working -- if peers start going schedulable, this is the "
+                    "first thing to check.", cols[0], node)
+                return
+        self.logger.info("[lblk] simplyblock-monitoring is not on %s", node)
 
     def _peer_data_ips(self, node_ip):
         """Every other storage node's DATA-network address.
