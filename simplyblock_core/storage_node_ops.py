@@ -7094,6 +7094,10 @@ def _release_jm_contexts_of_deleted_vuid(host, owner) -> None:
     host (_delete_replica_on_peer), and the expansion's donor teardown
     (teardown_non_leader_lvstore).
 
+    A build that fails and rolls back (_create_bdev_stack) calls it too: the
+    distribs it created opened the same contexts before they were deleted.
+    There ``owner`` may be ``host`` itself, building its own lvstore.
+
     Only members no other vuid on ``host`` has are released -- asked of JC
     itself, per vuid, so a member another vuid still uses is never even
     offered to jc_remove_jm (the SPDK team's preference over relying on its
@@ -7103,7 +7107,8 @@ def _release_jm_contexts_of_deleted_vuid(host, owner) -> None:
     own local JM is never a candidate.
     """
     try:
-        names = get_node_jm_names(owner, remote_node=host)
+        names = get_node_jm_names(
+            owner, remote_node=None if host.get_id() == owner.get_id() else host)
     except AttributeError as e:
         # A member's JM record is gone; nothing to name, nothing to release.
         logger.warning(
@@ -15358,6 +15363,17 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     else:
         stack = lvstore_stack
 
+    def _rollback():
+        if created_bdevs:
+            _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+        if any(b['type'] == "bdev_distr" for b in stack):
+            # bdev_distrib_create opens JC's contexts for the vuid's member
+            # JMs before it can fail, and deleting the distribs does not
+            # close them -- the orphan _release_jm_contexts_of_deleted_vuid
+            # describes. The vuid is primary_node's on a non-leader stack,
+            # snode's own otherwise.
+            _release_jm_contexts_of_deleted_vuid(snode, primary_node or snode)
+
     # Per-name filtered probes instead of one unfiltered bdev_get_bdevs dump:
     # the stack holds ~10 names while the full dump is O(cluster size) and
     # costs seconds of SPDK app-thread time on large clusters.
@@ -15411,8 +15427,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             # restart must abort on.
             failed = _distr_failures()
             if failed:
-                if created_bdevs:
-                    _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+                _rollback()
                 return False, f"Failed to (re)create distrib(s) after retry: {failed}"
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
@@ -15426,9 +15441,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             bdev['status'] = "created"
             created_bdevs.insert(0, bdev)
         else:
-            if created_bdevs:
-                # rollback
-                _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+            _rollback()
             return False, f"Failed to create BDev: {name}"
 
     if thread_list:
@@ -15438,8 +15451,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     # branch checks before assembling its raid; this covers everything else).
     failed = _distr_failures()
     if failed:
-        if created_bdevs:
-            _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+        _rollback()
         return False, f"Failed to (re)create distrib(s) after retry: {failed}"
     return True, None
 
