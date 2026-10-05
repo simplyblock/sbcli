@@ -3012,6 +3012,45 @@ class SshUtils:
             self.logger.error(f"Error fetching running containers on {node_ip}: {e}")
         return containers_by_node
     
+    #: Where the shared log store lives. Same values the suite mounts with at
+    #: setup (cluster_test_base), repeated here because a reboot drops the
+    #: mount and nothing else puts it back.
+    NFS_SERVER = "10.10.10.140"
+    NFS_EXPORT = "/srv/nfs_share"
+    NFS_MOUNT = "/mnt/nfs_share"
+
+    def _remount_nfs_after_reboot(self, node_ip):
+        """Put /mnt/nfs_share back after a reboot has dropped it.
+
+        The mount is made once at setup and there is no fstab entry, so every
+        reboot leaves the node with /mnt/nfs_share as an ordinary empty
+        directory. Nothing notices, because writing to it still succeeds --
+        it just goes to the root filesystem instead of the share.
+
+        Run 20261004-082535 shows what that costs. Fourteen mount calls, all
+        inside the first twenty seconds, then ten reboots over the next seven
+        hours and no remount after any of them. 192.168.10.201 accumulated
+        20G of run artefacts under the unmounted path, reached 95% full, and
+        then could not come back from the reboot the outage loop issued --
+        taking the run down at 8h17m and the node out of the lab entirely.
+        Its peers, rebooted less often across the lab's history, sat at 51-77%.
+
+        Best effort by design: a node that just rebooted into a run is more
+        useful than one we refuse to continue with because a log mount did
+        not come back. The warning is the signal.
+        """
+        if os.environ.get("SKIP_NFS", "").strip() in ("1", "true"):
+            return
+        try:
+            self.ensure_nfs_mounted(node_ip, self.NFS_SERVER, self.NFS_EXPORT,
+                                    self.NFS_MOUNT)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[nfs] could not remount %s on %s after its reboot: %s. "
+                "Anything written there now lands on the root filesystem, "
+                "which is how a node fills up and stops coming back.",
+                self.NFS_MOUNT, node_ip, str(exc)[:160])
+
     def reboot_node(self, node_ip, wait_time=300):
         """
         Reboot a node using SSH and wait for it to come online.
@@ -3047,6 +3086,7 @@ class SshUtils:
                     self.connect(address=node_ip,
                                  bastion_server_address=self.bastion_server)
                     self.logger.info(f"Node {node_ip} is back online.")
+                    self._remount_nfs_after_reboot(node_ip)
                     return True
                 except Exception as e:
                     self.logger.info(f"Node {node_ip} is not online yet: {e}")
