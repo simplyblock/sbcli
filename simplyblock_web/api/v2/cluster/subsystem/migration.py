@@ -1,19 +1,17 @@
-from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from simplyblock_core import constants
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-from simplyblock_web import utils
 
 from ..._dependencies import Cluster, Subsystem, SubsystemMigration
 from ..._dtos import BatchMigrationDTO, MigrationDTO
-from ...util import CreationResponseFormatParameter, creation_response
+from ...util import NQN, CreationResponseFormatParameter, creation_response
 
 api = APIRouter()
 _db = DBController()
@@ -50,7 +48,7 @@ def list_migrations(cluster: Cluster, subsystem: Subsystem) -> list[MigrationDTO
 class _MigrationParams(BaseModel):
     target_node_id: UUID
     ctrl_loss_tmo: int = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
-    host_nqn: Annotated[str, Field(pattern=utils.NQN_PATTERN)] | None = None
+    host_nqn: NQN | None = None
 
 
 def _resolve_member_lvol(cluster_id: str, nqn: str):
@@ -96,7 +94,15 @@ def create_migration(
                 ctrl_loss_tmo=parameters.ctrl_loss_tmo,
                 host_nqn=parameters.host_nqn,
             )
-    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
+    except (MigrationConflictError, PreconditionError) as e:
+        # Conflicting/not-yet-satisfiable state (e.g. a migration already
+        # active for this subsystem, or -- for a fallback-source migration --
+        # the chosen target is the node currently serving as the fallback
+        # source itself) -- matches the 409 convention used for the same
+        # shape of error elsewhere in v2 (storage_node shutdown, pool/volume
+        # already-exists, in-flight replication cutover).
+        raise HTTPException(409, str(e))
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
     def get_full(id):
@@ -149,7 +155,15 @@ def continue_migration(migration: SubsystemMigration, parameters: _ContinueParam
                 max_retries=parameters.max_retries,
                 deadline_seconds=parameters.deadline_seconds,
             )
-    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
+    except (MigrationConflictError, PreconditionError) as e:
+        # Conflicting/not-yet-satisfiable state (e.g. a migration already
+        # active for this subsystem, or -- for a fallback-source migration --
+        # the chosen target is the node currently serving as the fallback
+        # source itself) -- matches the 409 convention used for the same
+        # shape of error elsewhere in v2 (storage_node shutdown, pool/volume
+        # already-exists, in-flight replication cutover).
+        raise HTTPException(409, str(e))
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     return {"migration_id": result_id}
 

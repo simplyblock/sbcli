@@ -79,7 +79,10 @@ def _release_matches(running: str, wanted: str) -> bool:
 def _plugins():
     # Imported lazily so deleting a plugin module next release only requires
     # removing its entry here.
-    from simplyblock_core.release_upgrades import database_indices, jc_compression_upgrade
+    from simplyblock_core.release_upgrades import (
+        database_indices,
+        jc_compression_upgrade,
+    )
     return [database_indices.DatabaseIndices(), jc_compression_upgrade.JCCompressionUpgrade()]
 
 

@@ -230,27 +230,19 @@ class TestReplicationStatusCountsOnlyShippedSnapshots(unittest.TestCase):
 
 
 class TestBackupRunnerOwnsOnlyBackupTasks(unittest.TestCase):
+    """Ownership is now declared once, in SPEC.function_names, and enforced
+    generically by task_runner_base's dispatch loop (test_task_runner_base.py
+    covers the enforcement itself)."""
 
-    def test_other_tasks_are_left_alone(self):
-        repl = SimpleNamespace(uuid="t-r", function_name=JobSchedule.FN_SNAPSHOT_REPLICATION,
-                               status=JobSchedule.STATUS_SUSPENDED, canceled=False)
-        backup = SimpleNamespace(uuid="t-b", function_name=JobSchedule.FN_BACKUP,
-                                 status=JobSchedule.STATUS_NEW, canceled=False)
-        cl = MagicMock(status="active")
-        db = MagicMock()
-        db.get_clusters.return_value = [cl]
-        db.get_job_tasks.return_value = [repl, backup]
-        db.get_task_by_id.side_effect = lambda tid: {"t-r": repl, "t-b": backup}[tid]
+    def test_snapshot_replication_is_not_owned(self):
+        self.assertNotIn(JobSchedule.FN_SNAPSHOT_REPLICATION,
+                          tasks_runner_backup.SPEC.function_names)
 
-        class _Stop(Exception):
-            pass
-
-        with patch.object(tasks_runner_backup, "db", db), \
-                patch.object(tasks_runner_backup, "process_task") as process, \
-                patch.object(tasks_runner_backup.time, "sleep", side_effect=_Stop):
-            with self.assertRaises(_Stop):
-                tasks_runner_backup.main()
-        process.assert_called_once_with(backup, cl)
+    def test_backup_family_is_owned(self):
+        self.assertEqual(
+            set(tasks_runner_backup.SPEC.function_names),
+            {JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE, JobSchedule.FN_BACKUP_MERGE},
+        )
 
 
 class TestNeverTransferIntoASnapshot(unittest.TestCase):
@@ -259,8 +251,8 @@ class TestNeverTransferIntoASnapshot(unittest.TestCase):
         def node(nid, status, is_snap):
             n = MagicMock(status=status)
             n.get_id.return_value = nid
-            n.rpc_client.return_value.get_bdevs.return_value = [
-                {"driver_specific": {"lvol": {"snapshot": is_snap}}}]
+            n.rpc_client.return_value.bdev_get.return_value = \
+                {"driver_specific": {"lvol": {"snapshot": is_snap}}}
             return n
         nodes = {"n-p": node("n-p", "online", True), "n-s": node("n-s", "online", False),
                  "n-t": node("n-t", "offline", True)}

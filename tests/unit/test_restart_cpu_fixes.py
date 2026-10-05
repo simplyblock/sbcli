@@ -15,8 +15,8 @@ import time
 import types
 
 from simplyblock_core import storage_node_ops, utils
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +337,7 @@ class TestDegradedRecreateCoverage:
                 return peers
 
         fake_rpc = types.SimpleNamespace(
-            get_bdevs=lambda name: name in present_bdevs)
+            bdev_get=lambda name: name in present_bdevs)
         snode = types.SimpleNamespace(
             get_id=lambda: "snode", cluster_id="c1", failure_domain="fd0",
             rpc_client=lambda timeout, retry: fake_rpc)

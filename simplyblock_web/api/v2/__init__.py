@@ -1,9 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from . import cluster
-from . import management_node
-from . import meta
-from . import metrics
+from . import cluster, management_node, meta, metrics
 from ._auth import verify_api_token, verify_metrics_token
 
 api = APIRouter()

@@ -1,10 +1,20 @@
 import threading
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
-
-from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
-from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
+from simplyblock_core import (
+    cluster_ops,
+    constants,
+    db_controller,
+    storage_node_ops,
+    utils,
+)
+from simplyblock_core.controllers import (
+    device_controller,
+    health_controller,
+    storage_events,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -262,10 +272,30 @@ def _collect_status_probes(snodes):
 
 
 def get_next_cluster_status(cluster_id):
+    return _cluster_status_verdicts(cluster_id)[0]
+
+
+def _cluster_status_verdicts(cluster_id):
+    """``(status, status_without_removal)`` for the cluster.
+
+    ``status`` is the calculated cluster status. A node in a removal
+    shut-down status (migrating_devices .. removed_failed) counts only while
+    some of its devices are not yet failed_and_migrated -- until then its data
+    really has one replica fewer -- and not at all once its data is rebuilt.
+    It used to count until it was REMOVED, which kept a k=1 cluster DEGRADED
+    for the whole removal and stalled any driver that waits for ACTIVE.
+
+    A PENDING_REMOVAL node is counted like any other node -- it may still be
+    serving -- but when it counts as affected, it counts as the removal's.
+
+    ``status_without_removal`` leaves those nodes out entirely: the status the
+    cluster would have if the removal were not happening. DEGRADED with an
+    ACTIVE here means the removal alone causes it (Cluster.is_degraded_by_removal).
+    """
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
-        return Cluster.STATUS_UNREADY
+        return Cluster.STATUS_UNREADY, Cluster.STATUS_UNREADY
 
     # Phase 1: slow, RPC-dependent signals on a throwaway snapshot.
     probe_snapshot = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
@@ -283,7 +313,9 @@ def get_next_cluster_status(cluster_id):
     offline_devices = 0
     jm_replication_tasks = False
 
-    affected_physical_nodes = []
+    affected_physical_nodes: list[str] = []
+    # Hosts affected only through a node that is being removed (see above).
+    removal_affected_ips: list[str] = []
 
     # One task-table fetch for the whole verdict: is_new_migrated_node runs
     # once per ONLINE node below and used to re-fetch the full per-cluster
@@ -297,6 +329,24 @@ def get_next_cluster_status(cluster_id):
 
         if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
             continue
+
+        if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+            pending = [d for d in node.nvme_devices
+                       if d.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED]
+            if pending:
+                offline_nodes += 1
+                offline_devices += len(pending)
+                if node.mgmt_ip not in removal_affected_ips:
+                    removal_affected_ips.append(node.mgmt_ip)
+            continue
+
+        # A PENDING_REMOVAL node may still be serving, so it goes through the
+        # ordinary counting below. But once it does count as affected, that is
+        # the removal's own shutdown (prepare_node_for_removal stops it before
+        # it reaches MIGRATING_DEVICES), not an outage beside the removal.
+        affected_hosts = (removal_affected_ips
+                          if node.status == StorageNode.STATUS_PENDING_REMOVAL
+                          else affected_physical_nodes)
 
         if node.status == StorageNode.STATUS_ONLINE:
             if is_new_migrated_node(cluster_id, node, tasks=cluster_tasks):
@@ -325,8 +375,8 @@ def get_next_cluster_status(cluster_id):
                 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED)
                 or node.status == StorageNode.STATUS_OFFLINE):
             affected_nodes += 1
-            if node.mgmt_ip not in affected_physical_nodes:
-                affected_physical_nodes.append(node.mgmt_ip)
+            if node.mgmt_ip not in affected_hosts:
+                affected_hosts.append(node.mgmt_ip)
         elif node.status == StorageNode.STATUS_OFFLINE:
             # OFFLINE is a terminal mgmt escalation: data-plane loss was
             # already confirmed (_check_data_plane_and_escalate), the node
@@ -337,8 +387,8 @@ def get_next_cluster_status(cluster_id):
             # states) gates suspension on RPC probes against a node that is
             # already declared gone, and returns ACTIVE for whole-domain
             # outages (2026-07 failure-domain suspend regressions).
-            if node.mgmt_ip not in affected_physical_nodes:
-                affected_physical_nodes.append(node.mgmt_ip)
+            if node.mgmt_ip not in affected_hosts:
+                affected_hosts.append(node.mgmt_ip)
         elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
                                  StorageNode.STATUS_DOWN]:
             # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
@@ -365,19 +415,33 @@ def get_next_cluster_status(cluster_id):
             # that entered a transient state after the probe pass defaults
             # to "connected" (don't count) — same conservative bias as the
             # inline probe had, and the next fast tick re-evaluates it.
-            if (node.mgmt_ip not in affected_physical_nodes
+            if (node.mgmt_ip not in affected_hosts
                     and dp_quorum_by_node.get(node.get_id(), False)):
-                affected_physical_nodes.append(node.mgmt_ip)
+                affected_hosts.append(node.mgmt_ip)
 
         online_devices += node_online_devices
         offline_devices += node_offline_devices
 
-    affected_nodes = len(affected_physical_nodes)
+    affected_all = affected_physical_nodes + [
+        ip for ip in removal_affected_ips if ip not in affected_physical_nodes]
     logger.debug(f"online_nodes: {online_nodes}")
     logger.debug(f"offline_nodes: {offline_nodes}")
-    logger.debug(f"affected_nodes: {affected_nodes}")
+    logger.debug(f"affected_nodes: {len(affected_all)} "
+                 f"({len(removal_affected_ips)} through a removal)")
     logger.debug(f"online_devices: {online_devices}")
     logger.debug(f"offline_devices: {offline_devices}")
+    status = _status_verdict(cluster, snodes, affected_all, online_nodes,
+                             online_devices, jm_replication_tasks)
+    if not removal_affected_ips:
+        return status, status
+    return status, _status_verdict(cluster, snodes, affected_physical_nodes,
+                                   online_nodes, online_devices, jm_replication_tasks)
+
+
+def _status_verdict(cluster, snodes, affected_physical_nodes, online_nodes,
+                    online_devices, jm_replication_tasks):
+    """The cluster status for one set of affected hosts."""
+    affected_nodes = len(affected_physical_nodes)
     # ndcs n = 2
     # npcs k = 1
     n = cluster.distr_ndcs
@@ -918,6 +982,38 @@ def _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status):
             "Auto write-protection switch raised for cluster %s", cluster_id)
 
 
+_DATA_REBALANCING_TASKS = frozenset({
+    JobSchedule.FN_DEV_MIG,
+    JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_FAILED_DEV_MIG,
+    JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+    JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+    JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+})
+_LVOL_MIGRATION_TASKS = frozenset({JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG})
+
+
+def _rebalancing_flags(tasks):
+    """``(is_re_balancing, is_data_rebalancing, active_lvol_migrations)`` for
+    the cluster's tasks.
+
+    is_re_balancing keeps its meaning -- any data-moving task, volume
+    migrations included -- for the guards that must wait on those too
+    (shared-placement toggle, write-protection switch, shutdown headroom).
+    is_data_rebalancing is the device and balancing tasks alone: a node drain
+    migrates volumes itself and must not pause on its own migrations, which
+    it did for the whole of every removal (2026-09-29)."""
+    data = lvol = 0
+    for task in tasks:
+        if task.canceled or task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.function_name in _DATA_REBALANCING_TASKS:
+            data += 1
+        elif task.function_name in _LVOL_MIGRATION_TASKS:
+            lvol += 1
+    return (data + lvol) > 0, data > 0, lvol
+
+
 def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -928,36 +1024,28 @@ def _update_cluster_status_impl(cluster_id):
     # a re-admitted device stops counting toward affected_nodes on this tick.
     _readmit_stranded_devices(cluster_id)
 
-    next_current_status = get_next_cluster_status(cluster_id)
+    next_current_status, status_without_removal = _cluster_status_verdicts(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
+    degraded_by_removal = (next_current_status == Cluster.STATUS_DEGRADED
+                           and status_without_removal == Cluster.STATUS_ACTIVE)
+    shrinking = any(n.status in StorageNode.REMOVAL_IN_PROGRESS_STATUSES
+                    for n in db.get_storage_nodes_by_cluster_id(cluster_id))
 
-    rebalancing_task_names = {
-        JobSchedule.FN_DEV_MIG,
-        JobSchedule.FN_NEW_DEV_MIG,
-        JobSchedule.FN_FAILED_DEV_MIG,
-        JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
-        JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
-        JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
-        JobSchedule.FN_LVOL_MIG,
-        JobSchedule.FN_LVOL_BATCH_MIG,
-    }
-    active_rebalancing_tasks = 0
-    cluster_tasks = db.get_job_tasks(cluster_id)
-    for task in cluster_tasks:
-        if task.canceled:
-            continue
-        if task.status == JobSchedule.STATUS_DONE:
-            continue
-        if task.function_name in rebalancing_task_names:
-            active_rebalancing_tasks += 1
-
+    is_re_balancing, is_data_rebalancing, active_lvol_migrations = _rebalancing_flags(
+        db.get_job_tasks(cluster_id))
     cluster = db.get_cluster_by_id(cluster_id)
     # Atomic: a full write here would clobber a concurrent cluster.status change
     # committed by set_cluster_status (same lost-update class as incident
-    # 2026-06-18). Mutate only is_re_balancing on the freshly-read row.
-    is_re_balancing = active_rebalancing_tasks > 0
-    cluster = db.atomic_update(
-        cluster, lambda c, v=is_re_balancing: setattr(c, "is_re_balancing", v))
+    # 2026-06-18). Mutate only the flags on the freshly-read row.
+    def _set_rebalancing_flags(c, rb=is_re_balancing, drb=is_data_rebalancing, lm=active_lvol_migrations,
+                               sh=shrinking, dbr=degraded_by_removal):
+        c.is_re_balancing = rb
+        c.is_data_rebalancing = drb
+        c.active_lvol_migrations = lm
+        c.is_shrinking = sh
+        c.is_degraded_by_removal = dbr
+
+    cluster = db.atomic_update(cluster, _set_rebalancing_flags)
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
@@ -1267,9 +1355,9 @@ def _count_data_plane_votes_uncached(node):
         # bdev_nvme_get_controllers on a `resetting` / `reconnect_is_delayed`
         # ctrlr can sit on locks during reset.
         try:
-            bdevs = peer_rpc.get_bdevs(bdev_name)
+            bdevs = peer_rpc.bdev_get(bdev_name)
         except Exception as e:
-            logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
+            logger.debug("bdev_get(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
             return
 
         if not bdevs:
@@ -1463,15 +1551,19 @@ def node_port_check_fun(snode):
                 port_lvs_owner[_p] = n.get_id()
                 if advisory:
                     advisory_ports.add(_p)
+        own_port = None
         if not snode.is_secondary_node:
             _p = snode.get_lvol_subsys_port(snode.lvstore)
             ports.append(_p)
             port_lvs_owner[_p] = snode.get_id()
+            own_port = _p
 
         # Batched: one nvmf_get_blocked_ports fetch answers every port, so
         # carrying the advisory ports costs no extra RPC.
         try:
             port_results = health_controller.check_ports_on_node(snode, ports)
+            if own_port is not None and port_results.get(own_port) is False:
+                _reread_blocked_own_port(snode, own_port, port_results)
             for port, ret in port_results.items():
                 if port in advisory_ports:
                     logger.info(
@@ -1507,6 +1599,34 @@ def node_port_check_fun(snode):
                 f"(SnodeAPI ping_ip timed out); ignoring this cycle")
 
     return node_port_check
+
+
+#: How long to wait before re-reading a node's own lvstore port that read
+#: blocked. A fence nobody announced -- SPDK's own, on a writer conflict or a
+#: leadership change -- can last well under a second, so one sample can land
+#: inside it; a real fence is still there a second later. Must stay well
+#: inside PORT_CHECK_JOIN_TIMEOUT_SEC.
+PORT_BLOCK_CONFIRM_SEC = 1.0
+
+
+def _reread_blocked_own_port(snode, own_port, port_results):
+    """The node's own lvstore port read blocked: read it once more before the
+    sample counts against the node.
+
+    One blocked sample used to be enough for set_node_down, which broadcasts
+    the DOWN to every distrib. A block the control plane makes on purpose is
+    announced instead -- a replica rebuild sets the leader's lvstore_status to
+    "in_creation" first, and check_node skips the leader for that window --
+    but a fence nobody announced gets no such cover. A block that has cleared
+    on the re-read is recorded as open, which also keeps the stale-fence
+    remediation from aging it.
+    """
+    time.sleep(PORT_BLOCK_CONFIRM_SEC)
+    again = health_controller.check_ports_on_node(snode, [own_port]).get(own_port)
+    if again is True:
+        logger.info(f"Check: node port {snode.mgmt_ip}, {own_port} ... blocked only "
+                    f"momentarily (open {PORT_BLOCK_CONFIRM_SEC:.0f}s later); not a port-down")
+        port_results[own_port] = True
 
 
 # Bounded wait (s) for the parallel port/data-nic check to finish before we
@@ -1606,6 +1726,37 @@ _blocked_port_since: dict = {}
 #: not this timeout, is what keeps the remediation off deliberate fences.
 STALE_PORT_BLOCK_SEC = 12.0
 
+#: Node statuses in which a stale fence may be lifted.
+#:
+#: ONLINE alone was a deadlock, and a self-inflicted one: it excluded exactly
+#: the case this remediation exists for. When SPDK fences a node's OWN lvstore
+#: port, that port is not advisory, so node_port_check_fun returns False on the
+#: very next tick and set_node_down flips the node DOWN -- at t+6s, half the
+#: 12s the fence needs to age into "stale". The node is therefore never ONLINE
+#: on the tick that crosses the threshold, the `continue` here skips it on
+#: every pass thereafter, and the DOWN->ONLINE clear at the end of the node
+#: check cannot fire because it needs the port check to pass. Each side waits
+#: for the other for ever.
+#:
+#: Live on k8s 2026-09-15: an lvol-migration subtask on 2f59f60f hit a device
+#: belonging to the node being removed, the failed IO demoted LVS_16 and fenced
+#: ports 4442/4443 at 17:23:58, the node went DOWN at 17:24:05, and it was
+#: still fenced 70+ minutes later with SPDK up, the pod at 0 restarts and every
+#: other probe passing. The peer b30f8f0c was rescued by this very function at
+#: 17:24:28 -- its copy of 4442 is advisory, so it stayed ONLINE long enough to
+#: qualify. Only the owner, the node that actually needed it, could not.
+#:
+#: DOWN is safe to admit here because reaching this loop at all means
+#: check_ports_on_node just answered over JSON-RPC, so SPDK is alive and the
+#: unblock RPC has somewhere to land; and because DOWN is precisely the status
+#: set_node_down assigns when every liveness probe passed and only the port
+#: check failed. The three gates that keep this off deliberate fences --
+#: restart-owns-LVS, hublvol health, and the 12s age -- are unchanged.
+_REMEDIABLE_FENCE_STATUSES = (
+    StorageNode.STATUS_ONLINE,
+    StorageNode.STATUS_DOWN,
+)
+
 
 def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
     """Lift a client port that SPDK fenced and nothing ever released.
@@ -1630,7 +1781,9 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
     finally cleared incidentally by an unrelated restart at 09:06:16.
 
     Preconditions, all required:
-      * the node is ONLINE -- a fence on a node that is down is not a leak;
+      * the node is ONLINE or DOWN -- see _REMEDIABLE_FENCE_STATUSES. DOWN is
+        usually a consequence of the fence rather than an independent fault,
+        and excluding it deadlocked this remediation against the node check;
       * no restart task owns that LVS -- the restart flow is the legitimate
         author of port blocks during its phases and must not be raced;
       * the block has persisted past STALE_PORT_BLOCK_SEC;
@@ -1650,7 +1803,7 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
         held = time.monotonic() - first_seen
         if held < STALE_PORT_BLOCK_SEC:
             continue
-        if snode.status != StorageNode.STATUS_ONLINE:
+        if snode.status not in _REMEDIABLE_FENCE_STATUSES:
             continue
 
         owner_id = port_lvs_owner.get(port)
@@ -1691,10 +1844,10 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
             continue
 
         logger.error(
-            "Port %s on %s has been blocked %.0fs on an ONLINE node with a "
+            "Port %s on %s has been blocked %.0fs on a %s node with a "
             "healthy hublvol and no restart owning %s -- SPDK fenced it and "
             "nothing released it. Unblocking.",
-            port, snode.get_id(), held, owner.lvstore)
+            port, snode.get_id(), held, snode.status, owner.lvstore)
         try:
             from simplyblock_core.utils import port_block
             port_block.set_port(snode, port, block=False, timeout=5, retry=1)
@@ -2137,15 +2290,37 @@ def _run_periodic_housekeeping(cluster_id):
 
 
 def loop_for_node(snode):
-    # global logger
-    # logger = logging.getLogger()
-    # logger_handler = logging.StreamHandler(stream=sys.stdout)
-    # logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
-    # logger.addHandler(logger_handler)
+    # Not catching errors: Failures should propagate to avoid cross-loop failures from sticking
     while True:
         check_node(snode)
         logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
+
+#: Replacing a dead per-node thread recovers a transaction that timed out, but
+#: not an FDB client that has wedged: `db` is process-global, so a replacement
+#: thread inherits the same client and dies the same way. Past this many
+#: replacements of one node's thread inside the window, stop replacing and let
+#: the failure leave main() — the process exits and the orchestrator restarts
+#: us with a fresh client.
+THREAD_RESPAWN_WINDOW_SEC = 120
+THREAD_RESPAWN_CEILING = 5
+
+# node_id -> times this monitor replaced that node's thread, newest last.
+_thread_respawns: dict[str, list[float]] = {}
+
+
+def _record_thread_respawn(node_id) -> int:
+    """Note a replacement of ``node_id``'s thread and return how many fall
+    inside THREAD_RESPAWN_WINDOW_SEC."""
+    now = time.time()
+    recent = [
+        at for at in _thread_respawns.get(node_id, [])
+        if now - at < THREAD_RESPAWN_WINDOW_SEC
+    ]
+    recent.append(now)
+    _thread_respawns[node_id] = recent
+    return len(recent)
 
 
 def main():
@@ -2153,12 +2328,6 @@ def main():
     threads_maps: dict[str, threading.Thread] = {}
 
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()
@@ -2170,8 +2339,19 @@ def main():
             for node in nodes:
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    if node_id in threads_maps:
+                        respawns = _record_thread_respawn(node_id)
+                        if respawns > THREAD_RESPAWN_CEILING:
+                            raise RuntimeError(
+                                f"node {node_id}: monitor thread died {respawns} times in "
+                                f"{THREAD_RESPAWN_WINDOW_SEC}s, exiting so the orchestrator "
+                                "restarts this service with a fresh FDB client")
                     logger.info(f"Creating thread for node {node_id}")
-                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t = threading.Thread(
+                        target=loop_for_node,
+                        args=(node,),
+                        daemon=True,  # prevents main thread failures from keeping the process alive
+                    )
                     t.start()
                     threads_maps[node_id] = t
                     logger.debug(threads_maps[node_id])

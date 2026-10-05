@@ -24,7 +24,6 @@ from simplyblock_core.storage_node_ops import (
     _rpc_subsystem_has_ns,
 )
 
-
 # ---------------------------------------------------------------------------
 # 1. Existence probes
 # ---------------------------------------------------------------------------
@@ -34,17 +33,17 @@ class TestExistenceProbes(unittest.TestCase):
 
     def test_bdev_exists_true(self):
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": "raid0_1"}]
+        rpc.bdev_get.return_value = {"name": "raid0_1"}
         self.assertTrue(_rpc_bdev_exists(rpc, "raid0_1"))
 
     def test_bdev_exists_false_when_empty(self):
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         self.assertFalse(_rpc_bdev_exists(rpc, "raid0_1"))
 
     def test_bdev_exists_false_when_rpc_raises(self):
         rpc = MagicMock()
-        rpc.get_bdevs.side_effect = RuntimeError("rpc fail")
+        rpc.bdev_get.side_effect = RuntimeError("rpc fail")
         self.assertFalse(_rpc_bdev_exists(rpc, "raid0_1"))
 
     def test_lvstore_exists_true(self):

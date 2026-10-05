@@ -13,8 +13,12 @@ from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import snapshot_replication as sr
-from simplyblock_core.test.test_replication_policies import (_FakeDB, _done_replication_task,
-                                                             _install, _lvol)
+from simplyblock_core.test.test_replication_policies import (
+    _done_replication_task,
+    _FakeDB,
+    _install,
+    _lvol,
+)
 
 SRC, TGT = "CL_A", "CL_B"
 
@@ -330,7 +334,10 @@ def test_deleting_the_newest_replicated_generation_is_refused(monkeypatch):
 
 # ------------------------------------------------------------------ replicating back
 
-from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget  # noqa: E402
+from simplyblock_core.models.replication import (  # noqa: E402
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 
 
 def _reverse_policy(db, uuid, cluster, toward, name, status=ReplicationPolicy.STATUS_ACTIVE):

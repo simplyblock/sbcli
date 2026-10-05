@@ -7,17 +7,16 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import tasks_controller
-from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 from simplyblock_core import storage_node_ops
+from simplyblock_core.controllers import node_drain_steps, tasks_controller
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 
 from ... import util as util
 from ..._dependencies import Cluster, StorageNode
+from ..._dtos import StorageNodeDTO, TaskDTO
 from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .device import api as device_api
-from ..._dtos import StorageNodeDTO, TaskDTO
-
 
 api = APIRouter()
 db = DBController()
@@ -230,8 +229,14 @@ def nic_iostats(cluster: Cluster, storage_node: StorageNode, nic_id: str):
     ]
 
 
-@instance_api.post('/suspend', name='clusters:storage-nodes:suspend', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/suspend', name='clusters:storage-nodes:suspend', status_code=204, responses={204: {"content": None}, 409: {"description": "The node is not online"}})
 def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
+    # Idempotent: a retry finds the node already suspended.
+    if storage_node.status == StorageNode.STATUS_SUSPENDED:
+        return Response(status_code=204)
+    if storage_node.status != StorageNode.STATUS_ONLINE:
+        raise HTTPException(409, f'Storage node is {storage_node.status}, not online')
+
     ret = storage_node_ops.suspend_storage_node(storage_node.get_id(), force)
     if isinstance(ret, tuple):
         ok, reason = ret
@@ -243,8 +248,13 @@ def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) ->
     return Response(status_code=204)
 
 
-@instance_api.post('/resume', name='clusters:storage-nodes:resume', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/resume', name='clusters:storage-nodes:resume', status_code=204, responses={204: {"content": None}, 409: {"description": "The node is not suspended"}})
 def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
+    if storage_node.status == StorageNode.STATUS_ONLINE:
+        return Response(status_code=204)
+    if storage_node.status != StorageNode.STATUS_SUSPENDED:
+        raise HTTPException(409, f'Storage node is {storage_node.status}, not suspended')
+
     if not storage_node_ops.resume_storage_node(storage_node.get_id()):
         raise ValueError('Failed to resume storage node')
 
@@ -254,8 +264,8 @@ def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
 @instance_api.post('/shutdown', name='clusters:storage-nodes:shutdown', status_code=202, responses={202: {"content": None}, 409: {"description": "Shutdown preconditions not met; retry later or use force"}})
 def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
     if not force:
-        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
         from simplyblock_core.db_controller import DBController
+        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
         allowed, reason = _check_ftt_allows_node_removal(storage_node.get_id(), DBController())
         if not allowed:
             raise ValueError(reason)
@@ -309,6 +319,102 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
 def promote(cluster: Cluster, storage_node: StorageNode) -> Response:
     storage_node_ops.make_sec_new_primary(storage_node.uuid)
     return Response(status_code=204)
+
+
+class DrainStepProgress(BaseModel):
+    """How far one drain step has got.
+
+    ``done`` is authoritative and the only field a caller must honour: a step
+    that cannot count its work still has to say when it has finished. The counts
+    are for reporting, so a removal that pauses for minutes has a number
+    attached rather than being an unexplained wait.
+    """
+    done: bool
+    total: int = 0
+    completed: int = 0
+    failed: int = 0
+    message: str = ''
+    # The node's status, for the removal's first step (prepare-removal).
+    node_status: str = ''
+
+
+class DrainVerification(BaseModel):
+    """Whether the node still hosts anything, before its DELETE."""
+    drained: bool
+    lvols: builtins.list[str] = []
+    snapshots: builtins.list[str] = []
+
+
+@instance_api.post(
+    '/prepare-removal', name='clusters:storage-nodes:prepare-removal',
+    status_code=202, responses={202: {"content": None}})
+def prepare_removal(cluster: Cluster, storage_node: StorageNode, force_remove: bool = False) -> Response:
+    """The removal's first step: admit the node, mark it pending_removal, shut
+    it down and rebuild its devices onto its peers. The node is
+    migrating_lvols when this step is done (see GET).
+
+    A refused admission is a 400 and changes nothing. From pending_removal on
+    there is no way back; re-POSTing is a no-op while the step runs.
+    """
+    node_drain_steps.prepare_node_for_removal(storage_node.get_id(), force_remove=force_remove)
+    return Response(status_code=202)
+
+
+@instance_api.get('/prepare-removal', name='clusters:storage-nodes:prepare-removal-progress')
+def prepare_removal_progress(cluster: Cluster, storage_node: StorageNode) -> DrainStepProgress:
+    return DrainStepProgress(**node_drain_steps.prepare_progress(storage_node.get_id()))
+
+
+@instance_api.post('/verify-drained', name='clusters:storage-nodes:verify-drained')
+def verify_drained(cluster: Cluster, storage_node: StorageNode) -> DrainVerification:
+    """The removal's second step, closing the volume half: whether the node
+    still hosts a volume or a snapshot. The volumes are moved by the caller;
+    this moves nothing and changes no status. The node DELETE is the third."""
+    return DrainVerification(**node_drain_steps.verify_node_drained(storage_node.get_id()))
+
+
+@instance_api.post(
+    '/migrate-devices', name='clusters:storage-nodes:migrate-devices',
+    status_code=202, responses={202: {"content": None}})
+def migrate_devices(cluster: Cluster, storage_node: StorageNode) -> Response:
+    """Fail this node's data devices and rebuild them onto its peers.
+
+    Starting a rebuild that is already running is a no-op rather than an error,
+    so a caller that restarts and re-POSTs does not restart the work it is
+    waiting for.
+    """
+    node_drain_steps.start_device_decommission(storage_node.get_id())
+    return Response(status_code=202)
+
+
+@instance_api.get('/migrate-devices', name='clusters:storage-nodes:migrate-devices-progress')
+def migrate_devices_progress(cluster: Cluster, storage_node: StorageNode) -> DrainStepProgress:
+    return DrainStepProgress(**node_drain_steps.device_decommission_progress(storage_node.get_id()))
+
+
+@instance_api.post(
+    '/migrating-lvols', name='clusters:storage-nodes:migrating-lvols',
+    status_code=202, responses={202: {"content": None}})
+def mark_migrating_lvols(cluster: Cluster, storage_node: StorageNode) -> Response:
+    """Record that the drain has moved from the device half to the volume half.
+
+    A status transition only, with no work behind it: the volumes themselves are
+    moved by the caller, which on this path is the operator creating
+    VolumeMigration CRs. Without it the node would keep saying migrating_devices
+    for the whole of a phase it had already finished, and the node's own status
+    would disagree with the CR about which step a removal is on.
+
+    Idempotent, and never moves a node backwards.
+    """
+    node_drain_steps.mark_migrating_lvols(storage_node.get_id())
+    return Response(status_code=202)
+
+
+# There is no /reshuffle-replicas endpoint: reallocating the replica roles
+# other nodes hold on this one is phase 3b of DELETE's removal, which runs it
+# after the phase 3a that frees this node's own replica slots. Called on its
+# own it skipped 3a and deadlocked on a fully-occupied cluster -- see the note
+# in node_drain_steps.
 
 
 instance_api.include_router(device_api, prefix='/devices')

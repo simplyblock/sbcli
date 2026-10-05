@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 from typing import Literal, cast
 from uuid import UUID
@@ -7,27 +7,35 @@ from fastapi import Request
 from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
+from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.utils import hexa_to_cpu_list
+from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup_config import (
+    BackupConfig,
+    BackupLocation,
+    UnresolvedBackupConfig,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.utils.nvme import NvmeConnectEntry
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replication import (
-    ConsistencyGroup, ReplicationPolicy, ReplicationTarget)
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.models.stats import StatsObject
-from simplyblock_core.models.lvol_migration import LVolMigration
-from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils import hexa_to_cpu_list
+from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 from . import util
-
 
 AlertSeverity = Literal[
     "critical",
@@ -50,6 +58,7 @@ ClusterStatus = Literal[
     "unready",
     "in_activation",
     "in_expansion",
+    "in_shrink",
 ]
 
 StoragePoolStatus = Literal["active", "inactive"]
@@ -67,6 +76,9 @@ StorageNodeStatus = Literal[
     "down",
     "in_removal",
     "pending_removal",
+    "migrating_devices",
+    "migrating_lvols",
+    "removed_failed",
 ]
 
 TaskStatus = Literal["new", "running", "suspended", "done"]
@@ -149,6 +161,14 @@ class ClusterDTO(BaseModel):
     nqn: str
     status: ClusterStatus
     is_re_balancing: bool
+    # Device/balancing tasks only; is_re_balancing also counts volume migrations.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
+    # A node removal is in progress; the status beside it is the calculated
+    # one (in_shrink is no longer set as a status).
+    is_shrinking: bool = False
+    # The status is degraded only because of the node being removed.
+    is_degraded_by_removal: bool = False
     block_size: util.Unsigned
     distr_ndcs: int
     distr_npcs: int
@@ -181,6 +201,10 @@ class ClusterDTO(BaseModel):
             nqn=model.nqn,
             status=cast(ClusterStatus, model.status),
             is_re_balancing=model.is_re_balancing,
+            is_data_rebalancing=model.is_data_rebalancing,
+            active_lvol_migrations=model.active_lvol_migrations,
+            is_shrinking=model.is_shrinking,
+            is_degraded_by_removal=model.is_degraded_by_removal,
             block_size=model.blk_size,
             distr_ndcs=model.distr_ndcs,
             distr_npcs=model.distr_npcs,
@@ -213,17 +237,16 @@ class ClusterLogEntryDTO(BaseModel):
     event: str
     level: str
     message: str
-    storage_id: int | None
+    storage_id: util.OptionalIndex
     vuid: int | None
     status: str
 
     @staticmethod
     def from_model(model: EventObj):
-        storage_id = None
-        if model.storage_id >= 0:
-            storage_id = model.storage_id
-        elif 'cluster_device_order' in model.object_dict:
-            storage_id = model.object_dict['cluster_device_order']
+        storage_id = (
+            model.storage_id if model.storage_id >= 0
+            else model.object_dict.get('cluster_device_order')
+        )
 
         message = model.message
         if model.event in ("device_status", "node_status"):
@@ -258,7 +281,8 @@ class DeviceDTO(BaseModel):
     health_check: bool | None
     retries_exhausted: bool
     size: int
-    cluster_device_order: util.Unsigned
+    # None until the device joins the cluster map (i.e. while it is `new`)
+    cluster_device_order: util.OptionalIndex
     io_error: bool
     is_partition: bool
     nvmf_ips: list[IPv4Address]
@@ -285,7 +309,8 @@ class DeviceDTO(BaseModel):
             cluster_device_order=model.cluster_device_order,
             io_error=model.io_error,
             is_partition=model.is_partition,
-            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",")],
+            # Empty until the device stack is created, so a `new` device has none
+            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",") if ip],
             nvmf_nqn=model.nvmf_nqn,
             nvmf_port=model.nvmf_port,
             capacity=CapacityStatDTO.from_model(
@@ -323,7 +348,7 @@ class StoragePoolDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO | None
     dhchap: bool = False
-    allowed_hosts: list[str] = []
+    allowed_hosts: list[util.NQN] = []
 
     @staticmethod
     def from_model(model: Pool, stat_obj: StatsObject | None = None):
@@ -398,6 +423,9 @@ class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
     secondary_node_id: UUID | None
+    # The node's second HA replica. A drain prefers migration targets whose
+    # replica set does not include the node being removed.
+    tertiary_node_id: UUID | None = None
     status: StorageNodeStatus
     uptime: timedelta | None
     hostname: str
@@ -429,6 +457,7 @@ class StorageNodeDTO(BaseModel):
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
             secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
+            tertiary_node_id=UUID(model.tertiary_node_id) if model.tertiary_node_id else None,
             status=cast(StorageNodeStatus, model.status),
             uptime=model.uptime(),
             hostname=model.hostname,
@@ -522,7 +551,7 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: list[str]
+    allowed_hosts: list[util.NQN]
     policy: str
     capacity: CapacityStatDTO
     rep_info: dict | None = None
@@ -616,39 +645,79 @@ class VolumeDTO(BaseModel):
         )
 
 
+#: A resolved backup configuration as the API exchanges it, in both directions:
+#: the response body of the backup-config GET, and the request body of discover.
+#: Both name a bucket -- one reads back what a cluster resolved, and the other
+#: points at somebody else's bucket, which only the caller can name.
+#:
+#: An alias rather than a hand-copied duplicate, because the two shapes are
+#: identical today and a copy would only drift. It is still a name of its own, so
+#: the wire format can diverge from ``BackupConfig`` later by turning this into a
+#: real class, without touching a single route signature.
+BackupConfigDTO = BackupConfig
+
+#: The same configuration as the cluster-create request body takes it, where the
+#: bucket is the one field a caller cannot supply: it is derived from the id of
+#: the cluster the request is asking to create. ``Cluster.set_backup_config``
+#: resolves it, so this shape reaches nothing beyond that call.
+UnresolvedBackupConfigDTO = UnresolvedBackupConfig
+
+#: Where a set of backups lives, without the credentials to reach it. Carried
+#: inside an export rather than named beside one: the manifests describe objects
+#: and not where they are, so the document that collects them says instead.
+BackupLocationDTO = BackupLocation
+
+#: A backup's manifest as the API exchanges it: the response body of
+#: export/discover and the entries of an inline import.
+#:
+#: An alias for the same reason ``BackupConfigDTO`` is one -- except that here the
+#: shapes have a reason to stay locked together, since the wire form of a manifest
+#: is also its form in the bucket. Naming it separately still lets the API grow a
+#: field the stored document does not have.
+BackupManifestDTO = BackupManifest
+
+#: Backups as export and inline import exchange them: manifests grouped by the
+#: bucket they live in. Grouped because one cluster can hold backups in several
+#: -- its own and any it imported -- so a single location cannot describe them.
+BackupExportDTO = BackupExport
+
+
 class BackupDTO(BaseModel):
     id: UUID
     s3_id: int
-    lvol_id: str
+    lvol_id: UUID
     lvol_name: str
-    snapshot_id: str
+    snapshot_id: UUID
     snapshot_name: str
-    node_id: str
+    node_id: UUID
     status: str
-    prev_backup_id: str
+
+    #: Absent for a full backup, which is the root of its chain. The record
+    #: spells that "", as it does every unset id; the wire says null, the way
+    #: ``DeviceDTO`` and ``LVolDTO`` already do for theirs.
+    prev_backup_id: UUID | None = None
+
     size: int
-    allowed_hosts: list[dict]
     created_at: int
     completed_at: int
-    source_cluster_id: str
+    encrypted: bool
 
     @staticmethod
     def from_model(model: Backup):
         return BackupDTO(
             id=UUID(model.uuid),
             s3_id=model.s3_id,
-            lvol_id=model.lvol_id,
+            lvol_id=UUID(model.lvol_id),
             lvol_name=model.lvol_name,
-            snapshot_id=model.snapshot_id,
+            snapshot_id=UUID(model.snapshot_id),
             snapshot_name=model.snapshot_name,
-            node_id=model.node_id,
+            node_id=UUID(model.node_id),
             status=model.status,
-            prev_backup_id=model.prev_backup_id,
+            prev_backup_id=UUID(model.prev_backup_id) if model.prev_backup_id else None,
             size=model.size,
-            allowed_hosts=model.allowed_hosts or [],
             created_at=model.created_at,
             completed_at=model.completed_at,
-            source_cluster_id=model.source_cluster_id or "",
+            encrypted=model.encrypted,
         )
 
 
@@ -1019,6 +1088,7 @@ class MigrationDTO(BaseModel):
     id: UUID
     lvol_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     phase: str
     status: str
@@ -1039,6 +1109,7 @@ class MigrationDTO(BaseModel):
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             phase=model.phase,
             status=model.status,
@@ -1059,6 +1130,7 @@ class BatchMigrationDTO(BaseModel):
     id: UUID
     cluster_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     target_nqn: str
     phase: str
@@ -1073,6 +1145,7 @@ class BatchMigrationDTO(BaseModel):
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             target_nqn=model.target_nqn,
             phase=model.phase,

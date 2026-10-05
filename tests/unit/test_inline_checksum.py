@@ -13,7 +13,7 @@ Covers:
 
 import json
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
 
@@ -233,7 +233,7 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
         rpc.bdev_wait_for_examine.return_value = True
         # SPDK bdev_get_bdevs payload – the only md-relevant field is the
         # top-level uint32 md_size set by spdk_bdev_get_md_size.
-        bdev_payload = [{
+        bdev_payload = {
             'name': 'nvmeX_n1',
             'block_size': 4096,
             'num_blocks': 100 * 1024 * 1024 // 4096,  # 100 MiB
@@ -247,8 +247,8 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
                     },
                 }],
             },
-        }]
-        rpc.get_bdevs.return_value = bdev_payload
+        }
+        rpc.bdev_get.return_value = bdev_payload
         return rpc
 
     def _make_snode(self):
@@ -288,7 +288,7 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
         rpc = MagicMock()
         rpc.bdev_nvme_controller_list.return_value = []
         rpc.bdev_nvme_controller_attach.return_value = ["nvmeX_n1"]
-        rpc.get_bdevs.return_value = [{
+        rpc.bdev_get.return_value = {
             'name': 'nvmeX_n1',
             'block_size': 4096,
             'num_blocks': 100 * 1024 * 1024 // 4096,
@@ -298,7 +298,7 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
                     'ctrlr_data': {'model_number': 'M', 'serial_number': 'S'},
                 }],
             },
-        }]
+        }
         snode = self._make_snode()
         devs = utils.addNvmeDevices(rpc, snode, ["0000:00:01.0"])
         self.assertEqual(devs[0].md_size, 0)
@@ -307,3 +307,47 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Volume-create admission charges the fallback overhead
+# ---------------------------------------------------------------------------
+class TestCreateAdmissionChargesFallbackOverhead(unittest.TestCase):
+    """add_lvol_ha counts the fallback layout's reserved blocks as provisioned.
+
+    The charge was lost on main when #1333 reconciled the capacity block of
+    add_lvol_ha; without it, a fallback-mode cluster admits volumes against
+    capacity alceml has already reserved.
+    """
+
+    def _src(self):
+        import inspect
+        import re
+
+        from simplyblock_core.controllers import lvol_controller
+        return re.sub(r'""".*?"""', "", inspect.getsource(lvol_controller.add_lvol_ha), flags=re.DOTALL)
+
+    def test_overhead_of_md_less_devices_is_added_to_provisioned(self):
+        src = self._src()
+        self.assertIn("if cl.inline_checksum and not dev.md_supported:", src)
+        self.assertIn("utils.alceml_fallback_overhead_bytes(cl, dev.size)", src)
+        # charged before the utilisation check that reads it
+        self.assertLess(src.index("alceml_fallback_overhead_bytes"),
+                        src.index("cluster_size_prov_util ="))
+
+    def test_overhead_is_converted_to_effective(self):
+        # cluster_size_prov is effective (client-visible) bytes; the reserved
+        # blocks are physical, so the charge goes through capacity.to_effective.
+        self.assertIn("capacity.to_effective(", self._src().split("alceml_fallback_overhead_bytes")[0][-200:])
+
+    def test_effective_charge_on_a_4_plus_2_cluster(self):
+        from simplyblock_core.utils import capacity
+        c = Cluster()
+        c.inline_checksum = True
+        c.blk_size = 4096
+        c.page_size_in_blocks = 2 * 1024 * 1024
+        c.distr_ndcs, c.distr_npcs = 4, 2
+        size = 1000 * 2 * 1024 * 1024
+        raw = utils.alceml_fallback_overhead_bytes(c, size)
+        self.assertEqual(raw, 1000 * 6 * 4096)
+        self.assertEqual(capacity.to_effective(raw, c), raw * 4 // 6)

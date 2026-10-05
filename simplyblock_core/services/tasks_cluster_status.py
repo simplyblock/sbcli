@@ -1,9 +1,11 @@
-import subprocess
-import logging
 import json
+import logging
+import subprocess
 import sys
 import time
+
 from graypy import GELFTCPHandler
+
 from simplyblock_core import constants
 
 SBCLI_NAME = constants.SIMPLY_BLOCK_CLI_NAME

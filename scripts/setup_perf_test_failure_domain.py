@@ -1,16 +1,16 @@
 import argparse
+import json
 import os
+import re
+import select
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import boto3
 import paramiko
-import time
-import re
-import json
-import select
 
 # --- INPUT PARAMETERS ---
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1
@@ -613,7 +613,7 @@ def main():
     #
     # add-node runs IN PARALLEL: the control plane supports concurrent
     # sn add-node (mesh wiring is serialized per cluster behind
-    # ClusterAddNodeLock and port allocation behind PortReservation), and
+    # the cluster_add DbLock and port allocation behind PortReservation), and
     # 32 sequential adds would take the better part of an hour. Worker
     # count is capped at 8 so the parallel ssh sessions stay under mgmt
     # sshd's MaxStartups throttling.
@@ -698,7 +698,7 @@ def main():
 
             try:
                 # add-node wires the new node into the mesh (serialized behind
-                # ClusterAddNodeLock); at 32 nodes a single add can queue on
+                # the cluster_add DbLock); at 32 nodes a single add can queue on
                 # that lock up to CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC (30 min)
                 # on top of its own node-local setup and mesh section, so the
                 # SSH timeout must sit above that — killing the channel here

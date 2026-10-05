@@ -6,7 +6,6 @@ from simplyblock_core.models.lvol_model import LVol
 
 from .helpers import POOL, index_keys, make_lvol, ready
 
-
 # --- the round trip ---------------------------------------------------------
 
 def test_write_then_query_returns_the_row(db):

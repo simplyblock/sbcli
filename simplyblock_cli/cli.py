@@ -106,8 +106,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.', type=str, default='', dest='size_range', required=False)
         subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         subcommand.add_argument('--lblk', help='Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition.', dest='lblk', action='store_true')
-        subcommand.add_argument('--blk-names', help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk). Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
-        subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block device names to exclude, like sda (requires --lblk). All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
+        subcommand.add_argument('--blk-names', help='Comma separated list of block devices to use (requires --lblk). Each entry is a persistent /dev/disk name, such as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 or /dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba. A kernel name (sdb) or kernel path (/dev/sdb) is refused: it states a position in this boot\'s enumeration order, and the selection is resolved again at every node restart, so it names another disk after a reboot that probes the controllers in another order. Use --blk-serials for a device udev published no persistent name for. Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
+        subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block devices to exclude (requires --lblk), spelled the way --blk-names takes them. All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
         subcommand.add_argument('--blk-serials', help='Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk).', type=str, default='', dest='blk_serials', required=False)
         subcommand.add_argument('--jm-percent', help='Journal size in percent of the node\'s total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`.', type=int, default=3, dest='jm_percent', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format.', dest='force', action='store_true')
@@ -951,6 +951,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
         subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
+        subcommand.add_argument('--retry-on-failure', help='If this migration ends in failure, automatically start a brand-new migration (full precreate + start) for the same volume/target once preconditions are met again (no rebalancing, source and target both online).', dest='retry_on_failure', action='store_true')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')
@@ -1213,14 +1214,13 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup__delete(subparser)
         self.init_backup__restore(subparser)
         self.init_backup__export(subparser)
+        self.init_backup__discover(subparser)
         self.init_backup__import(subparser)
         self.init_backup__policy_add(subparser)
         self.init_backup__policy_remove(subparser)
         self.init_backup__policy_list(subparser)
         self.init_backup__policy_attach(subparser)
         self.init_backup__policy_detach(subparser)
-        self.init_backup__source_list(subparser)
-        self.init_backup__source_switch(subparser)
 
 
     def init_backup__list(self, subparser):
@@ -1237,17 +1237,37 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='The new logical volume name.', type=str, dest='lvol_name', required=True)
         subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
         subcommand.add_argument('--node', help='The target storage node id.', type=str, dest='node')
+        subcommand.add_argument('--access-key-id', help='Access key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='secret_access_key')
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
         subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('--backup-id', help='Export the chain ending at this backup and nothing else, which is the unit a restore needs.', type=str, dest='backup_id')
         subcommand.add_argument('--lvol', help='Filter exports to a specific logical volume name.', type=str, dest='lvol_name')
         subcommand.add_argument('-o', '--output', help='The output file path.', type=str, dest='output')
 
+    def init_backup__discover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'discover', 'List the backups a bucket contains, reading its manifests. Needs no cluster.')
+        subcommand.add_argument('--bucket', help='The bucket holding the backups.', type=str, dest='bucket', required=True)
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
+
     def init_backup__import(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'import', 'Import backup metadata from a JSON file.')
-        subcommand.add_argument('metadata_file', help='The path to JSON metadata file.', type=str)
+        subcommand = self.add_sub_command(subparser, 'import', 'Register the backups held in a bucket into this cluster.')
         subcommand.add_argument('--cluster-id', help='The target cluster to import into (required for cross-cluster restore).', type=str, dest='cluster_id')
+        subcommand.add_argument('--bucket', help='Import every backup in this bucket. Give this or --from-file, not both.', type=str, dest='bucket')
+        subcommand.add_argument('--from-file', help='Import the backups in this file, from \'backup export\'. It records which bucket each one lives in, so --bucket is neither needed nor accepted.', type=str, dest='from_file')
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
 
     def init_backup__policy_add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-add', 'Create a new backup policy.')
@@ -1276,15 +1296,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('policy_id', help='The backup policy id.', type=str)
         subcommand.add_argument('target_type', help='The target type.', type=str, choices=['pool','lvol',])
         subcommand.add_argument('target_id', help='The target id (storage pool or logical volume id).', type=str)
-
-    def init_backup__source_list(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'source-list', 'List backup sources (local and imported clusters).')
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
-
-    def init_backup__source_switch(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'source-switch', 'Switch the active S3 backup source to a different cluster. Use \'local\' or the local cluster id to switch back.')
-        subcommand.add_argument('source_cluster_id', help='The source cluster id or \'local\'.', type=str)
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
 
 
     def init_qos(self):
@@ -1822,6 +1833,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__restore(sub_command, args)
                 elif sub_command in ['export']:
                     ret = self.backup__export(sub_command, args)
+                elif sub_command in ['discover']:
+                    ret = self.backup__discover(sub_command, args)
                 elif sub_command in ['import']:
                     ret = self.backup__import(sub_command, args)
                 elif sub_command in ['policy-add']:
@@ -1834,10 +1847,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__policy_attach(sub_command, args)
                 elif sub_command in ['policy-detach']:
                     ret = self.backup__policy_detach(sub_command, args)
-                elif sub_command in ['source-list']:
-                    ret = self.backup__source_list(sub_command, args)
-                elif sub_command in ['source-switch']:
-                    ret = self.backup__source_switch(sub_command, args)
                 else:
                     self.parser.print_help()
 

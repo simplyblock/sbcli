@@ -20,13 +20,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.job_schedule import JobSchedule
 from tests._mocks import unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -192,11 +191,6 @@ class TestAddClusterValidation(unittest.TestCase):
     def test_max_ft_2_requires_ha(self, mock_db):
         import simplyblock_core.cluster_ops as ops
         mock_db.get_clusters.return_value = [_cluster()]
-        # add_cluster takes the named-cluster path, which unpacks
-        # acquire_cluster_create_lock's (acquired, holder). An unconfigured
-        # MagicMock iterates empty, so the call died there instead of reaching
-        # the validation under test.
-        mock_db.acquire_cluster_create_lock.return_value = (True, None)
         with self.assertRaises(ValueError) as ctx:
             ops.add_cluster(
                 4096, 2097152, 89, 99, 250, 500,
@@ -210,7 +204,6 @@ class TestAddClusterValidation(unittest.TestCase):
     def test_max_ft_2_requires_npcs(self, mock_db):
         import simplyblock_core.cluster_ops as ops
         mock_db.get_clusters.return_value = [_cluster()]
-        mock_db.acquire_cluster_create_lock.return_value = (True, None)
         with self.assertRaises(ValueError) as ctx:
             ops.add_cluster(
                 4096, 2097152, 89, 99, 250, 500,

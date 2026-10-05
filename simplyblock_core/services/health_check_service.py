@@ -3,13 +3,16 @@ import threading
 import time
 from datetime import datetime
 
-from simplyblock_core import utils
-from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller
+from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import (
+    device_events,
+    health_controller,
+    storage_events,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core import constants, db_controller, storage_node_ops
-
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -389,7 +392,7 @@ def check_node(snode):
             if snode.jm_device and snode.jm_device.get_id():
                 jm_device = snode.jm_device
                 logger.info(f"Node JM: {jm_device.get_id()}")
-                if rpc_client.get_bdevs(jm_device.jm_bdev):
+                if rpc_client.bdev_get(jm_device.jm_bdev):
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     connected_jms.append(jm_device.get_id())
                 else:
@@ -650,7 +653,11 @@ def main():
             for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t = threading.Thread(
+                        target=loop_for_node,
+                        args=(node,),
+                        daemon=True,  # prevents main thread failures from keeping the process alive
+                    )
                     t.start()
                     threads_maps[node_id] = t
 

@@ -1,7 +1,7 @@
 from typing import ClassVar
 
-from simplyblock_core.models.indices import Index
 from simplyblock_core.models.base_model import BaseNodeObject
+from simplyblock_core.models.indices import Index
 
 
 class MgmtNode(BaseNodeObject):

@@ -21,13 +21,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from simplyblock_core.db_controller import DBController
-
 import simplyblock_web.api.v2 as v2
 import simplyblock_web.api.v2._auth as auth_module
 import simplyblock_web.api.v2._dependencies as dependencies_module
 import simplyblock_web.api.v2._dtos as dtos_module
 import simplyblock_web.api.v2.cluster as cluster_module
+import simplyblock_web.api.v2.cluster.alert as alert_module
 import simplyblock_web.api.v2.cluster.backup as backup_module
 import simplyblock_web.api.v2.cluster.consistency_group as consistency_group_module
 import simplyblock_web.api.v2.cluster.replication as replication_module
@@ -39,10 +38,10 @@ import simplyblock_web.api.v2.cluster.storage_pool.volume as volume_module
 import simplyblock_web.api.v2.cluster.storage_pool.volume.replication as volume_replication_module
 import simplyblock_web.api.v2.cluster.subsystem.migration as migration_module
 import simplyblock_web.api.v2.cluster.task as task_module
-import simplyblock_web.api.v2.cluster.alert as alert_module
 import simplyblock_web.api.v2.management_node as management_node_module
 import simplyblock_web.api.v2.metrics as metrics_module
-
+from simplyblock_core.controllers import device_controller as real_device_controller
+from simplyblock_core.db_controller import DBController
 from tests.unit.web.api.v2 import _factories as factories
 
 
@@ -214,9 +213,15 @@ def snapshot_controller(monkeypatch):
 
 @pytest.fixture()
 def backup_controller(monkeypatch):
+    """One mock standing in for both halves of the backup package.
+
+    The router reaches `controller` for backups and `policy` for policies; the
+    tests assert against a single object, so the same mock is installed as both.
+    """
     mock = MagicMock()
     monkeypatch.setattr(volume_module, 'backup_controller', mock)
     monkeypatch.setattr(backup_module, 'backup_controller', mock)
+    monkeypatch.setattr(backup_module, 'backup_policy', mock)
     return mock
 
 
@@ -247,6 +252,8 @@ def tasks_controller(monkeypatch):
 @pytest.fixture()
 def device_controller(monkeypatch):
     mock = MagicMock()
+    # Constants the endpoints read off the module must stay real strings
+    mock.FAILED_SERIAL_SUFFIX = real_device_controller.FAILED_SERIAL_SUFFIX
     monkeypatch.setattr(device_module, 'device_controller', mock)
     return mock
 

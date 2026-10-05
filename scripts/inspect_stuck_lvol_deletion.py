@@ -1,6 +1,5 @@
 from simplyblock_core.db_controller import DBController
 
-
 LVIDS = [
     "a5fd8d4e-764c-462e-9729-925b6b12fcf5",
     "05114aac-fbe8-49bd-856d-28a3db579c9e",
@@ -18,7 +17,7 @@ for lvid in LVIDS:
     for node_id in lvol.nodes:
         node = db.get_storage_node_by_id(node_id)
         try:
-            bdevs = node.rpc_client().get_bdevs() or []
+            bdevs = node.rpc_client().bdev_list()
             bdev_names = {b["name"] for b in bdevs}
             subs = node.rpc_client().subsystem_list() or []
             matching_subs = [

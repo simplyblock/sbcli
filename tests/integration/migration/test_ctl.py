@@ -30,14 +30,17 @@ python -m tests.migration.test_ctl mock set-failure-rate --host 127.0.0.1 --port
 import argparse
 import json
 import sys
+
 import requests
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
-
 from tests.integration.migration.topology_loader import (
-    set_cluster_status, set_node_status, set_lvol_status, set_snap_status,
+    set_cluster_status,
+    set_lvol_status,
+    set_node_status,
+    set_snap_status,
 )
 
 db = DBController()

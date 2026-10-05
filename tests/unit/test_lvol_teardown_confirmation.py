@@ -1,26 +1,20 @@
-"""A teardown is only complete when the node has confirmed it.
+"""A teardown is only reported complete once the node has confirmed the bdev
+is actually gone.
 
-R26.3 field report: four lvols existed as bdevs in SPDK with no record in FDB.
-The defects behind that which live in this module and are pure logic:
+``_remove_bdev_stack`` marks an entry ``deleted`` only on confirmed removal
+(a successful delete, or a probe showing the bdev already absent); a failed
+removal is reported as such and left unmarked, so a retry re-attempts it
+instead of the record being erased over a bdev still registered in SPDK.
 
-  1. ``_remove_bdev_stack`` returned a constant ``True``. A failed removal was
-     logged, the entry was stamped ``status='deleted'`` anyway, and
-     ``delete_lvol_from_node`` reported success — so lvol_monitor went on to
-     erase the record while the bdev was still registered.
+The absence probe is ``RPCClient.bdev_get`` (tested in
+``tests/unit/rpc/test_client.py``), which raises on a genuine RPC failure
+rather than answering "absent" -- an RPC that could not be completed is not
+evidence the bdev is gone, so the code falls through to attempting the
+delete instead of skipping it.
 
-  2. The "is it already gone?" probe was ``if not rpc_client.get_bdevs(name)``.
-     ``get_bdevs`` returns ``None`` both for "no such device" and for a non-200
-     from the SPDK proxy, so one transient hiccup during a mass delete skipped
-     the delete entirely and recorded it as done, leaving nothing in the log
-     but an INFO line. The probe now goes through ``RPCClient.bdev_get``
-     (tested in ``tests/unit/rpc/test_client.py``), which raises on a genuine
-     RPC failure instead of collapsing it into "gone".
-
-  3. ``delete_lvol_from_node`` conflated "removed it", "the node is
-     disconnected so I did not try" and "a task owns it": all three were
-     ``True``. It now raises ``PreconditionError`` for a deferred teardown and
-     ``RuntimeError`` for a failed one, and returns normally only once the
-     teardown is confirmed complete.
+``delete_lvol_from_node`` keeps three outcomes distinct rather than
+collapsing them into one boolean: teardown completed (returns normally),
+deferred (raises ``PreconditionError``), or failed (raises ``RuntimeError``).
 """
 
 import pytest
@@ -58,8 +52,8 @@ def _stack(**over):
 class TestRemoveBdevStack:
 
     def test_a_failed_delete_is_reported_and_not_marked_deleted(self):
-        """The core leak: this used to return True and stamp the entry
-        'deleted', so the record was removed over a live bdev."""
+        """A failed removal must not be marked deleted -- the record would
+        then be erased while the bdev is still registered in SPDK."""
         stack = _stack()
         rpc = _RPC(delete=(None, {"code": -16, "message": "device busy"}))
 
@@ -75,7 +69,8 @@ class TestRemoveBdevStack:
         assert rpc.deletes == [("LVS_1/LVOL_1", True)]
 
     def test_an_absent_bdev_is_confirmed_without_a_delete(self):
-        """The optimisation the probe exists for: no second metadata walk."""
+        """An already-absent bdev needs no delete call -- the probe alone
+        confirms teardown."""
         stack = _stack()
         rpc = _RPC(probe=None)
 
@@ -84,8 +79,8 @@ class TestRemoveBdevStack:
         assert rpc.deletes == [], "an absent bdev must not be re-deleted"
 
     def test_a_failed_probe_still_attempts_the_delete(self):
-        """A failed probe is not evidence of anything. It used to short-circuit
-        to "already deleted, skipping" and drop the delete on the floor."""
+        """A failed probe is not evidence the bdev is gone, so the delete
+        must still be attempted rather than skipped."""
         stack = _stack()
         rpc = _RPC(probe=RPCException("proxy returned non-200"))
 
@@ -115,9 +110,8 @@ class TestRemoveBdevStack:
         assert lc._remove_bdev_stack(stack, rpc, sync=True) is False
 
     def test_bmap_init_is_not_a_failure(self):
-        """It is a bookkeeping entry with no bdev behind it. It fell through to
-        the failure log on every delete; now that the result is honest, that
-        noise would fail every teardown."""
+        """A bmap_init entry is bookkeeping with no bdev behind it, so it
+        must not count as a deletion failure."""
         stack = [{"type": "bmap_init", "name": "bmap", "params": {}}]
         assert lc._remove_bdev_stack(stack, _RPC(), sync=True) is True
         assert stack[0]["status"] == "deleted"
@@ -144,8 +138,9 @@ class TestRemoveBdevStack:
 
 
 class TestLvolBdevAbsentOnNode:
-    """The post-condition the delete protocol never checked. An acknowledged
-    sync-delete RPC is not proof the bdev is gone."""
+    """The post-condition the delete protocol depends on: an acknowledged
+    sync-delete RPC is not proof the bdev is gone, so callers must verify it
+    separately before treating a teardown as complete."""
 
     class _Node:
         def __init__(self, rpc):

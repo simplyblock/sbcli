@@ -1,11 +1,11 @@
 """
-tasks_runner_backup_merge.py - periodic service that evaluates backup policies
+backup_merge_service.py - periodic service that evaluates backup policies
 and triggers merges when retention limits are exceeded.
 """
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import backup_controller
+from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.models.cluster import Cluster
 
 logger = utils.get_logger(__name__)
@@ -15,12 +15,6 @@ db = db_controller.DBController()
 def main():
     logger.info("Starting backup merge service...")
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         for cl in clusters:
             if cl.status == Cluster.STATUS_IN_ACTIVATION:
@@ -30,11 +24,11 @@ def main():
                 lvols = db.get_lvols(cl.get_id())
                 for lvol in lvols:
                     try:
-                        backup_controller.evaluate_policy(lvol)
+                        backup_policy.evaluate_policy(lvol)
                     except Exception as e:
                         logger.error(f"Error evaluating policy for lvol {lvol.get_id()}: {e}")
                     try:
-                        backup_controller.evaluate_schedule(lvol)
+                        backup_policy.evaluate_schedule(lvol)
                     except Exception as e:
                         logger.error(f"Error evaluating schedule for lvol {lvol.get_id()}: {e}")
             except Exception as e:
