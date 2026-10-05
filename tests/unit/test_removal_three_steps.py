@@ -201,6 +201,55 @@ class TestPrepareNodeForRemoval(unittest.TestCase):
             self._run(StorageNode.STATUS_REMOVED)
 
 
+class TestRemovalAdmission(unittest.TestCase):
+    """The removal's admission, asked without starting the removal.
+
+    prepare-removal is where the admission runs, and from pending_removal on
+    there is no way back; a caller that shuts the node down first learns of a
+    refusal with the node already offline. The check answers the same question
+    while the node still serves, and changes nothing
+    (2026-10-05-removal-admission-after-shutdown)."""
+
+    def _run(self, status, admission=(True, "")):
+        node = _node("n1", "10.0.0.1", status)
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = node
+        with patch.object(node_drain_steps, "DBController", return_value=db), \
+                patch.object(storage_node_ops, "check_removal_admission",
+                             return_value=admission) as admit, \
+                patch.object(storage_node_ops, "set_node_status") as stamp, \
+                patch.object(node_drain_steps, "start_device_decommission") as start:
+            result = node_drain_steps.removal_admission("n1")
+        stamp.assert_not_called()
+        start.assert_not_called()
+        return result, admit
+
+    def test_an_admissible_node_is_admitted_and_nothing_changes(self):
+        result, admit = self._run(StorageNode.STATUS_ONLINE)
+        assert result == {"admitted": True, "reason": ""}
+        admit.assert_called_once()
+        # Forcing cancels the node's active tasks, which a check must never do.
+        assert admit.call_args.kwargs["force_remove"] is False
+        assert admit.call_args.kwargs["check_snapshots"] is False
+
+    def test_a_refusal_says_why_and_changes_nothing(self):
+        result, _ = self._run(StorageNode.STATUS_ONLINE,
+                              admission=(False, "would leave failure domain 2 with 1 host"))
+        assert result["admitted"] is False
+        assert "failure domain 2" in result["reason"]
+
+    def test_a_node_already_departing_is_past_admission(self):
+        result, admit = self._run(StorageNode.STATUS_MIGRATING_DEVICES)
+        assert result["admitted"] is True
+        admit.assert_not_called()
+
+    def test_a_removed_node_is_not_admitted(self):
+        result, admit = self._run(StorageNode.STATUS_REMOVED)
+        assert result["admitted"] is False
+        assert "removed" in result["reason"]
+        admit.assert_not_called()
+
+
 @pytest.mark.parametrize("status", [
     StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_REMOVED])
 def test_the_device_step_never_rewinds_a_later_status(status):

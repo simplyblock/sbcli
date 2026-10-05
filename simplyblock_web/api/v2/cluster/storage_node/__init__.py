@@ -355,6 +355,22 @@ def prepare_removal_progress(cluster: Cluster, storage_node: StorageNode) -> Dra
     return DrainStepProgress(**node_drain_steps.prepare_progress(storage_node.get_id()))
 
 
+class RemovalAdmission(BaseModel):
+    """Whether the node may be removed, and why not."""
+    admitted: bool
+    reason: str = ''
+
+
+@instance_api.get('/removal-admission', name='clusters:storage-nodes:removal-admission')
+def removal_admission(cluster: Cluster, storage_node: StorageNode) -> RemovalAdmission:
+    """The removal's admission, asked without starting the removal: the checks
+    prepare-removal runs (fault-tolerance headroom, failure-domain balance,
+    replica relocation, active tasks), answered while the node still serves.
+    It changes nothing. A refusal is an answer rather than an error, so it is a
+    200 with ``admitted`` false and the reason."""
+    return RemovalAdmission(**node_drain_steps.removal_admission(storage_node.get_id()))
+
+
 @instance_api.post('/verify-drained', name='clusters:storage-nodes:verify-drained')
 def verify_drained(cluster: Cluster, storage_node: StorageNode) -> DrainVerification:
     """The removal's second step, closing the volume half: whether the node

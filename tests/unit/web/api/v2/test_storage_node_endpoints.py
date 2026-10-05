@@ -339,6 +339,19 @@ class TestRemovalSteps:
         assert body['node_status'] == 'migrating_devices'
         assert body['done'] is False and body['completed'] == 1
 
+    def test_removal_admission_answers_without_starting_anything(self, client, storage_node, monkeypatch):
+        # The Kubernetes operator asks this while the node still serves, before
+        # it shuts the node down (2026-10-05-removal-admission-after-shutdown).
+        from simplyblock_web.api.v2.cluster import storage_node as module
+        monkeypatch.setattr(module.node_drain_steps, 'removal_admission', lambda nid: {
+            'admitted': False, 'reason': 'would leave failure domain 2 with 1 host'})
+
+        response = client.get(f'{BASE}/{STORAGE_NODE_ID}/removal-admission')
+
+        assert response.status_code == 200
+        assert response.json() == {
+            'admitted': False, 'reason': 'would leave failure domain 2 with 1 host'}
+
     def test_verify_drained_lists_what_is_left(self, client, storage_node, monkeypatch):
         from simplyblock_web.api.v2.cluster import storage_node as module
         monkeypatch.setattr(module.node_drain_steps, 'verify_node_drained', lambda nid: {
