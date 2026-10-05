@@ -2305,20 +2305,33 @@ class K8sNativeFailoverTest(TestClusterBase):
         rule_in = f"INPUT -i {iface} -j DROP"
         rule_out = f"OUTPUT -o {iface} -j DROP"
 
-        # Step 1: schedule the targeted restore as a host-level process.
+        # Step 1: schedule the targeted restore ON THE HOST.
+        #
+        # This used to go through `nsenter --target 1` from inside the SPDK
+        # pod, which does not reach the host: the pod is hostNetwork but not
+        # hostPID, so PID 1 in that namespace is the container's own and the
+        # timer died with the container -- precisely the case the comment
+        # claimed it survived. run_on_node goes in via `oc debug node/`,
+        # which chroots /host and gets real systemd.
         restore_inner = (
-            f"sleep {flush_delay} && iptables -D {rule_in}; "
-            f"iptables -D {rule_out}"
+            f"iptables -D {rule_in} 2>/dev/null; "
+            f"iptables -D {rule_out} 2>/dev/null; true"
         )
-        restore_cmd = (
-            f"sudo nsenter --target 1 --mount --net -- "
-            f"bash -c 'nohup bash -c \"{restore_inner}\" "
-            f"> /dev/null 2>&1 &'"
-        )
-        self.k8s_utils.exec_in_spdk_container(node_ip, restore_cmd)
+        armed = self.k8s_utils.arm_host_undo_script(
+            node_ip, restore_inner, flush_delay, tag="nic")
+        if not armed:
+            # No host shell (Talos). Keep the in-pod timer so the NIC still
+            # comes back in the common case, and say what we are exposed to.
+            self.k8s_utils.exec_in_spdk_container(node_ip, (
+                f"sudo nohup bash -c 'sleep {flush_delay}; {restore_inner}' "
+                f"> /dev/null 2>&1 &"))
+            self.logger.warning(
+                f"[K8s] restore of {iface} on {node_ip} is armed in the SPDK "
+                f"pod, not on the host. If this outage takes the node down "
+                f"the pod goes with it and the NIC stays dropped.")
         self.logger.info(
-            f"[K8s] Scheduled host-level restore of {iface} in {flush_delay}s "
-            f"on {node_ip}"
+            f"[K8s] Scheduled restore of {iface} in {flush_delay}s "
+            f"on {node_ip} ({'host' if armed else 'pod fallback'})"
         )
 
         # Step 2: apply the DROP rules after a short delay, so kubectl
@@ -2337,51 +2350,35 @@ class K8sNativeFailoverTest(TestClusterBase):
         return duration
 
     def _k8s_network_outage(self, node_ip: str, duration: int) -> int:
-        """Trigger self-restoring full network outage on a K8s storage node.
+        """Cut a K8s storage node off its peers' storage network.
 
-        Uses kubectl exec into the privileged SPDK pod (hostNetwork:true) to
-        run iptables DROP rules with auto-flush after *duration* seconds.
+        Delegates to K8sUtils.cut_storage_network, which every k8s outage
+        test now shares. Two things changed when it moved there, both of
+        them bugs this copy had:
 
-        The iptables flush runs as a **host-level process** via
-        ``nsenter --target 1`` so it survives SPDK container death.  Without
-        this, SPDK's 60-second abort timer kills the container (and all its
-        child processes), leaving iptables DROP rules permanently in place.
+        It used to blanket-DROP everything on the node. That severed the
+        node's spdk-proxy from its peers -- and `simplyblock-monitoring` is
+        scheduled onto a storage node, so when it landed on the node under
+        test it reported three healthy peers as failed and the cluster went
+        degraded, then suspended. It also severed OVN geneve and
+        FoundationDB, which shows up as `FDBError: transaction timed out`
+        and is a broken test environment rather than a storage outage. The
+        cut is now the peers' DATA addresses only (NVMe-oF), leaving
+        management -- and the monitor -- working.
 
-        No SSH to storage nodes required.
+        The undo used to be scheduled with `nsenter --target 1` from inside
+        the SPDK pod, under a comment saying it survived the container being
+        killed. It did not: the pod is hostNetwork but NOT hostPID, so PID 1
+        there is the container's own and the timer died with it. It is now a
+        transient systemd unit armed through `oc debug node/`, and the undo
+        deletes the rules it added instead of running `iptables -F`.
 
         Returns the chosen duration.
         """
         self._ensure_k8s_utils()
-        # Total delay before flush = 5s (pre-DROP delay) + duration
-        flush_delay = duration + 5
-        # Step 1: Schedule the iptables flush as a host-level process via
-        # nsenter into PID 1's namespaces.  This process survives even if
-        # the SPDK container (and all its children) is killed by abort().
-        flush_cmd = (
-            f"sudo nsenter --target 1 --mount --net -- "
-            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
-            f"> /dev/null 2>&1 &'"
-        )
-        self.k8s_utils.exec_in_spdk_container(node_ip, flush_cmd)
-        self.logger.info(
-            f"[K8s] Scheduled host-level iptables flush in {flush_delay}s on {node_ip}"
-        )
-
-        # Step 2: Apply the DROP rules after a short delay (gives kubectl
-        # exec time to return before connectivity is lost).
-        drop_cmd = (
-            "sudo nohup bash -c '"
-            "sleep 5 && "
-            "iptables -A INPUT -j DROP && "
-            "iptables -A OUTPUT -j DROP"
-            "' > /tmp/k8s_nw_outage.log 2>&1 &"
-        )
-        self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
-        self.logger.info(
-            f"[K8s] Network outage triggered on {node_ip} "
-            f"(self-restoring after {duration}s)"
-        )
-        return duration
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        peers = self.k8s_utils.peer_data_ips(nodes, node_ip)
+        return self.k8s_utils.cut_storage_network(node_ip, peers, duration)
 
     def _k8s_reboot_node(self, node_ip: str, node: str):
         """Really reboot the worker, or say plainly that we could not.

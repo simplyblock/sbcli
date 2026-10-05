@@ -503,15 +503,25 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     def _k8s_network_outage(self, node_ip: str, duration: int) -> int:
         """Trigger self-restoring full network outage on a K8s storage node.
 
-        Uses kubectl exec into the privileged SPDK pod (hostNetwork:true) to
-        run iptables DROP rules with auto-flush after *duration* seconds.
+        Delegates to K8sUtils.cut_storage_network, shared by every k8s
+        outage test. Two bugs this copy had went with it.
 
-        The iptables flush runs as a **host-level process** via
-        ``nsenter --target 1`` so it survives SPDK container death.  Without
-        this, SPDK's 60-second abort timer kills the container (and all its
-        child processes), leaving iptables DROP rules permanently in place.
+        It blanket-DROPped everything on the node, which severed the node's
+        spdk-proxy from its peers. `simplyblock-monitoring` runs on a storage
+        node, so when it landed on the node under test it reported three
+        healthy peers as failed and the cluster went degraded and then
+        suspended -- a collapse that was written up as a product defect twice
+        before dev spotted the co-location. The blanket rule also took out
+        OVN geneve and FoundationDB, which surfaces as `FDBError: transaction
+        timed out` and is a broken test environment, not a storage outage.
+        The cut is now the peers' DATA addresses only.
 
-        No SSH to storage nodes required.
+        And the undo was scheduled with `nsenter --target 1` from inside the
+        SPDK pod, under a comment claiming it survived the container being
+        killed. The pod is hostNetwork but NOT hostPID, so PID 1 there is the
+        container's own and the timer died with it. It is now a transient
+        systemd unit on the host, and it deletes the rules it added rather
+        than running `iptables -F` over every rule on the box.
 
         Returns the chosen duration.
         """
@@ -519,35 +529,9 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             raise RuntimeError(
                 "[K8s] k8s_utils not initialised — was setup() called with k8s_run=True?"
             )
-        # Total delay before flush = 5s (pre-DROP delay) + duration
-        flush_delay = duration + 5
-        # Step 1: Schedule the iptables flush as a host-level process via
-        # nsenter into PID 1's namespaces.  This process survives even if
-        # the SPDK container (and all its children) is killed by abort().
-        flush_cmd = (
-            f"sudo nsenter --target 1 --mount --net -- "
-            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
-            f"> /dev/null 2>&1 &'"
-        )
-        self.k8s_utils.exec_in_spdk_container(node_ip, flush_cmd)
-        self.logger.info(
-            f"[K8s] Scheduled host-level iptables flush in {flush_delay}s on {node_ip}"
-        )
-
-        # Step 2: Apply the DROP rules after a short delay (gives kubectl
-        # exec time to return before connectivity is lost).
-        drop_cmd = (
-            "sudo nohup bash -c '"
-            "sleep 5 && "
-            "iptables -A INPUT -j DROP && "
-            "iptables -A OUTPUT -j DROP"
-            "' > /tmp/k8s_nw_outage.log 2>&1 &"
-        )
-        self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
-        self.logger.info(
-            f"[K8s] Network outage triggered on {node_ip} "
-            f"(self-restoring after {duration}s)"
-        )
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        peers = self.k8s_utils.peer_data_ips(nodes, node_ip)
+        self.k8s_utils.cut_storage_network(node_ip, peers, duration)
         return duration
 
     def perform_n_plus_k_outages(self):

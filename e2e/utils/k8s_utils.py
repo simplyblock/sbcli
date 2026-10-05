@@ -459,6 +459,226 @@ class K8sUtils:
             node_name, want, timeout)
         return False
 
+    # ── storage-network cut (shared by every k8s outage test) ─────────
+    #
+    # One implementation for lblk, continuous_k8s_native_failover,
+    # continuous_failover_ha_k8s and the security suite. They had four
+    # copies; three of them blanket-DROPped everything on the node, which
+    # takes out OVN, FoundationDB and the cluster's own health monitor along
+    # with the storage path, and then "restored" with `iptables -F`.
+
+    def peer_data_ips(self, storage_nodes, node_ip):
+        """Peers' DATA-network addresses, given the storage-node list.
+
+        *storage_nodes* is the list of dicts the control plane returns.
+
+        The data NIC is what a storage outage should cut. Management carries
+        spdk-proxy, the SNodeAPI, OVN geneve, FoundationDB, the kubelet and
+        simplyblock-monitoring; cutting it means that when the monitor is
+        scheduled on the node under test, our own rule starves it of its
+        peers and it demotes all of them. That produced a cluster collapse
+        twice, which was written up as a product defect before dev spotted
+        the co-location.
+
+        Falls back to mgmt_ip when a node has no data NIC recorded, with a
+        warning -- silently falling back would reintroduce exactly that bug.
+        """
+        peers = []
+        for n in storage_nodes or []:
+            if n.get("mgmt_ip") == node_ip:
+                continue
+            ip = ""
+            for nic in (n.get("data_nics") or []):
+                ip = nic.get("ip4_address") or ""
+                if ip:
+                    break
+            if not ip:
+                ip = n.get("mgmt_ip") or ""
+                if ip:
+                    self.logger.warning(
+                        "[K8sUtils] storage node %s has no data NIC address; "
+                        "falling back to its mgmt IP for the cut. That is the "
+                        "network simplyblock-monitoring uses, so this cut may "
+                        "demote peers that are perfectly healthy.", ip)
+            if ip:
+                peers.append(ip)
+        return peers
+
+    @staticmethod
+    def _peer_drop_add(peers):
+        return "; ".join(
+            f"iptables -A INPUT -s {p} -j DROP; "
+            f"iptables -A OUTPUT -d {p} -j DROP" for p in peers)
+
+    @staticmethod
+    def _peer_drop_undo(peers):
+        """Delete exactly what we added. Never `iptables -F`.
+
+        -D matches the whole rule, so this has to mirror the add. Three
+        passes because a retried cycle can add a rule more than once.
+        """
+        return "; ".join(
+            f"for i in 1 2 3; do "
+            f"iptables -D INPUT -s {p} -j DROP 2>/dev/null; "
+            f"iptables -D OUTPUT -d {p} -j DROP 2>/dev/null; done"
+            for p in peers) + "; true"
+
+    #: Where the host-armed undo records that it fired.
+    NET_UNDO_MARKER = "/tmp/sb_net_undo.stamp"
+
+    def arm_host_net_undo(self, node_ip, peers, delay):
+        """Schedule the undo on the HOST, to fire in *delay* seconds.
+
+        Returns True when it is armed somewhere that outlives the SPDK pod.
+
+        This is the part the old copies got wrong. They scheduled it with
+        `nsenter --target 1` from inside the SPDK pod, under a comment saying
+        it survives the container dying. The pod is hostNetwork but not
+        hostPID, so PID 1 there is the container's own and the timer dies
+        with it. run_on_node goes in through `oc debug node/` instead, which
+        chroots /host and gets real systemd.
+
+        The SELinux relabel is not optional: a script written to /tmp is
+        user_tmp_t, which init_t may not execute, and systemd reports that as
+        "Failed to locate executable", which reads like a missing file.
+        """
+        return self.arm_host_undo_script(
+            node_ip, self._peer_drop_undo(peers), delay, tag="netundo")
+
+    def arm_host_undo_script(self, node_ip, inner, delay, tag="undo"):
+        """Run *inner* on the host after *delay* seconds, outliving the pod.
+
+        The generic form of :meth:`arm_host_net_undo`, so the interface-
+        scoped NIC outage can use the same mechanism rather than keeping its
+        own `nsenter --target 1` version, which never reached the host.
+
+        Returns True when systemd (or at worst setsid) took it.
+        """
+        import random as _random
+        import time as _time
+        unit = f"sb-{tag}-{int(_time.time())}-{_random.getrandbits(16):04x}"
+        undo = inner
+        script = (
+            f"set -e; "
+            f"cat > /tmp/sb_{tag}_undo.sh <<'EOS'\n"
+            f"#!/bin/sh\n"
+            f"sleep {delay}\n"
+            f"{undo}\n"
+            f"date -u +'net-undo %Y-%m-%dT%H:%M:%SZ' >> {self.NET_UNDO_MARKER}\n"
+            f"EOS\n"
+            f"chmod +x /tmp/sb_{tag}_undo.sh; "
+            f"chcon -t bin_t /tmp/sb_{tag}_undo.sh 2>/dev/null || true; "
+            f"if command -v systemd-run >/dev/null 2>&1 && "
+            f"systemd-run --collect --unit={unit} /tmp/sb_{tag}_undo.sh; "
+            f"then echo armed-via-systemd; else "
+            f"echo armed-via-setsid; "
+            f"setsid nohup /tmp/sb_{tag}_undo.sh </dev/null >/dev/null 2>&1 & "
+            f"fi")
+        try:
+            out, _err = self.run_on_node(node_ip, script, timeout=120,
+                                         check=False)
+        except Exception as exc:                      # noqa: BLE001
+            # Talos raises by design: it has no host shell.
+            self.logger.warning(
+                "[K8sUtils] could not arm the undo on the host for %s: %s",
+                node_ip, str(exc)[:160])
+            return False
+        if "armed-via" not in (out or ""):
+            self.logger.warning(
+                "[K8sUtils] host undo for %s did not confirm it armed; said: "
+                "%s", node_ip, (out or "<nothing>").strip()[:200])
+            return False
+        return True
+
+    def cut_storage_network(self, node_ip, peers, duration):
+        """Cut *node_ip* off its peers' storage network for *duration*.
+
+        Verifies the rules landed -- a silent no-op here is indistinguishable
+        from a successful isolation and produces a test that proves nothing.
+        Raises RuntimeError if they did not, after undoing whatever did.
+        """
+        import shlex as _shlex
+        if not peers:
+            raise RuntimeError(
+                f"[K8sUtils] no peer storage nodes to isolate {node_ip} from")
+        add = self._peer_drop_add(peers)
+        self.exec_in_spdk_container(node_ip, f"sudo sh -c {_shlex.quote(add)}")
+        show = "iptables -S INPUT; iptables -S OUTPUT"
+        out, _err = self.exec_in_spdk_container(
+            node_ip, f"sudo sh -c {_shlex.quote(show)}")
+        applied = sum(1 for p in peers if f"-s {p}/32" in (out or "")
+                      or f"-d {p}/32" in (out or ""))
+        if applied < len(peers):
+            self.restore_storage_network(node_ip, peers)
+            raise RuntimeError(
+                f"[K8sUtils] iptables did not take on {node_ip}: wanted "
+                f"{len(peers)} peers blocked, saw {applied}. Rules undone. "
+                f"iptables -S said: {(out or '<nothing>')[:300]}")
+        mgmt_hit = [ln for ln in (out or "").splitlines()
+                    if "-j DROP" in ln and "192.168." in ln]
+        if mgmt_hit:
+            self.logger.warning(
+                "[K8sUtils] a DROP rule on %s is on the MANAGEMENT network: "
+                "%s. That is the network simplyblock-monitoring uses; if the "
+                "monitor is on this node it will report its peers as failed.",
+                node_ip, mgmt_hit[:2])
+        on_host = self.arm_host_net_undo(node_ip, peers, duration + 30)
+        if not on_host:
+            undo = self._peer_drop_undo(peers)
+            self.exec_in_spdk_container(node_ip, (
+                f"sudo sh -c {_shlex.quote(f'(sleep {duration + 30}; {undo}) >/dev/null 2>&1 &')}"))
+            self.logger.warning(
+                "[K8sUtils] backstop for %s is in the SPDK pod, not on the "
+                "host. If this cut takes the node offline the pod goes with "
+                "it and the cut will not be undone.", node_ip)
+        self.logger.info(
+            "[K8sUtils] %s cut off from %d peer(s) %s for %ds; undo armed %s",
+            node_ip, len(peers), ",".join(peers), duration,
+            "on the host" if on_host else "in the pod (fallback)")
+        return duration
+
+    def restore_storage_network(self, node_ip, peers):
+        """Remove the peer DROP rules. Safe to call twice. Never raises.
+
+        Pod first because it is cheap and is all Talos has; host second
+        because a cut long enough to take the node offline removes the pod,
+        and that is the case that matters -- it is what ended run
+        20261002-202420 with "No snode-spdk-pod found" as its verdict on a
+        cycle that was testing a network cut.
+        """
+        import shlex as _shlex
+        if not peers:
+            return True
+        undo = self._peer_drop_undo(peers)
+        show = "iptables -S INPUT; iptables -S OUTPUT"
+        out = None
+        try:
+            self.exec_in_spdk_container(node_ip, f"sudo sh -c {_shlex.quote(undo)}")
+            out, _err = self.exec_in_spdk_container(
+                node_ip, f"sudo sh -c {_shlex.quote(show)}")
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[K8sUtils] cannot restore %s through its SPDK pod (%s); "
+                "going in through the host instead", node_ip, str(exc)[:140])
+            try:
+                self.run_on_node(node_ip, undo, timeout=120, check=False)
+                out, _err = self.run_on_node(node_ip, show, timeout=120,
+                                             check=False)
+            except Exception as exc2:                 # noqa: BLE001
+                self.logger.error(
+                    "[K8sUtils] could not reach %s by either route, so its "
+                    "peer DROP rules are probably still in place: %s",
+                    node_ip, str(exc2)[:160])
+                return False
+        left = [ln for ln in (out or "").splitlines() if "-j DROP" in ln]
+        if left:
+            self.logger.warning(
+                "[K8sUtils] DROP rules still on %s after restore: %s",
+                node_ip, left[:4])
+            return False
+        self.logger.info("[K8sUtils] network restored on %s", node_ip)
+        return True
+
     def isolate_node(self, node_ip: str, duration: int) -> bool:
         """Cut the node off completely for *duration*, restoring itself.
 
@@ -552,15 +772,26 @@ class K8sUtils:
     def isolation_marker(self, node_ip: str) -> str:
         """What the last :meth:`isolate_node` on this node left behind.
 
-        Empty string when the cut never armed. Read through the SPDK pod
-        rather than a debug pod, so it costs nothing and works once the node
-        is reachable again.
+        Empty string when the cut never armed.
+
+        Read from the HOST. isolate_node writes this marker through
+        run_on_node, which chroots /host, so the file is on the host
+        filesystem. This used to read it with `nsenter --target 1 --mount`
+        from inside the SPDK pod, which lands in the CONTAINER's mount
+        namespace -- the pod is hostNetwork but not hostPID, so PID 1 there
+        is its own. It would have returned "" whether or not the cut armed,
+        which is the exact failure the marker exists to distinguish.
+
+        Currently unreferenced; fixed rather than deleted because the
+        distinction it draws -- "never armed" is a broken harness, "armed
+        but nothing happened" is a finding about the cluster -- is worth
+        having, and a method that silently reads the wrong filesystem is a
+        trap for whoever picks it up next.
         """
         try:
-            out, _err = self.exec_in_spdk_container(
-                node_ip,
-                f"sudo nsenter --target 1 --mount -- "
-                f"cat {self.ISOLATION_MARKER} 2>/dev/null || true")
+            out, _err = self.run_on_node(
+                node_ip, f"cat {self.ISOLATION_MARKER} 2>/dev/null || true",
+                timeout=120, check=False)
             return (out or "").strip()
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[K8sUtils] could not read the isolation "

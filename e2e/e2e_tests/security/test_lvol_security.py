@@ -2164,13 +2164,26 @@ class SecurityTestBase(TestClusterBase):
         """Trigger a self-restoring full network outage on a storage node.
 
         docker: drop the node's NICs over SSH for *duration* seconds.
-        k8s: kubectl exec into the privileged hostNetwork SPDK pod and apply
-          iptables DROP rules, with the flush scheduled as a HOST-level
-          process via ``nsenter --target 1`` so it survives SPDK's 60-second
-          abort timer killing the container. Without that, the DROP rules
-          would be permanent and the node never comes back. Ported from the
-          proven implementation in
-          ``e2e/stress_test/continuous_k8s_native_failover.py``.
+        k8s: delegate to K8sUtils.cut_storage_network, shared by every k8s
+          outage test.
+
+        This was ported from continuous_k8s_native_failover and inherited
+        two bugs from it, both since fixed in the shared version.
+
+        It blanket-DROPped everything on the node. That severed the node's
+        spdk-proxy from its peers, and `simplyblock-monitoring` is scheduled
+        onto a storage node -- so when it happened to be the node under test,
+        it reported three healthy peers as failed and the cluster went
+        degraded and then suspended. It also cut OVN geneve and FoundationDB,
+        which is a broken test environment rather than a storage outage. The
+        cut is now the peers' DATA addresses only.
+
+        And the flush was scheduled with ``nsenter --target 1`` from inside
+        the SPDK pod. The pod is hostNetwork but NOT hostPID, so PID 1 there
+        is the container's own: the timer died with the container, which is
+        exactly the case the old docstring claimed it survived. It is now a
+        transient systemd unit on the host, deleting the rules it added
+        rather than flushing the table.
         """
         if not self.k8s_test:
             active = self.ssh_obj.get_active_interfaces(node_ip)
@@ -2180,28 +2193,9 @@ class SecurityTestBase(TestClusterBase):
             return duration
 
         k8s = self._ensure_k8s_utils()
-        flush_delay = duration + 5
-        flush_cmd = (
-            f"sudo nsenter --target 1 --mount --net -- "
-            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
-            f"> /dev/null 2>&1 &'"
-        )
-        k8s.exec_in_spdk_container(node_ip, flush_cmd)
-        self.logger.info(
-            f"[k8s] scheduled host-level iptables flush in {flush_delay}s on "
-            f"{node_ip}")
-        drop_cmd = (
-            "sudo nohup bash -c '"
-            "sleep 5 && "
-            "iptables -A INPUT -j DROP && "
-            "iptables -A OUTPUT -j DROP"
-            "' > /tmp/k8s_nw_outage.log 2>&1 &"
-        )
-        k8s.exec_in_spdk_container(node_ip, drop_cmd)
-        self.logger.info(
-            f"[k8s] network outage triggered on {node_ip} (self-restoring "
-            f"after {duration}s)")
-        return duration
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        peers = k8s.peer_data_ips(nodes, node_ip)
+        return k8s.cut_storage_network(node_ip, peers, duration)
 
     def _disconnect_and_unmount_dual(self, lvol_name, lvol_id, mount_point):
         """Release the volume so it can be published elsewhere.
