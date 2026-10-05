@@ -137,6 +137,48 @@ class _LblkOutageMatrix(_LblkBase):
     #: continuity for a pod the outage had deliberately thrown off the node.
     DRAINING_OUTAGES = ("storage_node_reboot", "node_network_isolation")
 
+    def _base_outage(self, outage_type):
+        """The generic outage a *_fio_worker variant is a variant OF.
+
+        FIO_WORKER_OUTAGES is the authority -- it is the mapping the recovery
+        path already uses -- with a suffix strip as the fallback so a variant
+        added to OUTAGES but forgotten in the dict still classifies correctly
+        rather than silently behaving like an unrelated outage.
+        """
+        return self.FIO_WORKER_OUTAGES.get(
+            outage_type, (outage_type or "").replace("_fio_worker", ""))
+
+    def _cycles_for(self, outage, nodes, no_client_evict):
+        """The (node, outage) pairs this outage should produce.
+
+        One implementation for the full and the trimmed node lists. They were
+        two separate expressions, and the trimmed one never learned about
+        FIO_WORKER_OUTAGES: with LBLK_MATRIX_NODES set, the *_fio_worker
+        variants would have run on EVERY node instead of once on the FIO
+        worker. On any other node there is no client to move, so
+        assert_clean_reschedule would wait out its full 900s hunting for a
+        reschedule that was never going to happen and then fail the run.
+
+        Nobody has set LBLK_MATRIX_NODES yet, which is the only reason that
+        has not fired.
+        """
+        if outage in self.FIO_WORKER_OUTAGES:
+            # Exactly one cycle, on the one node that matters for it. Running
+            # it per-node would be 3-4 repeats of the same question at up to
+            # eleven minutes each, and on any node but the FIO worker it is
+            # just the generic outage again.
+            if not self._fio_home_node:
+                self.logger.warning(
+                    "[matrix] skipping %s: no reserved FIO worker on this "
+                    "platform, so there is no node whose loss would move the "
+                    "client. Nothing to assert.", outage)
+                return []
+            return [(self._fio_home_node, outage)]
+        targets = (no_client_evict
+                   if self._base_outage(outage) in self.CLIENT_EVICTING_OUTAGES
+                   else nodes)
+        return [(node, outage) for node in targets]
+
     def _drains(self, outage_type):
         """Does this outage remove the pod on purpose?
 
@@ -152,8 +194,7 @@ class _LblkOutageMatrix(_LblkBase):
         the same mechanism for the same duration, so it drains exactly as much
         and deserves the same patience.
         """
-        base = (outage_type or "").replace("_fio_worker", "")
-        return base in self.DRAINING_OUTAGES
+        return self._base_outage(outage_type) in self.DRAINING_OUTAGES
 
     #: How long a client may take to come back on another node.
     #:
@@ -344,23 +385,7 @@ class _LblkOutageMatrix(_LblkBase):
             # node dicts, and the API answered "Pool not found:" followed by a
             # dump of every storage node -- which reads like a cluster fault
             # rather than a variable collision.
-            if outage in self.FIO_WORKER_OUTAGES:
-                # Exactly one cycle, on the one node that matters for it.
-                # Running it per-node would be 3-4 repeats of the same
-                # question at up to eleven minutes each, and on any node but
-                # the FIO worker it is just the generic outage again.
-                if not self._fio_home_node:
-                    self.logger.warning(
-                        "[matrix] skipping %s: no reserved FIO worker on this "
-                        "platform, so there is no node whose loss would move "
-                        "the client. Nothing to assert.", outage)
-                    continue
-                cycles.append((self._fio_home_node, outage))
-                continue
-            targets = (no_client_evict
-                       if outage in self.CLIENT_EVICTING_OUTAGES
-                       else nodes)
-            cycles += [(node, outage) for node in targets]
+            cycles += self._cycles_for(outage, nodes, no_client_evict)
 
         # Full coverage is every type on every node, and on a six-node cluster
         # that is 24 cycles at roughly ten minutes each -- about four hours.
@@ -375,14 +400,11 @@ class _LblkOutageMatrix(_LblkBase):
                               if n is not self._fio_home_node] or trimmed
             cycles = []
             for outage in outages:
-                # Same exclusion as above: trimming the node count must not
-                # quietly put an evicting outage back on the node hosting FIO.
-                # This tested one type where the list has four, so a trimmed
-                # run could still reboot the client's own node.
-                cycles += [(node, outage) for node in
-                           (trimmed_no_cut
-                            if outage in self.CLIENT_EVICTING_OUTAGES
-                            else trimmed)]
+                # Same helper as the full path, so trimming cannot quietly
+                # change WHICH outages land on the FIO worker. This used to be
+                # its own expression and had drifted: it knew about
+                # CLIENT_EVICTING_OUTAGES but not about FIO_WORKER_OUTAGES.
+                cycles += self._cycles_for(outage, trimmed, trimmed_no_cut)
             self.logger.warning(
                 "[matrix] LBLK_MATRIX_NODES=%d: running %d of %d nodes, so "
                 "%d cycles instead of %d. Coverage of outage TYPES is "
