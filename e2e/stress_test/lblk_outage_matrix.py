@@ -447,7 +447,8 @@ class _LblkOutageMatrix(_LblkBase):
             self._verify_raw(where)
             self._scan_spdk_logs(where)
             self._assert_attached(where)
-            self._assert_fio_alive(live, where, outage_type=outage)
+            self._assert_fio_alive(live, where, outage_type=outage,
+                                   outage_ip=node.get("mgmt_ip"))
 
         self._finish_live_fio(live)
         self._assert_static_unchanged("after all outages")
@@ -1504,7 +1505,8 @@ class _LblkOutageMatrix(_LblkBase):
                 placed[handle] = node
         return placed
 
-    def _assert_fio_alive(self, handles, outage, outage_type=None):
+    def _assert_fio_alive(self, handles, outage, outage_type=None,
+                          outage_ip=None):
         """FIO must still be running. A job that died is an interruption.
 
         On k8s the handle is the Job NAME -- a non-empty string -- so the old
@@ -1514,6 +1516,7 @@ class _LblkOutageMatrix(_LblkBase):
         Ask the cluster instead: a Job with no pod, or whose pod has gone
         Failed/Succeeded, is a Job that stopped doing IO.
         """
+        moves_asserted = 0
         for name, _log, job, handle in handles:
             if isinstance(handle, str):
                 alive = self._k8s_fio_running(handle)
@@ -1533,13 +1536,45 @@ class _LblkOutageMatrix(_LblkBase):
                 # be on a different node, and nothing may be stuck on a
                 # volume. assert_clean_reschedule says which of those failed.
                 was_on = (self._fio_nodes_before or {}).get(handle)
+                k8s = self._ensure_k8s_utils()
+                # Which k8s node did the outage actually take? prefer_node is
+                # a SOFT preference, so the live FIO jobs do not all sit on
+                # the reserved worker -- run 20261005-144243 had
+                # fio-mxlivecrypto on worker-2 while the cut took worker-4.
+                # Demanding a move from a job that was never on the cut node
+                # fails a cycle for doing exactly the right thing.
+                cut_node = ""
+                if outage_ip:
+                    try:
+                        cut_node = k8s._get_k8s_node_name(outage_ip)
+                    except Exception as exc:          # noqa: BLE001
+                        self.logger.warning(
+                            "[matrix] cannot resolve the k8s node for %s "
+                            "(%s); judging the move on the recorded node "
+                            "alone", outage_ip, str(exc)[:120])
                 if not was_on:
                     self.logger.warning(
                         "[matrix] %s: no recorded node for %s before the "
                         "outage, so the move cannot be judged. Treating as "
                         "the plain liveness check.", outage_type, handle)
+                elif cut_node and was_on != cut_node:
+                    # Nothing to move. Still has to be alive, which the
+                    # liveness check below covers.
+                    self.logger.info(
+                        "[matrix] %s: live FIO %s was on %s, not on the cut "
+                        "node %s, so no move is expected of it. Checking only "
+                        "that it is still running.",
+                        outage_type, name, was_on, cut_node)
+                    if not alive:
+                        raise LblkPreconditionError(
+                            f"[matrix] live FIO on {name} stopped during "
+                            f"{outage_type}, and it was on {was_on} -- NOT on "
+                            f"{cut_node}, the node the outage took. Nothing "
+                            f"touched its node, so this is a loss of "
+                            f"availability rather than an expected move.")
+                    continue
                 else:
-                    k8s = self._ensure_k8s_utils()
+                    moves_asserted += 1
                     landed = k8s.assert_clean_reschedule(
                         handle, was_on, timeout=self.RESCHEDULE_SEC)
                     self.logger.info(
@@ -1675,6 +1710,17 @@ class _LblkOutageMatrix(_LblkBase):
                     f"With ndcs/npcs {self.ndcs}/{self.npcs} one node down is "
                     f"meant to be survivable, so IO ending here is a loss of "
                     f"availability, not an expected blip.")
+        if outage_type in self.FIO_WORKER_MOVE_OUTAGES and not moves_asserted:
+            # The cycle ran, nothing broke, and it tested nothing. prefer_node
+            # is a soft preference, so every live FIO job can drift off the
+            # reserved worker and the cut then lands on a node with no client
+            # on it. Passing silently here is how a lane keeps reporting green
+            # while covering less and less.
+            self.logger.warning(
+                "[matrix] %s took its node but NO live FIO job was on it, so "
+                "nothing was asked to move and this cycle proves nothing "
+                "about moving a client off a dead node. prefer_node is a soft "
+                "preference; the jobs had drifted elsewhere.", outage_type)
         self._collect_fio_findings(handles, outage)
         self.logger.info("[matrix] live FIO still running after %s", outage)
 
