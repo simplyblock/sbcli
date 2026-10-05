@@ -1277,7 +1277,8 @@ class TestClusterBase:
                       runtime=300, name=None, rw="randrw", size="1G",
                       bs="4K", iodepth=1, numjobs=2, nrfiles=8,
                       time_based=True, verify=None, verify_fatal=False,
-                      node_selector=None, prefer_node=None, **kwargs):
+                      node_selector=None, prefer_node=None, backoff_limit=6,
+                      **kwargs):
         """Start FIO. Returns thread (Docker) or job_name str (K8s).
 
         verify: e.g. "md5" or "crc32c". Opt-in and off by default, so existing
@@ -1336,9 +1337,17 @@ class TestClusterBase:
             # to move it if that node is lost. Without that a Job can
             # never be rescheduled, which is the behaviour the
             # *_fio_worker outages exist to test.
+            # backoff_limit, not the create_fio_job default of 0. A pod
+            # evicted with its node counts as a FAILED pod, so at 0 the Job is
+            # marked Failed the moment an outage takes its node and Kubernetes
+            # never places a replacement. assert_clean_reschedule then waits
+            # out its full 900s for something that cannot happen -- which is
+            # exactly how run 20261005-081722 failed cycle 17, on the outage
+            # type whose entire purpose is to watch the pod move.
             k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
                                node_selector=node_selector,
-                               prefer_node=prefer_node)
+                               prefer_node=prefer_node,
+                               backoff_limit=backoff_limit)
             self._k8s_fio_jobs.append(job_name)
             self._k8s_configmaps.append(cm_name)
             return job_name

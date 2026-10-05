@@ -2559,10 +2559,25 @@ class K8sUtils:
                        warmup_config: str = None,
                        node_name: str = None,
                        node_selector: str = None,
-                       prefer_node: str = None):
+                       prefer_node: str = None,
+                       backoff_limit: int = 0):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
+            backoff_limit: how many times Kubernetes may replace a failed pod.
+                Defaults to 0, which is what every caller had before this was a
+                parameter: one pod, no retries, a failure is final.
+
+                That default is wrong for any job an outage is aimed at. A pod
+                evicted with its node counts as a failed pod, so at 0 the Job is
+                marked Failed and no replacement is ever placed -- which is how
+                run 20261005-081722 spent 900s waiting for a reschedule that
+                could not happen. Jobs that are expected to be moved need a real
+                budget, or the move cannot be observed at all.
+
+                Raising it does not hide FIO failures: get_job_pod_names selects
+                on job-name and so lists terminated pods, and
+                _collect_fio_findings reads every one of them.
             cleanup_before_fio: If True, add an init container that removes old
                 FIO data files from the volume before FIO starts. Useful for
                 clone PVCs that inherit files from the source.
@@ -2715,7 +2730,7 @@ class K8sUtils:
             f"  name: {job_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  backoffLimit: 0\n"
+            f"  backoffLimit: {backoff_limit}\n"
             f"  template:\n"
             f"    metadata:\n"
             f"      labels:\n"
