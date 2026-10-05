@@ -23,7 +23,9 @@ def _compute_s3_cpu_masks(node: StorageNode):
     """CPU masks for the S3 bdev, or None where the node does not say.
 
     Returns (bdb_lcpu_mask, s3_lcpu_mask):
-        bdb_lcpu_mask: app_thread core (SPDK lightweight thread, low overhead)
+        bdb_lcpu_mask: JC-singleton core (SPDK lightweight thread, low
+                       overhead) — the same core the lvol poller group already
+                       colocates with (see create_s3_bdev below)
         s3_lcpu_mask: all system vCPUs (no pinning — let Linux scheduler handle
                       the AWS SDK thread pool; the data plane default would
                       wrongly pin onto SPDK reactor cores)
@@ -32,8 +34,8 @@ def _compute_s3_cpu_masks(node: StorageNode):
     CPUs at all, and the data plane reads it as "unset" anyway, so returning it
     would be a sentinel dressed as a value.
     """
-    # SPDK thread for the bdev poller — reuse the app thread core
-    bdb_lcpu_mask = int(node.app_thread_mask, 16) if node.app_thread_mask else None
+    # SPDK thread for the bdev poller — reuse the JC singleton/compression core
+    bdb_lcpu_mask = int(node.jc_singleton_mask, 16) if node.jc_singleton_mask else None
 
     # AWS SDK thread pool — set all system vCPU bits so threads are unconstrained
     s3_lcpu_mask = (1 << node.cpu) - 1 if node.cpu > 0 else None

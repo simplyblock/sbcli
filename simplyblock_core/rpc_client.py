@@ -2338,6 +2338,22 @@ class RPCClient:
                 so callers that care should compute one.
             s3_thread_pool_size: AWS SDK thread pool size. Absent means the data
                 plane's default of 32.
+            s3_request_timeout_ms: how long a single AWS SDK call may hang
+                before the watchdog cooperatively aborts it. Absent means the
+                data plane's default of 5000.
+            s3_request_hard_abort_ms: grace period *after*
+                s3_request_timeout_ms before the watchdog forces the request
+                to a terminal FAILED state, bypassing the AWS SDK entirely --
+                not a standalone threshold. Absent means the data plane's
+                default of 10000.
+            s3_request_max_attempts: attempts the bdev makes at the AWS SDK
+                per I/O, including the first. Absent means the data plane's
+                default.
+            s3_retry_burst: retry budget shared by all requests of this
+                device. Absent means the data plane's default.
+            s3_retry_refill_ms: refill period for the retry budget, one
+                token per this many ms. Absent means the data plane's
+                default.
         """
         params: dict[str, Any] = {
             "name": name,
@@ -2356,6 +2372,11 @@ class RPCClient:
             "bdb_lcpu_mask": bdb_lcpu_mask,
             "s3_lcpu_mask": s3_lcpu_mask,
             "s3_thread_pool_size": s3_thread_pool_size,
+            "s3_request_timeout_ms": s3_request_timeout_ms,
+            "s3_request_hard_abort_ms": s3_request_hard_abort_ms,
+            "s3_request_max_attempts": s3_request_max_attempts,
+            "s3_retry_burst": s3_retry_burst,
+            "s3_retry_refill_ms": s3_retry_refill_ms,
         }
         params.update({k: v for k, v in optional.items() if v is not None})
         return self._request3("bdev_s3_create", **params)

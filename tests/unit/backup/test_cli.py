@@ -91,7 +91,7 @@ class TestBucketConfig:
         assert config.endpoint is None
         assert config.credentials is None
         assert config.verify_tls is True
-        assert config.use_path_style is False
+        assert config.use_path_style is True
 
     def test_endpoint_and_addressing(self):
         config = clibase._bucket_config(self._args(

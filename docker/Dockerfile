@@ -2,7 +2,7 @@
 
 ARG UBI_VERSION=10.2
 ARG FDB_VERSION=7.3.69
-ARG UV_VERSION=0.12.5
+ARG UV_VERSION=0.12.22
 
 # The application interpreter, free-threaded ("t" suffix). Managed by uv rather
 # than dnf: UBI carries no free-threaded build, and tying the runtime to the
@@ -50,7 +50,7 @@ ARG CACHE_KEY
 # slow, source-built extension.
 RUN echo "OS package layer cache key: ${CACHE_KEY}" && \
     dnf install -y \
-        https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm && \
+        https://download.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm && \
     dnf install -y \
         ca-certificates \
         curl \
@@ -148,6 +148,13 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
 
 RUN uv python install "${PYTHON_VERSION}t"
 
+# The managed interpreter ships its own pip in its site-packages (the venv
+# below does not -- uv creates it without one). Nothing in the image runs pip,
+# and the copy carries a vendored bundle (urllib3, msgpack, setuptools) that
+# the image scan flags whenever one of those gets an advisory.
+RUN rm -rf /opt/python/cpython-*/lib/python*/site-packages/pip \
+           /opt/python/cpython-*/lib/python*/site-packages/pip-*.dist-info
+
 WORKDIR /app
 
 # Dependencies resolve from pyproject.toml and uv.lock alone -- `uv sync` needs
@@ -172,8 +179,7 @@ COPY . .
 # and the `COPY . /app` in the runtime stage goes away. See AGENTS.md.
 #
 # uv creates the environment without pip, setuptools or wheel, so there is
-# nothing to uninstall afterwards and no vendored pip bundle for the image scan
-# to flag.
+# nothing to uninstall afterwards; the interpreter's own pip is removed above.
 RUN uv sync --locked --no-default-groups --python "${PYTHON_VERSION}t"
 
 
