@@ -679,6 +679,85 @@ class K8sUtils:
         self.logger.info("[K8sUtils] network restored on %s", node_ip)
         return True
 
+    def relocate_monitor_off(self, node_ip, timeout=180):
+        """Move simplyblock-monitoring off *node_ip* before isolating it.
+
+        :meth:`isolate_node` cuts EVERYTHING (``! -i lo -j DROP``) and has to:
+        the point of that outage is to make the kubelet miss its heartbeats
+        so the scheduler evicts the node's pods, and the kubelet is on the
+        management network. So unlike the storage-network cut, this one
+        cannot be narrowed to spare the control plane.
+
+        Which leaves the other half of the problem. simplyblock-monitoring is
+        scheduled onto a storage node, and when the node it lands on is the
+        one being isolated, it loses its RPCs to all three peers, concludes
+        all three have failed, and demotes them -- the cluster goes degraded
+        and then suspended off a single-node outage. That is what run
+        20261003-080237 did, and it was written up as a product defect twice
+        before dev spotted the co-location.
+
+        Deleting the pod lets the deployment put it on another node, so the
+        monitor keeps a clear view of the cluster while one node goes dark.
+        That is the behaviour the test means to exercise; a blinded monitor
+        is not.
+
+        Returns True when the monitor is known to be elsewhere. Best effort:
+        if it cannot be found or moved, the caller is told and decides.
+        """
+        try:
+            out, _err = self._exec_kubectl(
+                f"kubectl get pods -n {self.namespace} -o wide --no-headers "
+                f"2>/dev/null | grep -i monitoring || true",
+                supress_logs=True, timeout=120)
+            node = self._get_k8s_node_name(node_ip)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[K8sUtils] could not locate simplyblock-monitoring before "
+                "isolating %s: %s", node_ip, str(exc)[:140])
+            return False
+
+        here = [c.split()[0] for c in (out or "").splitlines()
+                if len(c.split()) >= 7 and c.split()[6] == node]
+        if not here:
+            self.logger.info(
+                "[K8sUtils] simplyblock-monitoring is not on %s; isolating "
+                "without moving it", node)
+            return True
+
+        self.logger.warning(
+            "[K8sUtils] simplyblock-monitoring %s is on %s, the node about "
+            "to be fully isolated. Moving it first -- left there it would "
+            "lose every peer and demote all of them, which collapses the "
+            "cluster and tells us nothing about the outage.", here, node)
+        for pod in here:
+            self._exec_kubectl(
+                f"kubectl delete pod {pod} -n {self.namespace} "
+                f"--ignore-not-found --wait=false 2>&1 || true", timeout=120)
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sleep_n_sec(10)
+            try:
+                out, _err = self._exec_kubectl(
+                    f"kubectl get pods -n {self.namespace} -o wide "
+                    f"--no-headers 2>/dev/null | grep -i monitoring || true",
+                    supress_logs=True, timeout=120)
+            except Exception:                         # noqa: BLE001
+                continue
+            rows = [c.split() for c in (out or "").splitlines()
+                    if len(c.split()) >= 7]
+            running = [r for r in rows if r[2] == "Running" and r[6] != node]
+            if running and not [r for r in rows if r[6] == node]:
+                self.logger.info(
+                    "[K8sUtils] simplyblock-monitoring is now on %s",
+                    running[0][6])
+                return True
+        self.logger.warning(
+            "[K8sUtils] simplyblock-monitoring did not move off %s within "
+            "%ds. Isolating anyway, but if the peers go schedulable during "
+            "this outage, that is why.", node, timeout)
+        return False
+
     def isolate_node(self, node_ip: str, duration: int) -> bool:
         """Cut the node off completely for *duration*, restoring itself.
 

@@ -828,6 +828,13 @@ class _LblkBase(TestClusterBase):
         self.logger.info("[lblk] isolating %s for %ds; %d pod(s) on it now",
                          ip, self.NODE_ISOLATION_SEC, len(before))
 
+        # isolate_node cuts everything, kubelet included -- it has to, that
+        # is how the node goes NotReady and its pods get evicted. So this
+        # outage cannot be narrowed to spare the control plane the way the
+        # storage-network cut was. Move the monitor out of the way instead:
+        # left on the node being isolated it loses all three peers, demotes
+        # them, and collapses the cluster off a single-node outage.
+        k8s.relocate_monitor_off(ip)
         k8s.isolate_node(ip, self.NODE_ISOLATION_SEC)
 
         if not k8s.wait_node_condition(ip, ready=False, timeout=240):
