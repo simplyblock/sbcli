@@ -746,6 +746,76 @@ jobs:
           done
           [[ "$failed" -eq 0 ]] || exit 1
 
+      - name: Check disk space on all nodes (post-cleanup)
+        timeout-minutes: 10
+        shell: bash
+        env:
+          DISK_WARN_PCT: "70"
+          DISK_FAIL_PCT: "90"
+        run: |
+          set -uo pipefail
+
+          # Run 20261004-082535 lost 8h17m because .201 was already at 95%
+          # before the test started and could not come back from the reboot
+          # the outage loop issued. It had been at 95% since the first sample.
+          # Nothing looked, so nothing said anything until the node was gone.
+          #
+          # This runs after the nodes are cleaned and before bootstrap, so a
+          # node that cannot survive the run is caught in seconds rather than
+          # hours. Not set -e: every node is checked and reported before the
+          # step decides, rather than stopping at the first one.
+
+          targets="$(echo "$MNODES $STORAGE_PRIVATE_IPS" | tr ' ' '\n' \
+            | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          worst=0
+          failed=0
+          for ip in $targets; do
+            use="$(timeout 60 ${SB_SSH} \
+              -o ConnectTimeout=15 -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "df --output=pcent / | tail -1 | tr -dc '0-9'" 2>/dev/null)"
+            if [[ -z "$use" ]]; then
+              echo "::warning::disk check: could not read df on ${ip}"
+              continue
+            fi
+            line="$(timeout 60 ${SB_SSH} \
+              -o ConnectTimeout=15 -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "df -h / | tail -1" 2>/dev/null)"
+            echo "  ${ip}: ${line}"
+            [[ "$use" -gt "$worst" ]] && worst="$use"
+
+            if [[ "$use" -ge "$DISK_FAIL_PCT" || "$use" -ge "$DISK_WARN_PCT" ]]; then
+              # Say WHY, not just that it is full. The usual answer is SPDK
+              # core dumps: analyze_core_dumps_docker.sh reads them out of
+              # /var/lib/systemd/coredump and /etc/simplyblock but never
+              # deletes them, so they survive every run.
+              echo "    biggest directories on ${ip}:"
+              timeout 90 ${SB_SSH} \
+                -o ConnectTimeout=15 -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                "${SSH_USER}@${ip}" \
+                "du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -12; \
+                 echo '    cores:'; \
+                 du -ch /var/lib/systemd/coredump/*.zst /etc/simplyblock/*core*.zst \
+                   2>/dev/null | tail -1" 2>/dev/null | sed 's/^/      /'
+            fi
+
+            if [[ "$use" -ge "$DISK_FAIL_PCT" ]]; then
+              echo "::error::${ip} root filesystem is ${use}% full (fail at ${DISK_FAIL_PCT}%). A node this full will not survive the reboot the outage loop issues -- that is what cost run 20261004-082535 eight hours and left .201 down."
+              failed=1
+            elif [[ "$use" -ge "$DISK_WARN_PCT" ]]; then
+              echo "::warning::${ip} root filesystem is ${use}% full (warn at ${DISK_WARN_PCT}%). Clear it before this becomes a failed run."
+            fi
+          done
+
+          echo "worst node: ${worst}% used"
+          if [[ "$failed" -eq 1 ]]; then
+            echo "Refusing to start: clear the disks and re-run. Raise DISK_FAIL_PCT on this step only if you intend to run that close to full."
+            exit 1
+          fi
+
       - name: Bootstrap cluster (all params are inputs; --spdk-image only if set)
         shell: bash
         run: |
