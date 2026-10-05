@@ -10,6 +10,7 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core import storage_node_ops
 from simplyblock_core.controllers import node_drain_steps, tasks_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 
 from ... import util as util
@@ -146,9 +147,18 @@ def delete(
     # domains) was retried forever instead of the operator resuming the
     # node it had already suspended and failing cleanly (2026-08-13
     # incident). 400 is correctly classified as non-retryable there.
-    none_or_false = storage_node_ops.remove_storage_node(
-            storage_node.get_id(), force_remove=force_remove, force_migrate=force_migrate
-    )
+    # A refusal carries its reason in the 400's detail. A caller decides from
+    # it whether to wait or to give up: a cluster still rebalancing or a task
+    # still active on the node passes by itself, a failure-domain balance the
+    # removal would break does not, and a bare 400 tells the two apart for
+    # nobody (2026-10-05-removal-refusal-read-as-final).
+    try:
+        none_or_false = storage_node_ops.remove_storage_node(
+                storage_node.get_id(), force_remove=force_remove, force_migrate=force_migrate,
+                raise_on_refusal=True,
+        )
+    except PreconditionError as e:
+        raise HTTPException(400, str(e))
     if none_or_false == False:  # noqa
         raise HTTPException(400, 'Failed to remove storage node')
 

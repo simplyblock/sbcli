@@ -4670,7 +4670,7 @@ def check_removal_admission(snode, db_controller, force_remove=False, check_snap
     return True, ""
 
 
-def remove_storage_node(node_id, force_remove=False, force_migrate=False):
+def remove_storage_node(node_id, force_remove=False, force_migrate=False, raise_on_refusal=False):
     """Start the online removal of a storage node from its cluster.
 
     This is the inverse of cluster expansion (add_node). It validates the
@@ -4696,6 +4696,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     LVol migration is no longer part of node removal.
 
     Returns the new task uuid on success, or False on a rejected precondition.
+    With ``raise_on_refusal`` a rejected precondition raises PreconditionError
+    carrying the reason instead: the API answers it as a 400 that says why, so
+    a caller can tell a refusal that passes by itself (the cluster still
+    rebalancing, an active task on the node) from one that never will.
     """
     db_controller = DBController()
     try:
@@ -4713,6 +4717,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     ok, reason = check_removal_admission(snode, db_controller, force_remove=force_remove)
     if not ok:
         logger.error(f"Can not remove node {node_id}: {reason}")
+        if raise_on_refusal:
+            from simplyblock_core.exceptions import PreconditionError
+            raise PreconditionError(f"Can not remove node {node_id}: {reason}")
         return False
 
     # Same positive condition the orchestrator's own shutdown step uses (see
@@ -4732,6 +4739,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             ret, reason = ret
             if not ret:
                 logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+                if raise_on_refusal:
+                    from simplyblock_core.exceptions import PreconditionError
+                    raise PreconditionError(f"Can not remove node {node_id}: shutdown failed: {reason}")
                 return False
         elif not ret:
             logger.error(f"[REMOVAL] {node_id}: shutdown failed")

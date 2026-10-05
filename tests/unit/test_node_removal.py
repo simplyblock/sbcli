@@ -156,7 +156,7 @@ class FakeDB:
 
 class TestRemovePreconditions(unittest.TestCase):
 
-    def _run(self, db, **patches):
+    def _run(self, db, raise_on_refusal=False, **patches):
         tc = MagicMock()
         tc.get_active_node_removal_task.return_value = patches.get("active_removal", False)
         tc.get_active_node_tasks.return_value = patches.get("active_tasks", [])
@@ -171,8 +171,30 @@ class TestRemovePreconditions(unittest.TestCase):
                           return_value=patches.get("ftt", (True, ""))), \
              patch.object(storage_node_ops, "_check_replica_relocation_feasible",
                           return_value=patches.get("feasible", (True, ""))):
-            ret = storage_node_ops.remove_storage_node("n1")
+            ret = storage_node_ops.remove_storage_node("n1", raise_on_refusal=raise_on_refusal)
         return ret, tc
+
+    def test_refusal_raises_with_its_reason_when_asked(self):
+        # The API's DELETE answered every refused removal with a bare 400,
+        # "Failed to remove storage node": the reason was only logged. A caller
+        # cannot tell a refusal that passes by itself (the cluster still
+        # rebalancing, an active task on the node) from one that never will,
+        # and the Kubernetes operator failed its removal on both
+        # (2026-10-05-removal-refusal-read-as-final).
+        from simplyblock_core.exceptions import PreconditionError
+        cl = _cluster()
+        nodes = [_node("n1"), _node("n2")]
+        with self.assertRaises(PreconditionError) as raised:
+            self._run(FakeDB(cl, nodes), raise_on_refusal=True,
+                      ftt=(False, "Cluster is rebalancing; wait for rebalancing"))
+        self.assertIn("wait for rebalancing", str(raised.exception))
+        self.assertIn("n1", str(raised.exception))
+
+    def test_refusal_returns_false_unless_asked_to_raise(self):
+        cl = _cluster()
+        nodes = [_node("n1"), _node("n2")]
+        ret, tc = self._run(FakeDB(cl, nodes), ftt=(False, "ftt blocks"))
+        self.assertFalse(ret)
 
     def test_happy_path_queues_task(self):
         cl = _cluster()
