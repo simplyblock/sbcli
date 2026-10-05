@@ -265,6 +265,31 @@ def test_backup_no_process_poll_is_a_retry(backup_runner):
     rpc.bdev_lvol_s3_backup.assert_not_called()  # this poll only resets state
 
 
+def test_backup_failed_poll_is_a_retry_not_an_abort(backup_runner):
+    """A "Failed" transfer must retry exactly like "No process", not abort the
+    backup outright.
+
+    Regression for backup-retry-empty-issue.md: MinIO was OOM-killed mid-upload
+    and back within ~2 seconds -- a plain upload is additive, so re-issuing it
+    onto the same s3_id is safe, and the data plane giving up after an I/O
+    error is not known to be any more permanent than it dying outright (the
+    "No process" case already retries). The task's own max_retry
+    (BACKUP_TASK_MAX_RETRIES) is what bounds this, not a counter kept here."""
+    backup = _backup()
+    backup_runner.db.get_backup_by_id.return_value = backup
+
+    snode = _node()
+    rpc = snode.rpc_client.return_value
+    rpc.bdev_lvol_transfer_stat.return_value = {"transfer_state": "Failed"}
+    backup_runner.db.get_storage_node_by_id.return_value = snode
+
+    with pytest.raises(trb.TaskRetry):
+        backup_runner.SPEC.handler(_backup_task(backup_id="bk-1"))
+
+    assert backup.status == Backup.STATUS_PENDING
+    rpc.bdev_lvol_s3_backup.assert_not_called()  # this poll only resets state
+
+
 def test_backup_completes_on_done(backup_runner):
     backup = _backup()
     backup_runner.db.get_backup_by_id.return_value = backup

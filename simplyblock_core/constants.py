@@ -977,8 +977,20 @@ NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
 
 # S3 Backup constants
 BACKUP_POLL_INTERVAL_SEC = 5
+#: max_retry for restore and merge tasks. A plain backup upload uses its own,
+#: lower BACKUP_TASK_MAX_RETRIES instead -- see that constant for why.
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
+
+#: max_retry for the backup-upload task (FN_BACKUP) specifically. Lower than
+#: BACKUP_MAX_RETRIES because a failing upload is not the only path back to a
+#: completed backup of the same snapshot: once this ceiling gives up, the next
+#: scheduled or manual backup notices the snapshot is still unbacked and
+#: starts a fresh attempt (backup.controller.ensure_snapshot_chain_backed_up).
+#: Restore and merge have no such fallback -- a restore that gives up leaves
+#: a volume stuck, and a merge mid-delete cannot be retried at all (see
+#: tasks_runner_backup._run_merge) -- so they keep the longer ceiling.
+BACKUP_TASK_MAX_RETRIES = 5
 
 #: Longest backup chain the control plane will accept.
 #:
