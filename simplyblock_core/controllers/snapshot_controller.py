@@ -9,6 +9,14 @@ import time
 import uuid
 from datetime import datetime
 
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_result,
+    stop_after_attempt,
+    wait_fixed,
+)
+
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import (
     events_controller,
@@ -21,7 +29,7 @@ from simplyblock_core.controllers import (
     tasks_controller,
 )
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import ChainLockTimeout, PreconditionError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.models.cluster import Cluster
@@ -451,7 +459,7 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True,
                 chain_root)
             yield
             return
-        raise PreconditionError(
+        raise ChainLockTimeout(
             f"Timed out acquiring chain lock on {chain_root} "
             f"(for {object_uuid})")
     stop = threading.Event()
@@ -828,19 +836,20 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
-                ret = False
+
+                @retry(
+                    retry=retry_if_result(lambda result: not result[0] and result[1] and result[1].get("code") == -32602),
+                    stop=stop_after_attempt(5),
+                    wait=wait_fixed(2),
+                    before_sleep=before_sleep_log(logger, lg.WARNING),
+                    retry_error_callback=lambda state: state.outcome.result() if state.outcome else (False, None),
+                )
+                def _create_snapshot_bdev():
+                    return rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+
                 with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
                                      node_id=primary_node.get_id(), enabled=lock):
-                    for i in range(5):
-                        ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
-                        if not ret:
-                            if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
-                                logger.error(f"Failed to create snapshot, retrying: {err}")
-                                time.sleep(0.1)
-                            else:
-                                break
-                        else:
-                            break
+                    ret, err = _create_snapshot_bdev()
                 if not ret:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
@@ -1251,6 +1260,21 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
                 all_nodes.append(db_controller.get_storage_node_by_id(snode.tertiary_node_id))
             except KeyError:
                 pass
+
+        # Probe order, not membership: a node the removal has already shut down
+        # cannot answer, so asking it first costs the SnodeAPI retry budget
+        # (3 attempts, ~6s) before the exception is swallowed and we move on.
+        # Live 2026-09-15: every intermediate-snapshot cleanup during a node
+        # drain burned that on the departing node -- "Failed to resolve
+        # ...bd4qf...svc.cluster.local" x3 -- then succeeded immediately
+        # against the secondary, which was the leader all along.
+        #
+        # Ordered rather than filtered so the "detect leader via RPC, no status
+        # checks" contract above still holds: every candidate is still probed,
+        # including a departing one if nothing else answers. Only the sequence
+        # changes, so this cannot pick a different leader than before.
+        all_nodes.sort(
+            key=lambda n: n.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES)
 
         primary_node = None
         for candidate in all_nodes:
