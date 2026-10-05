@@ -402,7 +402,7 @@ class _LblkOutageMatrix(_LblkBase):
             # failed, whatever the data says -- and if it is not caught here
             # the next cycle cuts a node on an already-degraded cluster and
             # stops being the single-node outage it reports itself as.
-            self._assert_cluster_healthy(where)
+            self._assert_cluster_healthy(where, outage_type=outage)
             self._assert_static_unchanged(where)
             self._verify_raw(where)
             self._scan_spdk_logs(where)
@@ -1113,7 +1113,23 @@ class _LblkOutageMatrix(_LblkBase):
     #: waits, and inside the 300s already allowed for node health.
     CLUSTER_SETTLE_SEC = 180
 
-    def _assert_cluster_healthy(self, where):
+    #: The same, for outages that evict and restart a node. Sized from what
+    #: recovery actually takes rather than guessed -- 180s was guessed twice
+    #: and was marginally short both times, which is worse than being wildly
+    #: wrong because it looks like a real failure:
+    #:
+    #:   run 20261004-164452  .244  offline 18:06:32 -> online 18:13:42   7m10s
+    #:   run 20261004-215107  .245  unreach 23:08:29 -> online 23:22:10  13m41s
+    #:
+    #: and the node bounces on the way (in_restart -> in_shutdown -> offline
+    #: -> in_restart -> online), so this is not one clean transition to wait
+    #: on. Matches RESCHEDULE_SEC, whose docstring already explains why
+    #: kubernetes takes minutes here. Draining outages only: a quick outage
+    #: that has not settled in 180s really is stuck, and waiting 15 minutes to
+    #: say so would cost every run that genuinely breaks.
+    DRAIN_SETTLE_SEC = 900
+
+    def _assert_cluster_healthy(self, where, outage_type=None):
         """Fail the cycle unless the cluster is active and every node online.
 
         Added after dev pointed out that run 20261003-080237 went degraded
@@ -1128,7 +1144,10 @@ class _LblkOutageMatrix(_LblkBase):
         # later. The cluster reports active while a node is still finishing
         # its restart, so a node check with no patience of its own fails a
         # cycle that was about to be fine.
-        deadline = time.time() + self.CLUSTER_SETTLE_SEC
+        budget = (self.DRAIN_SETTLE_SEC
+                  if outage_type in self.DRAINING_OUTAGES
+                  else self.CLUSTER_SETTLE_SEC)
+        deadline = time.time() + budget
         status, not_online = None, []
         while True:
             try:
@@ -1146,12 +1165,22 @@ class _LblkOutageMatrix(_LblkBase):
             if time.time() >= deadline:
                 raise LblkPreconditionError(
                     f"[matrix] cluster did not settle {where} within "
-                    f"{self.CLUSTER_SETTLE_SEC}s: status={status!r}"
+                    f"{budget}s: status={status!r}"
                     + (f", not online: {', '.join(not_online)}"
                        if not_online else "")
                     + ". Refusing to start the next outage -- cutting another "
                       "node now would exceed the 1/1 fault tolerance this run "
                       "is configured for.")
+            # Say something while waiting. A draining outage can legitimately
+            # take 14 minutes to settle, and a silent poll loop that long is
+            # indistinguishable from a hang in the log.
+            waited = int(budget - (deadline - time.time()))
+            if waited % 60 < 10:
+                self.logger.info(
+                    "[matrix] waiting for the cluster to settle %s "
+                    "(%ds/%ds): status=%s%s", where, waited, budget, status,
+                    f", not online: {', '.join(not_online)}"
+                    if not_online else "")
             sleep_n_sec(10)
         self.logger.info("[matrix] cluster active, all nodes online %s", where)
 
