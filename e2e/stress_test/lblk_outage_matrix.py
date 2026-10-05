@@ -137,6 +137,24 @@ class _LblkOutageMatrix(_LblkBase):
     #: continuity for a pod the outage had deliberately thrown off the node.
     DRAINING_OUTAGES = ("storage_node_reboot", "node_network_isolation")
 
+    def _drains(self, outage_type):
+        """Does this outage remove the pod on purpose?
+
+        Matched on the BASE name, so the *_fio_worker variants count as the
+        draining outages they are. Listing the exact strings was wrong twice:
+        node_network_isolation went in and node_network_isolation_fio_worker
+        did not, so run 20261005-114437 gave the latter the 180s quick-outage
+        budget and failed with the node still offline -- a node that a 420s
+        isolation had just taken down, and that the previous runs needed seven
+        to fourteen minutes to get back.
+
+        A *_fio_worker cycle differs only in WHICH node it targets. It uses
+        the same mechanism for the same duration, so it drains exactly as much
+        and deserves the same patience.
+        """
+        base = (outage_type or "").replace("_fio_worker", "")
+        return base in self.DRAINING_OUTAGES
+
     #: How long a client may take to come back on another node.
     #:
     #: Generous on purpose. A drained node hands its pods over in seconds,
@@ -1145,7 +1163,7 @@ class _LblkOutageMatrix(_LblkBase):
         # its restart, so a node check with no patience of its own fails a
         # cycle that was about to be fine.
         budget = (self.DRAIN_SETTLE_SEC
-                  if outage_type in self.DRAINING_OUTAGES
+                  if self._drains(outage_type)
                   else self.CLUSTER_SETTLE_SEC)
         deadline = time.time() + budget
         status, not_online = None, []
@@ -1573,7 +1591,7 @@ class _LblkOutageMatrix(_LblkBase):
                         f"{FIO_MAX_LATENCY} ceiling -- but the Job should "
                         f"have restarted it once the network came back.")
                 continue
-            if not alive and outage_type in self.DRAINING_OUTAGES:
+            if not alive and self._drains(outage_type):
                 # The drain asked for this. Give the Job controller a moment
                 # to place the replacement, then judge it on whether IO
                 # resumed -- not on whether it never stopped.
