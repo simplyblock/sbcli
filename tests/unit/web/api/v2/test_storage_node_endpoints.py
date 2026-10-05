@@ -144,7 +144,7 @@ class TestDeleteStorageNode:
 
         assert response.status_code == 204
         storage_node_ops.remove_storage_node.assert_called_once_with(
-            STORAGE_NODE_ID, force_remove=False, force_migrate=False)
+            STORAGE_NODE_ID, force_remove=False, force_migrate=False, raise_on_refusal=True)
         storage_node_ops.delete_storage_node.assert_not_called()
 
     def test_force_delete_also_deletes_node(self, client, storage_node, storage_node_ops):
@@ -153,7 +153,7 @@ class TestDeleteStorageNode:
 
         assert response.status_code == 204
         storage_node_ops.remove_storage_node.assert_called_once_with(
-            STORAGE_NODE_ID, force_remove=True, force_migrate=False)
+            STORAGE_NODE_ID, force_remove=True, force_migrate=False, raise_on_refusal=True)
         storage_node_ops.delete_storage_node.assert_called_once_with(
             STORAGE_NODE_ID, force=True)
 
@@ -171,6 +171,20 @@ class TestDeleteStorageNode:
         response = client.delete(f'{BASE}/{STORAGE_NODE_ID}/')
 
         assert response.status_code == 400
+        storage_node_ops.delete_storage_node.assert_not_called()
+
+    def test_refused_removal_says_why(self, client, storage_node, storage_node_ops):
+        # The reason is what tells a caller whether to wait or to give up: a
+        # cluster still rebalancing passes by itself, a failure-domain balance
+        # the removal would break does not (2026-10-05-removal-refusal-read-as-final).
+        from simplyblock_core.exceptions import PreconditionError
+        reason = f"Can not remove node {STORAGE_NODE_ID}: 2 active task(s) on the node; use force_remove"
+        storage_node_ops.remove_storage_node.side_effect = PreconditionError(reason)
+
+        response = client.delete(f'{BASE}/{STORAGE_NODE_ID}/')
+
+        assert response.status_code == 400
+        assert response.json()['detail'] == reason
         storage_node_ops.delete_storage_node.assert_not_called()
 
     def test_refused_delete_after_successful_remove_returns_400(
