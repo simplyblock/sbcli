@@ -1178,7 +1178,7 @@ def add_backup_task(backup):
         backup.cluster_id,
         backup.node_id,
         "",
-        max_retry=constants.BACKUP_MAX_RETRIES,
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
         function_params={
             "backup_id": backup.uuid,
         },
