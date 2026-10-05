@@ -349,6 +349,11 @@ from stress_test.continuous_backup_stress import (
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+from e2e_tests.replication.test_replication_functional import (
+    ReplicationHarness,
+    ReplicationTargetsAndPolicies,
+    ReplicationStartsAndReports,
+)
 from e2e_tests.test_api_parity_audit import TestAPIParityAudit
 
 
@@ -1011,6 +1016,26 @@ def get_load_tests():
         TestLvolOutageLoadTest
     ]
     return tests
+
+
+def get_replication_tests():
+    """Async replication: two simplyblock clusters under one control plane.
+
+    Ordered so the harness runs first. If AR-S cannot stand two clusters up
+    nothing below it means anything, and the run should say that by name
+    rather than reporting whichever case happened to run next.
+
+    Needs enough storage nodes for two clusters -- see
+    ReplicationTestBase.MIN_NODES_PER_CLUSTER -- passed via
+    STORAGE_PRIVATE_IPS and/or NEW_NODE_IPS.
+
+    Test IDs map to documentation/async_replication_QA_test_plan.xlsx.
+    """
+    return [
+        ReplicationHarness,               # AR-S-001, AR-S-002
+        ReplicationTargetsAndPolicies,    # AR-F-001/003/004/005, AR-N-007
+        ReplicationStartsAndReports,      # AR-F-006/007/009/010/011
+    ]
 
 
 def get_lblk_tests():

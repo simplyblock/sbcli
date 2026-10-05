@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, get_e2e_all_tests, ALL_TESTS, get_lblk_tests
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, get_e2e_all_tests, ALL_TESTS, get_lblk_tests, get_replication_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -180,6 +180,7 @@ def main():
         "backup-topology": get_backup_topology_tests,
         "backup-stress": get_backup_stress_tests,
         "lblk": get_lblk_tests,
+        "replication": get_replication_tests,
         "parity": get_parity_tests,
         "e2e-all": get_e2e_all_tests,
     }
