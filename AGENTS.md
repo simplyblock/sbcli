@@ -209,6 +209,8 @@ simplyblock_cli/AGENTS.md         ← CLI-specific instructions
 simplyblock_cli/CLAUDE.md          ← `@AGENTS.md`
 simplyblock_core/AGENTS.md        ← Core-specific instructions
 simplyblock_core/CLAUDE.md         ← `@AGENTS.md`
+simplyblock_core/services/AGENTS.md ← Background services: task-runner retry/abort/defer contract
+simplyblock_core/services/CLAUDE.md  ← `@AGENTS.md`
 simplyblock_web/AGENTS.md         ← Web API-specific instructions
 simplyblock_web/CLAUDE.md          ← `@AGENTS.md`
 tests/AGENTS.md                   ← Test-suite layout, tiers, fixtures
