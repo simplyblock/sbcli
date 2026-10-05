@@ -484,6 +484,15 @@ SPEC = RunnerSpec(
 )
 
 
+#: The task types this runner owns. The cluster's task list holds every other
+#: runner's tasks too, and process_task terminates what it is handed (timeout,
+#: max retry): without this filter it closed snapshot-replication tasks with
+#: "max retry reached (8/8)" and would end any other task older than the
+#: backup timeout (2026-09-29).
+BACKUP_FUNCTIONS = (JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE,
+                    JobSchedule.FN_BACKUP_MERGE)
+
+
 def main():
     serve(SPEC)
 

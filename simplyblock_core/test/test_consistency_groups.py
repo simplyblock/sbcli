@@ -119,11 +119,37 @@ class _Lvol:
 
 
 def test_attach_to_pinned_group_fails_on_wrong_lvs(monkeypatch):
-    g = _group(lvs="LVS_1", node="NODE_A")
+    # A group with a LIVE member enforces its single-LVS pin: a volume on another
+    # node/LVS is refused. (An EMPTY group has no live pin and re-pins instead --
+    # see test_empty_group_repins_to_a_new_member_on_a_different_node.)
+    g = _group({"v0": {"joined_seq": 1, "removed_seq": 0}}, lvs="LVS_1", node="NODE_A")
     monkeypatch.setattr(cgc, "db", _FakeDB(g))
     with pytest.raises(cgc.ConsistencyGroupError):
         cgc.add_member(_Policy(), _Lvol("v1", "NODE_B", "LVS_2"))
     assert "v1" not in (g.members or {})
+
+
+def test_empty_group_repins_to_a_new_member_on_a_different_node(monkeypatch):
+    # A group emptied by a hand-off keeps a stale node pin. Its next member -- a
+    # clone that landed on a different node -- must RE-PIN it, not be refused;
+    # otherwise reconstitute_group_after_handoff leaves the clones ungrouped and
+    # the group fail-back ships nothing home (live 2026-09-27).
+    g = _group(members={}, lvs="LVS_OLD", node="NODE_OLD")
+    g.write_to_db = lambda kv=None: None
+    monkeypatch.setattr(cgc, "db", _FakeDB(g))
+    cgc.add_member_to_group(g, _Lvol("v1", "NODE_NEW", "LVS_NEW"))
+    assert g.node_id == "NODE_NEW" and g.lvs_name == "LVS_NEW"
+    assert g.members["v1"]["removed_seq"] == 0
+
+
+def test_empty_group_via_closed_epochs_repins(monkeypatch):
+    # No OPEN members (the sole member's epoch is closed) => pin is stale => re-pin.
+    g = _group({"gone": {"joined_seq": 1, "removed_seq": 3}},
+               last_seq=3, lvs="LVS_OLD", node="NODE_OLD")
+    g.write_to_db = lambda kv=None: None
+    monkeypatch.setattr(cgc, "db", _FakeDB(g))
+    cgc.add_member_to_group(g, _Lvol("v1", "NODE_NEW", "LVS_NEW"))
+    assert g.node_id == "NODE_NEW" and g.lvs_name == "LVS_NEW"
 
 
 def test_first_member_pins_the_group(monkeypatch):
@@ -149,13 +175,49 @@ def test_late_joiner_epoch_starts_at_next_generation(monkeypatch):
 
 
 def test_detach_closes_the_epoch_at_current_generation(monkeypatch):
-    g = _group({"v1": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
+    # A second live member keeps the group non-empty, so this exercises the
+    # epoch-close path rather than the last-member reset (which clears members
+    # and returns the group to generation 0 — see the dynamic-membership suite).
+    g = _group({"v1": {"joined_seq": 1, "removed_seq": 0},
+                "v2": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
     g.write_to_db = lambda kv=None: None
     monkeypatch.setattr(cgc, "db", _FakeDB(g))
     cgc.remove_member("CL/p1", "v1")
     assert g.members["v1"]["removed_seq"] == 4
     assert g.included_in_seq("v1", 4)
     assert not g.included_in_seq("v1", 5)
+
+
+def test_delete_group_refuses_while_it_has_a_current_member(monkeypatch):
+    g = _group({"v1": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
+    removed = []
+    g.remove = lambda kv=None: removed.append(g)
+    monkeypatch.setattr(cgc, "db", _FakeDB(g))
+    with pytest.raises(cgc.ConsistencyGroupError, match="still has 1 member"):
+        cgc.delete_group(g)
+    assert removed == [], "a group with a live member must NOT be deleted"
+
+
+def test_delete_group_removes_an_empty_group(monkeypatch):
+    g = _group({}, last_seq=0)
+    removed = []
+    g.remove = lambda kv=None: removed.append(g)
+    monkeypatch.setattr(cgc, "db", _FakeDB(g))
+    cgc.delete_group(g)
+    assert removed == [g], "an empty group is deleted"
+
+
+def test_delete_group_removes_a_handed_off_group_with_only_closed_epochs(monkeypatch):
+    # After a hand-off every member's epoch is CLOSED (removed_seq set): no
+    # current member remains, so the record is safe to remove -- which frees the
+    # name for a fresh, correctly node-pinned group on the next hand-off instead
+    # of reusing a stale record pinned to a departed node (live 2026-09-27).
+    g = _group({"v1": {"joined_seq": 1, "removed_seq": 4}}, last_seq=4)
+    removed = []
+    g.remove = lambda kv=None: removed.append(g)
+    monkeypatch.setattr(cgc, "db", _FakeDB(g))
+    cgc.delete_group(g)
+    assert removed == [g]
 
 
 # --------------------------------------------------------------------------- #
@@ -189,8 +251,10 @@ def test_create_path_pins_cg_volumes_to_the_group_node():
 def test_cadence_snapshots_cg_policies_as_a_group():
     from simplyblock_core.services import snapshot_monitor as sm
     src = inspect.getsource(sm.take_due_internal_snapshots)
-    assert "create_group_snapshot" in src
-    assert "grouped_ids" in src, "group members must leave the per-volume loop"
+    assert "create_group_snapshot_for_group" in src
+    # Members are partitioned off by consistency-group membership, so they
+    # leave the per-volume loop and snapshot as one generation.
+    assert "partition_by_group" in src, "group members must leave the per-volume loop"
 
 
 def test_group_snapshot_is_one_rpc_and_bumps_seq_only_on_full_success():

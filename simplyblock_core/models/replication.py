@@ -93,6 +93,11 @@ class ReplicationPolicy(BaseModel):
     #: (bdev_lvol_snapshot_group), and fail-over generations are resolved
     #: group-wide. Auto-creates/deletes a ConsistencyGroup record.
     consistency_group: bool = False
+    #: The declared recovery point objective, in seconds. RPO compliance is
+    #: computed against THIS figure rather than the derived lag budget, so an
+    #: operator alerts on the objective they promised, not on a heuristic.
+    #: 0 means no declared objective: the lag budget stays the derived one.
+    rpo_target_seconds: int = 0
     status: str = STATUS_ACTIVE
 
     def get_id(self):
@@ -149,6 +154,10 @@ class ConsistencyGroup(BaseModel):
     #: every member snapshot it takes with group_seq = N.
     last_group_seq: int = 0
     members: dict = default_factory(dict)
+    # The active consistency-group migration (cg_colocation design §3): the
+    # target node and one entry per subsystem of the migration scope,
+    # {"nqn", "kind": "single"|"batch", "id"}; {} when none is active.
+    migration: dict = default_factory(dict)
     status: str = "active"
 
     def get_id(self):

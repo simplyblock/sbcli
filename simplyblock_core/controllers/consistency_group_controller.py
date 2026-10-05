@@ -76,6 +76,35 @@ def delete_group_for_policy(policy_id):
                     group.get_id(), policy_id)
 
 
+def delete_group(group):
+    """Delete a consistency-group record, but ONLY when it has no current
+    (open-epoch) member.
+
+    A group with live members is refused: removing it would leave its members
+    pointing at a group that no longer exists and orphan its generation history.
+    Once a hand-off has emptied a group (fail-over / fail-back moves every member
+    to the peer), it is safe to remove -- and removing it is what lets the NEXT
+    hand-off mint a FRESH group, correctly node-pinned, instead of reusing a
+    stale record whose node pin no longer matches where the clones landed. Live
+    2026-09-27: a peer group left pinned to a departed node from an earlier cycle
+    made reconstitute_group_after_handoff refuse every clone (single-LVS pin), so
+    the clones stayed ungrouped, the demote shipped nothing home, and the group
+    fail-back could resolve no members.
+
+    Raises ConsistencyGroupError when the group still has an open member.
+    """
+    open_members = [lid for lid, m in (group.members or {}).items()
+                    if m.get("removed_seq", 0) == 0]
+    if open_members:
+        raise ConsistencyGroupError(
+            f"consistency group {group.group_name or group.uuid[:8]} still has "
+            f"{len(open_members)} member(s); detach or hand them off before "
+            f"deleting it")
+    group.remove(db.kv_store)
+    logger.info("Deleted consistency group %s (%s)", group.uuid[:8],
+                group.group_name or "-")
+
+
 def ensure_group(cluster_id, name):
     """Resolve the standalone group named ``name`` in ``cluster_id``, or create
     it. Idempotent by (cluster_id, name): concurrent first volumes that carry
@@ -125,20 +154,36 @@ def add_member_to_group(group, lvol):
             f"{constants.MAX_CONSISTENCY_GROUP_MEMBERS} members; "
             f"volume {lvol.get_id()} cannot join")
 
-    if group.lvs_name and (lvol.lvs_name != group.lvs_name
-                           or lvol.node_id != group.node_id):
+    # A group with live members enforces its single-LVS pin; a group with NONE
+    # (emptied by a hand-off, or brand new) has no live pin and takes this member's
+    # node. A pin left over from a departed cycle must never block a hand-off's
+    # clones -- they can land on a different node than the previous cycle's members
+    # did, and refusing them leaves them ungrouped so reconstitute_group_after_handoff
+    # regroups nothing, the demote ships nothing home, and the group fail-back
+    # resolves no members (live 2026-09-27: a peer group left pinned to a departed
+    # node broke the whole fail-back this way).
+    pin_is_live = bool(group.lvs_name) and open_count > 0
+    if pin_is_live and (lvol.lvs_name != group.lvs_name
+                        or lvol.node_id != group.node_id):
         raise ConsistencyGroupError(
             f"Volume {lvol.get_id()} lives on {lvol.node_id[:8]}/{lvol.lvs_name} "
             f"but consistency group {group.uuid[:8]} is pinned to "
             f"{group.node_id[:8]}/{group.lvs_name}; all members of a "
             f"consistency group must share one LVS")
 
-    if not group.lvs_name:
+    if not pin_is_live and (group.node_id != lvol.node_id
+                            or group.lvs_name != lvol.lvs_name):
+        if group.lvs_name:
+            logger.info("Consistency group %s re-pinned from %s/%s to %s/%s "
+                        "(no live members; stale pin reset)", group.uuid[:8],
+                        (group.node_id or "-")[:8], group.lvs_name,
+                        lvol.node_id[:8], lvol.lvs_name)
+        else:
+            logger.info("Consistency group %s pinned to node %s / %s by its "
+                        "first member %s", group.uuid[:8], lvol.node_id[:8],
+                        lvol.lvs_name, lvol.get_id())
         group.node_id = lvol.node_id
         group.lvs_name = lvol.lvs_name
-        logger.info("Consistency group %s pinned to node %s / %s by its first "
-                    "member %s", group.uuid[:8], lvol.node_id[:8],
-                    lvol.lvs_name, lvol.get_id())
 
     members[lvol.get_id()] = {"joined_seq": group.last_group_seq + 1,
                               "removed_seq": 0}
@@ -231,11 +276,85 @@ def add_member(policy, lvol):
     return add_member_to_group(group, lvol)
 
 
+def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
+    """Re-form the consistency group on the destination cluster after a
+    fail-over / fail-back / migration hand-off, so the group stays crash-
+    consistent across it (design-csi-addons-replication.md §14.4).
+
+    A hand-off clones each member on its own (replicate_lvol_on_target_cluster
+    for fail-over, the cutover runner for fail-back/migration), leaving the
+    clones ungrouped. The snapshot monitor keys group snapshots off ``group_id``
+    and the driver resolves the backend group by membership, so ungrouped clones
+    can be neither group-snapshotted nor promoted atomically, and the next
+    hand-off degrades to per-volume. This puts each clone back into its group.
+
+    Keyed by group NAME, not id: each cluster owns its own CG record, but both
+    carry the same name (the ``storage.simplyblock.io/consistency-group`` label),
+    so a fail-back RETURNS the volume to the SAME group it came from -- the
+    destination cluster's existing record of that name is reused rather than a
+    new one minted. ``add_member_to_group`` re-opens a closed epoch, so a volume
+    whose fail-over closed its membership (its source was deleted) rejoins
+    cleanly. Group members share one node/LVS (the hand-off co-locates them on
+    one replication node, and delta fail-back lands on the original node), which
+    satisfies ``add_member_to_group``'s single-LVS pin.
+
+    No-op when the source is not a group member. The caller invokes this
+    best-effort: a failure here must never undo the promote/cutover that already
+    succeeded.
+    """
+    src_group_id = getattr(source_lvol, "group_id", "")
+    if not src_group_id:
+        return None
+    try:
+        src_group = db.get_consistency_group_by_id(src_group_id)
+    except KeyError:
+        logger.warning(
+            "Group reconstitution skipped: source group %s of %s not found",
+            src_group_id, dest_lvol.get_id())
+        return None
+    group = ensure_group(dest_cluster_id, src_group.group_name)
+    add_member_to_group(group, dest_lvol)
+    dest_lvol.group_id = group.get_id()
+    dest_lvol.write_to_db(db.kv_store)
+    logger.info(
+        "Consistency group %s (%s) reconstituted on cluster %s: %s rejoined so "
+        "the group stays crash-consistent across the hand-off",
+        group.uuid[:8], src_group.group_name, dest_cluster_id, dest_lvol.get_id())
+    return group
+
+
+def _reset_generation_if_emptied(group, members):
+    """When the last live member leaves, clear the group's epoch history.
+
+    A group with no open epoch is dormant, and ``add_member_to_group`` treats it
+    as re-pinnable by the next member. The closed epochs go -- they describe a
+    departed cycle -- but the generation COUNTER stays: the group's last
+    generation is still its replicated recovery point on both sides (the
+    snapshots of it survive the members' deletion), and the next cycle's
+    generations must number after it. Resetting the counter to 0 made a later
+    generation 1..14 rank below the departed cycle's generation 15 for every
+    "newest generation" selection, and two cycles reused the same numbers
+    (2026-10-04, WordPress relocate: the source member was deleted after its
+    demote, emptying the group). With no epochs left there is nothing for
+    ``included_in_seq`` to misread.
+
+    Returns the members map to persist (emptied when no live member remains).
+    """
+    if any(m.get("removed_seq", 0) == 0 for m in members.values()):
+        return members
+    if members:
+        logger.info("Consistency group %s has no live members; closed epochs cleared, "
+                    "generation counter kept at %d", group.uuid[:8], group.last_group_seq)
+    return {}
+
+
 def remove_member_from_group(group, lvol_id):
     """Close the member's epoch at the current generation (detach semantics).
 
     History-preserving: the member's snapshots in prior generations are
-    untouched (design §8.2), only the epoch's ``removed_seq`` is set.
+    untouched (design §8.2), only the epoch's ``removed_seq`` is set -- until the
+    member is the last one out, at which point the group is reset to generation 0
+    (see :func:`_reset_generation_if_emptied`).
     """
     if group is None:
         return
@@ -250,7 +369,7 @@ def remove_member_from_group(group, lvol_id):
             # open and the member would count as one forever (2026-09-11: a
             # restored group at generation 0 kept every deleted member).
             del members[lvol_id]
-            group.members = members
+            group.members = _reset_generation_if_emptied(group, members)
             group.write_to_db(db.kv_store)
             logger.info("Volume %s left consistency group %s before any "
                         "generation contained it; membership entry dropped",
@@ -259,10 +378,10 @@ def remove_member_from_group(group, lvol_id):
         entry = dict(entry)
         entry["removed_seq"] = group.last_group_seq
         members[lvol_id] = entry
-        group.members = members
-        group.write_to_db(db.kv_store)
         logger.info("Volume %s left consistency group %s (included up to "
                     "generation %d)", lvol_id, group.uuid[:8], entry["removed_seq"])
+        group.members = _reset_generation_if_emptied(group, members)
+        group.write_to_db(db.kv_store)
 
 
 def remove_member(policy_id, lvol_id):
@@ -370,6 +489,419 @@ def warnings_for_snapshot(lvol, snapshot):
     except KeyError:
         return []
     return generation_membership_warnings(group, seq)
+
+
+# --------------------------------------------------------------------------- #
+# Group replication status roll-up (design-csi-addons-replication.md §14.4/§14.6)
+# --------------------------------------------------------------------------- #
+
+# Severity order for rolling a group's health up to its worst member: a group is
+# only as healthy as its sickest member. An unknown state ranks worst (5), so a
+# state the roll-up does not recognize is never silently treated as healthy.
+_GROUP_STATE_SEVERITY = {
+    "error": 5,
+    "degraded": 4,
+    "not_replicating": 3,
+    "lagging": 2,
+    "replicating": 1,
+    "in_sync": 0,
+}
+
+
+def aggregate_group_replication_info(member_infos):
+    """Roll a consistency group's per-member replication status up to one group
+    verdict: the group's recovery point is its OLDEST member's, its lag and
+    health are its WORST member's, and its backlog is the sum, because a group is
+    only as protected as its slowest, sickest member. A member with no recovery
+    point leaves the whole group without one. Roles report ``none`` unless every
+    member agrees, since a healthy group's members share a role.
+
+    Pure function over the dicts ``lvol_controller.get_replication_info`` returns
+    (design-csi-addons-replication.md §14.4/§14.6).
+    """
+    if not member_infos:
+        return {
+            "member_count": 0,
+            "role": "none",
+            "state": "not_replicating",
+            "last_replicated_at": None,
+            "lag_seconds": None,
+            "outstanding_count": 0,
+            "outstanding_bytes": 0,
+            "resyncing": False,
+        }
+
+    roles = {info.get("role", "none") for info in member_infos}
+    role = roles.pop() if len(roles) == 1 else "none"
+
+    state = max((info.get("state", "not_replicating") for info in member_infos),
+                key=lambda s: _GROUP_STATE_SEVERITY.get(s, 5))
+
+    lasts = [info.get("last_replicated_at") for info in member_infos]
+    if any(value is None for value in lasts):
+        last_replicated_at = None
+        lag_seconds = None
+    else:
+        last_replicated_at = min(lasts)
+        lags = [info.get("lag_seconds") for info in member_infos if info.get("lag_seconds") is not None]
+        lag_seconds = max(lags) if lags else None
+
+    return {
+        "member_count": len(member_infos),
+        "role": role,
+        "state": state,
+        "last_replicated_at": last_replicated_at,
+        "lag_seconds": lag_seconds,
+        "outstanding_count": sum(int(info.get("outstanding_count", 0) or 0) for info in member_infos),
+        "outstanding_bytes": sum(int(info.get("outstanding_bytes", 0) or 0) for info in member_infos),
+        "resyncing": any(bool(info.get("resyncing", False)) for info in member_infos),
+    }
+
+
+def attach_group_policy(group, policy_id):
+    """Attach a standalone consistency group to a group replication policy so the
+    whole group replicates as one unit (design-csi-addons-replication.md §14.4).
+
+    The members already belong to the group -- they joined at provisioning by the
+    ``storage.simplyblock.io/consistency-group`` label -- so this links the group
+    to the policy and starts each OPEN member replicating. It never re-adds a
+    member: ``add_member_to_group`` stamps a fresh ``joined_seq``, which would
+    tear the group's snapshot-generation history. Any replication policy works:
+    membership is what makes the group crash-consistent, so the snapshot monitor
+    ships one GROUP snapshot per interval for its members regardless of a policy
+    flag.
+    """
+    from simplyblock_core.controllers import replication_policy_controller
+    try:
+        pol = db.get_replication_policy_by_id(policy_id)
+    except KeyError:
+        pol = None
+    if pol is None:
+        raise ConsistencyGroupError(f"replication policy {policy_id} not found")
+    target = db.get_replication_target_by_id(pol.target_id)
+
+    group = db.get_consistency_group_by_id(group.get_id())
+    group.policy_id = pol.get_id()
+    group.write_to_db(db.kv_store)
+
+    open_members = [m for m in list_members(group) if not m.get("removed_seq")]
+    for member in open_members:
+        replication_policy_controller.start_member_replication(
+            member["lvol_id"], pol, target)
+    logger.info("Consistency group %s attached to replication policy %s "
+                "(%d member(s) replicating)", group.uuid[:8], pol.policy_name,
+                len(open_members))
+    return group
+
+
+def _policy_family(name):
+    """The part of a policy name that is the same in both directions: the name
+    before its final ``-to-<site>`` (dr-hub derives ``sb-dr-<plan>-<method>-to-
+    <site>`` per direction), else the whole name."""
+    head, sep, _ = (name or "").rpartition("-to-")
+    return head if sep else (name or "")
+
+
+def reverse_replication_policy(cluster_id, toward_cluster_id, former_policy_name=""):
+    """The active replication policy on *cluster_id* whose target is
+    *toward_cluster_id*: the policy a group promoted onto *cluster_id* must
+    follow so its data replicates back to where it came from. Among several,
+    the one of the same family as the group's former policy wins (the same plan
+    and method, the other direction), then the oldest by name for a stable pick.
+    None when the cluster has no such policy."""
+    candidates = []
+    for pol in db.get_replication_policies(cluster_id):
+        if getattr(pol, "status", "active") != "active":
+            continue
+        try:
+            target = db.get_replication_target_by_id(pol.target_id)
+        except KeyError:
+            continue
+        if getattr(target, "status", "active") != "active":
+            continue
+        if target.target_cluster_id == toward_cluster_id:
+            candidates.append(pol)
+    if not candidates:
+        return None
+    family = _policy_family(former_policy_name)
+    candidates.sort(key=lambda pol: (not family or _policy_family(pol.policy_name) != family,
+                                     pol.policy_name))
+    return candidates[0]
+
+
+def attach_reverse_replication(group, toward_cluster_id, former_policy_name=""):
+    """After *group* was promoted onto its cluster (a fail-over from the
+    replicated copy, or a fail-back), attach it to that cluster's replication
+    policy toward *toward_cluster_id*, so its members replicate back and the
+    next group snapshot ships there. The per-volume fail-over sets up the same
+    reverse replication; csi-addons does not call Enable again after a promote,
+    so without this the promoted group replicated nowhere and Ramen waited for
+    a first sync forever (2026-10-04, WordPress on site B).
+
+    Idempotent: a group already following a policy is left as it is. Never
+    raises: the promote already succeeded, so a missing policy or a failure to
+    start a member is logged, not propagated. Returns the policy attached, or
+    None."""
+    try:
+        group = db.get_consistency_group_by_id(group.get_id())
+    except KeyError:
+        return None
+    if getattr(group, "policy_id", ""):
+        return None
+    pol = reverse_replication_policy(group.cluster_id, toward_cluster_id, former_policy_name)
+    if pol is None:
+        logger.warning("Consistency group %s on %s promoted, but the cluster has no "
+                       "active replication policy toward %s: it does not replicate back",
+                       group.group_name, group.cluster_id, toward_cluster_id)
+        return None
+    try:
+        attach_group_policy(group, pol.get_id())
+    except Exception as e:                          # noqa: BLE001 -- the promote stands
+        logger.error("Consistency group %s promoted, but attaching it to %s failed: %s",
+                     group.group_name, pol.policy_name, e)
+        return None
+    logger.info("Consistency group %s replicates back toward %s under policy %s",
+                group.group_name, toward_cluster_id, pol.policy_name)
+    return pol
+
+
+def detach_group_policy(group):
+    """Disable group replication: stop every member replicating and unlink the
+    group from its policy, WITHOUT dissolving the group. The members stay grouped
+    by their label (design-csi-addons-replication.md §14.4). Idempotent: a group
+    following no policy still stops each member (a no-op per member) and clears
+    the pointer.
+    """
+    from simplyblock_core.controllers import replication_policy_controller
+    group = db.get_consistency_group_by_id(group.get_id())
+    for member in list_members(group):
+        if member.get("removed_seq"):
+            continue
+        replication_policy_controller.stop_member_replication(member["lvol_id"])
+    group.policy_id = ""
+    group.write_to_db(db.kv_store)
+    logger.info("Consistency group %s detached from its replication policy",
+                group.uuid[:8])
+    return group
+
+
+def aggregate_group_demote(member_results):
+    """Roll each member's demote result up to one group verdict (design
+    §14.4). ``member_results`` is a list of ``(lvol_id, result)`` where result is
+    ``demote_lvol``'s return: a dict ``{"demoted": bool, ...}`` or a
+    ``(False, error)`` tuple. The group is demoted only when EVERY member is;
+    a member that hard-errors makes the whole group's demote an error. Pure
+    function.
+    """
+    members = []
+    error = None
+    all_demoted = True
+    for lvol_id, result in member_results:
+        if isinstance(result, tuple):        # (False, error)
+            all_demoted = False
+            error = error or f"{lvol_id}: {result[1]}"
+            members.append({"lvol_id": lvol_id, "demoted": False, "error": str(result[1])})
+            continue
+        demoted = bool(result.get("demoted"))
+        all_demoted = all_demoted and demoted
+        members.append({"lvol_id": lvol_id, "demoted": demoted})
+    return {"demoted": all_demoted and error is None, "members": members, "error": error}
+
+
+def _members_are_superseded_source(members):
+    """True when every member is the SOURCE side of a failed-over relationship --
+    the recovered old primary after an unplanned failover. Such a source is
+    superseded (the peer's clone already holds every post-failover write), so it
+    demotes by fencing alone, with nothing to ship.
+
+    The discriminator is the relationship state alone: being the SOURCE of a
+    FAILED_OVER relationship. do_replicate is deliberately NOT required to be
+    clear -- an UNPLANNED failover shuts the source's data plane down, so
+    replication_stop never runs to clear it, and the recovered old primary comes
+    back with do_replicate still True. Gating on do_replicate=False missed exactly
+    that case, so demote_group fell to the ship-home path and never converged
+    ("group demote is still converging" indefinitely, 2026-10-01). A
+    planned-relocate source -- the live-pipe case that gate was protecting -- is
+    never FAILED_OVER, so the state check already excludes it."""
+    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.models.lvol_model import LVolReplication
+    for m in members:
+        rep = lvol_controller._replication_for_lvol(db, m.get_id())
+        if rep is None or rep.state != LVolReplication.STATE_FAILED_OVER:
+            return False
+        if not (rep.source_lvol and rep.source_lvol.get_id() == m.get_id()):
+            return False
+    return True
+
+
+def demote_group(group):
+    """Demote the whole consistency group as ONE crash-consistent unit
+    (design-csi-addons-replication.md §14.4).
+
+    The demote generation is a SINGLE ``bdev_lvol_snapshot_group`` -- one atomic
+    cut across every member, carrying one ``group_seq`` -- NOT a per-member
+    snapshot each. That is what lets the peer's promote clone the whole group
+    from one common generation; per-member demote snapshots share no group_seq
+    and the peer's group-generation resolution would find no common cut.
+
+    Re-drivable, not queued:
+      * First call, ship-home (the current primary demoting for a relocate):
+        fence every member, configure each member's fail-back so the reverse pipe
+        exists, then take ONE group snapshot and track each member's slice of it.
+      * First call, superseded source (the recovered old primary): nothing to
+        ship -- demote_lvol fences each and completes at once.
+      * Later calls: report done once every member's slice of the demote
+        generation has replicated to the peer. This path deliberately does NOT
+        reuse demote_lvol's per-member wait, whose retrigger branch would take a
+        fresh single-volume snapshot and break the group cut.
+    """
+    from simplyblock_core.controllers import (
+        lvol_controller,
+        replication_policy_controller,
+    )
+    from simplyblock_core.models.lvol_model import LVolReplication
+    from simplyblock_core.services import replication_final_step
+
+    group = db.get_consistency_group_by_id(group.get_id())
+    members = []
+    for m in list_members(group):
+        try:
+            members.append(db.get_lvol_by_id(m["lvol_id"]))
+        except KeyError:
+            continue
+
+    # Relocate fail-back: the demote is issued against THIS (origin) group via its
+    # origin-pinned handle (cg:<origin>:<id>), but after a fail-over the current
+    # primary -- the data that must actually be demoted and shipped home -- lives
+    # in the PEER group. So when this group holds no shippable members of its own
+    # (empty, or only superseded sources whose writes already moved to the peer),
+    # resolve the peer group and demote ITS live clones instead: point each clone's
+    # reverse pipe home and take the demote cut there. This is the demote analog of
+    # _failback_group (the promote) and the per-volume resolveToLocalReplica the
+    # driver runs -- DemoteGroup does neither, so without this the relocate demote
+    # no-ops the origin and the fail-back promote loops on "the demote cut has not
+    # finished shipping" (live 2026-09-28).
+    if not members or _members_are_superseded_source(members):
+        try:
+            policy = (db.get_replication_policy_by_id(group.policy_id)
+                      if group.policy_id else None)
+        except KeyError:
+            policy = None
+        if policy is not None:
+            peer = replication_policy_controller._resolve_active_peer_group(group, policy)
+            if peer is not None:
+                peer_members = []
+                for m in list_members(peer):
+                    try:
+                        peer_members.append(db.get_lvol_by_id(m["lvol_id"]))
+                    except KeyError:
+                        continue
+                if peer_members and not _members_are_superseded_source(peer_members):
+                    logger.info("Group demote of %s resolved to peer group %s on "
+                                "cluster %s: demoting its %d live member(s) so the "
+                                "demote cut ships home",
+                                group.group_name, peer.uuid[:8], peer.cluster_id,
+                                len(peer_members))
+                    group, members = peer, peer_members
+
+    if not members:
+        return {"demoted": True, "members": []}
+
+    started = any(m.replication_demote_state in
+                  (LVol.REPLICATION_DEMOTE_PENDING, LVol.REPLICATION_DEMOTE_DONE)
+                  for m in members)
+
+    if not started:
+        # Superseded source: nothing to ship, demote_lvol fences + marks done.
+        if _members_are_superseded_source(members):
+            results = [(m.get_id(), lvol_controller.demote_lvol(m.get_id()))
+                       for m in members]
+            return aggregate_group_demote(results)
+
+        # Ship-home: fence every member and point its reverse pipe home BEFORE
+        # the group snapshot, so the one generation we take actually replicates.
+        for m in members:
+            try:
+                node = db.get_storage_node_by_id(m.node_id)
+                replication_final_step.fence_source_paths(
+                    node, node.lvstore, m.nqn, m.ns_id)
+            except Exception as e:
+                logger.warning("Demote fence of %s failed: %s", m.get_id(), e)
+            if not m.do_replicate:
+                rep = lvol_controller._replication_for_lvol(db, m.get_id())
+                if (rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER
+                        and rep.target_lvol and rep.target_lvol.get_id() == m.get_id()):
+                    lvol_controller.replication_failback(m.get_id())
+
+        group = db.get_consistency_group_by_id(group.get_id())
+        created_ids, err = create_group_snapshot_for_group(group)
+        if err:
+            return {"demoted": False, "error": err,
+                    "members": [{"lvol_id": m.get_id(), "demoted": False, "error": err}
+                                for m in members]}
+
+        by_lvol = {}
+        for sid in created_ids or []:
+            try:
+                s = db.get_snapshot_by_id(sid)
+            except KeyError:
+                continue
+            if s.lvol:
+                by_lvol[s.lvol.get_id()] = sid
+        for m in members:
+            sid = by_lvol.get(m.get_id())
+            if not sid:
+                continue
+            m = db.get_lvol_by_id(m.get_id())
+            m.replication_demote_snapshot_id = sid
+            m.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+            m.write_to_db(db.kv_store)
+        return {"demoted": False,
+                "members": [{"lvol_id": m.get_id(), "demoted": False} for m in members]}
+
+    # Already taken: report done once every member's slice of the demote
+    # generation has replicated. No retrigger -- the group cut is fixed.
+    member_status = []
+    all_done = True
+    for m in members:
+        if m.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
+            member_status.append({"lvol_id": m.get_id(), "demoted": True})
+            continue
+        replicated = False
+        try:
+            snap = db.get_snapshot_by_id(m.replication_demote_snapshot_id)
+            replicated = bool(snap.target_replicated_snap_uuid)
+        except KeyError:
+            replicated = False
+        if replicated:
+            m.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+            m.write_to_db(db.kv_store)
+            member_status.append({"lvol_id": m.get_id(), "demoted": True})
+        else:
+            all_done = False
+            member_status.append({"lvol_id": m.get_id(), "demoted": False})
+    return {"demoted": all_done, "members": member_status}
+
+
+def failback_group(group, source_cluster_id=None):
+    """Fail the whole group back: point every member's replication back at the
+    source cluster (design-csi-addons-replication.md §14.4). The cutover itself is
+    each member's own commit, as at the per-volume level. Returns ``configured:
+    False`` with per-member detail if any member could not be configured.
+    """
+    from simplyblock_core.controllers import lvol_controller
+    members = []
+    configured = True
+    for member in list_members(group):
+        lvol_id = member["lvol_id"]
+        result = lvol_controller.replication_failback(lvol_id, source_cluster_id=source_cluster_id)
+        if isinstance(result, tuple) or not result:
+            configured = False
+            detail = str(result[1]) if isinstance(result, tuple) else "failed to configure fail-back"
+            members.append({"lvol_id": lvol_id, "configured": False, "error": detail})
+        else:
+            members.append({"lvol_id": lvol_id, "configured": True})
+    return {"configured": configured, "members": members}
 
 
 # --------------------------------------------------------------------------- #
@@ -689,10 +1221,21 @@ def delete_generation(group, seq):
     """Delete every member snapshot of generation ``seq`` atomically; never the
     group itself (design §10). Returns (deleted_ids, None) or (None, error).
     """
-    from simplyblock_core.controllers import snapshot_controller
+    from simplyblock_core.controllers import (
+        replication_recovery_points,
+        snapshot_controller,
+    )
     targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
     if not targets:
         return None, f"generation {seq} of group {group.uuid[:8]} not found"
+    newest_seq, _, _ = replication_recovery_points.newest_group_generation(group.get_id(), db=db)
+    if newest_seq and seq == newest_seq:
+        # The group's newest replicated generation is its restore point on both
+        # sides: what a promote on the peer, or a relocate back after the demoted
+        # sources were deleted, clones the group from (2026-10-04).
+        return None, (f"generation {seq} is the newest replicated generation of group "
+                      f"{group.uuid[:8]} -- its recovery point; it can be deleted once a "
+                      f"newer generation has replicated")
     deleted: list = []
     for s in targets:
         if not snapshot_controller.delete(s.get_id()):

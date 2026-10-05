@@ -98,6 +98,7 @@ from tenacity import (
 from simplyblock_core import constants, utils
 from simplyblock_core import db_controller as db_mod
 from simplyblock_core.controllers import (
+    cg_colocation,
     migration_controller,
     migration_events,
     snapshot_controller,
@@ -262,6 +263,9 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         lvol.nodes.append(tgt_node.tertiary_node_id)
 
     lvol.write_to_db(db.kv_store)
+    # A consistency group follows its members: once every open member of the
+    # group lives on the new store, the pin moves with them.
+    cg_colocation.repin_after_member_moved(lvol)
     logger.info(
         f"_apply_migration_to_db: updated lvol {migration.lvol_id} "
         f"node_id={tgt_node.get_id()}, lvs_name={tgt_node.lvstore}, nodes={lvol.nodes}"

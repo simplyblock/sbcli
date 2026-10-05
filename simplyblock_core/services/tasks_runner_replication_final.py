@@ -162,6 +162,7 @@ def _record_cutover_done(task):
 
     _stop_source_replication(task)
     _delete_source_if_requested(task)
+    _reconstitute_group(rep)
     _release_lvs_claim(task)
 
 
@@ -212,6 +213,24 @@ def _delete_source_if_requested(task):
         # loudly but does not un-succeed the task.
         logger.error(f"Source volume {src_lvol_id} could not be "
                      f"deleted after the cutover: {e}")
+
+
+def _reconstitute_group(rep):
+    """Re-form the consistency group on the destination cluster so the group
+    stays crash-consistent across the cutover. Keyed by group name, so a
+    fail-back RETURNS the volume to the SAME group it originally left (the UUID
+    swap restored the original source UUID, whose epoch add_member_to_group
+    re-opens). Runs after the swap so the member is keyed by its final UUID.
+    Best-effort: never un-succeed the cutover.
+    """
+    try:
+        if rep is not None and rep.source_lvol and rep.target_lvol                 and rep.source_lvol.group_id:
+            from simplyblock_core.controllers import consistency_group_controller
+            dest_lvol = db.get_lvol_by_id(rep.target_lvol.get_id())
+            consistency_group_controller.reconstitute_group_after_handoff(
+                rep.source_lvol, dest_lvol, rep.target_cluster_id)
+    except Exception as e:
+        logger.warning("Group reconstitution after cutover failed: %s", e)
 
 
 def _cutover_failed(task, err) -> NoReturn:

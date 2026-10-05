@@ -165,13 +165,21 @@ class TestFinishSkipsConvertedNodes(unittest.TestCase):
 class TestReplicationStatusCountsOnlyShippedSnapshots(unittest.TestCase):
 
     def _info(self, snaps, tasks):
-        lvol = SimpleNamespace(node_id="n-1", replication_interval_min=5, get_id=lambda: "lv-1")
-        by_id = {s.uuid: s for s in snaps}
+        lvol = SimpleNamespace(node_id="n-1", replication_interval_min=5, get_id=lambda: "lv-1",
+                               replication_policy_id="", do_replicate=True)
+        tasks_by_snap: dict = {}
+        for task in tasks:
+            tasks_by_snap.setdefault(task.function_params["snapshot_id"], []).append(task)
         db = MagicMock()
         db.get_lvol_by_id.return_value = lvol
         db.get_storage_node_by_id.return_value = SimpleNamespace(cluster_id="c-1")
-        db.get_job_tasks.return_value = tasks
-        db.get_snapshot_by_id.side_effect = lambda sid: by_id[sid]
+        # get_replication_info resolves the lvol's own snapshots (lvol_uuid index)
+        # and each snapshot's shipping task (repl_snapshot_id index) -- no
+        # whole-table task scan, so the mock serves those two reads.
+        db.get_snapshots_by_lvol_id.return_value = snaps
+        db.get_replication_tasks_for_snapshot.side_effect = lambda sid: tasks_by_snap.get(sid, [])
+        db.get_job_tasks_by_function.return_value = []
+        db.get_lvol_replication_objects.return_value = []
         for s in snaps:
             s.lvol = lvol
         with patch.object(lvol_controller, "DBController", return_value=db):

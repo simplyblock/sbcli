@@ -77,6 +77,131 @@ def test_retire_tolerates_an_unreachable_source(monkeypatch):
     lc._retire_source_data_path(db, _lvol())  # must not raise
 
 
+def test_delete_demoted_predecessor_removes_a_cleanly_demoted_source(monkeypatch):
+    """Regression: 2026-09-25-failback-leaves-demoted-clone — a fail-back
+    clones the DR copy back onto the recovered cluster and promotes it; the
+    volume it cloned FROM (the previously-failed-over clone, cleanly DEMOTED
+    first) is then superseded, and this backend's secondary side keeps no
+    persistent lvol -- yet it was left online forever (confirmed live
+    2026-09-25: after M-04 fail-back, cluster B's demoted clone lingered).
+    Promote-after-demote must retire that predecessor, the same way
+    replication_commit --delete-source retires a migrated source."""
+    deleted: list = []
+    monkeypatch.setattr(lc, "delete_lvol", lambda lvol, **kw: deleted.append(lvol.get_id()))
+    lvol = _lvol()
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._delete_demoted_predecessor(MagicMock(), lvol)
+    assert deleted == ["SRC"], "a cleanly demoted, superseded predecessor must be deleted"
+
+
+def test_delete_demoted_predecessor_keeps_a_never_demoted_source(monkeypatch):
+    """The unplanned-failover source was never demoted -- its cluster is
+    presumed down, and its record is still needed to address a later
+    fail-back. demote_state is the discriminator: no demote, no delete."""
+    deleted: list = []
+    monkeypatch.setattr(lc, "delete_lvol", lambda lvol, **kw: deleted.append(lvol.get_id()))
+    lvol = _lvol()  # replication_demote_state defaults empty
+    lc._delete_demoted_predecessor(MagicMock(), lvol)
+    assert deleted == [], "a never-demoted (unplanned-failover) source must be preserved"
+
+
+def test_delete_demoted_predecessor_tolerates_a_delete_failure(monkeypatch):
+    """Best-effort: a promote that already succeeded must not be undone by a
+    cleanup failure."""
+    def _boom(lvol, **kw):
+        raise RuntimeError("backend refused")
+    monkeypatch.setattr(lc, "delete_lvol", _boom)
+    lvol = _lvol()
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._delete_demoted_predecessor(MagicMock(), lvol)  # must not raise
+
+
+class _Policy:
+    def __init__(self, uuid, status="active"):
+        self._uuid = uuid
+        self.status = status
+        self.cluster_id = "CL_A"
+
+    def get_id(self):
+        return "CL_A/" + self._uuid
+
+
+def _new_lvol():
+    lv = LVol()
+    lv.uuid = "NEWPRIMARY"
+    lv.node_id = "N_A"
+    return lv
+
+
+def test_resume_replication_reattaches_the_policy_after_failback(monkeypatch):
+    """Regression: 2026-09-25-failback-leaves-volume-unreplicated — after a
+    fail-back the recovered primary was a plain clone (do_replicate False, no
+    policy), so it served IO but replicated NOWHERE and was unprotected for the
+    next DR event (confirmed live 2026-09-25: cluster A's post-fail-back primary
+    had empty Policy / Replicated On). Promote-after-demote must re-attach the
+    new primary's own cluster policy so replication resumes, exactly as M-01's
+    protect first established it."""
+    attached: list = []
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    monkeypatch.setattr(rpc, "attach_policy",
+                        lambda lid, pol: _record(attached, (lid, pol)))
+    db = MagicMock()
+    node = MagicMock(); node.cluster_id = "CL_A"
+    db.get_storage_node_by_id.return_value = node
+    db.get_replication_policies.return_value = [_Policy("POL1")]
+    src = _lvol()
+    src.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._resume_replication_after_failback(db, src, _new_lvol())
+    assert attached == [("NEWPRIMARY", "CL_A/POL1")], \
+        "the new primary must be re-attached to its cluster's policy"
+
+
+def test_resume_replication_skipped_for_a_never_demoted_source(monkeypatch):
+    """Unplanned failover: source never demoted, its cluster is down -- there is
+    nothing to replicate to yet, and attaching then collided with the fail-back
+    (reverted 2026-09-24). demote_state gates it out."""
+    attached: list = []
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    monkeypatch.setattr(rpc, "attach_policy",
+                        lambda lid, pol: _record(attached, (lid, pol)))
+    db = MagicMock()
+    lc._resume_replication_after_failback(db, _lvol(), _new_lvol())
+    assert attached == []
+
+
+def test_resume_replication_skips_when_no_active_policy(monkeypatch):
+    """No active policy for the cluster -- nothing to re-attach; leave the new
+    primary as-is rather than guess."""
+    attached: list = []
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    monkeypatch.setattr(rpc, "attach_policy",
+                        lambda lid, pol: _record(attached, (lid, pol)))
+    db = MagicMock()
+    node = MagicMock(); node.cluster_id = "CL_A"
+    db.get_storage_node_by_id.return_value = node
+    db.get_replication_policies.return_value = [_Policy("POL1", status="inactive")]
+    src = _lvol()
+    src.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._resume_replication_after_failback(db, src, _new_lvol())
+    assert attached == []
+
+
+def test_resume_replication_tolerates_attach_failure(monkeypatch):
+    """Best-effort: a promote that already succeeded must not be undone by a
+    failure to resume replication."""
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    def _boom(lid, pol):
+        raise RuntimeError("attach failed")
+    monkeypatch.setattr(rpc, "attach_policy", _boom)
+    db = MagicMock()
+    node = MagicMock(); node.cluster_id = "CL_A"
+    db.get_storage_node_by_id.return_value = node
+    db.get_replication_policies.return_value = [_Policy("POL1")]
+    src = _lvol()
+    src.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._resume_replication_after_failback(db, src, _new_lvol())  # must not raise
+
+
 def test_failover_retires_the_source_after_the_relationship_is_durable():
     """Ordering guard: by the time the source path disappears, connect_lvol
     must already resolve the volume to the DR copy — so the relationship
@@ -85,6 +210,31 @@ def test_failover_retires_the_source_after_the_relationship_is_durable():
     rel = src.index("lvol_replication.write_to_db")
     retire = src.index("_retire_source_data_path")
     assert rel < retire
+
+
+def test_existing_clone_without_relationship_completes_the_failover():
+    """Regression (2026-09-27): the 'LVol with same nqn already exists on target
+    cluster' idempotency return handed the clone back WITHOUT writing the
+    LVolReplication relationship the fresh-clone path writes. With no relationship,
+    the driver's resolveToLocalReplica had nothing to walk, so a group fail-over's
+    mount fell back to the now-down source and failed with 'connection refused'
+    (a standalone volume did NOT hit this: it always cloned fresh through the
+    completion). The early return must ONLY short-circuit when the fail-over
+    relationship already exists; otherwise it falls through to the shared
+    completion that writes the relationship and connection paths on the existing
+    clone."""
+    src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
+    already = src.index("already exists on target cluster")
+    # short-circuit is now GUARDED on an already-recorded relationship
+    assert "already_failed_over" in src
+    guarded_return = src.index("return existing_clone.get_id()")
+    # otherwise the existing clone becomes the fail-over target and falls through
+    fallthrough = src.index("new_lvol = existing_clone")
+    rel_write = src.index("lvol_replication.write_to_db")
+    # the guarded early return and the fall-through both sit after the 'already
+    # exists' match, and the fall-through reaches the relationship write.
+    assert already < guarded_return
+    assert already < fallthrough < rel_write
 
 
 def test_monitor_skips_retired_sources():

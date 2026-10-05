@@ -95,6 +95,19 @@ ReplicationState = Literal["replicating", "cutover_pending", "cutover_done", "fa
 
 ReplicationDirection = Literal["to_target", "to_source"]
 
+#: Which end of the relationship this volume is, seen from its own cluster.
+ReplicationRole = Literal["source", "secondary", "failed_over", "none"]
+
+#: The steady-state health verdict ``get_replication_info`` derives.
+ReplicationHealthState = Literal[
+    "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
+]
+
+# Every value of JobSchedule's FN_* constants: the /tasks endpoints serialize a
+# task of any type the scheduler can persist, so an omission here is not a
+# narrower API -- it is a 500 (pydantic literal_error) the moment such a task
+# exists. Keep in lockstep with simplyblock_core.models.job_schedule.JobSchedule;
+# test_task_endpoints.test_serializes_every_task_function_name pins the two together.
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -102,6 +115,7 @@ TaskFunctionName = Literal[
     "failed_device_migration",
     "new_device_migration",
     "node_add",
+    "node_removal",
     "port_allow",
     "balancing_on_restart",
     "balancing_on_dev_rem",
@@ -109,10 +123,15 @@ TaskFunctionName = Literal[
     "jc_comp_resume",
     "snapshot_replication",
     "lvol_sync_del",
+    "lvol_sync_op",
     "lvol_migration",
+    "lvol_batch_migration",
     "s3_backup",
     "s3_backup_restore",
     "s3_backup_merge",
+    "cluster_expand",
+    "replication_final",
+    "fdb_backup",
 ]
 
 
@@ -758,6 +777,9 @@ class ReplicationPolicyDTO(BaseModel):
     mode: ReplicationMode
     keep_replicated: int
     status: ReplicationPolicyStatus
+    #: The declared RPO objective, in seconds; null when the operator
+    #: declared none, in which case the derived lag budget applies.
+    rpo_target_seconds: util.OptionalUnsigned = None
     consistency_group: bool = False
     #: Pinned placement of the policy's consistency group, set by its first
     #: member: every further member volume must be created on this node/LVS.
@@ -778,6 +800,7 @@ class ReplicationPolicyDTO(BaseModel):
             mode=cast(ReplicationMode, model.mode),
             keep_replicated=model.keep_replicated,
             status=cast(ReplicationPolicyStatus, model.status),
+            rpo_target_seconds=getattr(model, 'rpo_target_seconds', 0) or None,
             consistency_group=bool(getattr(model, 'consistency_group', False)),
             group_node_id=UUID(group.node_id) if group is not None and group.node_id else None,
             group_lvs_name=group.lvs_name if group is not None else "",
@@ -792,6 +815,7 @@ class ConsistencyGroupDTO(BaseModel):
     name: str
     node_id: util.OptionalUUID = None
     lvs_name: str = ""
+    policy_id: util.OptionalUUID = None
     member_count: int
     last_group_seq: int
 
@@ -805,6 +829,11 @@ class ConsistencyGroupDTO(BaseModel):
             name=model.group_name,
             node_id=UUID(model.node_id) if model.node_id else None,
             lvs_name=model.lvs_name,
+            # The group carries its replication policy (attach_group_policy sets
+            # group.policy_id); expose it so a client can find the group's policy
+            # without the placement/flag heuristic, which a group-first attach
+            # leaves empty.
+            policy_id=UUID(model.policy_id.split('/')[-1]) if model.policy_id else None,
             member_count=current,
             last_group_seq=model.last_group_seq,
         )
@@ -823,6 +852,42 @@ class ConsistencyGroupMemberDTO(BaseModel):
 class ConsistencyGroupMemberJoinDTO(BaseModel):
     """Request body for the late join of an existing volume (design §4.5)."""
     lvol_id: str
+
+
+class ConsistencyGroupJoinPlanDTO(BaseModel):
+    """The steps a late join of an existing volume takes (co-location design
+    §5): ``migrate`` (live-migrate ``migrate_lvol_ids`` to ``target_node_id``
+    first), ``join``, ``colocate`` (move into ``target_nqn``)."""
+    steps: list[str]
+    target_node_id: str = ""
+    migrate_lvol_ids: list[str] = []
+    target_nqn: str = ""
+
+
+class ConsistencyGroupColocateDTO(BaseModel):
+    """Request body for moving a member into its group's subsystem."""
+    client_swap_ready: bool = False
+
+
+class ConsistencyGroupMigrationCreateDTO(BaseModel):
+    """Request body for a consistency-group migration: the group's scope (its
+    members, every subsystem sibling, transitively) moves to the node."""
+    target_node_id: str
+    host_nqn: str | None = None
+
+
+class ConsistencyGroupMigrationItemDTO(BaseModel):
+    nqn: str
+    kind: str
+    id: str
+    lvol_ids: list[str]
+    connect_strings: list[dict] = []
+
+
+class ConsistencyGroupMigrationDTO(BaseModel):
+    target_node_id: str = ""
+    status: str = "none"
+    items: list[ConsistencyGroupMigrationItemDTO] = []
 
 
 class ConsistencyGroupGenerationMemberDTO(BaseModel):
@@ -856,6 +921,159 @@ class ReplicationRelationshipDTO(BaseModel):
     is_source: bool
     active: str | None = None
     active_lvol_id: util.OptionalUUID = None
+
+
+class ReplicationStatusDTO(BaseModel):
+    """The typed steady-state replication status of one volume.
+
+    Serves what ``lvol_controller.get_replication_info`` computes, for the
+    volume's WHOLE replicated life — unlike ``ReplicationRelationshipDTO``,
+    which only exists once a cutover or fail-over has created a relationship
+    record. ``state: not_replicating, role: none`` is a valid answer, never a
+    404, because the csi-addons adapter polls this on every reconcile.
+    """
+    role: ReplicationRole
+    state: ReplicationHealthState
+    #: Creation time of the newest fully replicated snapshot; null until the
+    #: first snapshot lands on the peer.
+    last_replicated_at: datetime | None = None
+    lag_seconds: util.OptionalUnsigned = None
+    lag_budget_seconds: util.OptionalUnsigned = None
+    outstanding_count: util.Unsigned = 0
+    outstanding_bytes: util.Unsigned = 0
+    #: Shipping tasks currently suspended on errors.
+    failing_count: util.Unsigned = 0
+    #: Whether any shipping task exhausted its retries and gave up.
+    max_retry_reached: bool = False
+    #: Size and duration of the last completed shipping cycle.
+    last_cycle_bytes: util.OptionalUnsigned = None
+    last_cycle_seconds: util.OptionalUnsigned = None
+    #: A divergence catch-up (fail-back reversal or final cutover) in flight.
+    resyncing: bool = False
+
+    @staticmethod
+    def from_info(info: dict) -> 'ReplicationStatusDTO':
+        last_replicated_at = info.get('last_replicated_at')
+        return ReplicationStatusDTO(
+            role=info.get('role', 'none'),
+            state=info.get('state', 'not_replicating'),
+            last_replicated_at=(datetime.fromtimestamp(last_replicated_at, tz=UTC)
+                                if last_replicated_at is not None else None),
+            lag_seconds=info.get('lag_seconds'),
+            lag_budget_seconds=info.get('lag_budget_seconds'),
+            outstanding_count=info.get('outstanding_count', 0),
+            outstanding_bytes=info.get('outstanding_bytes', 0),
+            failing_count=info.get('failing_count', 0),
+            max_retry_reached=bool(info.get('max_retry_reached', 0)),
+            last_cycle_bytes=info.get('last_cycle_bytes'),
+            last_cycle_seconds=info.get('last_cycle_seconds'),
+            resyncing=bool(info.get('resyncing', False)),
+        )
+
+
+class ConsistencyGroupReplicationIntentDTO(BaseModel):
+    """Request body to enable or disable group replication (design §14.4).
+
+    A UUID attaches the whole consistency group to that group replication policy;
+    an explicit ``null`` detaches it (the group and its members stay grouped by
+    label, only replication stops). The field is required, so omitting it is a
+    422 rather than an ambiguous no-op.
+    """
+    replication_policy_id: UUID | None
+
+
+class ConsistencyGroupLineageMemberDTO(BaseModel):
+    """One protected volume of a consistency group: the handle its
+    PersistentVolume carries and the volume serving its data now."""
+    origin_handle: str
+    active_handle: str
+
+
+class ConsistencyGroupResolutionDTO(BaseModel):
+    """Where a consistency group's data lives now (replication_policy_controller.
+    resolve_group). ``active_*`` are empty when no group holds a live member."""
+    cluster_id: str
+    group_id: str
+    active_cluster_id: str = ""
+    active_group_id: str = ""
+    members: list[ConsistencyGroupLineageMemberDTO] = []
+
+
+class ConsistencyGroupReplicationStatusDTO(BaseModel):
+    """The replication status of a consistency group as one unit.
+
+    A group's recovery point is its OLDEST member's, its lag and health its
+    WORST member's, and its backlog the sum, because a group is only as
+    protected as its slowest, sickest member. Never a 404, matching the
+    per-volume ``ReplicationStatusDTO`` (design-csi-addons-replication.md
+    §14.4/§14.6).
+    """
+    role: ReplicationRole
+    state: ReplicationHealthState
+    member_count: util.Unsigned = 0
+    #: Oldest member's newest-replicated time; null until every member has a
+    #: recovery point.
+    last_replicated_at: datetime | None = None
+    #: Worst (largest) member lag; null when the group has no recovery point.
+    lag_seconds: util.OptionalUnsigned = None
+    outstanding_count: util.Unsigned = 0
+    outstanding_bytes: util.Unsigned = 0
+    #: A divergence catch-up in flight on any member.
+    resyncing: bool = False
+
+    @staticmethod
+    def from_info(info: dict) -> 'ConsistencyGroupReplicationStatusDTO':
+        last_replicated_at = info.get('last_replicated_at')
+        return ConsistencyGroupReplicationStatusDTO(
+            role=info.get('role', 'none'),
+            state=info.get('state', 'not_replicating'),
+            member_count=info.get('member_count', 0),
+            last_replicated_at=(datetime.fromtimestamp(last_replicated_at, tz=UTC)
+                                if last_replicated_at is not None else None),
+            lag_seconds=info.get('lag_seconds'),
+            outstanding_count=info.get('outstanding_count', 0),
+            outstanding_bytes=info.get('outstanding_bytes', 0),
+            resyncing=bool(info.get('resyncing', False)),
+        )
+
+
+class ReplicatedSnapshotDTO(BaseModel):
+    """A fully replicated snapshot on the secondary, addressed as a cloneable
+    object. ``lvol_id`` is the volume the snapshot belongs to on the
+    SECONDARY cluster, not the source volume the caller asked about, because
+    that is the identity the ordinary CSI clone path resolves a
+    ``dataSource`` against.
+    """
+    snapshot_id: UUID
+    cluster_id: UUID
+    pool_id: util.OptionalUUID = None
+    lvol_id: util.OptionalUUID = None
+    size: util.Unsigned
+    used_size: util.Unsigned
+    created_at: datetime
+    group_id: str = ""
+    group_seq: util.Unsigned = 0
+
+    @staticmethod
+    def from_model(model: SnapShot) -> 'ReplicatedSnapshotDTO':
+        return ReplicatedSnapshotDTO(
+            snapshot_id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            pool_id=UUID(model.pool_uuid) if model.pool_uuid else None,
+            lvol_id=UUID(model.lvol.get_id()) if model.lvol else None,
+            size=model.size,
+            used_size=model.used_size,
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
+        )
+
+
+class ReplicatedGenerationDTO(BaseModel):
+    """One complete, fully replicated consistency-group generation, every
+    member addressed as a cloneable object on the secondary."""
+    group_seq: util.Unsigned
+    members: list[ReplicatedSnapshotDTO]
 
 
 class FailoverResultDTO(BaseModel):
