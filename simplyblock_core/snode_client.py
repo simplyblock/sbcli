@@ -1,8 +1,7 @@
 import json
-
-import requests
 import logging
 
+import requests
 from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry

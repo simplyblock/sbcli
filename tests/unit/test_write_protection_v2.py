@@ -31,7 +31,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
-
 # ---------------------------------------------------------------------------
 # The create parameter
 # ---------------------------------------------------------------------------
@@ -45,7 +44,7 @@ class TestCreateParam(unittest.TestCase):
         captured = {}
         with patch.object(c, "_request",
                           side_effect=lambda m, p: captured.update(p) or True), \
-             patch.object(c, "get_bdevs", return_value=None):
+             patch.object(c, "bdev_get", return_value=None):
             c.bdev_distrib_create(
                 "distrib_1", 7001, 2, 1, 1000, 4096, ["jm1"], 4096, **kw)
         return captured

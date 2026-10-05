@@ -1,8 +1,8 @@
+import re
+import sys
+
 import jinja2
 import yaml
-import sys
-import re
-
 from jsonschema import validators
 
 

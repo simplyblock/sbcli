@@ -84,8 +84,7 @@ class TestInventoryPartitions(unittest.TestCase):
                 patch.object(node_utils, "_root_disk_names", return_value=[]), \
                 patch.object(node_utils, "_disk_holders", return_value=[]), \
                 patch.object(node_utils, "_partition_holders", return_value=[]), \
-                patch.object(node_utils, "_disk_by_id_path", return_value=""), \
-                patch.object(node_utils, "_partition_by_id_path", return_value=""), \
+                patch.object(node_utils, "read_persistent_links", return_value={}), \
                 patch.object(node_utils, "_read_sysfs", return_value="0"):
             return {d["name"]: d for d in node_utils.get_block_devices_info()}
 

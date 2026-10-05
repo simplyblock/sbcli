@@ -37,11 +37,11 @@ class TestEnsureHublvolActiveActive(unittest.TestCase):
 
     def test_policy_asserted_on_namespace_bdev(self):
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": BDEV}]
+        rpc.bdev_get.return_value = {"name": BDEV}
 
         self.assertTrue(ensure_hublvol_active_active(rpc, CTRL, "sec", "secondary"))
 
-        rpc.get_bdevs.assert_called_once_with(BDEV)
+        rpc.bdev_get.assert_called_once_with(BDEV)
         # The policy goes on the namespace bdev, not the controller name.
         args, kwargs = rpc.bdev_nvme_set_multipath_policy.call_args
         self.assertEqual(args[0], BDEV)
@@ -53,7 +53,7 @@ class TestEnsureHublvolActiveActive(unittest.TestCase):
         rr_min_io UINT32_MAX -> 1 (bdev_nvme.c:5626), matching the
         remote-device/JM path."""
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": BDEV}]
+        rpc.bdev_get.return_value = {"name": BDEV}
 
         ensure_hublvol_active_active(rpc, CTRL)
 
@@ -66,13 +66,13 @@ class TestEnsureHublvolActiveActive(unittest.TestCase):
         """wait=False is for callers inside the LVS-rejoin freeze / port-block
         window: one probe, no sleep, give up rather than spend the budget."""
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
 
         with patch.object(hublvol_reconnect.time, "sleep") as sleep:
             ok = ensure_hublvol_active_active(rpc, CTRL, wait=False)
 
         self.assertFalse(ok)
-        self.assertEqual(rpc.get_bdevs.call_count, 1)
+        self.assertEqual(rpc.bdev_get.call_count, 1)
         sleep.assert_not_called()
         rpc.bdev_nvme_set_multipath_policy.assert_not_called()
 
@@ -80,42 +80,42 @@ class TestEnsureHublvolActiveActive(unittest.TestCase):
         """The attach can report enabled a few ms before the AER-driven n1
         bdev appears, so a bounded poll precedes the policy call."""
         rpc = MagicMock()
-        rpc.get_bdevs.side_effect = [[], [], [{"name": BDEV}]]
+        rpc.bdev_get.side_effect = [None, None, {"name": BDEV}]
 
         with patch.object(hublvol_reconnect.time, "sleep") as sleep:
             self.assertTrue(ensure_hublvol_active_active(rpc, CTRL))
 
-        self.assertEqual(rpc.get_bdevs.call_count, 3)
+        self.assertEqual(rpc.bdev_get.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
         rpc.bdev_nvme_set_multipath_policy.assert_called_once()
 
     def test_wait_gives_up_after_bounded_tries(self):
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
 
         with patch.object(hublvol_reconnect.time, "sleep"):
             self.assertFalse(ensure_hublvol_active_active(rpc, CTRL))
 
-        self.assertEqual(rpc.get_bdevs.call_count, HUBLVOL_MP_POLICY_WAIT_TRIES)
+        self.assertEqual(rpc.bdev_get.call_count, HUBLVOL_MP_POLICY_WAIT_TRIES)
         rpc.bdev_nvme_set_multipath_policy.assert_not_called()
 
-    def test_get_bdevs_raising_is_non_fatal(self):
+    def test_bdev_get_raising_is_non_fatal(self):
         rpc = MagicMock()
-        rpc.get_bdevs.side_effect = RuntimeError("rpc down")
+        rpc.bdev_get.side_effect = RuntimeError("rpc down")
 
         self.assertFalse(ensure_hublvol_active_active(rpc, CTRL))
         rpc.bdev_nvme_set_multipath_policy.assert_not_called()
 
     def test_set_policy_raising_is_non_fatal(self):
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": BDEV}]
+        rpc.bdev_get.return_value = {"name": BDEV}
         rpc.bdev_nvme_set_multipath_policy.side_effect = RuntimeError("boom")
 
         self.assertFalse(ensure_hublvol_active_active(rpc, CTRL))
 
     def test_set_policy_falsy_is_reported(self):
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": BDEV}]
+        rpc.bdev_get.return_value = {"name": BDEV}
         rpc.bdev_nvme_set_multipath_policy.return_value = None
 
         self.assertFalse(ensure_hublvol_active_active(rpc, CTRL))

@@ -1,11 +1,10 @@
-import time
 import os
+import time
 
 import fdb
 
 from simplyblock_core import constants, utils
 from simplyblock_core.db_controller import DBController
-
 
 logger = utils.get_logger(__name__)
 

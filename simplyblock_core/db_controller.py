@@ -5,33 +5,48 @@ import logging
 import os.path
 import struct
 import time
-
-import fdb
 from typing import Any, ClassVar
 
+import fdb
+
 from simplyblock_core import constants, index_ops, utils
-from simplyblock_core.utils import ttl_cache
 from simplyblock_core.models import indices, watches
+from simplyblock_core.models.backup import (
+    Backup,
+    BackupChainLock,
+    BackupPolicy,
+    BackupPolicyAttachment,
+)
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
+from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
-from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.port_stat import PortStat
-from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-from simplyblock_core.models.replication import ConsistencyGroup, ReplicationPolicy, ReplicationTarget
-from simplyblock_core.models.qos import QOSClass
-from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
-from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
-    PoolStatObject, CachedLVolStatObject
-from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
+from simplyblock_core.models.lvol_model import LVol, LVolMini, LVolReplication
 from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
-from simplyblock_core.utils.helpers import single, single_or_none
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.port_stat import PortStat
+from simplyblock_core.models.qos import QOSClass
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
+from simplyblock_core.models.stats import (
+    CachedLVolStatObject,
+    ClusterStatObject,
+    DeviceStatObject,
+    LVolStatObject,
+    NodeStatObject,
+    PoolStatObject,
+)
+from simplyblock_core.models.storage_node import NodeLVolDelLock, StorageNode
+from simplyblock_core.utils import ttl_cache
+from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -843,135 +858,6 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
 
-    # ---- Cluster node-add mesh lock (Single FDB Transaction) ----
-
-    def get_cluster_add_lock(self, cluster_id: str) -> ClusterAddNodeLock | None:
-        return single_or_none(ClusterAddNodeLock().read_from_db(self.kv_store, id=cluster_id))
-
-    def _try_acquire_cluster_add_lock_tx(self, tr, cluster_id, owner, now):
-        lock = ClusterAddNodeLock()
-        lock.cluster_id = cluster_id
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if raw.present():
-            existing = ClusterAddNodeLock().from_dict(json.loads(raw))
-            fresh = (now - existing.heartbeat_at) <= constants.CLUSTER_ADD_LOCK_TTL_SEC
-            if existing.owner and existing.owner != owner and fresh:
-                return False, existing.owner
-            # Stale (holder presumed dead) or already ours: (re)take it.
-            lock.acquired_at = existing.acquired_at if existing.owner == owner else now
-        else:
-            lock.acquired_at = now
-        lock.owner = owner
-        lock.heartbeat_at = now
-        tr[key] = json.dumps(lock.to_dict()).encode()
-        return True, None
-
-    def acquire_cluster_add_lock(self, cluster_id, owner):
-        """Atomically acquire the per-cluster node-add mesh lock.
-
-        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
-        reclaimed from a dead holder whose heartbeat went stale, or already
-        held by this owner), or (False, current_owner) if a live holder owns it.
-        """
-        if not self.kv_store:
-            return False, "No DB connection"
-        now = int(time.time())
-        transactional = fdb.transactional(DBController._try_acquire_cluster_add_lock_tx)
-        return transactional(self, self.kv_store, cluster_id, owner, now)
-
-    def _refresh_cluster_add_lock_tx(self, tr, cluster_id, owner, now):
-        lock = ClusterAddNodeLock()
-        lock.cluster_id = cluster_id
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if not raw.present():
-            return False
-        existing = ClusterAddNodeLock().from_dict(json.loads(raw))
-        if existing.owner != owner:
-            return False  # lost the lock (reclaimed by someone else)
-        existing.heartbeat_at = now
-        tr[key] = json.dumps(existing.to_dict()).encode()
-        return True
-
-    def refresh_cluster_add_lock(self, cluster_id, owner):
-        """Heartbeat the lock so a long mesh section isn't reclaimed. Returns
-        True if still held by ``owner``, False if it was lost/reclaimed."""
-        if not self.kv_store:
-            return False
-        now = int(time.time())
-        transactional = fdb.transactional(DBController._refresh_cluster_add_lock_tx)
-        return transactional(self, self.kv_store, cluster_id, owner, now)
-
-    def _release_cluster_add_lock_tx(self, tr, cluster_id, owner):
-        lock = ClusterAddNodeLock()
-        lock.cluster_id = cluster_id
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if not raw.present():
-            return
-        existing = ClusterAddNodeLock().from_dict(json.loads(raw))
-        if existing.owner == owner:
-            del tr[key]
-
-    def release_cluster_add_lock(self, cluster_id, owner):
-        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
-        late release never deletes a lock another host has since reclaimed)."""
-        if not self.kv_store:
-            return
-        transactional = fdb.transactional(DBController._release_cluster_add_lock_tx)
-        transactional(self, self.kv_store, cluster_id, owner)
-
-    # ---- Cluster create-by-name lock (Single FDB Transaction) ----
-
-    def _try_acquire_cluster_create_lock_tx(self, tr, name, owner, now):
-        lock = ClusterCreateLock()
-        lock.lock_name = name
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if raw.present():
-            existing = ClusterCreateLock().from_dict(json.loads(raw))
-            fresh = (now - existing.acquired_at) <= constants.CLUSTER_CREATE_LOCK_TTL_SEC
-            if existing.owner and existing.owner != owner and fresh:
-                return False, existing.owner
-            # Stale (holder presumed dead/finished) or already ours: (re)take it.
-        lock.owner = owner
-        lock.acquired_at = now
-        tr[key] = json.dumps(lock.to_dict()).encode()
-        return True, None
-
-    def acquire_cluster_create_lock(self, name, owner):
-        """Atomically acquire the create-by-name lock for ``name``.
-
-        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
-        reclaimed from a stale holder, or already held by this owner), or
-        (False, current_owner) if a live holder owns it.
-        """
-        if not self.kv_store:
-            return False, "No DB connection"
-        now = int(time.time())
-        transactional = fdb.transactional(DBController._try_acquire_cluster_create_lock_tx)
-        return transactional(self, self.kv_store, name, owner, now)
-
-    def _release_cluster_create_lock_tx(self, tr, name, owner):
-        lock = ClusterCreateLock()
-        lock.lock_name = name
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if not raw.present():
-            return
-        existing = ClusterCreateLock().from_dict(json.loads(raw))
-        if existing.owner == owner:
-            del tr[key]
-
-    def release_cluster_create_lock(self, name, owner):
-        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
-        late release never deletes a lock another caller has since reclaimed)."""
-        if not self.kv_store:
-            return
-        transactional = fdb.transactional(DBController._release_cluster_create_lock_tx)
-        transactional(self, self.kv_store, name, owner)
-
     # ---- Per-lvstore snapshot-mutation lock (Single FDB Transaction) ----
 
     def _try_acquire_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner, now, ttl):
@@ -1350,6 +1236,61 @@ class DBController(metaclass=Singleton):
         fdb.transactional(DBController._seed_vuid_tx)(self, self.kv_store, seed)
         return fdb.transactional(DBController._incr_vuid_tx)(self, self.kv_store)
 
+    # ---- s3_id allocation (monotonic sequence) ----
+    #
+    # An s3_id names a backup's object keys in S3 ({s3_id}/{mid}/{extent}). The
+    # old allocator was max-plus-one over the local cluster's Backup records,
+    # which had three problems: it raced (two concurrent backups got the same
+    # id), it recycled the id of a deleted backup whose objects may still exist
+    # (nothing reclaims them -- bdev_lvol_s3_delete does not exist on the data
+    # plane), and after an import it counted foreign backups it should not have.
+    # A monotonic sequence makes reuse impossible by construction.
+    #
+    # Unlike vuid this space is NOT unbounded: the data plane packs s3_id into
+    # 30 bits and masks rather than validates, so callers must check
+    # BACKUP_MAX_S3_ID. 2^30 is ~1.07e9 backups per control plane.
+    _S3_ID_SEQ_KEY = b"sequence/s3_id"
+
+    def _incr_s3_id_tx(self, tr):
+        raw = tr.get(DBController._S3_ID_SEQ_KEY).wait()
+        if not raw.present():
+            return None
+        nxt = int(json.loads(raw)) + 1
+        tr[DBController._S3_ID_SEQ_KEY] = json.dumps(nxt).encode()
+        return nxt
+
+    def _seed_s3_id_tx(self, tr, seed):
+        # Only-if-absent CAS, as for vuid: the first allocator across all API
+        # workers seeds it; concurrent racers see it present and skip.
+        raw = tr.get(DBController._S3_ID_SEQ_KEY).wait()
+        if raw.present():
+            return
+        tr[DBController._S3_ID_SEQ_KEY] = json.dumps(int(seed)).encode()
+
+    def _max_existing_s3_id(self) -> int:
+        """Highest s3_id in use across every backup this control plane knows of.
+
+        Read once to seed the counter on an upgraded cluster so the sequence
+        never reuses an id the old max-plus-one allocator handed out; never read
+        again. Deliberately unscoped by cluster -- imported backups keep their
+        originating cluster's ids, and seeding above those too costs nothing.
+        """
+        return max((b.s3_id or 0 for b in self.get_backups()), default=0)
+
+    def next_s3_id(self) -> int:
+        """Allocate the next globally-unique s3_id (monotonic, O(1))."""
+        val = fdb.transactional(DBController._incr_s3_id_tx)(self, self.kv_store)
+        if val is None:
+            seed = self._max_existing_s3_id()
+            fdb.transactional(DBController._seed_s3_id_tx)(self, self.kv_store, seed)
+            val = fdb.transactional(DBController._incr_s3_id_tx)(self, self.kv_store)
+
+        if val > constants.BACKUP_MAX_S3_ID:
+            raise ValueError(
+                f"s3_id space exhausted: {val} exceeds the data plane's "
+                f"{constants.BACKUP_MAX_S3_ID} limit")
+        return val
+
     # ---- name uniqueness and snapshot chaining (declared indices) ----
     #
     # These three lookups used to have hand-rolled key families of their own
@@ -1528,8 +1469,8 @@ class DBController(metaclass=Singleton):
             # re-emit). Delayed imports avoid any dependency cycle between
             # db_controller and the controllers package.
             try:
-                from simplyblock_core.controllers import storage_events
                 from simplyblock_core import distr_controller
+                from simplyblock_core.controllers import storage_events
                 snode = self.get_storage_node_by_id(node_id)
                 if snode is not None and old_status != snode.status:
                     storage_events.snode_status_change(
@@ -1611,29 +1552,6 @@ class DBController(metaclass=Singleton):
 
     def get_backups_by_snapshot_id(self, snapshot_id: str) -> list[Backup]:
         return self.query(Backup, 'snapshot_id', snapshot_id)
-
-    def get_backup_chain(self, backup_id: str) -> list[Backup]:
-        """Return the full backup chain ending at backup_id, oldest first."""
-        # One point read per link once the index is ready. Until then each link
-        # would fall back to its own full scan, so read the table once and walk
-        # the chain against that — what this did before the index existed.
-        source = (None if self.index_state(Backup, 'uuid') == indices.STATE_READY
-                  else self.get_backups())
-
-        def find_backup(id_):
-            wanted = id_.split('/')[-1]
-            return single(
-                [backup for backup in source if backup.uuid == wanted] if source is not None
-                else self.query(Backup, 'uuid', wanted))
-
-        next_id = backup_id
-        chain = []
-        while next_id:
-            chain.append(find_backup(next_id))
-            next_id = chain[-1].prev_backup_id
-
-        chain.reverse()
-        return chain
 
     def get_replication_targets(self, cluster_id: str | None = None) -> list[ReplicationTarget]:
         prefix = cluster_id if cluster_id else " "

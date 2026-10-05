@@ -10,7 +10,11 @@ from simplyblock_core import watch as watchmod
 from simplyblock_core.models import watches
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.watch import (
-    ScopeWatch, WatchUnavailable, _Subscription, diff_by_id, watch,
+    ScopeWatch,
+    WatchUnavailable,
+    _Subscription,
+    diff_by_id,
+    watch,
 )
 
 

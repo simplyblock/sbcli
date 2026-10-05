@@ -8,9 +8,9 @@ topology epoch with a forced floor.
 import types
 
 from simplyblock_core import constants
-from simplyblock_core.services import health_check_service
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services import health_check_service
 
 
 def _node(node_id, status=StorageNode.STATUS_ONLINE, devs=()):

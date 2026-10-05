@@ -20,7 +20,6 @@ from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -81,7 +80,7 @@ def _mock_rpc(return_bdev_create=None,
     """Build a MagicMock RPCClient with sensible defaults for hublvol tests."""
     rpc = MagicMock()
     rpc.bdev_lvol_create_hublvol.return_value = return_bdev_create or str(uuid.uuid4())
-    rpc.get_bdevs.return_value = [{}] if bdev_exists else []
+    rpc.bdev_get.return_value = {} if bdev_exists else None
     rpc.subsystem_get.return_value = {} if subsystem_exists else None
     rpc.subsystem_create.return_value = True
     rpc.listeners_create.return_value = True
@@ -232,14 +231,14 @@ class TestCreateSecondaryHublvolUnit(unittest.TestCase):
 
     def test_creates_bdev_when_missing(self):
         """bdev_lvol_create_hublvol must be called when the bdev doesn't exist."""
-        # get_bdevs returns [] → bdev absent
-        self.rpc.get_bdevs.return_value = []
+        # bdev_get returns None → bdev absent
+        self.rpc.bdev_get.return_value = None
         self.secondary.create_secondary_hublvol(self.primary, _CLUSTER_NQN)
         self.rpc.bdev_lvol_create_hublvol.assert_called_once_with(_PRIMARY_LVS)
 
     def test_skips_bdev_create_when_already_exists(self):
         """bdev_lvol_create_hublvol must NOT be called when bdev already exists."""
-        self.rpc.get_bdevs.return_value = [{'name': f'{_PRIMARY_LVS}/hublvol'}]
+        self.rpc.bdev_get.return_value = {'name': f'{_PRIMARY_LVS}/hublvol'}
         self.secondary.create_secondary_hublvol(self.primary, _CLUSTER_NQN)
         self.rpc.bdev_lvol_create_hublvol.assert_not_called()
 
@@ -319,7 +318,7 @@ class TestRecreateHublvolUnit(unittest.TestCase):
 
     def test_expose_bdev_with_optimized_ana(self):
         """Recreated hublvol must be exposed with ana_state = optimized."""
-        self.rpc.get_bdevs.return_value = [{}]  # bdev already exists
+        self.rpc.bdev_get.return_value = {}  # bdev already exists
         self.node.recreate_hublvol()
         listener_calls = self.rpc.listeners_create.call_args_list
         assert len(listener_calls) >= 1, "listeners_create must be called on recreate"
@@ -332,19 +331,19 @@ class TestRecreateHublvolUnit(unittest.TestCase):
 
     def test_creates_bdev_when_missing(self):
         """If the bdev is gone, bdev_lvol_create_hublvol must be called to recreate it."""
-        self.rpc.get_bdevs.return_value = []  # bdev absent after restart
+        self.rpc.bdev_get.return_value = None  # bdev absent after restart
         self.node.recreate_hublvol()
         self.rpc.bdev_lvol_create_hublvol.assert_called_once_with(_PRIMARY_LVS)
 
     def test_skips_bdev_create_when_exists(self):
         """If the bdev already exists, bdev_lvol_create_hublvol must NOT be called."""
-        self.rpc.get_bdevs.return_value = [{'name': f'{_PRIMARY_LVS}/hublvol'}]
+        self.rpc.bdev_get.return_value = {'name': f'{_PRIMARY_LVS}/hublvol'}
         self.node.recreate_hublvol()
         self.rpc.bdev_lvol_create_hublvol.assert_not_called()
 
     def test_returns_true_on_success(self):
         """recreate_hublvol must return True when it succeeds."""
-        self.rpc.get_bdevs.return_value = [{}]
+        self.rpc.bdev_get.return_value = {}
         result = self.node.recreate_hublvol()
         assert result is True
 
@@ -392,22 +391,20 @@ class TestAdoptHublvolUnit(unittest.TestCase):
 
     def test_creates_bdev_for_taken_over_lvstore_not_self(self):
         """bdev_lvol_create_hublvol must target the peer's lvstore, not self's."""
-        self.rpc.get_bdevs.return_value = []  # bdev absent
+        self.rpc.bdev_get.return_value = None  # bdev absent
         self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
         self.rpc.bdev_lvol_create_hublvol.assert_called_once_with(self._TAKEOVER_LVS)
 
     def test_skips_create_when_bdev_already_exists(self):
         """Idempotent: probe succeeds → no create call, no EEXIST."""
-        self.rpc.get_bdevs.return_value = [
-            {'name': f'{self._TAKEOVER_LVS}/hublvol'}
-        ]
+        self.rpc.bdev_get.return_value = {'name': f'{self._TAKEOVER_LVS}/hublvol'}
         self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
         self.rpc.bdev_lvol_create_hublvol.assert_not_called()
 
     def test_exposes_with_peer_hublvol_metadata(self):
         """Subsystem must be exposed with the peer's existing UUID/port so
         that surviving clients don't see a new NQN and keep their paths."""
-        self.rpc.get_bdevs.return_value = [{}]
+        self.rpc.bdev_get.return_value = {}
         self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
         listener_calls = self.rpc.listeners_create.call_args_list
         assert listener_calls, "listeners_create must be called"
@@ -429,7 +426,7 @@ class TestAdoptHublvolUnit(unittest.TestCase):
     def test_exposes_under_shared_nqn_for_lvs(self):
         """NQN must be the deterministic shared hublvol NQN for the taken-over
         lvstore — not self's primary NQN."""
-        self.rpc.get_bdevs.return_value = [{}]
+        self.rpc.bdev_get.return_value = {}
         self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
         expected = f"{_CLUSTER_NQN}:hublvol:{self._TAKEOVER_LVS}"
         create_call = self.rpc.subsystem_create.call_args
@@ -438,7 +435,7 @@ class TestAdoptHublvolUnit(unittest.TestCase):
 
     def test_exposes_with_optimized_ana(self):
         """Takeover leader is the NEW primary for the adopted LVS → ANA optimized."""
-        self.rpc.get_bdevs.return_value = [{}]
+        self.rpc.bdev_get.return_value = {}
         self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
         listener_calls = self.rpc.listeners_create.call_args_list
         assert listener_calls
@@ -453,7 +450,7 @@ class TestAdoptHublvolUnit(unittest.TestCase):
     def test_does_not_mutate_self_hublvol(self):
         """Takeover runs in addition to self's own primary — self.hublvol
         (self's own lvstore's hub) must not be overwritten by adoption."""
-        self.rpc.get_bdevs.return_value = []
+        self.rpc.bdev_get.return_value = None
         original_self_hublvol = self.takeover_node.hublvol
         self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
         assert self.takeover_node.hublvol is original_self_hublvol
@@ -695,7 +692,7 @@ class TestConnectToHublvolUnit(unittest.TestCase):
     def test_skips_attach_if_bdev_already_exists(self):
         """If the remote bdev already exists, attach_controller must not be called again."""
         # Simulate bdev already attached (e.g. after a partial restart)
-        self.rpc.get_bdevs.return_value = [{'name': f'{_PRIMARY_LVS}/hubvoln1'}]
+        self.rpc.bdev_get.return_value = {'name': f'{_PRIMARY_LVS}/hubvoln1'}
         self.secondary.connect_to_hublvol(self.primary, failover_node=None, role="secondary")
         self.rpc.bdev_nvme_attach_controller.assert_not_called()
 

@@ -2,11 +2,11 @@
 import base64
 import hmac
 import logging
+from collections.abc import Callable
 from functools import wraps
 from typing import Any, TypeVar, Union, cast
-from collections.abc import Callable
 
-from flask import request, Response
+from flask import Response, request
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from simplyblock_core.db_controller import DBController

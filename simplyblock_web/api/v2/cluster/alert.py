@@ -10,7 +10,6 @@ from simplyblock_core.db_controller import DBController
 from .._dependencies import Cluster
 from .._dtos import AlertDTO, AlertSeverity, AlertStatus
 
-
 api = APIRouter()
 db = DBController()
 

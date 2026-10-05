@@ -5,12 +5,13 @@ import socket
 import threading
 import time
 import uuid
+from collections.abc import Callable
 
-from simplyblock_core import db_controller, constants, utils
-from simplyblock_core.controllers import (
-    tasks_events, device_controller, events_controller)
+from simplyblock_core import constants, db_controller, utils
+from simplyblock_core.controllers import device_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -118,6 +119,62 @@ def refresh_task_lease(task, owner=None):
     if db.atomic_update(task, _mutate) is None:
         return False
     return refreshed["ok"]
+
+
+def _cancel_atomically(
+        task: JobSchedule,
+        mutate: Callable[[JobSchedule], bool],
+) -> JobSchedule | None:
+    """Apply a cancellation to the task row as it currently stands.
+
+    NOT ``task.write_to_db()``: the copy a canceller holds was read before it
+    decided to cancel — off a bulk ``get_job_tasks`` scan, in the case below —
+    and the runner driving that task writes the same row meanwhile, claiming
+    its lease, moving it to running, advancing retry and recording handler
+    progress in function_params. A full-object write puts all of that back. The
+    damaging one is the owner lease: clearing it hands the task to the next
+    runner host that polls, which executes it a second time. That is the lost
+    update behind the 2026-07-29 double restart, arriving from the other side.
+
+    ``mutate`` receives the fresh row and returns False to decline (a guard
+    that no longer holds). It may be replayed on transaction conflict, so it
+    must do nothing but mutate the object it is given.
+
+    Returns the committed task if this call performed the cancellation, or None
+    if the row is gone or another actor got there first.
+    """
+    now = str(datetime.datetime.now(datetime.UTC))
+    performed = {"ok": False}
+
+    def _mutate(fresh):
+        if mutate(fresh) is False:
+            return False
+        fresh.updated_at = now
+        performed["ok"] = True
+        return True
+
+    committed = db.atomic_update(task, _mutate)
+    return committed if performed["ok"] else None
+
+
+def _flag_canceled(fresh: JobSchedule) -> bool:
+    """Set only the canceled flag. Where the task has got to — status, retry,
+    owner, progress — stays as the runner left it; the runner reads the flag on
+    its next pass and finishes the task itself."""
+    if fresh.canceled:
+        return False
+    fresh.canceled = True
+    return True
+
+
+def _flag_canceled_if_pending(fresh: JobSchedule) -> bool:
+    """As _flag_canceled, but declines a task that has already finished. An
+    opportunistic bulk cancellation has nothing left to cancel there, and
+    flagging it would misreport a completed task as canceled. (An operator's
+    explicit cancel_task is deliberately not this strict.)"""
+    if fresh.status == JobSchedule.STATUS_DONE:
+        return False
+    return _flag_canceled(fresh)
 
 
 @contextlib.contextmanager
@@ -360,6 +417,40 @@ def add_device_mig_task_for_node(node_id):
     sub_tasks = []
     node = db.get_storage_node_by_id(node_id)
     cluster_id = node.cluster_id
+
+    # A rebalance spreads data across the CURRENT placement, and a removal is in
+    # the middle of changing it: the departing node's slots are already dead
+    # (storage_ID=-1) in every peer's cluster map, so these migrations run
+    # against them and fail -- "mig error: 576" -- with max_retry=-1, i.e. for
+    # ever.
+    #
+    # That is not merely wasted work, because it deadlocks the removal that
+    # made it pointless. An unfinished balancing master keeps the cluster in
+    # REBALANCING, and migration_controller.create_migration refuses to run
+    # there ("Cluster ... is rebalancing; wait for it to finish before
+    # migrating") -- so the removal's own volume drain can never start, the
+    # node can never finish leaving, and the placement the rebalance is
+    # waiting on can never settle. Observed live on cluster a6e7569d
+    # (2026-09-15): two subtasks, 182 retries in ~20 minutes, progress
+    # restarting from zero each lap.
+    #
+    # Cluster-wide, not per-node: skipping only the departing node still queues
+    # tasks for its healthy peers, which is the same rebalance against the same
+    # moving placement.
+    #
+    # Skipping is safe: the node whose recovery triggered this is ONLINE and
+    # serving either way, and the removal re-balances what it moves as it goes.
+    # The next legitimate trigger after the removal settles rebalances against
+    # a topology that has stopped moving.
+    departing = [n.get_id() for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+                 if n.status in StorageNode.DEPARTING_STATUSES]
+    if departing:
+        logger.info(
+            f"Skipping cluster rebalance for {node_id}: node removal in "
+            f"progress ({', '.join(departing)}); the placement it would "
+            f"balance against is still changing")
+        return False
+
     master_task = None
     for task in  db.get_job_tasks(cluster_id):
         if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
@@ -369,7 +460,14 @@ def add_device_mig_task_for_node(node_id):
                 break
 
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Every departing status, not just REMOVED. A device-migration task runs
+        # ON the node it is queued for, and the runner will not run one whose
+        # node is not ONLINE -- so a task queued against a node that is on its
+        # way out waits for a recovery that is never coming. Testing only
+        # REMOVED left the whole of a removal's drain, where the node is still
+        # present but no longer returning, inside the gap. The sibling queuing
+        # functions above read the same set for the same reason.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
 
         for bdev in node.lvstore_stack:
@@ -585,6 +683,17 @@ def cancel_pending_node_restart_tasks(cluster_id, node_id, exclude_task_id=None,
     # blanket cancel there would abort the very restart doing the shutting
     # down. Compared against the bare task uuid, matching the convention in
     # check_node_shutdown_preconditions.
+    def _cancel_if_still_pending(fresh: JobSchedule) -> bool:
+        # Re-checked on the fresh row: a task that reached its own outcome
+        # between the scan and this write has nothing left to cancel, and its
+        # result must not be overwritten with ours.
+        if fresh.canceled or fresh.status == JobSchedule.STATUS_DONE:
+            return False
+        fresh.canceled = True
+        fresh.status = JobSchedule.STATUS_DONE
+        fresh.function_result = f"canceled: {reason}"
+        return True
+
     canceled = 0
     for task in db.get_job_tasks(cluster_id):
         if (task.function_name == JobSchedule.FN_NODE_RESTART
@@ -592,13 +701,34 @@ def cancel_pending_node_restart_tasks(cluster_id, node_id, exclude_task_id=None,
                 and task.status != JobSchedule.STATUS_DONE
                 and not task.canceled
                 and (exclude_task_id is None or task.uuid != exclude_task_id)):
-            task.canceled = True
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = f"canceled: {reason}"
-            task.write_to_db(db.kv_store)
+            if _cancel_atomically(task, _cancel_if_still_pending) is None:
+                continue
             canceled += 1
             logger.info(
                 f"Canceled obsolete node_restart task {task.get_id()} (node {node_id}: {reason})")
+    return canceled
+
+
+def cancel_node_tasks(cluster_id, node_id, function_names):
+    """Flag the node's unfinished tasks of the given kinds canceled.
+
+    Used when a node is going away and the work queued against it is moot
+    (shutdown cancelling its migration tasks). Like every canceller this reads
+    in bulk and writes one row at a time, so each write goes through the CAS in
+    _cancel_atomically rather than putting the scan's copy back.
+
+    Returns how many tasks this call canceled.
+    """
+    canceled = 0
+    for task in db.get_job_tasks(cluster_id):
+        if task.node_id != node_id or task.function_name not in function_names:
+            continue
+        if task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        if _cancel_atomically(task, _flag_canceled_if_pending) is None:
+            continue
+        canceled += 1
+        logger.info(f"Canceled task {task.get_id()} ({task.function_name}) on node {node_id}")
     return canceled
 
 
@@ -672,9 +802,9 @@ def cancel_task(task_id):
     if task.device_id:
         device_controller.device_set_retries_exhausted(task.device_id, True)
 
-    task.canceled = True
-    task.write_to_db(db.kv_store)
-    tasks_events.task_canceled(task)
+    committed = _cancel_atomically(task, _flag_canceled)
+    if committed is not None:
+        tasks_events.task_canceled(committed)
     return True
 
 
@@ -748,23 +878,53 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        # IN_REMOVAL nodes have a dead SPDK (shut down by the removal flow);
-        # a migration task targeting their distribs can never run and would
-        # stall the node-removal completion check forever. Skip them like
-        # already-REMOVED nodes.
-        if node.status == StorageNode.STATUS_REMOVED:
+        # A departing node cannot run a migration task: its SPDK is stopped, or
+        # about to be, and the runner refuses any task whose node is not ONLINE.
+        # Queued anyway, such a task retries forever and the removal's own
+        # completion check waits on it -- the device never reaches
+        # failed_and_migrated, so the drain sits in its device phase for good.
+        #
+        # This used to name only STATUS_REMOVED while the comment claimed it
+        # covered IN_REMOVAL too, which held while removal failed devices last:
+        # by then the node's lvstore was already torn down, so it had no distrib
+        # left to queue against. A drain that fails devices FIRST still has one,
+        # and deadlocked on exactly this (7-node cluster, 2026-09-25: six tasks
+        # stuck on the suspended node, "node is not online, retrying").
+        #
+        # The departing node's distribs still have to be migrated; the block
+        # below queues them onto its secondary or tertiary, which can run them.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
                           max_retry=-1, function_params={'distr_name': bdev['name']})
+
+    # add device migration tasks for device host distribs on other nodes (secondary) in case the host is in removal process
+    device_node = db.get_storage_node_by_id(device.node_id)
+    if device_node.status in StorageNode.DEPARTING_STATUSES and device_node.status != StorageNode.STATUS_REMOVED:
+        secondary_node = db.get_storage_node_by_id(device_node.secondary_node_id)
+        if secondary_node and secondary_node.status not in StorageNode.DEPARTING_STATUSES:
+            for bdev in device_node.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, secondary_node.get_id(), device.get_id(),
+                              max_retry=-1, function_params={'distr_name': bdev['name']})
+        else:
+            tertiary_node = db.get_storage_node_by_id(device_node.tertiary_node_id)
+            if tertiary_node and tertiary_node.status not in StorageNode.DEPARTING_STATUSES:
+                for bdev in device_node.lvstore_stack:
+                    if bdev['type'] == "bdev_distr":
+                        _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, tertiary_node.get_id(), device.get_id(),
+                                  max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
 
 
 def add_new_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Same reason as add_device_failed_mig_task: a departing node cannot
+        # run the task, so queueing it strands work nothing will ever do.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
@@ -786,21 +946,56 @@ def add_node_add_task(cluster_id, function_params):
 
     A task that already exists is the answer to "add this host", so it is
     returned, which is what `ensure_node_restart_task` does with its own repeat.
+
+    But the dedup check is itself a plain read-then-write, so two concurrent
+    posts for the same host can both pass it before either commits, and both
+    go on to create a task (the create-time twin of the cluster_add mesh race
+    -- see constants.py). Serialize check-then-create per (cluster, node_addr)
+    behind a DbLock so only one of them writes.
     """
-    existing = _validate_new_task_node_add(
-        cluster_id, (function_params or {}).get("node_addr"))
-    if existing:
-        return existing
-    return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
-                     function_params=function_params, max_retry=11)
+    node_addr = (function_params or {}).get("node_addr")
+    if not node_addr:
+        # No host identity to dedup or serialize on; unchanged from before.
+        return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
+                         function_params=function_params, max_retry=11)
+
+    lock = DbLock(f"node_add_task/{cluster_id}/{node_addr}",
+                  timeout=constants.NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC)
+    try:
+        with lock:
+            existing = _validate_new_task_node_add(cluster_id, node_addr)
+            if existing:
+                return existing
+            return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
+                             function_params=function_params, max_retry=11)
+    except DbLockBusyError as busy:
+        # The holder is inside this same read-then-write, not the add_node
+        # mesh section -- a couple of FDB round trips, done well within the
+        # wait above. If it is somehow still not done, its write has already
+        # landed or is about to: look for what it left rather than failing an
+        # otherwise-valid request. DbLockBusyError only ever comes from
+        # entering the lock (the block above can't raise it), so this except
+        # can't accidentally swallow one from `_add_task`.
+        existing = _validate_new_task_node_add(cluster_id, node_addr)
+        if existing:
+            return existing
+        raise ValueError(
+            f"An add-node task for '{node_addr}' is already being created "
+            f"(held by {busy.owner or 'unknown'})") from busy
 
 
 def add_node_removal_task(cluster_id, node_id, function_params=None):
-    # max_retry=-1: the removal runner drives a multi-step, possibly multi-hour
-    # orchestration (shutdown -> LVS rewire -> device fail+migrate). Migration
-    # waits legitimately suspend-and-retry many times; do not cap retries.
+    # Bounded, at the ceiling the runner enforces (NODE_REMOVAL_MAX_RETRY, one
+    # retry per TASK_EXEC_INTERVAL_SEC across NODE_REMOVAL_MAX_WAIT_SEC). The
+    # orchestration is multi-step and its migration waits legitimately
+    # suspend-and-retry many times, which is why the ceiling is hours, not
+    # minutes -- but it has to exist: this was queued with max_retry=-1 while
+    # the runner's check reads `0 < max_retry <= retry`, so the ceiling the
+    # runner and its test both described could never fire, and a removal that
+    # could not finish retried every 10s for ever (2026-09-28 review).
     return _add_task(JobSchedule.FN_NODE_REMOVAL, cluster_id, node_id, "",
-                     function_params=function_params or {}, max_retry=-1)
+                     function_params=function_params or {},
+                     max_retry=constants.NODE_REMOVAL_MAX_RETRY)
 
 
 def get_active_node_removal_task(cluster_id, node_id):
@@ -850,27 +1045,6 @@ def get_active_cluster_expand_task(cluster_id):
                 and task.status != JobSchedule.STATUS_DONE:
             return task.uuid
     return False
-
-
-def defer_task_for_expansion(task):
-    """Suspend ``task`` if a cluster expansion is in progress. Returns True
-    when deferred.
-
-    Migration-family runners call this right after their cluster-status
-    gate. The status gate alone is not enough: a node outage mid-expansion
-    suspends the cluster-expand task and restores the cluster status to
-    ACTIVE between its retries — without this gate the outage's recovery
-    migrations would start running in that window and then block the
-    expansion resume, inverting the required order (expansion completes
-    FIRST, then outage device migration, then expansion migration).
-    Deliberately does not consume a retry: this is a deferral, not a
-    failure."""
-    if not get_active_cluster_expand_task(task.cluster_id):
-        return False
-    task.function_result = "cluster expansion in progress, deferring"
-    task.status = JobSchedule.STATUS_SUSPENDED
-    task.write_to_db(db.kv_store)
-    return True
 
 
 def get_active_node_tasks(cluster_id, node_id):
@@ -1018,19 +1192,6 @@ def add_batch_mig_task(group):
     )
 
 
-def _is_already_gone(err):
-    """True when an RPC error means "the thing is not there" (-19/ENODEV).
-
-    For a delete that is success; for a register it is still a failure, but
-    it is not an actionable one to alert on repeatedly -- the object the
-    caller wanted registered has gone away underneath it.
-    """
-    if err is None:
-        return False
-    if isinstance(err, dict):
-        return err.get("code") == -19
-    return "-19" in str(err)
-
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
     """Deferred per-node sync delete. Retried until it succeeds.
 
@@ -1083,148 +1244,6 @@ def add_lvol_sync_op_task(cluster_id, node_id, lvol_id, op, secondary_index=0):
                      max_retry=-1)
 
 
-def run_lvol_sync_op_task(task):
-    """Execute one FN_LVOL_SYNC_OP task (called by the sync runner's loop;
-    lives here so it is importable without triggering the runner's
-    module-level loop). Idempotent; never raises."""
-    from simplyblock_core import storage_node_ops
-    from simplyblock_core.models.lvol_model import LVol
-
-    def _finish(result):
-        task.function_result = result
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-
-    def _defer(result):
-        task.function_result = result
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-
-    def _defer_failure(result, err=None):
-        """Defer after a GENUINE failure, and escalate a persistent one.
-
-        Distinct from _defer, which also covers benign waiting (node not
-        ONLINE yet, LVS owned by a restart, lvol not yet settled) -- those
-        are not failures and must not raise an alert. These tasks retry
-        forever by design, so without this a permanently failing
-        registration is invisible except as a replica that is silently
-        missing and every later snapshot on that node failing.
-        """
-        previous = task.function_result
-        if _is_already_gone(err):
-            # -19 / ENODEV: nothing to act on, do not count it.
-            _defer(result)
-            return
-        task.retry = (task.retry or 0) + 1
-        threshold = constants.TASK_FAILURE_ALERT_THRESHOLD
-        should_alert = task.retry > threshold and (
-            task.retry == threshold + 1 or previous != result)
-        _defer(result)
-        if not should_alert:
-            return
-        try:
-            events_controller.log_event_cluster(
-                cluster_id=task.cluster_id,
-                domain=events_controller.DOMAIN_STORAGE,
-                event="LVOL_TASK_FAILING_REPEATEDLY",
-                db_object=task,
-                caused_by=events_controller.CAUSED_BY_MONITOR,
-                message=(f"Deferred lvol {task.function_params.get('op')} "
-                         f"for {task.function_params.get('lvol_id')} has "
-                         f"failed {task.retry} times on node {task.node_id}; "
-                         f"it will keep retrying, but this is not a "
-                         f"transient condition and needs attention. "
-                         f"Last error: {result}"),
-                node_id=task.node_id,
-                event_level="Critical")
-        except Exception as event_error:
-            logger.warning("Could not log repeated-failure event: %s", event_error)
-
-    try:
-        if task.canceled:
-            _finish("canceled")
-            return
-
-        lvol_id = task.function_params.get("lvol_id")
-        op = task.function_params.get("op")
-        try:
-            lvol = db.get_lvol_by_id(lvol_id)
-        except KeyError:
-            # A missing record is normally obsolescence (the lvol was
-            # deleted) and completes the task. But add_lvol_ha queues these
-            # register tasks in its pre-check, BEFORE it writes the lvol
-            # record at the end of the create -- so this runner (3s poll)
-            # can see the task while the create is still running and
-            # permanently DROP the registration, leaving the replica
-            # missing and every later snapshot on that node failing
-            # (the LVOL_109 class). Inside the grace window, defer instead:
-            # once the record appears, the status check below takes over.
-            try:
-                age = time.time() - float(task.date or 0)
-            except (TypeError, ValueError):
-                # Unknown age: fall back to the previous behaviour and treat
-                # the record as genuinely gone, rather than deferring forever.
-                age = float("inf")
-            if age < constants.LVOL_SYNC_OP_RECORD_GRACE_SEC:
-                _defer("lvol record not written yet, retrying")
-            else:
-                _finish("lvol no longer exists")
-            return
-        if lvol.status == LVol.STATUS_IN_DELETION:
-            _finish("lvol is being deleted")
-            return
-        if lvol.status != LVol.STATUS_ONLINE:
-            _defer(f"lvol status is {lvol.status}, retrying")
-            return
-
-        try:
-            node = db.get_storage_node_by_id(task.node_id)
-        except KeyError:
-            _finish("node no longer exists")
-            return
-        if node.get_id() not in lvol.nodes:
-            _finish("node no longer hosts this lvol (topology moved)")
-            return
-        if node.status != StorageNode.STATUS_ONLINE:
-            _defer(f"node is {node.status}, retrying")
-            return
-        if storage_node_ops.get_restart_phase(task.node_id, lvol.lvs_name):
-            # The owning flow (restart/activation/expansion) re-registers
-            # lvols itself; re-check once it has released the LVS.
-            _defer("LVS owned by a restart/activation/expansion, retrying")
-            return
-
-        if task.status != JobSchedule.STATUS_RUNNING:
-            task.status = JobSchedule.STATUS_RUNNING
-            task.write_to_db(db.kv_store)
-
-        if op == "register":
-            ok, err = storage_node_ops.repair_lvol_registration_on_non_leader(
-                lvol, node, task.function_params.get("secondary_index", 0))
-            if ok:
-                _finish(f"registered lvol {lvol_id} on {task.node_id}")
-            else:
-                _defer_failure(f"registration failed: {err}", err)
-        elif op == "resize":
-            # Converge to the CURRENT DB size — resize_lvol persists the new
-            # size after the fan-out, so this always applies the latest
-            # target even if the lvol was resized again meanwhile.
-            size_in_mib = utils.convert_size(lvol.size, 'MiB')
-            ret = node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
-                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-            if ret:
-                _finish(f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB")
-            else:
-                _defer("resize RPC failed, retrying")
-        else:
-            _finish(f"unknown op {op!r}")
-    except Exception as e:
-        logger.error(f"lvol sync-op task {task.uuid} failed: {e}")
-        try:
-            _defer(f"error: {e}")
-        except Exception as defer_e:
-            logger.debug(f"lvol sync-op task {task.uuid}: _defer fallback also failed: {defer_e}")
-
 def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
@@ -1263,8 +1282,18 @@ def add_backup_task(backup):
     )
 
 
-def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids, lvol_id=""):
-    """Create the task that restores an S3 backup chain into a new lvol."""
+def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids,
+                            lvol_id="", s3_config=None):
+    """Create the task that restores an S3 backup chain into a new lvol.
+
+    Args:
+        s3_config: set when the backup lives in a bucket that is not the
+            cluster's own, so the runner has to attach a device of its own to
+            read it. The runner names that device after the backup, owns it,
+            and deletes it -- scrubbing this field -- once the restore reaches
+            a terminal state. Unset, the restore reads through the device the
+            node already has for the cluster's own bucket.
+    """
     return _add_task(
         JobSchedule.FN_BACKUP_RESTORE,
         cluster_id,
@@ -1276,6 +1305,7 @@ def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "chain_ids": chain_ids,
+            "s3_config": s3_config,
         },
     )
 

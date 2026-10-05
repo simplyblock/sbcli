@@ -95,7 +95,6 @@ JM_COMPRESSION_BACKLOG_REARM_FRACTION = 0.9
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
-DEV_DISCOVERY_INTERVAL_SEC = 60
 
 # --- lblk cluster mode (Linux block devices via SPDK AIO bdevs) ---
 DEVICE_MODE_NVME = "nvme"
@@ -220,6 +219,36 @@ LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC = int(
     os.getenv("LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC", "86400"))
 
 TASK_EXEC_INTERVAL_SEC = 10
+
+#: Ceiling on how long a node-removal task may sit suspend-and-retrying on one
+#: of its waits (device failure-migration today; volume drain once that lands)
+#: before the removal gives up and the node goes to STATUS_REMOVED_FAILED.
+#: Expressed as wall-clock and converted to a retry count against the runner's
+#: tick, because the meaningful budget is "how long may a removal hang", not
+#: "how many passes". Deliberately generous: these waits legitimately run for
+#: hours on a node holding real data, and a ceiling that fires early would
+#: fail removals that were merely slow.
+#: NOTE: this is a whole-task backstop, not a per-step bound -- the
+#: orchestrator has no persisted step cursor yet, so it cannot attribute
+#: elapsed retries to a particular wait. Per-step budgets arrive with it.
+NODE_REMOVAL_MAX_WAIT_SEC = 6 * 3600
+NODE_REMOVAL_MAX_RETRY = NODE_REMOVAL_MAX_WAIT_SEC // TASK_EXEC_INTERVAL_SEC
+
+#: Node drain: how many times one volume-migration unit is retried against the
+#: SAME target before the drain gives up on that target and tries another.
+NODE_DRAIN_MAX_RESTARTS_PER_TARGET = 10
+#: Pacing between those attempts. The removal runner ticks every few seconds;
+#: a migration that has just failed does not succeed by being re-issued
+#: immediately, and hammering it would burn the whole per-target budget in
+#: under a minute. Matches the standalone retry-on-failure pacing.
+NODE_DRAIN_RETRY_WAIT_SEC = 300
+
+#: How long the post-shutdown condition re-check may keep failing before the
+#: removal gives up. Its own budget, not the whole-removal one: a drain may
+#: legitimately run for hours, but a peer that has not come back within this
+#: window is not coming back on the removal timescale, and waiting the full
+#: budget out holds a shut-down node hostage to it.
+NODE_REMOVAL_CONDITION_WAIT_SEC = 30 * 60
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
 # tasks are time-critical (cluster is degraded until the node is back) and
@@ -273,29 +302,15 @@ RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
 RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
-# per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
-# CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than
-# CLUSTER_ADD_LOCK_TTL_SEC is treated as abandoned (holder crashed) and may be
-# reclaimed. TTL is kept well under TASK_LEASE_TTL_SEC so a dead holder's lock
-# is reclaimed before its task lease, and is several heartbeats wide so a live
-# (but momentarily slow) holder is never falsely preempted. The slow part of
-# add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
-CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
-CLUSTER_ADD_LOCK_TTL_SEC = 120
-
-# Cluster creation concurrency: add_cluster()'s duplicate-name check
-# (does a cluster named X already exist?) is otherwise a plain read-then-write
-# with no atomicity, so concurrent/retried create calls for the same name can
-# all pass the check before any of them has committed — observed 2026-07-28:
-# a control-plane readiness flap caused the operator to retry cluster-create
-# ~6 times in a burst, producing 6 separate "simplyblock-cluster" records
-# instead of one. A ClusterCreateLock keyed by name serializes create attempts
-# for that name; no heartbeat (create is a single synchronous call, not a
-# long-lived section), just a generous TTL so a crashed holder's lock is
-# eventually reclaimable. Sized above add_cluster's worst realistic runtime
-# (the first-cluster bootstrap path retries opensearch/graylog up to ~150s
-# each, sequentially).
-CLUSTER_CREATE_LOCK_TTL_SEC = 600
+# per cluster behind a DbLock named "cluster_add/<cluster_id>". Cluster
+# creation is serialized per name behind "cluster_create/<name>", because
+# add_cluster()'s duplicate-name check is a plain read-then-write: concurrent
+# retries for one name can all pass it before any of them commits (2026-07-28:
+# an operator retry burst produced 6 "simplyblock-cluster" records).
+#
+# Neither takes a lease constant here — DbLock's LEASE_SEC covers crash
+# detection for every lock, and a live holder heartbeats for as long as its
+# section runs. Only the wait timeout below is per-call-site.
 
 # How long a queued add_node waits for the lock before failing for retry.
 # "Short" is relative: one mesh section takes minutes on a 32-node cluster,
@@ -310,6 +325,16 @@ CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 # persisting the node record (which spans the SPDK boot), so a live add never
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
+
+# add_node_add_task's dedup check (by node_addr) is itself a plain
+# read-then-write: two concurrent posts for one host can both pass it before
+# either commits, queuing two FN_NODE_ADD tasks for the same host (the
+# create-time twin of the cluster_add mesh race above). Serialized per
+# (cluster, node_addr) behind "node_add_task/<cluster_id>/<node_addr>". Short,
+# unlike CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC: the guarded section is a couple of
+# FDB round trips, not the mesh section of add_node itself, so a waiter only
+# needs to outlast the holder's own read-then-write.
+NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC = 10
 
 # Snapshot create concurrency: the primary-create + replica-register sequence of
 # a snapshot is serialized per lvstore behind an LVStoreMutationLock so that
@@ -749,7 +774,6 @@ TRANSPORT_RETRY=1
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
-LVOL_CLUSTER_RATIO=1
 
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
 # layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
@@ -871,6 +895,14 @@ LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — sk
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
 LVOL_MIG_TRANSFER_BATCH_SIZE = 256
 
+#: `sbctl volume migrate-continue --retry-on-failure`: once a migration (or
+#: batch group) reaches a terminal FAILED status (not cancelled) with
+#: retry_on_failure set, wait this long before attempting a brand-new
+#: migration (full precreate + start) for the same lvol/target, so a
+#: transient condition -- a bouncing target node, an in-flight rebalance --
+#: has time to clear before the precondition checks are retried.
+LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC = 300
+
 #: How long a deferred lvol register task tolerates a missing lvol record
 #: before treating it as obsolete. add_lvol_ha queues the task in its
 #: pre-check but writes the lvol record only at the end of the create, so
@@ -935,7 +967,23 @@ NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
 BACKUP_POLL_INTERVAL_SEC = 5
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
-BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
+
+#: Longest backup chain the control plane will accept.
+#:
+#: Bounded by the data plane, not policy: bdev_lvol_s3_backup and
+#: bdev_lvol_s3_recovery refuse a longer chain (RPC_MAX_S3_IDS in
+#: vbdev_lvol_rpc.c). Raising this alone turns every backup and restore of a
+#: longer chain into an RPC error.
+#:
+#: 40 is also where the policy argument lands: a restore reads the whole chain in
+#: one operation, so its length multiplies restore time and objects fetched.
+BACKUP_MAX_CHAIN_LENGTH = 40
+
+#: Upper bound on a backup's s3_id. The data plane packs it into bits 33..62 of
+#: the synthetic bdev offset (S3_ID_BITS in spdk_internal/lvolstore.h) and masks
+#: rather than validates, so a larger value silently aliases onto another
+#: backup's object keys.
+BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---

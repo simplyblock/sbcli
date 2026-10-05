@@ -36,9 +36,8 @@ from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
-
+from simplyblock_core.models.storage_node import StorageNode
 from tests.integration.ftt2.mock_cluster import FTT2MockRpcServer
 
 NUM_NODES = 4
@@ -578,7 +577,7 @@ def patch_externals():
               return_value=[]),
         patch('simplyblock_core.storage_node_ops._connect_to_remote_devs',
               return_value=[]),
-        patch('simplyblock_core.storage_node_ops.addNvmeDevices',
+        patch('simplyblock_core.utils.addNvmeDevices',
               side_effect=lambda rpc, snode, ssds: snode.nvme_devices),
         patch('simplyblock_core.storage_node_ops._prepare_cluster_devices_on_restart',
               return_value=True),

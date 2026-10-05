@@ -28,13 +28,15 @@ import time
 import uuid as uuid_module
 from datetime import datetime
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils
 from simplyblock_core import db_controller as db_mod
-from simplyblock_core import utils
 from simplyblock_core.controllers import snapshot_events, tasks_controller
 from simplyblock_core.controllers.snapshot_controller import (
-    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock,
-    object_mutation_lock)
+    _find_lvs_leader,
+    _rollback_snapshot_bdev,
+    lvstore_op_lock,
+    object_mutation_lock,
+)
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
@@ -753,9 +755,12 @@ def demote_group(group):
         reuse demote_lvol's per-member wait, whose retrigger branch would take a
         fresh single-volume snapshot and break the group cut.
     """
-    from simplyblock_core.controllers import lvol_controller, replication_policy_controller
-    from simplyblock_core.services import replication_final_step
+    from simplyblock_core.controllers import (
+        lvol_controller,
+        replication_policy_controller,
+    )
     from simplyblock_core.models.lvol_model import LVolReplication
+    from simplyblock_core.services import replication_final_step
 
     group = db.get_consistency_group_by_id(group.get_id())
     members = []
@@ -1045,19 +1050,21 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
         created_ids: list = []
         for p in plan:
             lvol = p["lvol"]
-            snap_bdev = rpc_client.get_bdevs(f"{group.lvs_name}/{p['snap_bdev_name']}")
+            snap_bdev = rpc_client.bdev_get(f"{group.lvs_name}/{p['snap_bdev_name']}")
             if not snap_bdev:
                 _rollback_all()
                 return None, (f"group snapshot {p['snap_bdev_name']} not readable "
                               f"after creation")
-            p["snap_uuid"] = snap_bdev[0]["uuid"]
-            p["blobid"] = snap_bdev[0]["driver_specific"]["lvol"]["blobid"]
-            num_allocated = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+            p["snap_uuid"] = snap_bdev["uuid"]
+            p["blobid"] = snap_bdev["driver_specific"]["lvol"]["blobid"]
+            num_allocated = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
             p["used_size"] = int(num_allocated * cluster.page_size_in_blocks)
 
             for sec in secondary_nodes:
                 from simplyblock_core.storage_node_ops import (
-                    wait_or_delay_for_restart_gate, queue_for_restart_drain)
+                    queue_for_restart_drain,
+                    wait_or_delay_for_restart_gate,
+                )
                 gate = wait_or_delay_for_restart_gate(sec.get_id(), group.lvs_name)
                 if gate == "delay":
                     queue_for_restart_drain(
@@ -1214,7 +1221,10 @@ def delete_generation(group, seq):
     """Delete every member snapshot of generation ``seq`` atomically; never the
     group itself (design §10). Returns (deleted_ids, None) or (None, error).
     """
-    from simplyblock_core.controllers import replication_recovery_points, snapshot_controller
+    from simplyblock_core.controllers import (
+        replication_recovery_points,
+        snapshot_controller,
+    )
     targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
     if not targets:
         return None, f"generation {seq} of group {group.uuid[:8]} not found"

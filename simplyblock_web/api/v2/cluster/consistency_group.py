@@ -15,7 +15,6 @@ from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import (
     cg_colocation,
     consistency_group_controller,
@@ -23,18 +22,21 @@ from simplyblock_core.controllers import (
     migration_controller,
     replication_policy_controller,
 )
-from simplyblock_core.controllers.consistency_group_controller import ConsistencyGroupError
+from simplyblock_core.controllers.consistency_group_controller import (
+    ConsistencyGroupError,
+)
+from simplyblock_core.db_controller import DBController
 
 from .._dependencies import Cluster, ConsistencyGroupResource
 from .._dtos import (
+    ConsistencyGroupColocateDTO,
     ConsistencyGroupDTO,
     ConsistencyGroupGenerationDTO,
     ConsistencyGroupGenerationMemberDTO,
+    ConsistencyGroupJoinPlanDTO,
+    ConsistencyGroupLineageMemberDTO,
     ConsistencyGroupMemberDTO,
     ConsistencyGroupMemberJoinDTO,
-    ConsistencyGroupLineageMemberDTO,
-    ConsistencyGroupJoinPlanDTO,
-    ConsistencyGroupColocateDTO,
     ConsistencyGroupMigrationCreateDTO,
     ConsistencyGroupMigrationDTO,
     ConsistencyGroupMigrationItemDTO,

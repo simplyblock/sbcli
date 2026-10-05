@@ -29,11 +29,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.storage_node import StorageNode
 from tests._mocks import unique_ip
-
 
 # --------------------------------------------------------------------------
 # Helpers (kept aligned with tests/test_dual_ft_secondary_fixes.py)
@@ -216,7 +215,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             "lvs_primary": False,
             "uuid": "lvs-uuid",
         }]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True

@@ -341,7 +341,12 @@ def test_create_migration_refuses_a_lone_group_member_before_touching_the_target
     db = mock.MagicMock()
     db.get_lvol_by_id.return_value = lv
     db.get_storage_node_by_id.return_value = tgt
+    # main's _refuse_restarting_target_replicas reads the replicas through
+    # the module-level db: serve it from the same mock (no replicas).
+    tgt.secondary_node_id = ""
+    tgt.tertiary_node_id = ""
     with mock.patch.object(migration_controller, "DBController", return_value=db), \
+            mock.patch.object(migration_controller, "db", db), \
             mock.patch.object(migration_controller, "_get_shared_subsystem_members", return_value=[]), \
             mock.patch.object(cgl, "require_whole_groups",
                               side_effect=ValueError("would split a consistency group")):

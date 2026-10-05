@@ -24,7 +24,7 @@ While the expansion runs, the locks live elsewhere: every migration
 runner defers its tasks while a cluster-expand task is open (they may be
 QUEUED — e.g. by an unexpected node outage mid-expansion — but never run
 before the expansion completes; see
-``tasks_controller.defer_task_for_expansion``), ``shutdown_storage_node``
+``migration_task_common.require_active_cluster``), ``shutdown_storage_node``
 refuses shutdowns during IN_EXPANSION, the executor holds a restart-phase
 gate on each donor (queueing create/delete/resize for the affected LVS),
 and the donors' outbound hublvol connections are dropped up-front (see
@@ -43,7 +43,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-
 
 logger = utils.get_logger(__name__)
 
@@ -77,7 +76,7 @@ EXPANSION_IMPACTED_NODE_TASK_FNS = frozenset({
 
 #: Subset of the blocking families that DEFER on an open cluster-expand task
 #: (their runners suspend while the expansion is in progress — see
-#: ``tasks_controller.defer_task_for_expansion``). A RESUME of an in-progress
+#: ``migration_task_common.require_active_cluster``). A RESUME of an in-progress
 #: plan tolerates open tasks from these families: they are typically the
 #: recovery migrations queued by an unexpected node outage mid-expansion,
 #: and they wait for us, not the other way around (required order: expansion
@@ -248,6 +247,12 @@ def check_expansion_preconditions(cluster, db_controller,
     # outage is in progress; IN_EXPANSION means another expansion runs.
     if cluster.status != Cluster.STATUS_ACTIVE:
         return False, f"cluster status is {cluster.status}, expansion requires active"
+    # A removal in progress is "shrinking", no longer a status of its own
+    # (it used to be IN_SHRINK, which the check above refused).
+    shrinking = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id())
+                 if n.status in StorageNode.REMOVAL_IN_PROGRESS_STATUSES]
+    if shrinking:
+        return False, f"a node removal is in progress ({', '.join(shrinking)}); expansion must wait for it"
 
     # Every node must be ONLINE — a sec/tert teardown while any peer is
     # out reduces redundancy below the FTT contract.

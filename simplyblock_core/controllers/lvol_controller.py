@@ -6,29 +6,43 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import utils, constants, index_ops
-from simplyblock_core.models.indices import UniqueIndexViolation
-from simplyblock_core.controllers import object_limits, ops_gate
-from simplyblock_core.controllers import events_controller
-from simplyblock_core.controllers import replication_recovery_points
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
-    snapshot_events
+from simplyblock_core import constants, index_ops, utils
+from simplyblock_core.controllers import (
+    events_controller,
+    lvol_events,
+    object_limits,
+    ops_gate,
+    pool_controller,
+    replication_recovery_points,
+    snapshot_controller,
+    snapshot_events,
+    tasks_controller,
+)
+from simplyblock_core.controllers.host_auth import (
+    _get_dhchap_group,
+    _register_dhchap_keys_on_node,
+    _register_pool_dhchap_keys_on_node,
+)
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
-from simplyblock_core.rpc_client import RPCException
-from simplyblock_core.controllers.host_auth import (
-    _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
+from simplyblock_core.kms import (
+    KMSException,
+    create_kms_connection,
+    lvol_dek_path,
+    pool_kek_name,
+)
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.utils import capacity
-from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
+from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import replication_final_step
+from simplyblock_core.utils import capacity
+from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 
 logger = utils.get_logger(__name__)
 
@@ -78,7 +92,7 @@ def lvol_bdev_absent_on_node(lvol, snode) -> bool:
 def _create_crypto_lvol(rpc_client, lvol, cluster):
     name = lvol.crypto_bdev
     base_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-    ret = rpc_client.get_bdevs(base_name)
+    ret = rpc_client.bdev_get(base_name)
     if not ret:
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
@@ -87,7 +101,7 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
     # activation/restart pass, skip the key + crypto-bdev creates. SPDK
     # rejects duplicate creates with hard errors that would otherwise
     # break re-activation convergence.
-    if rpc_client.get_bdevs(name):
+    if rpc_client.bdev_get(name):
         logger.info("crypto LVol %s already exists, skipping create", name)
         return True
 
@@ -157,7 +171,7 @@ def ask_for_lvol_vuid():
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
-                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols=None, all_snaps=None):
+                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
     #  Validation
     #  name validation
     db_controller = DBController()
@@ -197,7 +211,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         return False, f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
 
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
@@ -252,16 +266,26 @@ def max_subsystems_for_node(node):
 
 
 def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
-                      pool_id=None):
-    """Pick candidate primary nodes for a new lvol.
+                      pool_id=None, exclude_ids=None):
+    """Pick candidate primary nodes for an lvol: up to three, best first,
+    weighted by how little each is already carrying.
 
     ``pool_id`` is the pool of the lvol being placed; for namespaced creates
     it decides which existing subsystems count as joinable (a shared
     subsystem is exclusive to one pool -- see
     ``get_next_available_subsystem_on_node``). Non-namespaced placement
     ignores it.
+
+    ``exclude_ids`` removes nodes from consideration outright. Creation has
+    never needed it -- the ONLINE filter below is enough when the only
+    unsuitable node is one that is down. A node DRAIN does: it walks candidates
+    until one accepts the volume, so each attempt has to exclude the ones
+    already tried, and it must never offer the node currently acting as the
+    migration's source (an offline primary's replica stands in for it, and that
+    replica is ONLINE and otherwise eligible).
     """
     db_controller = DBController()
+    exclude_ids = set(exclude_ids or [])
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if all_lvols is None:
         all_lvols = db_controller.get_mini_lvols()
@@ -272,6 +296,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
     nodes_with_ns_slot = set()
     for node in snodes:
         if node.is_secondary_node:  # pass
+            continue
+        if node.get_id() in exclude_ids:
             continue
         if node.status == node.STATUS_ONLINE:
             subsys_count = count_lvol_subsystems(node, all_lvols)
@@ -592,13 +618,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # group's node BEFORE placement runs (requirement: pin to host before
         # creation). An explicit conflicting --host is an error, not a
         # preference fight.
-        from simplyblock_core.controllers import replication_policy_controller as _rpc
         # Local import: consistency_group_controller from-imports
         # snapshot_controller internals, and snapshot_controller imports this
         # module — a top-level import here breaks any process that loads
         # snapshot_controller first (every tasks-runner service; see
         # tests/unit/test_controller_import_order.py).
         from simplyblock_core.controllers import consistency_group_controller as _cgc
+        from simplyblock_core.controllers import replication_policy_controller as _rpc
         try:
             _policy = _rpc._resolve_policy(replication_policy)
         except KeyError:
@@ -715,13 +741,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # TTL-cached scans: these feed advisory capacity math and random-vuid
     # dedup only — name uniqueness goes through the O(1) per-pool name index
     # inside validate_add_lvol_func, so a few seconds of staleness here cannot
-    # admit a duplicate name. Uncached, these two full-DB reads cost seconds
-    # per create at a few thousand objects and dominate mass-create runs.
-    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
+    # admit a duplicate name (the pool's capacity is likewise read fresh there).
+    # Uncached, these two full-DB reads cost seconds per create at a few
+    # thousand objects and dominate mass-create runs.
+    from simplyblock_core.utils.ttl_cache import (
+        cached_mini_lvols,
+        cached_mini_snapshots,
+    )
     all_lvols = cached_mini_lvols(db_controller)
     all_snaps = cached_mini_snapshots(db_controller)
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
-                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
+                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
     if error:
         logger.error(error)
@@ -750,6 +780,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 if dev.status == dev.STATUS_ONLINE:
                     dev_count += 1
                     cluster_size_total_raw += dev.size
+                    # Inline-checksum fallback layout reserves 6 of every 510 data blocks
+                    # per 2 MiB extent for the extended md page + filler. Charge that as
+                    # initial utilization rather than reducing reported raw capacity;
+                    # the overhead is physical, cluster_size_prov is effective.
+                    if cl.inline_checksum and not dev.md_supported:
+                        cluster_size_prov += capacity.to_effective(
+                            utils.alceml_fallback_overhead_bytes(cl, dev.size), cl)
     # NVMeDevice.size is RAW (physical, parity-inclusive); cluster_size_prov is
     # the sum of provisioned lvol sizes, which is EFFECTIVE. Comparing them
     # directly understated provisioned utilisation by (ndcs+npcs)/ndcs -- 1.5x on
@@ -1063,8 +1100,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # snapshot_controller, which already locks the parent chain).
         with snapshot_controller.object_mutation_lock(cl.get_id(), lvol.uuid):
             from simplyblock_core.storage_node_ops import (
-                find_leader_with_failover, check_non_leader_for_operation,
+                check_non_leader_for_operation,
                 execute_on_leader_with_failover,
+                find_leader_with_failover,
             )
 
             # Build nodes list
@@ -1279,7 +1317,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
         # membership test, but O(1) instead of serializing every bdev on the
         # node into the response (the dump grows with lvol count and was the
         # single largest cost of mass creates).
-        if rpc_client.get_bdevs(name):
+        if rpc_client.bdev_get(name):
             continue
 
         ret = None
@@ -1308,7 +1346,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                     # failed).  The idempotency probe above uses the bare
                     # stack name which doesn't resolve for lvol bdevs
                     # (SPDK registers them as lvstore/lvol_name).
-                    existing = rpc_client.get_bdevs(
+                    existing = rpc_client.bdev_get(
                         f"{lvol.lvs_name}/{name}")
                     if existing:
                         ret = existing
@@ -1320,7 +1358,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             if is_primary:
                 ret = rpc_client.lvol_clone(**params)
                 if not ret:
-                    existing = rpc_client.get_bdevs(
+                    existing = rpc_client.bdev_get(
                         f"{lvol.lvs_name}/{name}")
                     if existing:
                         ret = existing
@@ -1339,7 +1377,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                     # bdev is really there before letting add_ns proceed.
                     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
                     for _ in range(40):
-                        if rpc_client.get_bdevs(bdev_name):
+                        if rpc_client.bdev_get(bdev_name):
                             break
                         time.sleep(0.5)
                     else:
@@ -1753,9 +1791,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 # carry the source cluster's values. The bdev_lvol_clone just
                 # created has its own uuid/blobid - read them back so the caller
                 # can pass correct values to bdev_lvol_clone_register on HA peers.
-                actual = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+                actual = rpc_client.bdev_get(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
                 if actual:
-                    return actual[0], None
+                    return actual, None
                 return {'uuid': lvol.lvol_uuid,
                         'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
 
@@ -1861,9 +1899,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return {'uuid': lvol.lvol_uuid,
                 'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
 
-    ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-    if ret:
-        lvol_bdev = ret[0]
+    lvol_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+    if lvol_bdev:
         return lvol_bdev, None
     else:
         return False, "Failed to get lvol bdev"
@@ -5515,8 +5552,8 @@ def _resume_replication_after_failback(db_controller, lvol, new_lvol):
     if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
         return
     try:
-        from simplyblock_core.models.replication import ReplicationPolicy
         from simplyblock_core.controllers import replication_policy_controller
+        from simplyblock_core.models.replication import ReplicationPolicy
         node = db_controller.get_storage_node_by_id(new_lvol.node_id)
         active = [p for p in db_controller.get_replication_policies(node.cluster_id)
                   if p.status == ReplicationPolicy.STATUS_ACTIVE]
@@ -5742,7 +5779,9 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
         if already_failed_over:
             if getattr(lvol, "group_id", ""):
                 try:
-                    from simplyblock_core.controllers import consistency_group_controller
+                    from simplyblock_core.controllers import (
+                        consistency_group_controller,
+                    )
                     consistency_group_controller.reconstitute_group_after_handoff(
                         lvol, existing_clone, target_cluster.get_id())
                 except Exception as e:

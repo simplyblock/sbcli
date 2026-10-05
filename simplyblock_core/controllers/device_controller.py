@@ -1,14 +1,14 @@
 import json
+import logging
 import threading
 import time
-import logging
 import uuid
 
-from simplyblock_core import constants, distr_controller, utils, storage_node_ops
+from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.utils.helpers import single_or_none
@@ -19,6 +19,10 @@ from simplyblock_core.utils.helpers import single_or_none
 # longer than the typical SPDK timeout/reset cycle is sufficient — 10 s
 # comfortably exceeds the 4 s timeout_us + reset round-trip.
 DEVICE_FLAP_DEBOUNCE_SEC = 10.0
+
+# Appended to a failed device's serial number once it has been replaced by a
+# fresh device record, marking the original as spent.
+FAILED_SERIAL_SUFFIX = "_failed"
 
 logger = logging.getLogger()
 
@@ -401,8 +405,8 @@ def probe_device_stack(device_obj, snode, rpc_client=None):
     _safe("nvme_controller",
           lambda: rpc_client.bdev_nvme_controller_list(device_obj.nvme_controller))
     if device_obj.alceml_bdev:
-        _safe("alceml", lambda: rpc_client.get_bdevs(device_obj.alceml_bdev))
-        _safe("pt", lambda: rpc_client.get_bdevs(f"{device_obj.alceml_bdev}_PT"))
+        _safe("alceml", lambda: rpc_client.bdev_get(device_obj.alceml_bdev))
+        _safe("pt", lambda: rpc_client.bdev_get(f"{device_obj.alceml_bdev}_PT"))
     if device_obj.nvmf_nqn:
         subsys: list = []
 
@@ -583,7 +587,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     nvme_bdev = device_obj.nvme_bdev
     if snode.enable_test_device:
         test_name = f"{device_obj.nvme_bdev}_test"
-        if not rpc_client.get_bdevs(test_name):
+        if not rpc_client.bdev_get(test_name):
             # create testing bdev
             ret = rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
             if not ret:
@@ -602,7 +606,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         # device can be made to "hang" on demand (chaos testing). Created with zero
         # latency; arm via device_controller.set_device_hang / bdev_delay_update_latency.
         hang_name = f"{device_obj.nvme_bdev}_hang"
-        if not rpc_client.get_bdevs(hang_name):
+        if not rpc_client.bdev_get(hang_name):
             ret = rpc_client.bdev_delay_create(hang_name, nvme_bdev)
             if not ret:
                 logger.error(f"Failed to create hang bdev: {hang_name}")
@@ -615,7 +619,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
-    if not rpc_client.get_bdevs(alceml_name):
+    if not rpc_client.bdev_get(alceml_name):
         checksum_method, cache_size, cache_eviction_threshold = utils.alceml_checksum_params(cluster, device_obj)
         if cluster.inline_checksum and not device_obj.md_supported:
             logger.warning(
@@ -642,7 +646,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
-    if not rpc_client.get_bdevs(pt_name):
+    if not rpc_client.bdev_get(pt_name):
         ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
@@ -774,7 +778,7 @@ def restart_device(device_id, force=False):
     if device_obj.bdev_type == "aio":
         # lblk mode: the base bdev is an AIO bdev over a kernel block device.
         # Re-resolve serial-first (kernel names shift), recreate if gone.
-        if not snode.rpc_client().get_bdevs(device_obj.nvme_bdev):
+        if not snode.rpc_client().bdev_get(device_obj.nvme_bdev):
             try:
                 filename = device_obj.by_id_path or device_obj.device_path
                 try:
@@ -830,11 +834,11 @@ def restart_device(device_id, force=False):
             # looking for jm partition
             rpc_client = snode.rpc_client()
             jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
-            ret = rpc_client.get_bdevs(jm_dev_part)
+            ret = rpc_client.bdev_get(jm_dev_part)
             if ret:
                 logger.info(f"JM part found: {jm_dev_part}")
                 if snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]:
-                    if snode.rpc_client().get_bdevs(snode.jm_device.raid_bdev):
+                    if snode.rpc_client().bdev_get(snode.jm_device.raid_bdev):
                         logger.info("Raid found, setting jm device online")
                         ret = snode.rpc_client().bdev_raid_get_bdevs()
                         has_bdev = any(
@@ -1015,7 +1019,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(f"{device.alceml_bdev}_PT") or force:
+    if  rpc_client.bdev_get(f"{device.alceml_bdev}_PT") or force:
         logger.info("Removing device PT")
         ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
         if not ret:
@@ -1023,21 +1027,21 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(device.alceml_bdev ) or force:
+    if  rpc_client.bdev_get(device.alceml_bdev ) or force:
         ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(device.qos_bdev) or force:
+    if  rpc_client.bdev_get(device.qos_bdev) or force:
         ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.qos_bdev}")
             if not force:
                 return False
 
-    if snode.enable_test_device and (rpc_client.get_bdevs(device.testing_bdev) or force):
+    if snode.enable_test_device and (rpc_client.bdev_get(device.testing_bdev) or force):
         ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.testing_bdev}")
@@ -1246,7 +1250,7 @@ def reset_storage_device(dev_id):
         # error state below (device_set_online also forgives flaps);
         # bdev gone => fail so the tasks framework escalates to
         # restart_device, whose full stack rebuild is the real recovery.
-        if not rpc_client.get_bdevs(device.nvme_bdev):
+        if not rpc_client.bdev_get(device.nvme_bdev):
             logger.error(f"AIO bdev {device.nvme_bdev} is gone; reset cannot "
                          f"recover it — restart the device instead")
             return False
@@ -1501,7 +1505,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
                     continue
                 dev_part = f"{dev.nvme_bdev[:-2]}p1"
-                if rpc_client.get_bdevs(dev_part):
+                if rpc_client.bdev_get(dev_part):
                     if dev_part not in jm_nvme_bdevs:
                         jm_nvme_bdevs.append(dev_part)
 
@@ -1592,14 +1596,14 @@ def new_device_from_failed(device_id):
         logger.error(f"Device status: {device.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
         return False
 
-    if device.serial_number.endswith("_failed"):
+    if device.serial_number.endswith(FAILED_SERIAL_SUFFIX):
         logger.error("Device is already added back from failed")
         return False
 
     if device.bdev_type == "aio":
         # lblk mode: ensure the AIO bdev exists again (serial-first
         # re-resolution against the live host; stored path as fallback).
-        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+        if not device_node.rpc_client().bdev_get(device.nvme_bdev):
             try:
                 filename = device.by_id_path or device.device_path
                 try:
@@ -1621,7 +1625,7 @@ def new_device_from_failed(device_id):
             except Exception as e:
                 logger.error(e)
                 return False
-        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+        if not device_node.rpc_client().bdev_get(device.nvme_bdev):
             logger.error(f"Failed to find AIO bdev {device.nvme_bdev}")
             return False
     else:
@@ -1651,7 +1655,7 @@ def new_device_from_failed(device_id):
     def _mut(n, nd=new_device, old_id=device_id):
         for d in n.nvme_devices:
             if d.get_id() == old_id:
-                d.serial_number = f"{d.serial_number}_failed"
+                d.serial_number = f"{d.serial_number}{FAILED_SERIAL_SUFFIX}"
                 break
         n.nvme_devices.append(nd)
         return True

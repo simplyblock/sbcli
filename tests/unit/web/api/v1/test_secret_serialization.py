@@ -18,8 +18,8 @@ import pytest
 from flask import Flask
 from pydantic import SecretStr
 
-from simplyblock_web import utils
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_web import utils
 
 
 @pytest.fixture

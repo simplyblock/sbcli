@@ -33,12 +33,14 @@ import importlib.util
 import os
 import time
 import unittest
+import uuid
 from unittest.mock import MagicMock, patch
 
+import simplyblock_core.services.task_runner_base as trb
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
-
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services.task_runner_base import TaskAbort, TaskRetry
 
 _RUNNER_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..",
@@ -81,28 +83,34 @@ def _load_runner_module():
 
 def _mk_task(node_id="node-1", retry=0, max_retry=11,
              status=JobSchedule.STATUS_NEW, canceled=False):
-    t = MagicMock(spec=JobSchedule)
+    """A real, persisted task row.
+
+    The handler records its outcome through ``set_result``, which is a
+    compare-and-set against the row in FoundationDB — not a write to whatever
+    object the handler was handed. A double would absorb that silently and the
+    assertions below would pass on any behaviour at all, so the row is real and
+    read back from the store.
+    """
+    t = JobSchedule()
+    t.uuid = str(uuid.uuid4())
+    t.cluster_id = "cl-1"
+    t.function_name = JobSchedule.FN_NODE_RESTART
     t.node_id = node_id
     t.retry = retry
     t.max_retry = max_retry
     t.status = status
     t.canceled = canceled
-    t.function_result = ""
-    t.write_to_db = MagicMock()
+    t.write_to_db(trb.db.kv_store)
     return t
 
 
-def _mk_db(node):
-    """A db double whose ``atomic_update`` actually applies the mutator.
+def _result(task):
+    return trb.db.get_task_by_id(task.uuid).function_result
 
-    Terminal task writes go through ``db.atomic_update(task, _mutate)`` — a
-    plain write of the runner's in-memory copy would erase a concurrent
-    cancellation. An unconfigured MagicMock swallows ``_mutate``, so the task
-    never reached DONE and the short-circuit looked broken when it was not.
-    """
+
+def _mk_db(node):
     db = MagicMock()
     db.get_storage_node_by_id.return_value = node
-    db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     return db
 
 
@@ -130,10 +138,8 @@ class TestShortCircuitSkipsRestartForOnlineNode(unittest.TestCase):
         node = _mk_node(status=StorageNode.STATUS_ONLINE, health_check=True,
                         nvme_devices=[])
         with patch.object(mod, "db", _mk_db(node)):
-            ret = mod.task_runner_node(task)
-        self.assertTrue(ret)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
-        self.assertIn("online", task.function_result.lower())
+            mod.task_runner_node(task.frozen_view())
+        self.assertIn("online", _result(task).lower())
 
     def test_online_and_healthy_with_unavailable_devices_still_skips(self):
         """Devices flagged UNAVAILABLE must NOT block task short-circuit.
@@ -147,9 +153,8 @@ class TestShortCircuitSkipsRestartForOnlineNode(unittest.TestCase):
         node = _mk_node(status=StorageNode.STATUS_ONLINE, health_check=True,
                         nvme_devices=[bad_dev])
         with patch.object(mod, "db", _mk_db(node)):
-            ret = mod.task_runner_node(task)
-        self.assertTrue(ret)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
+            mod.task_runner_node(task.frozen_view())
+        self.assertIn("online", _result(task).lower())
 
     def test_online_but_unhealthy_still_skips_restart(self):
         """Critical regression: an ONLINE node with health_check=False
@@ -162,10 +167,8 @@ class TestShortCircuitSkipsRestartForOnlineNode(unittest.TestCase):
         node = _mk_node(status=StorageNode.STATUS_ONLINE, health_check=False,
                         nvme_devices=[])
         with patch.object(mod, "db", _mk_db(node)):
-            ret = mod.task_runner_node(task)
-        self.assertTrue(ret)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
-        self.assertIn("online", task.function_result.lower())
+            mod.task_runner_node(task.frozen_view())
+        self.assertIn("online", _result(task).lower())
 
 
 class TestShortCircuitDoesNotApplyToNonOnlineStatuses(unittest.TestCase):
@@ -184,8 +187,10 @@ class TestShortCircuitDoesNotApplyToNonOnlineStatuses(unittest.TestCase):
             mock_health._check_node_ping.return_value = False
             mock_health._check_node_api.return_value = False
             mock_health._check_ping_from_node.return_value = False
-            _ = mod.task_runner_node(task)
-        self.assertNotEqual(task.status, JobSchedule.STATUS_DONE)
+            # Not a short-circuit: it falls through to the reachability
+            # checks and asks the driver for another attempt.
+            with self.assertRaises(TaskRetry):
+                mod.task_runner_node(task.frozen_view())
 
 
 class TestTerminalStatusesStillDoneImmediately(unittest.TestCase):
@@ -205,9 +210,10 @@ class TestTerminalStatusesStillDoneImmediately(unittest.TestCase):
         task = _mk_task()
         node = _mk_node(status=StorageNode.STATUS_REMOVED)
         with patch.object(mod, "db", _mk_db(node)):
-            ret = mod.task_runner_node(task)
-        self.assertTrue(ret)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
+            # TaskAbort is the terminal, non-retryable stop the driver turns
+            # into DONE — reached before any shutdown/restart call.
+            with self.assertRaises(TaskAbort):
+                mod.task_runner_node(task.frozen_view())
 
 
 if __name__ == "__main__":

@@ -44,8 +44,8 @@ def test_c_db_controller(db_controller):
 def test_d_router_active(patched_rpc_router):
     """RpcRouter is patched into the canonical rpc_client module."""
     _say("start test_d_router_active")
-    from tests.integration.expansion_sim._rpc_sim import RpcRouter
     from simplyblock_core import rpc_client
+    from tests.integration.expansion_sim._rpc_sim import RpcRouter
     assert rpc_client.RPCClient is RpcRouter, (
         f"RPCClient is {rpc_client.RPCClient}, expected RpcRouter")
     _say("done test_d_router_active")
@@ -56,8 +56,8 @@ def test_e_baseline_scenario(fdb_clean, db_controller_singleton_reset,
     """Build the 4-node FTT1 baseline; assert FDB has the records and
     simulators are registered."""
     _say("start test_e_baseline_scenario")
-    from tests.integration.expansion_sim._scenarios import build_4_node_ftt1_baseline
     from simplyblock_core.db_controller import DBController
+    from tests.integration.expansion_sim._scenarios import build_4_node_ftt1_baseline
 
     db = DBController()
     cluster_id, existing_ids, new_node_id = build_4_node_ftt1_baseline(
@@ -85,9 +85,9 @@ def test_f_planner_against_db(fdb_clean, db_controller_singleton_reset,
     """compute_role_diff against the FDB-backed scenario produces the right
     move count for 4 -> 5 FTT1 (3 moves: 1 re-home + 2 newcomer creates)."""
     _say("start test_f_planner_against_db")
-    from tests.integration.expansion_sim._scenarios import build_4_node_ftt1_baseline
     from simplyblock_core.controllers.cluster_expansion.planner import compute_role_diff
     from simplyblock_core.db_controller import DBController
+    from tests.integration.expansion_sim._scenarios import build_4_node_ftt1_baseline
 
     db = DBController()
     cluster_id, existing_ids, new_node_id = build_4_node_ftt1_baseline(

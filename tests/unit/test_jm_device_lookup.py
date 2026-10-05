@@ -17,7 +17,6 @@ from simplyblock_core.controllers import device_controller, health_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.storage_node import StorageNode
 
-
 NVME_ID = 'dev-1'
 JM_ID = 'jm-1'
 NODE_ID = 'node-1'

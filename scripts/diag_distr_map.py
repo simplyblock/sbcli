@@ -1,8 +1,8 @@
 """Diagnose persistent Distr-map health=False: for each node, fetch the SPDK
 cluster map for each of its distrib bdevs and compare against the mgmt DB,
 printing only the mismatching entries."""
-from simplyblock_core.db_controller import DBController
 from simplyblock_core import distr_controller
+from simplyblock_core.db_controller import DBController
 
 db = DBController()
 sns = db.get_storage_nodes()

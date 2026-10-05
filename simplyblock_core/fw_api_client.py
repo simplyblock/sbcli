@@ -1,14 +1,12 @@
 import json
-
-import requests
 import logging
 
+import requests
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
-
 
 logger = logging.getLogger()
 
