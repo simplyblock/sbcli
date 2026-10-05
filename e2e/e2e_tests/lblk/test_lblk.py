@@ -871,10 +871,25 @@ class _LblkBase(TestClusterBase):
         # and the reattach below, and the same question is asked properly by
         # interface_full_network_interrupt.
         if uuid:
+            # Both states, not just "offline". A fully isolated node can land
+            # in either, and they are not equivalent: run 20261005-173730 went
+            # online -> UNREACHABLE and stayed there for 34 minutes with no
+            # restart ever queued, because restarts are queued from offline.
+            # Waiting only for "offline" reported "stayed online" about a node
+            # that had very much gone away -- the most misleading possible
+            # message in the one situation that matters.
             try:
-                self.sbcli_utils.wait_for_storage_node_status(
-                    uuid, "offline", timeout=120)
-                self.logger.info("[lblk] %s went offline while cut off", uuid)
+                reached = self.sbcli_utils.wait_for_storage_node_status(
+                    uuid, ["offline", "unreachable"], timeout=120)
+                state = (reached or {}).get("status", "offline/unreachable")                     if isinstance(reached, dict) else "offline/unreachable"
+                self.logger.info("[lblk] %s went %s while cut off", uuid, state)
+                if state == "unreachable":
+                    self.logger.warning(
+                        "[lblk] %s is 'unreachable' rather than 'offline'. "
+                        "Auto-restart is queued from offline, so a node that "
+                        "stays unreachable has no route back on its own -- "
+                        "watch for it still being unreachable after the host "
+                        "returns.", uuid)
             except Exception:                         # noqa: BLE001
                 self.logger.warning(
                     "[lblk] %s stayed online through the isolation of %s. "
