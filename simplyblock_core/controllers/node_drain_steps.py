@@ -304,6 +304,37 @@ def prepare_node_for_removal(node_id: str, force_remove: bool = False) -> dict:
     return {'status': db.get_storage_node_by_id(node_id).status, 'started': started}
 
 
+def removal_admission(node_id: str) -> dict:
+    """Whether the node may be removed, asked without starting the removal.
+
+    prepare-removal runs the admission and stamps pending_removal on the same
+    call, and from there there is no way back. A caller that has to take the
+    node down before prepare-removal (the Kubernetes operator shuts it down
+    first) would learn of a refusal with the node already offline, so this
+    answers the same question while the node still serves, and changes
+    nothing: no status, no task, no rebuild.
+
+    The admission is prepare-removal's own, check_removal_admission without the
+    snapshot check, and always unforced: forcing cancels the node's active
+    tasks, which a check must never do. A node already departing is past the
+    admission; a removed one is not admitted. Returns ``{'admitted', 'reason'}``.
+    """
+    from simplyblock_core import storage_node_ops
+    from simplyblock_core.models.storage_node import StorageNode
+
+    db = DBController()
+    node = db.get_storage_node_by_id(node_id)
+    if node.status == StorageNode.STATUS_REMOVED:
+        return {'admitted': False, 'reason': f"node {node_id} is already removed"}
+    if node.status in StorageNode.DEPARTING_STATUSES:
+        return {'admitted': True, 'reason': ''}
+    ok, reason = storage_node_ops.check_removal_admission(
+        node, db, force_remove=False, check_snapshots=False)
+    if not ok:
+        return {'admitted': False, 'reason': f"Can not remove node {node_id}: {reason}"}
+    return {'admitted': True, 'reason': ''}
+
+
 def prepare_progress(node_id: str) -> dict:
     """The first step's progress: the device rebuild, plus the node status.
 
