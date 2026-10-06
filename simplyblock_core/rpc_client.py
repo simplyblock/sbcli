@@ -387,11 +387,13 @@ class RPCClient:
 
     def _request3(self, method: str, *, request_timeout=None, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
-        wire_payload = unwrap_secrets_for_send({
-            'id': 1,
-            'method': method,
-            'params': kwargs,
-        })
+        payload: dict = {'id': 1, 'method': method}
+        # Some SPDK RPC handlers (e.g. framework_start_init) reject a request
+        # that carries a "params" field at all, even an empty object -- so a
+        # zero-argument call must omit the key entirely, not send `{}`.
+        if kwargs:
+            payload['params'] = kwargs
+        wire_payload = unwrap_secrets_for_send(payload)
         # Per-call override of the client-level HTTP timeout, same as _request2 --
         # see bdev_nvme_attach_controller for why this exists (the LVS rejoin
         # freeze window). Keyword-only so it can never collide with an RPC
