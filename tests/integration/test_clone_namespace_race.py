@@ -90,7 +90,10 @@ def _rpc_client():
     mock.subsystem_list.return_value = [
         {"max_namespaces": 32, "namespaces": [{"uuid": "x"}]}]
     mock.subsystem_create.return_value = True
-    mock.nvmf_subsystem_add_listener.return_value = (True, None)
+    # Listeners go through nvmf_listener.ensure_listener: listeners_list
+    # (absent) -> listeners_create(ana_state=...) once.
+    mock.listeners_list.return_value = []
+    mock.listeners_create.return_value = True
     # add_lvol_on_node uses nvmf_subsystem_add_ns2, which returns (ret, err).
     mock.nvmf_subsystem_add_ns2.return_value = (7, None)
     mock.ultra21_util_get_malloc_stats.return_value = {}
@@ -150,7 +153,7 @@ class TestNamespacedAttachRace(unittest.TestCase):
         # add_ns fires directly against the pre-chosen subsystem.
         rpc.subsystem_list.assert_not_called()
         rpc.subsystem_create.assert_not_called()
-        rpc.nvmf_subsystem_add_listener.assert_not_called()
+        rpc.listeners_create.assert_not_called()
         rpc.nvmf_subsystem_add_ns2.assert_called_once()
         self.assertEqual(rpc.nvmf_subsystem_add_ns2.call_args[0][0],
                          original_nqn)
@@ -222,7 +225,7 @@ class TestNamespacedAttachRace(unittest.TestCase):
         rpc.subsystem_create.assert_called_once()
         self.assertEqual(rpc.subsystem_create.call_args[0][0],
                          "nqn.test:cluster-1:lvol:u2")
-        rpc.nvmf_subsystem_add_listener.assert_called()
+        rpc.listeners_create.assert_called()
         # Two add_ns calls: the rejected one against the gone subsystem,
         # then the successful one against the lvol's own subsystem.
         self.assertEqual(rpc.nvmf_subsystem_add_ns2.call_count, 2)
@@ -300,7 +303,7 @@ class TestPostBdevStackRollback(unittest.TestCase):
         lvol = _lvol_for_add("u4")  # standalone path
         node = _node()
         rpc = _rpc_client()
-        rpc.nvmf_subsystem_add_listener.return_value = (False, {"code": -32000})
+        rpc.listeners_create.return_value = None   # RPC error, listener absent
         node.rpc_client = MagicMock(return_value=rpc)
         mock_db_cls.return_value = MagicMock()
 
@@ -317,15 +320,16 @@ class TestPostBdevStackRollback(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_listener_already_exists_does_not_roll_back(self, mock_db_cls):
-        """A -32602 ``listener already exists`` is a benign warning —
-        the existing code logs and continues, and rollback must NOT
-        fire (otherwise we'd delete a perfectly good clone)."""
+        """An existing listener is never added again and is not an error:
+        rollback must NOT fire (otherwise we'd delete a perfectly good
+        clone)."""
         from simplyblock_core.controllers import lvol_controller
 
         lvol = _lvol_for_add("u6")  # standalone path
         node = _node()
         rpc = _rpc_client()
-        rpc.nvmf_subsystem_add_listener.return_value = (False, {"code": -32602})
+        rpc.listeners_list.return_value = [{"address": {
+            "trtype": "TCP", "traddr": "10.0.0.1", "trsvcid": "4420"}}]
         node.rpc_client = MagicMock(return_value=rpc)
         mock_db_cls.return_value = MagicMock()
 
@@ -334,8 +338,9 @@ class TestPostBdevStackRollback(unittest.TestCase):
         self.assertIsNone(err)
         # add_ns was reached and succeeded.
         rpc.nvmf_subsystem_add_ns2.assert_called_once()
-        # No rollback.
+        # No rollback, and no second add.
         rpc.delete_lvol.assert_not_called()
+        rpc.listeners_create.assert_not_called()
 
 
 if __name__ == "__main__":
