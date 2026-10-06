@@ -558,6 +558,18 @@ REPL_CUTOVER_PROCEED_REQUIRED = True
 # convergence snapshot cannot be taken until the previous one is marked
 # replicated, so observation latency lands directly in the IO freeze.
 REPL_XFER_POLL_INTERVAL_SEC = 0.1
+# Replication node fail-over (docs/replication-node-failover.md).
+# Leadership of the TARGET lvstore must be seen on the same single member twice,
+# this far apart, before a transfer or convert is sent to it: a leadership move
+# in progress reports a leader on the old member, then none, then the new one.
+REPL_LEADER_SETTLE_SEC = 2.0
+# Source-member and target-leader switches a task may make without spending a
+# retry. A switch is not the transfer's fault (an outage moved it), but a node
+# that flaps must not keep a task alive for ever: past this, switches count.
+REPL_MAX_NODE_SWITCHES = 6
+# How long a target leader confirmed settled stays trusted without another
+# settle wait, as long as each probe still shows it as the only leader.
+REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # How long the submitting pass may wait inline for the transfer. The runner is
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
 # just falls back to being noticed on a later pass.
