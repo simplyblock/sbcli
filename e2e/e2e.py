@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, get_e2e_all_tests, ALL_TESTS, get_lblk_tests, get_replication_tests, get_replication_stress_tests
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, get_e2e_all_tests, ALL_TESTS, get_lblk_tests, get_replication_tests, get_replication_stress_tests, get_migration_tests, get_migration_stress_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -185,6 +185,10 @@ def main():
         # hours, and it must never stand between a correctness run and
         # its answer.
         "replication-stress": get_replication_stress_tests,
+        # lvol migration: the two-phase volume migrate handshake. Had no
+        # e2e coverage at all before this lane.
+        "migration": get_migration_tests,
+        "migration-stress": get_migration_stress_tests,
         "parity": get_parity_tests,
         "e2e-all": get_e2e_all_tests,
     }

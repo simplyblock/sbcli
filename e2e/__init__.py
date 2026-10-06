@@ -382,6 +382,40 @@ from e2e_tests.replication.test_replication_negative import (
     ReplicationNegativeConfiguration,
     ReplicationNegativeOperations,
 )
+from e2e_tests.migration.test_migration_happy import (
+    MigrationHappyPath,
+    MigrationRoundTrip,
+    MigrationWithSnapshots,
+)
+from e2e_tests.migration.test_migration_fault import (
+    MigrationTargetOfflinePerPhase,
+    MigrationSourceAndTargetFaults,
+    MigrationCancel,
+    MigrationRetryAfterTargetReboot,
+    MigrationHaPartnerRestart,
+    MigrationClusterRestartBetween,
+)
+from e2e_tests.migration.test_migration_topology import (
+    MigrationHaOverlapMatrix,
+    MigrationSnapshotCloneTrees,
+    MigrationConcurrent,
+)
+from e2e_tests.migration.test_migration_batch import (
+    MigrationBatchFlat,
+    MigrationBatchNsGaps,
+    MigrationBatchNegative,
+    MigrationBatchWithTrees,
+)
+from e2e_tests.migration.test_migration_negative import (
+    MigrationNegativeTargets,
+    MigrationNegativeCapacity,
+    MigrationUnderReplication,
+)
+from e2e_tests.migration.test_migration_scale import (
+    MigrationLargeVolume,
+    MigrationManyVolumes,
+    MigrationSoak,
+)
 from e2e_tests.replication.test_replication_scale import (
     ReplicationOverlappingIntervals,
     ReplicationManyVolumes,
@@ -1116,6 +1150,71 @@ def get_replication_tests():
         CsiAddonsPromoteDemote,                   # AR-K-005/006/007/009
         CsiAddonsForcedFailoverAndOutage,         # AR-K-008/012/013/014
         CsiAddonsGroupReplication,                # AR-K-015 (Phase 4, records a skip)
+    ]
+
+
+def get_migration_tests():
+    """lvol migration: one volume between two nodes of ONE cluster.
+
+    The two-phase `volume migrate` / `volume migrate-continue` handshake,
+    which had NO e2e coverage before this lane -- our other "migration"
+    classes are device-failure rebalance, node migration, or cross-cluster
+    replication, none of which touch these verbs.
+
+    Ported from origin/lvol-migration-test-scripts, which were run by hand
+    and found most of this feature's bugs. Ordered cheapest-and-safest
+    first: the happy path has to work before a fault case means anything,
+    and the fault lane leaves nodes down and restarted, so it runs after
+    the topology work that needs a quiet cluster.
+
+        MIG-H  8 cases   happy path + the volume is still usable
+        MIG-T  11 cases  HA overlap matrix, trees, concurrency
+        MIG-B  8 cases   shared-namespace groups
+        MIG-N  7 cases   must-be-refused, plus migrate-while-replicating
+        MIG-F  15 cases  faults in a named phase -- longest, most disruptive
+    """
+    return [
+        # MIG-H: if a plain migration does not work, nothing below matters.
+        MigrationHappyPath,              # MIG-H-001..004
+        MigrationRoundTrip,              # MIG-H-005/006
+        MigrationWithSnapshots,          # MIG-H-007/008
+        # MIG-T: needs a quiet cluster, so before anything destructive.
+        MigrationHaOverlapMatrix,        # MIG-T-001..005
+        MigrationSnapshotCloneTrees,     # MIG-T-006..009
+        MigrationConcurrent,             # MIG-T-010/011
+        # MIG-B: the batch path.
+        MigrationBatchFlat,              # MIG-B-001..003
+        MigrationBatchNsGaps,            # MIG-B-004
+        MigrationBatchNegative,          # MIG-B-005/006
+        MigrationBatchWithTrees,         # MIG-B-007/008
+        # MIG-N: cheap, but MIG-N-003 takes a node down.
+        MigrationNegativeTargets,        # MIG-N-001..004
+        MigrationNegativeCapacity,       # MIG-N-005
+        MigrationUnderReplication,       # MIG-N-006/007
+        # MIG-F: last. Kills nodes, reboots them, restarts the cluster.
+        MigrationTargetOfflinePerPhase,  # MIG-F-001..003
+        MigrationSourceAndTargetFaults,  # MIG-F-004..009
+        MigrationCancel,                 # MIG-F-010..012
+        MigrationRetryAfterTargetReboot, # MIG-F-013
+        MigrationHaPartnerRestart,       # MIG-F-014
+        MigrationClusterRestartBetween,  # MIG-F-015
+    ]
+
+
+def get_migration_stress_tests():
+    """MIG-P: migration at scale and over time. A SEPARATE lane.
+
+    Same split, same reason as the replication lanes: a soak measured in
+    hours must never stand between a correctness run and its answer.
+
+        MIG_LARGE_SIZE (100G)   MIG_LARGE_BUDGET_SEC (7200)
+        MIG_MANY_COUNT (20)     MIG_MANY_SETTLE_SEC (3600)
+        MIG_SOAK_HOURS (6)      MIG_VOL_SIZE (2G)  MIG_POST_OP_SEC (300)
+    """
+    return [
+        MigrationManyVolumes,   # MIG-P-003/004  minutes to an hour
+        MigrationLargeVolume,   # MIG-P-001/002  needs capacity; times the freeze
+        MigrationSoak,          # MIG-P-005/006  MIG_SOAK_HOURS
     ]
 
 
