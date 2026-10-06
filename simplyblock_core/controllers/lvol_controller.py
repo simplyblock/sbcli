@@ -41,7 +41,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import replication_final_step
-from simplyblock_core.utils import capacity
+from simplyblock_core.utils import capacity, nvmf_listener
 from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 
 logger = utils.get_logger(__name__)
@@ -1931,26 +1931,30 @@ def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
         else:
             continue
         logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-        ret, err = rpc_client.nvmf_subsystem_add_listener(
-            lvol.nqn, trtype, iface.ip4_address, listener_port, ana_state)
-        if not ret:
-            if err and "code" in err and err["code"] == -32602:
-                logger.warning("listener already exists")
-            else:
-                # A node with several matching NICs can get one listener up and
-                # fail on the next. The caller rolls the namespace and the bdev
-                # back, so anything published here would be left pointing at a
-                # deleted bdev -- take them down again first.
-                for done_trtype, done_ip in added:
-                    try:
-                        rpc_client.listeners_del(
-                            lvol.nqn, done_trtype, done_ip, listener_port)
-                    except Exception:
-                        logger.exception(
-                            "failed to remove listener %s %s:%s from %s during rollback",
-                            done_trtype, done_ip, listener_port, lvol.nqn)
-                return False, f"Failed to create listener for {lvol.get_id()}"
-        else:
+        # Created once, directly in its intended ANA state; an existing
+        # listener (a shared subsystem, a re-registration) is not added a
+        # second time -- SPDK refuses that with "Listener already exists".
+        try:
+            outcome = nvmf_listener.ensure_listener(
+                rpc_client, lvol.nqn, trtype, iface.ip4_address, listener_port,
+                ana_state=ana_state)
+        except Exception as e:
+            logger.error("listener %s %s:%s for %s: %s", trtype,
+                         iface.ip4_address, listener_port, lvol.nqn, e)
+            # A node with several matching NICs can get one listener up and
+            # fail on the next. The caller rolls the namespace and the bdev
+            # back, so anything published here would be left pointing at a
+            # deleted bdev -- take them down again first.
+            for done_trtype, done_ip in added:
+                try:
+                    rpc_client.listeners_del(
+                        lvol.nqn, done_trtype, done_ip, listener_port)
+                except Exception:
+                    logger.exception(
+                        "failed to remove listener %s %s:%s from %s during rollback",
+                        done_trtype, done_ip, listener_port, lvol.nqn)
+            return False, f"Failed to create listener for {lvol.get_id()}"
+        if outcome == nvmf_listener.CREATED:
             added.append((trtype, iface.ip4_address))
     return True, None
 
@@ -2074,7 +2078,15 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
                     ana_state = "optimized"
             logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, recreate_lvs_port))
             logger.info(f"Setting ANA state: {ana_state}")
-            ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, recreate_lvs_port, ana_state)
+            # Never a second add for an existing listener (shared subsystem):
+            # created once in ana_state, otherwise left as it is.
+            try:
+                nvmf_listener.ensure_listener(
+                    rpc_client, lvol.nqn, iface.trtype, iface.ip4_address,
+                    recreate_lvs_port, ana_state=ana_state)
+            except Exception as e:
+                logger.error("listener for %s on %s:%s: %s", lvol.nqn,
+                             iface.ip4_address, recreate_lvs_port, e)
 
     return True, None
 

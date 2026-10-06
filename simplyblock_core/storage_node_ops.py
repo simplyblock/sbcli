@@ -86,6 +86,7 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
+    nvmf_listener,
     port_block,
     pull_docker_image_with_retry,
     rpc_budget,
@@ -234,6 +235,62 @@ def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
         return False
     except Exception:
         return False
+
+
+def _presumed_acting_leader(lvs_node, sec_nodes, disconnected_peers, snode):
+    """The peer to quiesce when no connected peer reports lvs leadership.
+
+    ``bdev_lvol_get_lvstores``' "lvs leadership" is not a reliable signal for
+    a secondary that took over: in the lblk_rapid_outage run (2026-09-26
+    22:23:21, LVS_1) c8a7e64d had been the acting leader since 22:22:39 --
+    every distrib of jm_vuid 1 "state changed to leader", its JC writing the
+    journal -- yet the probe found no leader. The recreate then skipped the
+    whole quiesce on it (no jc_disable_replication, no in-flight drain, no
+    leadership drop), examined the lvstore on the restarting primary and
+    made it leader at 22:23:24.9; at 22:23:25.2 the secondary's JC, still
+    the writer, started replicating into the primary's just-recovered JM
+    and the primary hit a writer conflict at 22:23:25.28.
+
+    Every step of that quiesce is harmless on a peer that is not leading
+    (no replication to suspend, nothing in flight, leadership already
+    False), so when the probe is inconclusive and ``snode`` is recreating
+    its own primary LVS, the connected peer that would have taken over --
+    the secondary, else the tertiary -- is quiesced as if it were the
+    leader. Returns None when no such peer is connected."""
+    if lvs_node is None or lvs_node.get_id() != snode.get_id():
+        return None
+    connected = {p.get_id(): p for p in sec_nodes
+                 if p.get_id() not in disconnected_peers}
+    for peer_id in (lvs_node.secondary_node_id, lvs_node.tertiary_node_id):
+        if peer_id and peer_id in connected:
+            return connected[peer_id]
+    return None
+
+
+def demote_old_leader_listeners(sec_node, lvol_list, ana_state="non_optimized"):
+    """Put the old leader's lvol listeners into ``ana_state`` after a
+    failback, per volume ANA group.
+
+    Existing listeners get nvmf_subsystem_listener_set_ana_state; only a
+    missing listener is created, directly in ``ana_state``. Raises on the
+    first failure (the caller logs it and moves on to the next peer)."""
+    sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
+    seen = set()
+    for lvol in lvol_list:
+        listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
+        for iface in sec_node.data_nics:
+            if not iface.ip4_address:
+                continue
+            tr_type = "RDMA" if sec_node.active_rdma and iface.trtype == "RDMA" else "TCP"
+            key = (lvol.nqn, tr_type, iface.ip4_address, listener_port,
+                   lvol.ns_id or None)
+            if key in seen:
+                continue
+            seen.add(key)
+            nvmf_listener.ensure_listener(
+                sec_rpc, lvol.nqn, tr_type, iface.ip4_address, listener_port,
+                ana_state=ana_state, anagrpid=lvol.ns_id or None,
+                set_existing_ana=True)
 
 
 def _rpc_bdev_exists(rpc_client, name):
@@ -13086,6 +13143,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     current_leader = sec_node
                     logger.info("Current leader for %s is %s", lvs_name, sec_node.get_id())
                     break
+                logger.info(
+                    "Peer %s does not report lvs leadership for %s (lvstore: %s)",
+                    sec_node.get_id(), lvs_name, ret[0] if ret else ret)
             except Exception as e:
                 # Cannot tell "peer down" from "peer mgmt slow" at this stage:
                 # snode has no peer-hublvol controller bdevs yet, so any
@@ -13095,6 +13155,17 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 # data-plane check earlier in this function.
                 raise Exception(
                     f"Abort restart: leader detection RPC to peer {sec_node.get_id()} failed: {e}")
+
+        if current_leader is None:
+            current_leader = _presumed_acting_leader(
+                lvs_node, sec_nodes, disconnected_peers, snode)
+            if current_leader is not None:
+                logger.warning(
+                    "No connected peer reports lvs leadership for %s; treating "
+                    "%s as the presumed acting leader and quiescing it (journal "
+                    "replication suspended, in-flight IO drained, leadership "
+                    "dropped) before %s examines the lvstore",
+                    lvs_name, current_leader.get_id(), snode.get_id())
 
         # Check compression and replication only on the current leader
         if current_leader:
@@ -14199,19 +14270,20 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             ### 11- demote old leader's subsystems to non_optimized (async)
             # Per design: after restarting node takes leadership, the old leader must
             # start demoting all its lvol subsystems to non_optimized.
+            #
+            # The listeners already exist on the old leader: change their ANA
+            # state, never add them again. This step used to call
+            # nvmf_subsystem_add_listener(ana_state=non_optimized) on every
+            # one of them; SPDK refused each with "Listener already exists"
+            # and the state did not change (lblk_rapid_outage, 2026-09-26
+            # 22:23:27, 15 refusals on c8a7e64d; 3,000 in the whole run).
+            # Only a listener that is really missing is created, and then
+            # directly as non_optimized.
             for sec_node in sec_nodes:
                 if sec_node.get_id() in disconnected_peers:
                     continue
                 try:
-                    sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
-                    for lvol in lvol_list:
-                        listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
-                        for iface in sec_node.data_nics:
-                            if iface.ip4_address:
-                                tr_type = "RDMA" if sec_node.active_rdma and iface.trtype == "RDMA" else "TCP"
-                                sec_rpc.listeners_create(
-                                    lvol.nqn, tr_type, iface.ip4_address, listener_port,
-                                    ana_state="non_optimized")
+                    demote_old_leader_listeners(sec_node, lvol_list)
                     logger.info("Demoted subsystems to non_optimized on old leader %s", sec_node.get_id())
                 except Exception as e:
                     logger.warning("Failed to demote subsystems on %s: %s", sec_node.get_id(), e)

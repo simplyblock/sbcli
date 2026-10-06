@@ -36,7 +36,10 @@ class ListenerOrderingTest(unittest.TestCase):
     def setUp(self):
         self.rpc = MagicMock(name="rpc")
         self.rpc.nvmf_subsystem_add_ns2.return_value = ("3", None)
-        self.rpc.nvmf_subsystem_add_listener.return_value = (True, None)
+        # publish_lvol_listeners creates a listener once, via ensure_listener:
+        # listeners_list (absent) -> listeners_create(ana_state=...).
+        self.rpc.listeners_list.return_value = []
+        self.rpc.listeners_create.return_value = True
         self.rpc.subsystem_create.return_value = True
         self.rpc.bdev_get.return_value = {
             "uuid": "lvol-bdev-uuid",
@@ -92,11 +95,11 @@ class ListenerOrderingTest(unittest.TestCase):
         order = self._call_order()
         self.assertIn("nvmf_subsystem_add_ns2", order,
                       "the namespace was never added")
-        self.assertIn("nvmf_subsystem_add_listener", order,
+        self.assertIn("listeners_create", order,
                       "the listener was never published")
         self.assertLess(
             order.index("nvmf_subsystem_add_ns2"),
-            order.index("nvmf_subsystem_add_listener"),
+            order.index("listeners_create"),
             "the listener was published before the namespace existed: a client "
             "reaching the subsystem in that window gets Invalid Namespace or "
             "Format with DNR, which is not retried on another path")
@@ -111,8 +114,7 @@ class ListenerOrderingTest(unittest.TestCase):
         at a bdev the rollback deletes -- reads on it answer INTERNAL DEVICE
         ERROR (the 2026-07-14 resurrected-namespace incident).
         """
-        self.rpc.nvmf_subsystem_add_listener.return_value = (
-            None, {"code": -1, "message": "listener add failed"})
+        self.rpc.listeners_create.return_value = None   # RPC error
 
         ok, _ = lvol_controller.add_lvol_on_node(self.lvol, self.snode)
 
@@ -128,7 +130,7 @@ class ListenerOrderingTest(unittest.TestCase):
         lvol_controller.add_lvol_on_node(self.lvol, self.snode)
 
         self.assertNotIn(
-            "nvmf_subsystem_add_listener", self._call_order(),
+            "listeners_create", self._call_order(),
             "a subsystem whose namespace add failed must not be made reachable")
 
 
