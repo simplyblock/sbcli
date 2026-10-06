@@ -2,7 +2,10 @@ import random
 import threading
 import csv
 from logger_config import setup_logger
-import matplotlib.pyplot as plt
+# Imported lazily in generate_graph(). At module top this made a missing
+# plotting library break the import of e2e/__init__.py itself -- the whole
+# suite, not just this test -- because __init__ imports this module
+# eagerly. A missing plot should cost the plot.
 from datetime import datetime
 from pathlib import Path
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
@@ -197,6 +200,15 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         return results
 
     def generate_graph(self, results):
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "matplotlib unavailable (%s); the CSV at %s still holds "
+                "every measurement.", str(exc)[:120], self.output_file)
+            return
         x = [r['lvol_count'] for r in results]
         shutdown = [r['shutdown_time_sec'] for r in results]
         restart = [r['restart_time_sec'] for r in results]

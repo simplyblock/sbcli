@@ -349,6 +349,15 @@ from stress_test.continuous_backup_stress import (
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+from load_tests.migration_load import (
+    MigrationFreezeByVolumeSize,
+    MigrationTimeBySnapshotCount,
+    MigrationConcurrencyCurve,
+)
+from load_tests.replication_load import (
+    ReplicationCycleTimeBySize,
+    ReplicationDemoteDowntimeBySize,
+)
 from e2e_tests.replication.test_replication_functional import (
     ReplicationHarness,
     ReplicationTargetsAndPolicies,
@@ -1089,6 +1098,54 @@ def get_upgrade_tests():
         # K8sNativeMajorUpgradeDualNode,  # disabled: focus on single-node upgrade first
     ]
     return tests
+
+
+def get_migration_load_tests():
+    """MIG-L: migration timings, as curves rather than verdicts.
+
+    A LOAD lane, which is a different kind of thing from e2e or stress --
+    the output is a number per step, appended to CSV, resumable, and
+    plotted. "Did it pass" is close to meaningless; the deliverable is
+    where the curve bends.
+
+        MIG-L-001  freeze duration vs volume size      <- the headline
+        MIG-L-002  duration vs snapshot count
+        MIG-L-003  wall-clock vs concurrency
+
+    MIG-L-001 is the one to run first. lvol_migrate is the only phase that
+    stops the volume serving, the design calls it a "short freeze", and
+    nobody has published what it is at the sizes customers use.
+
+        MIG_LOAD_SIZES (2,10,50,100)   MIG_LOAD_SNAPS (0,10,50,100)
+        MIG_LOAD_CONCURRENCY (1,2,4,8) MIG_LOAD_BUDGET_SEC (5400)
+        LOAD_CONTINUE (1)  -- resume from the CSV instead of redoing steps
+    """
+    return [
+        MigrationFreezeByVolumeSize,     # MIG-L-001
+        MigrationTimeBySnapshotCount,    # MIG-L-002
+        MigrationConcurrencyCurve,       # MIG-L-003
+    ]
+
+
+def get_replication_load_tests():
+    """AR-L: the two replication numbers nobody has.
+
+    Neither has a threshold to assert against, which is exactly why they
+    are load and not stress: the answer is a curve that tells you how big
+    a volume you can honestly offer the feature on.
+
+        AR-L-001  cycle time vs volume size -- the shortest honest interval,
+                  which does NOT improve when little changes because
+                  allow_partial is disabled and every transfer is full
+        AR-L-002  planned-relocation downtime vs size -- demote fences
+                  first and then ships a whole volume
+
+        AR_LOAD_SIZES (2,10,50,100)   AR_LOAD_BUDGET_SEC (7200)
+    """
+    return [
+        ReplicationCycleTimeBySize,      # AR-L-001
+        ReplicationDemoteDowntimeBySize, # AR-L-002
+    ]
 
 
 def get_load_tests():
