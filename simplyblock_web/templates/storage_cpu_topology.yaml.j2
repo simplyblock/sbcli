@@ -5,6 +5,9 @@ metadata:
   namespace: {{ NAMESPACE }}
 spec:
   template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
     spec:
       restartPolicy: OnFailure
       nodeSelector:
