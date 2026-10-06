@@ -3349,10 +3349,131 @@ class TestClusterBase:
     # OpenSearch helpers (fallback when Graylog endpoints are unavailable)
     # ------------------------------------------------------------------
 
+    #: In-cluster OpenSearch on k8s. The control plane's own deployment
+    #: points at this same service, so it is the authority on where
+    #: OpenSearch lives -- not a management node, because on k8s there is no
+    #: separate management host.
+    K8S_OPENSEARCH_SVC = "opensearch-cluster-master"
+    K8S_OPENSEARCH_PORT = 9200
+
     def _opensearch_base_url(self):
-        """Return the OpenSearch base URL for the first management node."""
+        """Where to reach OpenSearch, per platform.
+
+        On docker this is the management node's reverse proxy. On k8s it is
+        NOT: mgmt_nodes[0] there is the placeholder 0.0.0.0, so this used to
+        return http://0.0.0.0/opensearch and every probe failed with
+
+            HTTPConnectionPool(host='0.0.0.0', port=80) ... Connection refused
+
+        which reads as a network fault and is really a bind address being used
+        as a connect address. Every k8s run this week exported an empty
+        control_plane/ and storage_nodes/ because of it.
+
+        On k8s a port-forward to the in-cluster service gives requests a URL it
+        can actually use, and leaves every query in this file unchanged.
+        """
+        if getattr(self, "k8s_test", False):
+            local = self._ensure_opensearch_port_forward()
+            if local:
+                return f"http://127.0.0.1:{local}"
+            # Fall through to the old shape rather than inventing one, so the
+            # failure stays recognisable instead of becoming a new mystery.
         mgmt_ip = self.mgmt_nodes[0]
         return f"http://{mgmt_ip}/opensearch"
+
+    #: Set by _ensure_opensearch_port_forward so the tunnel is reused and can
+    #: be torn down. (popen, local_port) or None.
+    _os_port_forward = None
+
+    def _ensure_opensearch_port_forward(self):
+        """Tunnel to in-cluster OpenSearch. Returns the local port, or 0.
+
+        Best effort: a diagnostic that cannot be collected must not fail a
+        run, so every failure here returns 0 and says why.
+        """
+        import socket
+        import subprocess
+        import time as _time
+
+        if self._os_port_forward:
+            proc, port = self._os_port_forward
+            if proc.poll() is None:
+                return port
+            self._os_port_forward = None
+
+        try:
+            k8s = self._ensure_k8s_utils()
+            ns = getattr(k8s, "namespace", "simplyblock")
+        except Exception:                             # noqa: BLE001
+            ns = "simplyblock"
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        cmd = (f"kubectl port-forward -n {ns} "
+               f"svc/{self.K8S_OPENSEARCH_SVC} "
+               f"{port}:{self.K8S_OPENSEARCH_PORT}")
+        try:
+            proc = subprocess.Popen(cmd, shell=True,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[graylog-export] could not start a port-forward to "
+                "%s: %s", self.K8S_OPENSEARCH_SVC, str(exc)[:160])
+            return 0
+
+        # Wait for the listener rather than sleeping a fixed amount: a
+        # port-forward is usually ready in well under a second, and a fixed
+        # sleep is either wasteful or flaky.
+        deadline = _time.time() + 15
+        while _time.time() < deadline:
+            if proc.poll() is not None:
+                self.logger.warning(
+                    "[graylog-export] port-forward to %s exited immediately; "
+                    "is the service present in namespace %s?",
+                    self.K8S_OPENSEARCH_SVC, ns)
+                return 0
+            probe = socket.socket()
+            probe.settimeout(0.5)
+            try:
+                probe.connect(("127.0.0.1", port))
+                probe.close()
+                self._os_port_forward = (proc, port)
+                self.logger.info(
+                    "[graylog-export] OpenSearch via port-forward "
+                    "127.0.0.1:%d -> %s:%d", port,
+                    self.K8S_OPENSEARCH_SVC, self.K8S_OPENSEARCH_PORT)
+                return port
+            except Exception:                         # noqa: BLE001
+                _time.sleep(0.25)
+            finally:
+                try:
+                    probe.close()
+                except Exception:                     # noqa: BLE001
+                    pass
+
+        self.logger.warning(
+            "[graylog-export] port-forward to %s never came up within 15s",
+            self.K8S_OPENSEARCH_SVC)
+        try:
+            proc.kill()
+        except Exception:                             # noqa: BLE001
+            pass
+        return 0
+
+    def _close_opensearch_port_forward(self):
+        """Tear the tunnel down. Safe to call when there is none."""
+        if not self._os_port_forward:
+            return
+        proc, _port = self._os_port_forward
+        self._os_port_forward = None
+        try:
+            proc.kill()
+        except Exception:                             # noqa: BLE001
+            pass
 
     def _build_opensearch_session(self):
         """Create a requests.Session for OpenSearch (no auth needed)."""
@@ -3962,10 +4083,42 @@ class TestClusterBase:
 
             if not opensearch_ok and not graylog_ok:
                 self.logger.warning(
-                    "[graylog-export] Neither OpenSearch nor Graylog "
-                    "is reachable, skipping export"
-                )
+                    "[graylog-export] Neither OpenSearch nor Graylog is "
+                    "reachable, skipping export. On k8s check that the "
+                    "%s service exists in the simplyblock namespace -- this "
+                    "used to fail with host='0.0.0.0' because there is no "
+                    "management node to ask.", self.K8S_OPENSEARCH_SVC)
                 return
+
+            # Reachable but empty is a different problem, and a quieter one:
+            # the export "succeeds" and writes nothing, which is how every
+            # k8s run this week produced a zero-byte control_plane/ without
+            # anyone noticing. Say it plainly, with the two things to check.
+            if opensearch_ok:
+                try:
+                    r = os_session.get(
+                        f"{os_url}/_cat/indices?h=index,docs.count&format=json",
+                        timeout=10)
+                    rows = r.json() if r.status_code == 200 else []
+                    total = sum(int(x.get("docs.count") or 0) for x in rows)
+                    if total == 0:
+                        self.logger.warning(
+                            "[graylog-export] OpenSearch is reachable but "
+                            "holds NO log documents (%s). Nothing will be "
+                            "exported, and this is an ingestion problem, not "
+                            "an export one. Check: (1) fluent-bit for "
+                            "'[output:gelf] no upstream connections "
+                            "available', (2) whether Graylog actually has a "
+                            "GELF input running -- the chart creates the "
+                            "service and the 12201 port mapping, but the "
+                            "input itself is a runtime object and nothing "
+                            "listens on 12201 until it is launched.",
+                            ", ".join(f"{x.get('index')}={x.get('docs.count')}"
+                                      for x in rows) or "no indices")
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.info(
+                        "[graylog-export] could not count documents: %s",
+                        str(exc)[:140])
 
             # Discover (container_name, source) pairs
             # _graylog_discover_containers tries:
@@ -4090,6 +4243,11 @@ class TestClusterBase:
             self.logger.warning(
                 f"[graylog-export] Unexpected error, skipping: {exc}"
             )
+        finally:
+            # Every path, including the early returns above: a leaked
+            # port-forward outlives the export and holds a local port for the
+            # rest of the run.
+            self._close_opensearch_port_forward()
 
     def _extract_delay_logs(self, graylog_dir):
         """Extract delay-qpair entries from SPDK logs into separate files.
