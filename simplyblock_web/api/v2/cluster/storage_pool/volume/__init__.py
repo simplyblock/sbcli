@@ -106,6 +106,14 @@ def add(
         pass
 
     if isinstance(data, _CreateParams):
+        # add_lvol_ha accepts a node id or a hostname. Resolve it here so a
+        # missing node is a 404 instead of a generic controller refusal.
+        if data.host_id:
+            try:
+                db.get_storage_node_by_id(data.host_id)
+            except KeyError:
+                if not db.get_storage_nodes_by_hostname(data.host_id):
+                    raise HTTPException(404, f'Storage node not found: {data.host_id}')
         volume_id_or_false, error = lvol_controller.add_lvol_ha(
             name=data.name,
             size=data.size,

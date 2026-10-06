@@ -108,6 +108,34 @@ class TestCreateVolume:
         assert response.status_code == 422
         assert 'maximum 20 members' in response.json()['detail']
 
+    def test_unknown_host_id_returns_404_without_calling_the_controller(
+            self, client, db, pool, lvol_controller):
+        """A well-formed host_id that matches no node is a missing resource,
+        not a refusal by the controller."""
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        db.get_storage_node_by_id.side_effect = KeyError('StorageNode not found')
+        db.get_storage_nodes_by_hostname.return_value = []
+
+        response = client.post(
+            f'{BASE}/', json={'name': 'vol-1', 'size': '2G', 'host_id': STORAGE_NODE_ID})
+
+        assert response.status_code == 404
+        assert STORAGE_NODE_ID in response.json()['detail']
+        lvol_controller.add_lvol_ha.assert_not_called()
+
+    def test_host_id_resolving_to_a_hostname_is_passed_through(
+            self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        db.get_storage_node_by_id.side_effect = KeyError('StorageNode not found')
+        db.get_storage_nodes_by_hostname.return_value = [object()]
+        lvol_controller.add_lvol_ha.return_value = (VOLUME_ID, None)
+
+        response = client.post(
+            f'{BASE}/', json={'name': 'vol-1', 'size': '2G', 'host_id': 'worker-1'})
+
+        assert response.status_code == 201
+        assert lvol_controller.add_lvol_ha.call_args.kwargs['host_id_or_name'] == 'worker-1'
+
     def test_existing_name_returns_409(self, client, db, pool, volume, lvol_controller):
         db.get_lvol_by_name.return_value = volume
 
