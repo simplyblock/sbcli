@@ -353,6 +353,52 @@ from e2e_tests.replication.test_replication_functional import (
     ReplicationHarness,
     ReplicationTargetsAndPolicies,
     ReplicationStartsAndReports,
+    ReplicationPolicyVariants,
+)
+from e2e_tests.replication.test_replication_integrity import (
+    ReplicationDataIsIdentical,
+    ReplicationConvergesUnderLoad,
+    ReplicationNoMetadataCorruption,
+)
+from e2e_tests.replication.test_replication_consistency import (
+    ConsistencyGroupPlacement,
+    ConsistencyGroupGeneration,
+)
+from e2e_tests.replication.test_replication_recovery import (
+    ReplicationFailoverScopes,
+    ReplicationFailoverDataLoss,
+    ReplicationFailback,
+    ReplicationMigration,
+)
+from e2e_tests.replication.test_replication_outage import (
+    ReplicationSourceNodeOutages,
+    ReplicationTargetNodeOutage,
+    ReplicationNetworkOutages,
+    ReplicationOutageDuringOperations,
+    ReplicationConsistencyGroupNodeLoss,
+    ReplicationControlPlaneAndDeviceOutages,
+)
+from e2e_tests.replication.test_replication_negative import (
+    ReplicationNegativeConfiguration,
+    ReplicationNegativeOperations,
+)
+from e2e_tests.replication.test_replication_scale import (
+    ReplicationOverlappingIntervals,
+    ReplicationManyVolumes,
+    ReplicationLargeVolume,
+    ReplicationSoak,
+)
+from e2e_tests.replication.test_replication_upgrade import (
+    ReplicationSurvivesControlPlaneUpgrade,
+    ReplicationSurvivesOperatorUpgrade,
+    ReplicationAnnotationToCsiAddonsMigration,
+)
+from e2e_tests.replication.test_replication_csi_addons import (
+    CsiAddonsEnableAndReport,
+    CsiAddonsOwnership,
+    CsiAddonsPromoteDemote,
+    CsiAddonsForcedFailoverAndOutage,
+    CsiAddonsGroupReplication,
 )
 from e2e_tests.test_api_parity_audit import TestAPIParityAudit
 
@@ -1032,9 +1078,83 @@ def get_replication_tests():
     Test IDs map to documentation/async_replication_QA_test_plan.xlsx.
     """
     return [
-        ReplicationHarness,               # AR-S-001, AR-S-002
-        ReplicationTargetsAndPolicies,    # AR-F-001/003/004/005, AR-N-007
-        ReplicationStartsAndReports,      # AR-F-006/007/009/010/011
+        # AR-S: if two clusters cannot be stood up, stop here.
+        ReplicationHarness,                       # AR-S-001, AR-S-002
+        # AR-F: configuration surface. Cheap, and fails fast on a broken build.
+        ReplicationTargetsAndPolicies,            # AR-F-001/003/004/005, AR-N-007
+        ReplicationStartsAndReports,              # AR-F-006/007/009/010/011
+        ReplicationPolicyVariants,                # AR-F-002/008/012/013/014/015
+        # AR-I: the core risk. Before anything destructive runs.
+        ReplicationDataIsIdentical,               # AR-I-001
+        ReplicationConvergesUnderLoad,            # AR-I-002
+        ReplicationNoMetadataCorruption,          # AR-I-003
+        # AR-C: a working group has to exist before AR-O-009 breaks one.
+        ConsistencyGroupPlacement,                # AR-C-001/005/006
+        ConsistencyGroupGeneration,               # AR-C-002/003/004/007/008
+        # AR-R: moves volumes between clusters; leaves the lab rearranged.
+        ReplicationFailoverScopes,                # AR-R-001/002/003/005
+        ReplicationFailoverDataLoss,              # AR-R-004
+        ReplicationFailback,                      # AR-R-006/007/008/009
+        ReplicationMigration,                     # AR-R-010/011/012
+        # AR-O: destructive and slowest.
+        ReplicationSourceNodeOutages,             # AR-O-001/002/003
+        ReplicationTargetNodeOutage,              # AR-O-004
+        ReplicationNetworkOutages,                # AR-O-005/006
+        ReplicationOutageDuringOperations,        # AR-O-007/008
+        ReplicationConsistencyGroupNodeLoss,      # AR-O-009
+        ReplicationControlPlaneAndDeviceOutages,  # AR-O-010/011/012
+        # AR-N: cheap, but AR-N-006 deletes a volume under replication.
+        ReplicationNegativeConfiguration,         # AR-N-001/002/003
+        ReplicationNegativeOperations,            # AR-N-004/005/006
+        # AR-K: the Kubernetes DR surface. Last because it is the newest and
+        # the only lane that no-ops on docker -- a failure here should not
+        # cost the engine coverage above it. Every case skips by name when
+        # the csi-addons CRDs are absent, so this is safe to leave enabled
+        # before operator PR #548 lands.
+        CsiAddonsEnableAndReport,                 # AR-K-001/002/003/010/011
+        CsiAddonsOwnership,                       # AR-K-004
+        CsiAddonsPromoteDemote,                   # AR-K-005/006/007/009
+        CsiAddonsForcedFailoverAndOutage,         # AR-K-008/012/013/014
+        CsiAddonsGroupReplication,                # AR-K-015 (Phase 4, records a skip)
+    ]
+
+
+def get_replication_stress_tests():
+    """AR-P and AR-U: scale, endurance and upgrade. A SEPARATE lane.
+
+    Deliberately not part of get_replication_tests(). The correctness suite
+    answers "is this right" in a couple of hours; this one answers "does it
+    hold up" and a single soak can run for a weekend. Putting a 20-hour case
+    in front of a 2-hour answer is how a suite stops being run.
+
+    Ordered cheapest-first, because the early cases need nothing special and
+    the later ones need lab capacity and a time budget:
+
+        AR-U-007..009  migration      minutes   -- and it has a customer behind it
+        AR-P-001..003  overlap        ~20 min
+        AR-U-001..006  upgrade        ~30 min
+        AR-P-004..006  many volumes   ~45 min   needs headroom for N volumes
+        AR-P-007..009  large volume   hours     needs AR_LARGE_SIZE of capacity
+        AR-P-010..012  soak           AR_SOAK_HOURS (default 6)
+
+    Scale knobs, all environment-overridable because the right value is a
+    property of the lab and not of the test:
+
+        AR_OVERLAP_SIZE (20G)   AR_MANY_COUNT (25)    AR_MANY_SIZE (1G)
+        AR_LARGE_SIZE (100G)    AR_SOAK_HOURS (6)     AR_SOAK_RETENTION (3)
+    """
+    return [
+        # Cheap, no blockers, and the one with a customer waiting on the answer.
+        ReplicationAnnotationToCsiAddonsMigration,  # AR-U-007/008/009
+        ReplicationOverlappingIntervals,            # AR-P-001/002/003
+        # Upgrade: survives a control-plane roll, and the helm crds/ trap.
+        ReplicationSurvivesControlPlaneUpgrade,     # AR-U-001/002/003
+        ReplicationSurvivesOperatorUpgrade,         # AR-U-004/005/006
+        # Scale by count, then by size.
+        ReplicationManyVolumes,                     # AR-P-004/005/006
+        ReplicationLargeVolume,                     # AR-P-007/008/009
+        # Last: the only case measured in hours.
+        ReplicationSoak,                            # AR-P-010/011/012
     ]
 
 

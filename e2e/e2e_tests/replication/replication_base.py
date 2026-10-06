@@ -82,23 +82,40 @@ class ReplicationTestBase(TestClusterBase):
         self.cluster_b = None
         self.pool_a = None
         self.pool_b = None
+        #: Pool UUID on cluster A. The v2 routes are nested under the pool,
+        #: so cutover_proceed_url needs the id, not the name.
+        self.pool_id_a = None
+        self._repl_skips = []
         self._repl_targets = []
         self._repl_policies = []
 
     def build_second_cluster(self):
-        """Create cluster B on the same control plane. Sets ``cluster_b``.
+        """Make ``cluster_b`` available. Two very different routes.
 
-        Nodes come from whatever is spare: IPs in ``NEW_NODE_IPS`` or
-        ``STORAGE_PRIVATE_IPS`` that are not already in cluster A. If every
-        node is already in A, the set is split in half and A gives up its
-        second half first.
+        **On Kubernetes the test does not build anything.** A simplyblock
+        cluster there is a ``StorageCluster`` CR reconciled by the operator,
+        and "two clusters" means two of them in two NAMESPACES of ONE
+        Kubernetes cluster -- the control plane cannot span two. Workers are
+        split by NODE NAME, never by IP, and both are reached through one
+        kubeconfig. All of that is twenty minutes of pipeline work, and
+        ``k8s-native-cross-cluster-restore.yaml`` already does it and already
+        exports the result. So here we adopt it. A test that reimplemented
+        cluster bring-up would be racing the operator and testing the wrong
+        thing.
 
-        The sequence mirrors ``TestBackupCrossClusterRestore`` because that
-        one is proven in CI. It is reimplemented here rather than imported so
-        that a change made for replication cannot break the backup lane.
+        **On docker the test does build it**, because there is no equivalent
+        pipeline step: ssh to spare IPs from ``NEW_NODE_IPS`` or
+        ``STORAGE_PRIVATE_IPS``, ``sn configure``, ``sn deploy``, then
+        ``cluster add`` on the management node. The sequence mirrors
+        ``TestBackupCrossClusterRestore`` because that one is proven in CI,
+        and is reimplemented rather than imported so a change made for
+        replication cannot break the backup lane.
         """
         if self.cluster_b:
             return self.cluster_b
+
+        if self.k8s_test:
+            return self._adopt_second_cluster_k8s()
 
         mgmt = self.mgmt_nodes[0]
         c2_ips = self._pick_cluster_b_nodes()
@@ -165,6 +182,61 @@ class ReplicationTestBase(TestClusterBase):
         self._await_cluster_active(c2)
         self.cluster_b = c2
         return c2
+
+    #: Set by the k8s path so later calls can reach cluster B's API.
+    cluster_b_secret = None
+    cluster_b_namespace = None
+
+    def _adopt_second_cluster_k8s(self):
+        """Adopt the second StorageCluster the workflow already stood up.
+
+        Reads the three variables ``k8s-native-cross-cluster-restore.yaml``
+        exports at its "Run e2e" step::
+
+            export CLUSTER2_ID="${{ env.C2_CLUSTER_ID }}"
+            export CLUSTER2_SECRET="${{ env.C2_CLUSTER_SECRET }}"
+            export CLUSTER2_NAMESPACE="${NS_C2}"
+
+        Nothing is created and nothing is addressed by IP, because neither
+        is how a Kubernetes cluster works.
+        """
+        cid = (os.environ.get("CLUSTER2_ID")
+               or os.environ.get("C2_CLUSTER_ID") or "").strip()
+        if not cid:
+            raise ReplicationPreconditionError(
+                "[AR-S] no second cluster on this Kubernetes run. On k8s the "
+                "test does NOT build one: a simplyblock cluster is a "
+                "StorageCluster CR reconciled by the operator, two of them "
+                "live in two NAMESPACES of one Kubernetes cluster, and the "
+                "workers are split by NODE NAME (not IP) across the two "
+                "StorageNodeSets. All of that belongs to the workflow.\n\n"
+                "Run this lane from k8s-native-cross-cluster-restore.yaml, "
+                "which builds both and exports CLUSTER2_ID, CLUSTER2_SECRET "
+                "and CLUSTER2_NAMESPACE. Or export CLUSTER2_ID yourself "
+                "against a second StorageCluster that already exists.\n\n"
+                "It needs (ndcs + npcs) * 2 workers in total, since each "
+                "cluster needs a full stripe of its own.")
+
+        self.cluster_b = cid
+        self.cluster_b_secret = (os.environ.get("CLUSTER2_SECRET")
+                                 or os.environ.get("C2_CLUSTER_SECRET") or "")
+        self.cluster_b_namespace = (os.environ.get("CLUSTER2_NAMESPACE")
+                                    or os.environ.get("NS_C2") or "")
+        self.logger.info(
+            "[AR-S] adopted cluster B %s (namespace %r) \u2014 built by the "
+            "workflow, not by this test", self.cluster_b,
+            self.cluster_b_namespace or "<unset>")
+
+        if self.cluster_b == self.cluster_a:
+            raise ReplicationPreconditionError(
+                f"[AR-S] CLUSTER2_ID is the same cluster as cluster A "
+                f"({self.cluster_a}). Replicating a volume to its own cluster "
+                f"puts source and target in the same failure domain, which is "
+                f"the thing AR-N-001 exists to refuse.")
+
+        self._await_cluster_active(self.cluster_b)
+        self.pool_b = self.pool_name
+        return self.cluster_b
 
     def _pick_cluster_b_nodes(self):
         all_ips, seen = [], set()
@@ -286,7 +358,7 @@ class ReplicationTestBase(TestClusterBase):
         return self._cli(f"{self.base_cmd} -d cluster replication-target-remove {name}")
 
     def policy_add(self, name, target, interval_min=None, mode=None,
-                   consistency_group=False, retention=None):
+                   consistency_group=False, retention=None, rpo_target=None):
         """``cluster replication-policy-add``. Returns the policy name."""
         cmd = (f"{self.base_cmd} -d cluster replication-policy-add "
                f"{self.cluster_a} {name} {target}")
@@ -297,6 +369,14 @@ class ReplicationTestBase(TestClusterBase):
             cmd += f" --mode {mode}"
         if consistency_group:
             cmd += " --consistency-group"
+        if rpo_target is not None:
+            # --rpo-target-sec sets ReplicationPolicy.rpo_target_seconds, so
+            # compliance is computed against a DECLARED target instead of
+            # being inferred from observed lag. It post-dates the first
+            # version of this harness and had no coverage at all; AR-P-001
+            # is the first case that sets it, because an unachievable
+            # cadence is exactly where a declared target earns its keep.
+            cmd += f" --rpo-target-sec {rpo_target}"
         if retention is not None:
             cmd += f" --snapshot-retention {retention}"
         out, err = self._cli(cmd)
@@ -404,20 +484,27 @@ class ReplicationTestBase(TestClusterBase):
         self.await_state(volume_id, self.STATE_CUTOVER_PENDING,
                          timeout=timeout, what="waiting for cutover-proceed")
         self.logger.info("[AR] signalling cutover-proceed for %s", volume_id)
-        out, err = self._cli(
-            f"{self.base_cmd} -d volume replication-cutover-proceed {volume_id} "
-            f"2>&1 || true")
-        combined = (out + err)
-        if "not found" in combined.lower() or "no such" in combined.lower():
-            # The CLI verb may not be exposed on every build; fall through to
-            # the API. Say which route was taken -- silently using the
-            # fallback would hide a missing verb.
-            self.logger.warning(
-                "[AR] no replication-cutover-proceed CLI verb on this build "
-                "(%s); using the API route instead", combined.strip()[:120])
-            self.sbcli_utils.post_request(
-                f"/lvol/{volume_id}/replication/cutover-proceed", body={})
+        self.sbcli_utils.post_request(self.cutover_proceed_url(volume_id), body={})
         return True
+
+    def cutover_proceed_url(self, volume_id):
+        """The only route that exists for cutover-proceed.
+
+        There is NO CLI verb for this -- checked against the full replication
+        surface in simplyblock_cli/cli.py. It is a v2 API route only, nested
+        under cluster and pool:
+
+            api.include_router(v2.api, prefix='/api/v2')            app.py:103
+            include_router(cluster.api, prefix='/clusters')      v2/__init__:10
+            instance_api = APIRouter(prefix='/{cluster_id}')     cluster/__init__:163
+            include_router(pool_api, prefix='/storage-pools')    cluster/__init__:297
+            instance_api = APIRouter(prefix='/{volume_id}')      volume/__init__:148
+            include_router(replication_api, prefix='/replication')  volume/__init__:379
+            @api.post('/cutover-proceed')                        replication.py:190
+        """
+        return (f"/api/v2/clusters/{self.cluster_a}/storage-pools/"
+                f"{self.pool_id_a or self.pool_name}/volumes/{volume_id}"
+                f"/replication/cutover-proceed")
 
     # ── integrity ─────────────────────────────────────────────────────────
     def assert_no_corruption(self, context):
@@ -443,24 +530,305 @@ class ReplicationTestBase(TestClusterBase):
                      "Metadata page is all zero", "crc mismatch for blob")
 
     def _scan_cluster_logs(self, cluster_id, context):
+        """Read each storage node's SPDK log and look for the fatal markers.
+
+        Both platforms, because the docker-only version of this silently
+        scanned nothing on k8s -- and a corruption check that cannot fail is
+        indistinguishable from one that passes.
+        """
         nodes = self.sbcli_utils.get_storage_nodes().get("results", [])
+        scanned = 0
         for n in nodes:
             if n.get("cluster_id") and n["cluster_id"] != cluster_id:
                 continue
             ip = n.get("mgmt_ip")
             if not ip:
                 continue
-            out, _ = self.ssh_obj.exec_command(
-                node=ip,
-                command="sudo docker logs --tail 2000 "
-                        "$(sudo docker ps -q -f name=spdk_ 2>/dev/null | head -1) "
-                        "2>&1 || true")
+            out = self._spdk_log_for(ip)
+            if out is None:
+                continue
+            scanned += 1
             for marker in self.FATAL_MARKERS:
-                if marker.lower() in (out or "").lower():
+                if marker.lower() in out.lower():
                     raise AssertionError(
                         f"[AR] {marker!r} in SPDK log on {ip} {context}. "
                         f"This is never acceptable -- unlike an md5 mismatch, "
                         f"which a non-4K-atomic device can produce legitimately.")
+        if not scanned:
+            # Say so loudly. A scan that reached no node is not a pass, and
+            # treating it as one is exactly how this check was dead on k8s.
+            self.logger.warning(
+                "[AR] corruption scan %s reached NO storage node in cluster "
+                "%s -- nothing was actually checked. Treat any 'no corruption' "
+                "conclusion for this window as unverified.", context, cluster_id)
+        else:
+            self.logger.info("[AR] corruption scan %s: %d node(s) clean",
+                             context, scanned)
+
+    def _spdk_log_for(self, node_ip):
+        """The node's SPDK log, on either platform. None if unreachable."""
+        try:
+            if self.k8s_test:
+                k8s = self._ensure_k8s_utils()
+                pod = k8s.get_spdk_pod_name(node_ip)
+                return k8s.get_pod_logs(pod, tail=2000)
+            out, _ = self.ssh_obj.exec_command(
+                node=node_ip,
+                command="sudo docker logs --tail 2000 "
+                        "$(sudo docker ps -q -f name=spdk_ 2>/dev/null | head -1) "
+                        "2>&1 || true")
+            return out or ""
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[AR] could not read the SPDK log on %s: %s",
+                                node_ip, str(exc)[:160])
+            return None
+
+    # ── operations ────────────────────────────────────────────────────────
+    # The complete verb set, confirmed against simplyblock_cli/cli.py. Worth
+    # stating what is NOT here: there is no volume-scope failover verb. Only
+    # policy and target scope exist on the CLI, which is why AR-R-001 goes
+    # through the API and says so.
+
+    def failover_target(self, target_id):
+        """``cluster replication-target-failover`` -- every volume on the pair."""
+        return self._cli(f"{self.base_cmd} -d cluster "
+                         f"replication-target-failover {target_id} 2>&1")
+
+    def failover_policy(self, policy_id):
+        """``cluster replication-policy-failover`` -- every volume on the policy."""
+        return self._cli(f"{self.base_cmd} -d cluster "
+                         f"replication-policy-failover {policy_id} 2>&1")
+
+    def failback(self, volume_id, source_cluster_id=None):
+        """``volume replication-failback``. Cut over afterwards with commit().
+
+        A recovered original source replicates the delta only; a fresh cluster
+        takes a full copy. The CLI help says exactly that, and AR-R-006 vs
+        AR-R-007 are the two halves of it.
+        """
+        cmd = f"{self.base_cmd} -d volume replication-failback {volume_id}"
+        if source_cluster_id:
+            cmd += f" --source-cluster-id {source_cluster_id}"
+        return self._cli(cmd + " 2>&1")
+
+    def commit(self, volume_id, delete_source=False):
+        """``volume replication-commit`` -- the cut-over itself."""
+        cmd = f"{self.base_cmd} -d volume replication-commit {volume_id}"
+        if delete_source:
+            cmd += " --delete-source"
+        return self._cli(cmd + " 2>&1")
+
+    def replication_start(self, volume_id, cluster_id, mode=None,
+                          interval_min=None):
+        """``volume replication-start`` -- this is the migration entry point."""
+        cmd = (f"{self.base_cmd} -d volume replication-start {volume_id} "
+               f"--replication-cluster-id {cluster_id}")
+        if mode:
+            cmd += f" --mode {mode}"
+        if interval_min is not None:
+            cmd += f" --interval-min {interval_min}"
+        return self._cli(cmd + " 2>&1")
+
+    def replication_stop(self, volume_id):
+        return self._cli(f"{self.base_cmd} -d volume replication-stop "
+                         f"{volume_id} 2>&1")
+
+    def replication_trigger(self, volume_id):
+        """Force a cycle now instead of waiting out the interval."""
+        return self._cli(f"{self.base_cmd} -d volume replication-trigger "
+                         f"{volume_id} 2>&1")
+
+    def policy_snapshot(self, policy_id):
+        """``cluster replication-policy-snapshot`` -- one generation, all members."""
+        return self._cli(f"{self.base_cmd} -d cluster "
+                         f"replication-policy-snapshot {policy_id} 2>&1")
+
+    # ── data path ─────────────────────────────────────────────────────────
+    def seed_volume(self, lvol_name, files=4, file_size="32M"):
+        """Connect, format, mount and write known files. Returns checksums.
+
+        Uses the dual helpers so docker and k8s take the same code path. The
+        files are small and few on purpose: every replication transfer is a
+        FULL copy (see the module docstring), so the bytes written here set
+        how long every later cycle takes.
+        """
+        self._connect_and_mount_dual(lvol_name, format_disk=True)
+        mount = self.mount_path
+        if not self.k8s_test:
+            self.ssh_obj.create_random_files(
+                node=self.fio_node[0], mount_path=mount,
+                file_size=file_size, file_prefix="arseed", file_count=files)
+        else:
+            self._run_fio_dual(lvol_name, runtime=60, rw="write", bs="256K",
+                               size=file_size, numjobs=1, nrfiles=files,
+                               time_based=False, name="arseed")
+        sums = self._generate_checksums_dual(lvol_name)
+        if not sums:
+            raise ReplicationPreconditionError(
+                f"[AR] seeded {lvol_name} but produced no checksums; there is "
+                f"nothing to compare after a fail-over.")
+        self.logger.info("[AR] seeded %s with %d file(s)", lvol_name, len(sums))
+        return sums
+
+    def write_marker_files(self, lvol_name, prefix, count=2, size_mb=16):
+        """Write *count* identifiable files into *lvol_name*. Both platforms.
+
+        Exists because the call sites used to be guarded with
+        ``if not self.k8s_test:`` and no else branch, which meant that on k8s
+        no data was written and the assertions downstream compared empty sets
+        -- AR-R-004's whole RPO claim asserted over nothing. A test must not
+        have to know which platform it is on to write a file.
+
+        Returns the checksums of everything on the volume afterwards.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._volume_registry.get(lvol_name, {})
+            pvc = reg.get("pvc_name") or self._k8s_normalize_name(lvol_name)
+            pod = f"armark-{pvc}"[:63]
+            k8s.create_utility_pod(pod, pvc)
+            self._k8s_utility_pods.append(pod)
+            try:
+                k8s.wait_pod_running(pod)
+                for i in range(count):
+                    k8s.exec_in_pod(
+                        pod,
+                        f"sh -c 'dd if=/dev/urandom of=/spdkvol/{prefix}{i} "
+                        f"bs=1M count={size_mb} 2>/dev/null && sync'")
+            finally:
+                k8s.delete_pod(pod, wait=True)
+                if pod in self._k8s_utility_pods:
+                    self._k8s_utility_pods.remove(pod)
+        else:
+            self.ssh_obj.create_random_files(
+                node=self.fio_node[0],
+                mount_path=self._volume_registry.get(lvol_name, {}).get(
+                    "mount") or self.mount_path,
+                file_size=f"{size_mb}M", file_prefix=prefix, file_count=count)
+        sums = self._generate_checksums_dual(lvol_name)
+        self.logger.info("[AR] wrote %d %r file(s) to %s (%d file(s) total)",
+                         count, prefix, lvol_name, len(sums))
+        return sums
+
+    def verify_volume(self, lvol_name, expected, context=""):
+        """Re-checksum and compare against *expected*. Raises on any mismatch.
+
+        Reports which files differ, not just that something did. A single
+        differing file after a fail-over is a very different bug from all of
+        them differing, and "checksum mismatch" alone does not distinguish.
+        """
+        got = self._generate_checksums_dual(lvol_name)
+        missing = sorted(set(expected) - set(got))
+        extra = sorted(set(got) - set(expected))
+        bad = sorted(f for f in set(expected) & set(got)
+                     if expected[f] != got[f])
+        if missing or bad:
+            raise AssertionError(
+                f"[AR] {lvol_name} does not match what was written {context}. "
+                f"differing={bad or 'none'} missing={missing or 'none'} "
+                f"unexpected={extra or 'none'}. Replicated data must be "
+                f"byte-identical; this is the whole point of the feature.")
+        self.logger.info("[AR] %s verified byte-identical (%d files) %s",
+                         lvol_name, len(got), context)
+        return True
+
+    def failed_over_volume_name(self, volume_id, source_name):
+        """Where the data lives after a fail-over.
+
+        The target copy is not independently readable while replicating; a
+        fail-over clones it into a usable volume. The clone's name is not
+        guaranteed to equal the source's, so resolve it from the relationship
+        rather than assuming.
+        """
+        rel = self.relationship_for(volume_id) or {}
+        tid = rel.get("target_lvol_id")
+        if not tid:
+            return source_name
+        try:
+            details = self.sbcli_utils.get_lvol_details(lvol_id=tid)
+            rows = details.get("results", details) if isinstance(details, dict) else details
+            row = rows[0] if isinstance(rows, list) and rows else rows
+            return (row or {}).get("lvol_name") or source_name
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[AR] could not resolve the target volume name "
+                                "for %s: %s", volume_id, str(exc)[:120])
+            return source_name
+
+    # ── outages ───────────────────────────────────────────────────────────
+    def outage_on_node(self, node_ip, kind, duration=120):
+        """Inject *kind* on *node_ip* and return a callable that undoes it.
+
+        Deliberately thin: the cluster-level suites own the heavy outage
+        machinery, and duplicating it here would mean two implementations
+        drifting apart. What this adds is that every outage is paired with
+        its own undo, so a replication test cannot leave a node down for the
+        next case in the list.
+        """
+        node_id = None
+        for n in self.sbcli_utils.get_storage_nodes().get("results", []):
+            if n.get("mgmt_ip") == node_ip:
+                node_id = n.get("uuid") or n.get("id")
+                break
+        if not node_id:
+            raise ReplicationPreconditionError(
+                f"[AR] no storage node with mgmt_ip {node_ip}")
+
+        self.logger.info("[AR] outage %s on %s (%s)", kind, node_ip, node_id)
+        if kind == "graceful_shutdown":
+            self.sbcli_utils.shutdown_node(node_uuid=node_id)
+            return lambda: self.sbcli_utils.restart_node(node_uuid=node_id)
+        if kind == "container_stop":
+            if self.k8s_test:
+                # The docker spelling stopped nothing here, so AR-O-002 used
+                # to pass without an outage ever happening.
+                k8s = self._ensure_k8s_utils()
+                k8s.stop_spdk_pod(node_ip)
+                return lambda: self.sbcli_utils.restart_node(
+                    node_uuid=node_id, force=True)
+            self.ssh_obj.exec_command(
+                node=node_ip,
+                command="sudo docker stop $(sudo docker ps -q -f name=spdk_ "
+                        "| head -1) 2>&1 || true")
+            return lambda: self.sbcli_utils.restart_node(node_uuid=node_id,
+                                                         force=True)
+        if kind == "storage_node_reboot":
+            self.ssh_obj.reboot_node(node_ip=node_ip)
+            return lambda: True       # reboot_node waits for the node itself
+        if kind in ("network_interrupt", "short_network_interrupt"):
+            self.ssh_obj.disconnect_all_active_interfaces(
+                node=node_ip, interfaces=None, duration=duration)
+            return lambda: True       # self-restoring after `duration`
+        raise ReplicationPreconditionError(f"[AR] unknown outage kind {kind!r}")
+
+    # ── reporting ─────────────────────────────────────────────────────────
+    def skip_case(self, case_id, why):
+        """Record that a case could not run, and why.
+
+        Not a pass. The run summary prints these, and the QA sheet's
+        Automated column carries the same reason, so coverage claimed on
+        paper matches coverage that actually executed.
+        """
+        self._repl_skips.append((case_id, why))
+        self.logger.warning("[%s] SKIPPED: %s", case_id, why)
+
+    def expect_refused(self, case_id, out_err, what, allow=()):
+        """Assert the CLI refused something it should refuse.
+
+        *allow* lists substrings that also count as a refusal, for verbs whose
+        wording differs between builds. An empty response counts as acceptance
+        -- a verb that prints nothing and exits 0 did the thing.
+        """
+        combined = (out_err[0] + out_err[1]) if isinstance(out_err, tuple) else str(out_err)
+        low = combined.lower()
+        markers = ("error", "refus", "cannot", "not allowed", "invalid",
+                   "in use", "conflict", "must ") + tuple(allow)
+        if not any(m in low for m in markers):
+            raise AssertionError(
+                f"[{case_id}] {what} was NOT refused. Response: "
+                f"{combined.strip()[:300] or '(empty)'}")
+        self.logger.info("[%s] PASS: refused -- %s", case_id,
+                         combined.strip()[:160])
+        return True
 
     # ── teardown ──────────────────────────────────────────────────────────
     def cleanup_replication(self):
@@ -477,3 +845,8 @@ class ReplicationTestBase(TestClusterBase):
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[AR] could not remove target %s: %s",
                                     tgt, str(exc)[:120])
+        if self._repl_skips:
+            self.logger.warning(
+                "[AR] %d case(s) did not run on this build:\n%s",
+                len(self._repl_skips),
+                "\n".join(f"    {cid}: {why}" for cid, why in self._repl_skips))
