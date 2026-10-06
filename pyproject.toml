@@ -98,6 +98,7 @@ constraint-dependencies = [
     "cryptography>=50.0.0",
     "starlette>=1.3.1",
     "python-dotenv>=1.2.2",
+    "werkzeug>=3.1.9",
 ]
 
 [tool.ruff]
