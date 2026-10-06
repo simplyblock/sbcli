@@ -14,6 +14,7 @@ Two defences: do not enqueue such a task, and if one exists anyway, end it
 instead of retrying.
 """
 import inspect
+from types import SimpleNamespace
 
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -74,7 +75,8 @@ def test_undeliverable_forward_task_is_ended_not_retried(monkeypatch):
         raise AssertionError("looked up a storage node with a blank id")
 
     monkeypatch.setattr(sr.db, "get_storage_node_by_id", _boom)
-    monkeypatch.setattr(sr, "_source_leader_node", lambda s: object())
+    monkeypatch.setattr(sr, "_select_source_node",
+                        lambda s, exclude=(): (SimpleNamespace(get_id=lambda: "N_SRC"), "primary"))
     # The chain-completeness gate has its own suite
     # (test_replication_chain_completeness); this test is about the
     # destination guard behind it.
@@ -99,7 +101,8 @@ def test_volume_with_a_destination_is_still_processed(monkeypatch):
         raise RuntimeError("stop here — past the guard is all this test needs")
 
     monkeypatch.setattr(sr.db, "get_storage_node_by_id", _node)
-    monkeypatch.setattr(sr, "_source_leader_node", lambda s: object())
+    monkeypatch.setattr(sr, "_select_source_node",
+                        lambda s, exclude=(): (SimpleNamespace(get_id=lambda: "N_SRC"), "primary"))
     monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
                         lambda snode, snapshot, to_source: ("ok", None, ""))
     try:
@@ -134,7 +137,7 @@ def test_landing_copy_inherits_source_subsystem_packing(monkeypatch):
         def get_id(self):
             return "N_DEST"
 
-    monkeypatch.setattr(sr, "_source_leader_node", lambda s: _Node())
+    monkeypatch.setattr(sr, "_select_source_node", lambda s, exclude=(): (_Node(), "primary"))
     monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
                         lambda snode, snapshot, to_source: ("ok", None, ""))
     monkeypatch.setattr(sr.db, "get_storage_node_by_id", lambda _id: _Node())
