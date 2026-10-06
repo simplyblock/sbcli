@@ -387,11 +387,14 @@ class RPCClient:
 
     def _request3(self, method: str, *, request_timeout=None, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
-        wire_payload = unwrap_secrets_for_send({
-            'id': 1,
-            'method': method,
-            'params': kwargs,
-        })
+        payload: dict = {'id': 1, 'method': method}
+        # A method that takes no parameters must get no "params" member at all,
+        # as _request2 sends it: SPDK refuses even an empty object for those
+        # ("spdk_get_version method requires no parameters"), and the health
+        # check reads that refusal as a dead node.
+        if kwargs:
+            payload['params'] = kwargs
+        wire_payload = unwrap_secrets_for_send(payload)
         # Per-call override of the client-level HTTP timeout, same as _request2 --
         # see bdev_nvme_attach_controller for why this exists (the LVS rejoin
         # freeze window). Keyword-only so it can never collide with an RPC

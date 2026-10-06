@@ -2,6 +2,7 @@
 subsystem_get). Coverage is partial — add cases here as wrappers grow."""
 
 import errno
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -339,6 +340,49 @@ class TestBdevLvolS3MergeStat(unittest.TestCase):
         self.assertEqual(result["transfer_state"], "In progress")
         mock_req.assert_called_once_with("bdev_lvol_s3_merge_stat", s3_id=1, old_s3_id=2)
 
+
+
+class TestRequest3WireFormat(unittest.TestCase):
+    """What _request3 puts on the wire, not what a mock of it was called with.
+
+    e6cc5a0cd moved get_version (and framework_start_init,
+    framework_get_reactors, rpc_get_methods) onto _request3, which sent
+    ``"params": {}`` for a call without keyword arguments. SPDK refuses even
+    an empty object for its parameterless methods ("spdk_get_version method
+    requires no parameters"); check_node_rpc read that refusal as a dead node,
+    and on 2026-10-06 the storage-node monitor of a 7-node cluster marked every
+    node unreachable, suspended the cluster and shut every node down. Every
+    other test here patches _request3 away, which is why none caught it.
+    """
+
+    def _posted(self, call):
+        client = _make_client()
+        _session_pool.evict("127.0.0.1", 8081)
+        client.session = MagicMock()
+        response = MagicMock()
+        response.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": True}
+        client.session.post.return_value = response
+        call(client)
+        return json.loads(client.session.post.call_args.kwargs["data"])
+
+    def test_a_parameterless_method_sends_no_params_member(self):
+        for name, call in (
+                ("spdk_get_version", lambda c: c.get_version()),
+                ("framework_start_init", lambda c: c.framework_start_init()),
+                ("framework_get_reactors", lambda c: c.framework_get_reactors()),
+                ("rpc_get_methods", lambda c: c._request3("rpc_get_methods"))):
+            with self.subTest(method=name):
+                payload = self._posted(call)
+                self.assertEqual(payload["method"], name)
+                self.assertNotIn("params", payload)
+
+    def test_a_method_with_arguments_still_sends_them(self):
+        payload = self._posted(lambda c: c._request3("nvmf_get_subsystems", nqn="nqn.2023-02.io.x:1"))
+        self.assertEqual(payload["params"], {"nqn": "nqn.2023-02.io.x:1"})
+
+    def test_request_timeout_is_not_sent_as_a_parameter(self):
+        payload = self._posted(lambda c: c._request3("spdk_get_version", request_timeout=3))
+        self.assertNotIn("params", payload)
 
 if __name__ == "__main__":
     unittest.main()
