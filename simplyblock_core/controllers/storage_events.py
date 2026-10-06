@@ -101,6 +101,24 @@ def snode_restart_failed(node):
         node_id=node.get_id())
 
 
+def snode_removal_aborted_fenced_secondary(node, secondary, port, caused_by=ec.CAUSED_BY_CLI):
+    """The removal of ``node`` is refused for good: SPDK fenced ``port`` on its
+    ``secondary`` after the node went down, and only the primary's return can
+    release that fence. LEVEL_ERROR because the operator stops asking and the
+    node stays offline until someone acts on this.
+    """
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_ERROR,
+        message=(f"Removal aborted: secondary {secondary.get_id()} has port {port} for "
+                 f"{node.lvstore} fenced by SPDK; restart this node to release it"),
+        node_id=node.get_id())
+
+
 def snode_rpc_timeout(node, timeout_seconds, caused_by=ec.CAUSED_BY_MONITOR):
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
