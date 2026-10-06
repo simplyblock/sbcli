@@ -553,7 +553,11 @@ jobs:
           # The key, not the password. Password auth is going away on these
           # nodes, and this gate would fail every run the moment the secret
           # is removed -- for a credential nothing uses any more.
-          [[ -n "${KEY_PATH}" && -f "${KEY_PATH}" ]] || \n            (echo "ERROR: no SSH key at KEY_PATH=${KEY_PATH:-<unset>}. Set the LAB_SSH_PRIVATE_KEY secret or the key_path input." && exit 1)
+          if [[ -z "${KEY_PATH}" || ! -f "${KEY_PATH}" ]]; then
+            echo "ERROR: no SSH key at KEY_PATH=${KEY_PATH:-<unset>}."
+            echo "Set the LAB_SSH_PRIVATE_KEY secret, or pass the key_path input."
+            exit 1
+          fi
 
       # ============================================================
       # PRE-BOOTSTRAP CLEANUP (remote ops only)
