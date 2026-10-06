@@ -442,7 +442,9 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
     if not parent:
         raise ValueError(f"cannot determine parent disk of {part_name}")
 
-    out, _, rc = shell_utils.run_command(f"lsblk -ndo PTTYPE /dev/{parent}")
+    # blkid -p probes the device itself. lsblk reads PTTYPE from the udev
+    # database, which the storage-node container does not mount.
+    out, _, rc = shell_utils.run_command(f"blkid -p -o value -s PTTYPE /dev/{parent}")
     if rc != 0 or out.strip() != "gpt":
         raise ValueError(
             f"disk {parent} has partition table {out.strip() or 'unknown'!r}; "
