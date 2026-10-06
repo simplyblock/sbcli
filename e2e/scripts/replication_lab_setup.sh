@@ -63,6 +63,7 @@ NDCS="${NDCS:-1}"
 NPCS="${NPCS:-1}"
 HA_TYPE="${HA_TYPE:-ha}"
 DATA_NIC="${BOOTSTRAP_DATA_NIC:-eth1}"
+IFNAME="${IFNAME:-eth0}"
 JOURNAL_PARTITION="${BOOTSTRAP_JOURNAL_PARTITION:-0}"
 HA_JM_COUNT="${BOOTSTRAP_HA_JM_COUNT:-3}"
 MAX_SUBSYS="${BOOTSTRAP_MAX_SUBSYS:-1024}"
@@ -350,5 +351,31 @@ EOF
   exit 0
 fi
 
-CLUSTER_A="$CLUSTER_A" C2_NODES="$C2_NODES" SBCLI_CMD="$SBCLI_CMD" \
-  exec "$HERE/replication_manual_setup.sh"
+# The two scripts run in DIFFERENT PLACES, and that is easy to get wrong.
+# bootstrap-cluster.sh drives the lab from here, over ssh. The wiring script
+# needs sbctl against the live control plane, and sbctl lives on the
+# MANAGEMENT NODE -- running it here would hit its own preflight and stop.
+# So ship it over and run it there.
+if command -v "$SBCLI_CMD" >/dev/null 2>&1 && $SBCLI_CMD cluster list >/dev/null 2>&1; then
+  CLUSTER_A="$CLUSTER_A" C2_NODES="$C2_NODES" SBCLI_CMD="$SBCLI_CMD"     exec "$HERE/replication_manual_setup.sh"
+fi
+
+echo "   $SBCLI_CMD is not usable here, so the wiring runs on $MGMT"
+scp -q -o StrictHostKeyChecking=no "$HERE/replication_manual_setup.sh"     "$SSH_USER@$MGMT:/tmp/replication_manual_setup.sh"   || die "could not copy the wiring script to $MGMT"
+ssh -o StrictHostKeyChecking=no "$SSH_USER@$MGMT"     "chmod +x /tmp/replication_manual_setup.sh &&      C2_NODES='$C2_NODES' SBCLI_CMD='$SBCLI_CMD'      IFNAME='$IFNAME' BOOTSTRAP_DATA_NIC='$DATA_NIC'      NDCS='$NDCS' NPCS='$NPCS' HA_TYPE='$HA_TYPE'      BOOTSTRAP_JOURNAL_PARTITION='$JOURNAL_PARTITION'      BOOTSTRAP_HA_JM_COUNT='$HA_JM_COUNT'      BOOTSTRAP_MAX_SUBSYS='$MAX_SUBSYS'      /tmp/replication_manual_setup.sh"
+rc=$?
+echo
+if [[ $rc -eq 0 ]]; then
+  ok "lab ready"
+  cat <<EOF
+
+  The wiring script now lives on the management node, which is where it has
+  to run. Go there for everything else:
+
+    ssh $SSH_USER@$MGMT
+    /tmp/replication_manual_setup.sh --verify      # read-only checks
+    /tmp/replication_manual_setup.sh --cleanup     # drop the replication,
+                                                   # leave the clusters
+EOF
+fi
+exit $rc
