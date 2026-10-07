@@ -33,7 +33,7 @@ from e2e_tests.migration.migration_base import (
     MigrationTestBase,
     MigrationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class MigrationHaOverlapMatrix(MigrationTestBase):
@@ -131,7 +131,7 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
             # this the batch path, which MIG-B covers separately.
             out, err = self._cli(f"{self.base_cmd} -d snapshot clone "
                                  f"{snap_id} {cn} 2>&1")
-            if "error" in (out + err).lower():
+            if cli_failed(out, err):
                 raise MigrationPreconditionError(
                     f"[MIG-T-006] could not clone {snap}: {(out + err)[:240]}")
             self._mig_vols.append(cn)
@@ -181,7 +181,7 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
         newclone = f"migtpost{stamp}"
         out, err = self._cli(f"{self.base_cmd} -d snapshot clone {snap_id} "
                              f"{newclone} 2>&1")
-        if "error" in (out + err).lower():
+        if cli_failed(out, err):
             raise AssertionError(
                 f"[MIG-T-009] the snapshot cannot be cloned after its volume "
                 f"was migrated twice: {(out + err)[:300]}. The chain has been "

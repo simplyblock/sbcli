@@ -57,7 +57,7 @@ import re
 import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class MigrationPreconditionError(Exception):
@@ -91,6 +91,18 @@ class MigrationTestBase(TestClusterBase):
 
     def setup(self):
         super().setup()
+        # The pool is created HERE, not in a run() method, because every case
+        # in this lane needs one and the failure when it is missing does not
+        # look like a missing pool: `volume add` prints "Pool not found:
+        # testpool", which contains no "error" substring, so a naive check
+        # passes it through and the test dies later in seed() with
+        # "'NoneType' object is not iterable".
+        #
+        # On docker the base setup DELETES every pool first, so nothing is
+        # inherited from a previous run. ensure_pool also waits for the pool
+        # to become queryable (creation is async) and makes the StorageClass
+        # on k8s. All three steps, once, where no case can skip them.
+        self.pool_name = self.ensure_pool()
         self._migrations = []
         self._mig_vols = []
 
@@ -499,7 +511,7 @@ class MigrationTestBase(TestClusterBase):
         if host_id:
             cmd += f" --host-id {host_id}"
         out, err = self._cli(cmd + " 2>&1")
-        if "error" in (out + err).lower():
+        if cli_failed(out, err):
             raise MigrationPreconditionError(
                 f"[MIG] could not create {name}: {(out + err)[:300]}")
         vol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)

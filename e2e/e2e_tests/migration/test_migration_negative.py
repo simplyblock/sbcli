@@ -25,7 +25,7 @@ from e2e_tests.migration.migration_base import (
     MigrationTestBase,
     MigrationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class MigrationNegativeTargets(MigrationTestBase):
@@ -162,7 +162,7 @@ class MigrationNegativeCapacity(MigrationTestBase):
         huge = os.environ.get("MIG_FILLER_SIZE", "10T")
         out, err = self._cli(f"{self.base_cmd} -d volume add {filler} {huge} "
                              f"{self.pool_name} --host-id {tgt} 2>&1")
-        if "error" in (out + err).lower():
+        if cli_failed(out, err):
             self.logger.warning(
                 "[MIG-N-005] SKIPPED: could not fill the target to create "
                 "the out-of-space condition (%s). The lab has more capacity "
@@ -243,7 +243,7 @@ class MigrationUnderReplication(MigrationTestBase):
         out, err = self._cli(f"{self.base_cmd} -d cluster "
                              f"replication-policy-add {self.cluster_id} "
                              f"{pol} {target} --interval-min 1 2>&1")
-        if "error" in (out + err).lower():
+        if cli_failed(out, err):
             self.logger.warning(
                 "[MIG-N-006] SKIPPED: could not create a replication policy "
                 "on the existing target: %s", (out + err).strip()[:220])

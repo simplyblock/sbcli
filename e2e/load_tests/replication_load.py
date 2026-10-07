@@ -30,7 +30,7 @@ from e2e_tests.replication.replication_base import (
     ReplicationPreconditionError,
 )
 from load_tests._load_base import LoadSweepMixin
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 def _sizes(env, default):
@@ -226,7 +226,7 @@ class ReplicationDemoteDowntimeBySize(LoadSweepMixin, ReplicationTestBase):
 
         t1 = time.time()
         out, cerr = self.failback(vol_id, source_cluster_id=self.cluster_a)
-        if "error" in ((out or "") + (cerr or "")).lower():
+        if cli_failed(out, cerr):
             err = f"failback refused: {((out or '') + (cerr or ''))[:140]}"
         else:
             try:

@@ -28,7 +28,7 @@ from e2e_tests.replication.replication_base import (
     ReplicationTestBase,
     ReplicationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class _OutageBase(ReplicationTestBase):
@@ -272,7 +272,7 @@ class ReplicationOutageDuringOperations(_OutageBase):
         self.logger.info("[AR-O-008] starting a fail-back, then cutting the "
                          "network during the delta")
         out, err = self.failback(self._vol_id, source_cluster_id=self.cluster_a)
-        if "error" in ((out or "") + (err or "")).lower():
+        if cli_failed(out, err):
             raise ReplicationPreconditionError(
                 f"[AR-O-008] fail-back refused: {((out or '') + (err or ''))[:300]}")
         sleep_n_sec(10)

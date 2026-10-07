@@ -35,7 +35,7 @@ import re
 import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class ReplicationPreconditionError(Exception):
@@ -78,6 +78,18 @@ class ReplicationTestBase(TestClusterBase):
     # ── two-cluster bootstrap ─────────────────────────────────────────────
     def setup(self):
         super().setup()
+        # The pool is created HERE, not in a run() method, because every case
+        # in this lane needs one and the failure when it is missing does not
+        # look like a missing pool: `volume add` prints "Pool not found:
+        # testpool", which contains no "error" substring, so a naive check
+        # passes it through and the test dies later in seed() with
+        # "'NoneType' object is not iterable".
+        #
+        # On docker the base setup DELETES every pool first, so nothing is
+        # inherited from a previous run. ensure_pool also waits for the pool
+        # to become queryable (creation is async) and makes the StorageClass
+        # on k8s. All three steps, once, where no case can skip them.
+        self.pool_name = self.ensure_pool()
         self.cluster_a = self.cluster_id
         self.cluster_b = None
         self.pool_a = None
@@ -344,7 +356,10 @@ class ReplicationTestBase(TestClusterBase):
         if timeout is not None:
             cmd += f" --timeout {timeout}"
         out, err = self._cli(cmd)
-        if "error" in (out + err).lower() and name not in out:
+        # `and name not in out` is the real guard here: these verbs echo the
+        # created name on success, so a name in the output means it worked
+        # whatever else was printed.
+        if cli_failed(out, err) and name not in out:
             raise ReplicationPreconditionError(
                 f"[AR] replication-target-add failed: {(out + err)[:400]}")
         self._repl_targets.append(name)
@@ -387,7 +402,10 @@ class ReplicationTestBase(TestClusterBase):
             # different thing.
             cmd += f" --keep {retention}"
         out, err = self._cli(cmd)
-        if "error" in (out + err).lower() and name not in out:
+        # `and name not in out` is the real guard here: these verbs echo the
+        # created name on success, so a name in the output means it worked
+        # whatever else was printed.
+        if cli_failed(out, err) and name not in out:
             raise ReplicationPreconditionError(
                 f"[AR] replication-policy-add failed: {(out + err)[:400]}")
         self._repl_policies.append(name)

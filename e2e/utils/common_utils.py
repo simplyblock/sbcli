@@ -684,3 +684,28 @@ def convert_bytes_to_gb_tb(bytes_value):
         return f"{bytes_value // TB}T"
     else:
         return f"{bytes_value // GB}G"
+
+def cli_failed(out, err=""):
+    """True when a CLI call did not do what was asked.
+
+    `if "error" in output` is not enough and cost a run: `volume add` answers
+    a missing pool with
+
+        Pool not found: testpool
+
+    which contains no "error" substring at all, so the check passed, the test
+    carried on, and it died later in seed() with "'NoneType' object is not
+    iterable" -- three frames away from the cause.
+
+    These are the shapes the CLI actually uses for failure.
+    """
+    text = ((out or "") + (err or "")).lower()
+    if not text.strip():
+        return True          # silence is not success for a -d command
+    markers = (
+        "error", "traceback", "not found", "no such", "does not exist",
+        "cannot", "invalid", "refus", "not allowed", "denied", "failed",
+        "unrecognized arguments", "usage:", "is required", "must be",
+        "already exists", "in use", "conflict", "insufficient",
+    )
+    return any(m in text for m in markers)

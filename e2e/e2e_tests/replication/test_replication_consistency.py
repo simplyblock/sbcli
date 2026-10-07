@@ -23,7 +23,7 @@ from e2e_tests.replication.replication_base import (
     ReplicationTestBase,
     ReplicationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class ConsistencyGroupPlacement(ReplicationTestBase):
@@ -133,7 +133,7 @@ class ConsistencyGroupPlacement(ReplicationTestBase):
                 f"{self.base_cmd} -d volume add {split} "
                 f"{self.REPL_VOLUME_SIZE} {self.pool_name} "
                 f"--host-id {other_node} 2>&1")
-            if "error" in (out + err).lower():
+            if cli_failed(out, err):
                 self.skip_case(
                     "AR-C-005",
                     f"could not place a volume on {other_node} to build the "

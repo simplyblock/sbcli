@@ -28,7 +28,7 @@ from e2e_tests.migration.migration_base import (
     MigrationTestBase,
     MigrationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class _BatchBase(MigrationTestBase):
@@ -54,7 +54,7 @@ class _BatchBase(MigrationTestBase):
             out, err = self._cli(
                 f"{self.base_cmd} -d volume add {name} {self.VOL_SIZE} "
                 f"{self.pool_name}{extra} 2>&1")
-            if "error" in (out + err).lower():
+            if cli_failed(out, err):
                 raise MigrationPreconditionError(
                     f"[MIG-B] could not add {name} as a namespace on a "
                     f"shared subsystem: {(out + err)[:300]}. The group is "

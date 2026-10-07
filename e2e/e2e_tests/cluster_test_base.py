@@ -887,6 +887,50 @@ class TestClusterBase:
         self.pool_name = actual
         return actual
 
+    def ensure_pool(self, pool_name=None, timeout=180, **kwargs):
+        """Create the pool and block until the control plane will accept
+        volumes in it. Returns the actual pool name.
+
+        Three things have to happen in this order and every one of them has
+        bitten a lane that skipped it:
+
+        1. CREATE IT. On docker the base setup deletes every pool first, so
+           each run genuinely has to create one -- nothing is inherited. A
+           lane that assumes self.pool_name already exists gets
+           `Pool not found: testpool` on its first volume.
+
+        2. WAIT FOR IT. Pool creation is asynchronous: the POST returns
+           before the pool is queryable. Asking for a volume milliseconds
+           later gets the same `Pool not found`, which the API answers with a
+           dump of every storage node, so the real cause is buried.
+
+        3. ON K8S ONLY, make the StorageClass. Without it every PVC sits
+           Pending until the 300s wait gives up, and nothing in the timeout
+           mentions a StorageClass.
+
+        test_lblk.py learned all three the hard way and wrapped them in its
+        own _make_pool/_await_pool_visible. This is the same thing in the
+        base so the next lane does not have to.
+        """
+        pool = self._add_pool_dual(pool_name=pool_name, **kwargs)
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if self.sbcli_utils.get_storage_pool_id(pool):
+                    self.logger.info("[pool] %s is visible", pool)
+                    break
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.debug("[pool] lookup failed: %s", str(exc)[:100])
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"pool {pool!r} was created but never became visible to "
+                    f"the control plane within {timeout}s, so no volume can "
+                    f"be placed in it.")
+            sleep_n_sec(3)
+        if self.k8s_test:
+            self._k8s_ensure_storage_class()
+        return pool
+
     def _verify_pool_exists_dual(self, pool_name=None):
         """Assert that a pool exists. In K8s mode checks the StoragePool CRD;
         in Docker mode checks sbcli pool list."""

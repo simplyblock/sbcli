@@ -33,6 +33,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CLI = HERE.parent.parent / "simplyblock_cli" / "cli.py"
+if not DEFAULT_CLI.exists():
+    import os as _os
+    _env = _os.environ.get("SBCLI_CLI_PY")
+    if _env:
+        DEFAULT_CLI = Path(_env)
 DEFAULT_ROOTS = [HERE.parent / "e2e_tests", HERE.parent / "load_tests",
                  HERE.parent / "stress_test"]
 

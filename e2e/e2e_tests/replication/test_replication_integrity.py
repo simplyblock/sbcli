@@ -29,7 +29,7 @@ from e2e_tests.replication.replication_base import (
     ReplicationTestBase,
     ReplicationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class ReplicationDataIsIdentical(ReplicationTestBase):
@@ -266,7 +266,7 @@ class ReplicationNoMetadataCorruption(ReplicationTestBase):
         self.logger.info("[AR-I-003] failing back to %s", self.cluster_a)
         out, err = self.failback(vol_id, source_cluster_id=self.cluster_a)
         combined = (out or "") + (err or "")
-        if "error" in combined.lower():
+        if cli_failed(combined):
             raise ReplicationPreconditionError(
                 f"[AR-I-003] fail-back could not be configured: "
                 f"{combined[:300]}")

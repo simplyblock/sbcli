@@ -37,7 +37,7 @@ from e2e_tests.replication.replication_base import (
     ReplicationTestBase,
     ReplicationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 def _env(name, default):
@@ -341,7 +341,7 @@ class ReplicationLargeVolume(ReplicationTestBase):
         out, err = self._cli(
             f"{self.base_cmd} -d volume replication-failback {vol_id} "
             f"--source-cluster-id {self.cluster_a} 2>&1")
-        if "error" in ((out or "") + (err or "")).lower():
+        if cli_failed(out, err):
             self.skip_case(
                 "AR-P-008",
                 f"could not drive a planned relocation on the large volume: "

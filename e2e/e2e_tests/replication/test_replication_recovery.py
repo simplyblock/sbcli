@@ -35,7 +35,7 @@ from e2e_tests.replication.replication_base import (
     ReplicationTestBase,
     ReplicationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class _RecoveryBase(ReplicationTestBase):
@@ -288,7 +288,7 @@ class ReplicationFailback(_RecoveryBase):
         self.logger.info("[AR-R-008] fail-back takes a volume id")
         out, err = self.failback(v["id"], source_cluster_id=self.cluster_a)
         combined = (out or "") + (err or "")
-        if "error" in combined.lower():
+        if cli_failed(combined):
             raise ReplicationPreconditionError(
                 f"[AR-R-008] fail-back refused for {v['name']}: "
                 f"{combined[:300]}")

@@ -18,7 +18,7 @@ from e2e_tests.migration.migration_base import (
     MigrationTestBase,
     MigrationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class MigrationHappyPath(MigrationTestBase):
@@ -67,7 +67,7 @@ class MigrationHappyPath(MigrationTestBase):
         snap = f"migsnap{stamp}"
         out, err = self._cli(f"{self.base_cmd} -d snapshot add {vol_id} "
                              f"{snap} 2>&1")
-        if "error" in (out + err).lower():
+        if cli_failed(out, err):
             raise AssertionError(
                 f"[MIG-H-004] cannot snapshot {vol} after migrating it: "
                 f"{(out + err)[:300]}. The migration reported success, so "
@@ -81,7 +81,7 @@ class MigrationHappyPath(MigrationTestBase):
             clone = f"migclone{stamp}"
             out, err = self._cli(f"{self.base_cmd} -d snapshot clone "
                                  f"{snap_id} {clone} 2>&1")
-            if "error" in (out + err).lower():
+            if cli_failed(out, err):
                 raise AssertionError(
                     f"[MIG-H-004] cannot clone a snapshot of the migrated "
                     f"volume: {(out + err)[:300]}")
@@ -90,7 +90,7 @@ class MigrationHappyPath(MigrationTestBase):
 
         out, err = self._cli(f"{self.base_cmd} -d volume resize {vol_id} "
                              f"4G 2>&1")
-        if "error" in (out + err).lower():
+        if cli_failed(out, err):
             self.logger.warning(
                 "[MIG-H-004] resize after migration was refused: %s. Raised "
                 "rather than failed -- resize has its own preconditions and "

@@ -11,7 +11,7 @@ import time
 
 from e2e_tests.replication.replication_base import (ReplicationTestBase,
                                                     ReplicationPreconditionError)
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import sleep_n_sec, cli_failed
 
 
 class ReplicationHarness(ReplicationTestBase):
@@ -195,7 +195,7 @@ class ReplicationStartsAndReports(ReplicationTestBase):
             command=f"{self.base_cmd} -d volume add {vol} "
                     f"{self.REPL_VOLUME_SIZE} {self.pool_name} 2>&1")
         combined = (out or "") + (err or "")
-        if "error" in combined.lower():
+        if cli_failed(combined):
             raise ReplicationPreconditionError(
                 f"[AR-F-006] could not create {vol} with a policy attached: "
                 f"{combined[:400]}")
@@ -381,7 +381,7 @@ class ReplicationPolicyVariants(ReplicationTestBase):
             f"{self.base_cmd} -d cluster replication-policy-add "
             f"{self.cluster_a} pd{stamp} {t1} --interval-min 5m 2>&1")
         combined = (out or "") + (err or "")
-        if "error" in combined.lower() or "invalid" in combined.lower():
+        if cli_failed(combined):
             self.logger.info(
                 "[AR-F-014] PASS: the CLI rejects the CRD duration spelling, "
                 "which is correct -- the two surfaces take different types "
