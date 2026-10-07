@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.rpc_client import RPCRemoteError
 
 
 def _node(node_id, secondary_node_id="", tertiary_node_id="", lvstore="LVS_1"):
@@ -54,7 +55,7 @@ class TestSafeDeleteBdevWithoutSecondary(unittest.TestCase):
         db.get_storage_node_by_id.side_effect = _get
 
         # delete_lvol -> (True, None); delete-status 0 == "already gone/done"
-        primary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+        primary.rpc_client.return_value.delete_lvol.return_value = True
         primary.rpc_client.return_value.bdev_lvol_get_lvol_delete_status.return_value = 0
 
         with patch.object(storage_node_ops, "DBController", return_value=db), \
@@ -81,7 +82,7 @@ class TestSafeDeleteBdevWithoutSecondary(unittest.TestCase):
     def test_secondary_leg_still_runs_when_there_is_one(self):
         primary = _node("node-a", secondary_node_id="node-b")
         secondary = _node("node-b")
-        secondary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+        secondary.rpc_client.return_value.delete_lvol.return_value = True
 
         result = self._run(primary, {"node-a": primary, "node-b": secondary})
 
@@ -106,7 +107,7 @@ class TestSafeDeleteBdevReachesEveryReplica(unittest.TestCase):
     def _run(primary, lookups):
         db = MagicMock()
         db.get_storage_node_by_id.side_effect = lambda nid: lookups[nid]
-        primary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+        primary.rpc_client.return_value.delete_lvol.return_value = True
         primary.rpc_client.return_value.bdev_lvol_get_lvol_delete_status.return_value = 0
         with patch.object(storage_node_ops, "DBController", return_value=db), \
                 patch.object(storage_node_ops.time, "sleep"):
@@ -116,8 +117,14 @@ class TestSafeDeleteBdevReachesEveryReplica(unittest.TestCase):
         primary = _node("node-a", secondary_node_id="node-b", tertiary_node_id="node-c")
         secondary = _node("node-b")
         tertiary = _node("node-c")
-        secondary.rpc_client.return_value.delete_lvol.return_value = (secondary_ok, None)
-        tertiary.rpc_client.return_value.delete_lvol.return_value = (tertiary_ok, None)
+        if secondary_ok:
+            secondary.rpc_client.return_value.delete_lvol.return_value = True
+        else:
+            secondary.rpc_client.return_value.delete_lvol.side_effect = RPCRemoteError("boom", -1)
+        if tertiary_ok:
+            tertiary.rpc_client.return_value.delete_lvol.return_value = True
+        else:
+            tertiary.rpc_client.return_value.delete_lvol.side_effect = RPCRemoteError("boom", -1)
         return primary, secondary, tertiary
 
     def test_tertiary_receives_the_sync_delete(self):
@@ -150,7 +157,7 @@ class TestSafeDeleteBdevReachesEveryReplica(unittest.TestCase):
     def test_missing_peer_record_is_skipped_not_fatal(self):
         primary = _node("node-a", secondary_node_id="node-b", tertiary_node_id="gone")
         secondary = _node("node-b")
-        secondary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+        secondary.rpc_client.return_value.delete_lvol.return_value = True
 
         def _get(nid):
             if nid == "gone":
@@ -159,7 +166,7 @@ class TestSafeDeleteBdevReachesEveryReplica(unittest.TestCase):
 
         db = MagicMock()
         db.get_storage_node_by_id.side_effect = _get
-        primary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+        primary.rpc_client.return_value.delete_lvol.return_value = True
         primary.rpc_client.return_value.bdev_lvol_get_lvol_delete_status.return_value = 0
 
         with patch.object(storage_node_ops, "DBController", return_value=db), \

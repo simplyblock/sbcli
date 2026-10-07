@@ -233,7 +233,7 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.get_lvstore.return_value = {"lvs leadership": True}
         mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
         mock_rpc.bdev_get.return_value = {"name": "lvol-uuid-vol-1", "aliases": []}
-        mock_rpc.jc_suspend_compression.return_value = (True, None)
+        mock_rpc.jc_suspend_compression.return_value = True
         mock_rpc.jc_compression_get_status.return_value = False
         mock_rpc.bdev_distrib_force_to_non_leader.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
@@ -307,7 +307,7 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.bdev_examine.return_value = True
         mock_rpc.bdev_wait_for_examine.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
-        mock_rpc.jc_suspend_compression.return_value = (True, None)
+        mock_rpc.jc_suspend_compression.return_value = True
         # Post-examine lvol-bdev verification scans bdev_get() for each
         # expected lvol (by uuid or lvs/bdev alias); default MagicMock isn't
         # a real bdev dict, so supply the expected entry here.
@@ -377,7 +377,7 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.bdev_examine.return_value = True
         mock_rpc.bdev_wait_for_examine.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
-        mock_rpc.jc_suspend_compression.return_value = (True, None)
+        mock_rpc.jc_suspend_compression.return_value = True
         # Post-examine verification in recreate_lvstore_on_non_leader scans
         # bdev_get() for each expected lvol (by uuid or lvs/bdev alias). The
         # default MagicMock isn't a real bdev dict, so the check fails
@@ -470,7 +470,7 @@ class TestPrimaryEscalation(unittest.TestCase):
         mock_rpc.get_lvstore.return_value = {"lvs leadership": True}
         mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
         mock_rpc.bdev_get.return_value = {"name": "lvol-uuid-vol-1", "aliases": []}
-        mock_rpc.jc_suspend_compression.return_value = (True, None)
+        mock_rpc.jc_suspend_compression.return_value = True
         mock_rpc.jc_compression_get_status.return_value = False
         mock_rpc.bdev_distrib_force_to_non_leader.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False

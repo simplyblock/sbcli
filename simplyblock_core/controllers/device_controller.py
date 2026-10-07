@@ -11,7 +11,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
@@ -1035,15 +1035,17 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
                 return False
 
     if  rpc_client.bdev_get(device.alceml_bdev ) or force:
-        ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
-        if not ret:
+        try:
+            rpc_client.bdev_alceml_delete(device.alceml_bdev)
+        except RPCRemoteError:
             logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
             if not force:
                 return False
 
     if  rpc_client.bdev_get(device.qos_bdev) or force:
-        ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
-        if not ret:
+        try:
+            rpc_client.qos_vbdev_delete(device.qos_bdev)
+        except RPCRemoteError:
             logger.error(f"Failed to remove bdev: {device.qos_bdev}")
             if not force:
                 return False
@@ -1474,7 +1476,10 @@ def remove_jm_device(device_id, force=False):
 
         rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=snode.enable_ha_jm)
 
-        rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
+        try:
+            rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
+        except RPCRemoteError as e:
+            logger.warning(f"Failed to remove bdev {snode.jm_device.alceml_bdev}: {e}")
 
         # if snode.jm_device.testing_bdev:
         #     rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)

@@ -4024,28 +4024,32 @@ class TestAFailedBuildReleasesWhatItOpened(unittest.TestCase):
 class TestJcRemoveJmClient(unittest.TestCase):
     """The client wrapper's contract: success / unsupported / coded error."""
 
-    def _client(self, response):
+    def _client(self, result=None, error=None):
         from simplyblock_core import rpc_client as rc
         c = rc.RPCClient.__new__(rc.RPCClient)
-        c._request2 = MagicMock(return_value=response)  # type: ignore[method-assign]
+        if error is not None:
+            c._request = MagicMock(  # type: ignore[method-assign]
+                side_effect=RPCRemoteError(error.get("message", ""), error.get("code", 0)))
+        else:
+            c._request = MagicMock(return_value=result)  # type: ignore[method-assign]
         return c
 
     def test_success_returns_the_result(self):
-        self.assertTrue(self._client((True, None)).jc_remove_jm("remote_jm_xn1"))
+        self.assertTrue(self._client(result=True).jc_remove_jm("remote_jm_xn1"))
 
     def test_method_not_found_returns_the_unsupported_sentinel(self):
         from simplyblock_core.rpc_client import RPC_UNSUPPORTED
-        c = self._client((None, {"code": -32601, "message": "Method not found"}))
+        c = self._client(error={"code": -32601, "message": "Method not found"})
         self.assertEqual(c.jc_remove_jm("remote_jm_xn1"), RPC_UNSUPPORTED)
 
     def test_still_in_use_raises_with_code_22(self):
-        c = self._client((None, {"code": -22, "message": "still in use"}))
+        c = self._client(error={"code": -22, "message": "still in use"})
         with self.assertRaises(RPCRemoteError) as ctx:
             c.jc_remove_jm("remote_jm_xn1")
         self.assertEqual(ctx.exception.code, -22)
 
     def test_other_errors_raise_with_their_code(self):
-        c = self._client((None, {"code": -12, "message": "another removal in progress"}))
+        c = self._client(error={"code": -12, "message": "another removal in progress"})
         with self.assertRaises(RPCRemoteError) as ctx:
             c.jc_remove_jm("remote_jm_xn1")
         self.assertEqual(ctx.exception.code, -12)

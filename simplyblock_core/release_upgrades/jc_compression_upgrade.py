@@ -87,15 +87,16 @@ class JCCompressionUpgrade(UpgradePlugin):
         suspended = []
         try:
             for member, jm_vuid in pairs:
-                ret, err = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=True)
-                if ret:
-                    suspended.append((member, jm_vuid))
-                elif err:
-                    logger.info(f"JC compression suspend not applicable on node "
-                                f"{member.get_id()}, JM: {jm_vuid}: {err}")
-                else:
+                try:
+                    ret = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=True)
+                except RPCException:
                     raise ReleaseUpgradeError(
                         f"failed to suspend JC compression on node {member.get_id()}, JM: {jm_vuid}")
+                if not ret:
+                    logger.info(f"JC compression suspend not applicable on node "
+                                f"{member.get_id()}, JM: {jm_vuid}")
+                else:
+                    suspended.append((member, jm_vuid))
 
             def _still_running(member, jm_vuid):
                 try:
@@ -170,16 +171,15 @@ class JCCompressionUpgrade(UpgradePlugin):
                                 f"resume task queued")
                 continue
             try:
-                ret, err = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
+                ret = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
             except Exception as e:
                 logger.error(e)
-                ret, err = False, None
-            if ret:
-                messages.append(f"node {member_id} JM:{jm_vuid}: compression resumed")
-            elif err:
-                messages.append(f"node {member_id} JM:{jm_vuid}: resume not applicable: {err}")
-            else:
                 if not tasks_controller.get_jc_comp_task(cluster_id, member_id, jm_vuid=jm_vuid):
                     tasks_controller.add_jc_comp_resume_task(cluster_id, member_id, jm_vuid=jm_vuid)
                 messages.append(f"node {member_id} JM:{jm_vuid}: resume failed, resume task queued")
+            else:
+                if ret:
+                    messages.append(f"node {member_id} JM:{jm_vuid}: compression resumed")
+                else:
+                    messages.append(f"node {member_id} JM:{jm_vuid}: resume not applicable")
         return messages

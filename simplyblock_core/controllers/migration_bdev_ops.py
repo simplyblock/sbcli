@@ -16,6 +16,7 @@ migration files (migration_controller.py, tasks_runner_lvol_migration.py,
 tasks_runner_batch_migration.py) import it directly at module level.
 """
 
+import errno
 import logging
 import time
 
@@ -23,11 +24,13 @@ from tenacity import (
     RetryError,
     Retrying,
     before_sleep_log,
+    retry_if_exception,
     stop_after_attempt,
     wait_fixed,
 )
 
 from simplyblock_core import utils
+from simplyblock_core.rpc_client import RPCRemoteError
 
 logger = utils.get_logger(__name__)
 
@@ -59,17 +62,17 @@ def delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_rp
         from simplyblock_core.storage_node_ops import execute_on_leader_with_failover
 
         def _async_delete(leader):
-            ret, _ = leader.rpc_client().delete_lvol(
-                bdev_name, sync=False, special_delete=not coalescing)
-            return ret or False
+            return leader.rpc_client().delete_lvol(
+                bdev_name, sync=False, special_delete=not coalescing) or False
         ok, leader_node, _ = execute_on_leader_with_failover(all_nodes, lvs_name, _async_delete)
         if not ok or leader_node is None:
             raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
         leader_rpc = leader_node.rpc_client()
     else:
-        ret, _ = primary_rpc.delete_lvol(bdev_name, sync=False, special_delete=not coalescing)
-        if not ret:
-            raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
+        try:
+            primary_rpc.delete_lvol(bdev_name, sync=False, special_delete=not coalescing)
+        except RPCRemoteError as e:
+            raise RuntimeError(f"delete bdev {bdev_name}: initiation failed") from e
         leader_rpc = primary_rpc
 
     deadline = time.monotonic() + timeout_s
@@ -87,10 +90,19 @@ def delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_rp
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
         try:
             Retrying(
+                # ENODEV means this replica's blob is already gone -- the
+                # finalize is done, not failed, so it is not worth retrying.
+                retry=retry_if_exception(
+                    lambda e: not (isinstance(e, RPCRemoteError) and e.code == -errno.ENODEV)),
                 stop=stop_after_attempt(3),
                 wait=wait_fixed(1),
                 before_sleep=before_sleep_log(logger, logging.WARNING),
             )(rpc.delete_lvol, bdev_name, sync=True, special_delete=False)
+        except RPCRemoteError:
+            # Only reachable for ENODEV (the predicate above lets any other
+            # RPCRemoteError retry to exhaustion, below, instead).
+            logger.info(
+                f"delete bdev {bdev_name} sync finalize: already absent on this replica")
         except RetryError:
             logger.exception(
                 f"delete bdev {bdev_name} sync finalize STILL failing after 3 attempts "

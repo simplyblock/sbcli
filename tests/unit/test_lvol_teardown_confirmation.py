@@ -20,7 +20,7 @@ deferred (raises ``PreconditionError``), or failed (raises ``RuntimeError``).
 import pytest
 
 from simplyblock_core.controllers import lvol_controller as lc
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 
 
 class _RPC:
@@ -39,7 +39,10 @@ class _RPC:
 
     def delete_lvol(self, name, sync=False, special_delete=False):
         self.deletes.append((name, sync))
-        return self._delete
+        result, error = self._delete
+        if error:
+            raise RPCRemoteError(error.get("message", ""), error.get("code", 0))
+        return result
 
 
 def _stack(**over):
@@ -127,8 +130,8 @@ class TestRemoveBdevStack:
             def delete_lvol(self, name, sync=False, special_delete=False):
                 self.deletes.append((name, sync))
                 if name.endswith("CLN_1"):
-                    return None, {"code": -16}
-                return True, None
+                    raise RPCRemoteError("device busy", -16)
+                return True
 
         rpc = _PartialRPC()
         assert lc._remove_bdev_stack(stack, rpc, sync=True) is False
