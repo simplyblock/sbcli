@@ -146,23 +146,28 @@ def _run_backup(task):
             task.function_result = "Backup completed"
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
-        elif state == "Failed":
-            _fail_backup(backup, task, "Backup transfer failed on data plane")
-        elif state == "No process" and backup.status == Backup.STATUS_IN_PROGRESS:
-            # "No process" means no transfer is running for this bdev — the
-            # backup died (e.g. an SPDK crash wiped the in-flight transfer).
+        elif state in ("Failed", "No process") and backup.status == Backup.STATUS_IN_PROGRESS:
+            # Both mean no transfer is running for this bdev and it did not
+            # finish: "No process" because the backup died outright (e.g. an
+            # SPDK crash wiped the in-flight transfer); "Failed" because the
+            # data plane gave up after an I/O error (e.g. the S3 endpoint was
+            # briefly unreachable -- an OOM-killed MinIO pod is back in a
+            # couple of seconds). A plain backup upload is additive, so
+            # re-issuing it onto the same s3_id is safe: it just re-uploads
+            # and overwrites.
+            #
             # Re-issue by resetting to PENDING, but COUNT it as a retry so the
             # max_retry ceiling in process_task() can stop a backup that keeps
             # failing. Without the increment this branch loops forever, and
             # re-issuing an RPC that crashes the data plane just re-crashes it.
-            # NOTE: this treats "No process" as a failure. It relies on a
-            # healthy in-progress backup NOT sitting in "No process"; if the
-            # data plane ever reports "No process" for a running backup, this
-            # would fail it prematurely and completion needs another signal.
+            # NOTE: this treats both as a failure. It relies on a healthy
+            # in-progress backup NOT sitting in either state; if the data
+            # plane ever reports one for a running backup, this would fail it
+            # prematurely and completion needs another signal.
             task.retry += 1
             backup.status = Backup.STATUS_PENDING
             backup.write_to_db()
-            task.function_result = "No process, retrying backup start"
+            task.function_result = f"{state}, retrying backup start"
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
