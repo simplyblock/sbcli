@@ -161,7 +161,7 @@ class MigrationNegativeCapacity(MigrationTestBase):
         filler = f"migfill{stamp}"
         huge = os.environ.get("MIG_FILLER_SIZE", "10T")
         out, err = self._cli(f"{self.base_cmd} -d volume add {filler} {huge} "
-                             f"--pool {self.pool_name} --host-id {tgt} 2>&1")
+                             f"{self.pool_name} --host-id {tgt} 2>&1")
         if "error" in (out + err).lower():
             self.logger.warning(
                 "[MIG-N-005] SKIPPED: could not fill the target to create "

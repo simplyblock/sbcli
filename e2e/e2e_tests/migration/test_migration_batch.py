@@ -44,19 +44,24 @@ class _BatchBase(MigrationTestBase):
         group = []
         for i in range(members):
             name = f"mig{tag}{stamp}n{i}"
-            # --max-namespaces on the first member is what makes the
-            # subsystem shared; later members join it by name.
-            extra = (f" --max-namespaces {members + 2} --subsystem {self._subsys}"
-                     if i == 0 else f" --subsystem {self._subsys}")
+            # --namespaced is what shares a subsystem: it adds the lvol as
+            # a namespace on an existing subsystem of the same pool on the
+            # node, opening a new one only when none has a free slot. There
+            # is no --subsystem flag to name one, so the group is "every
+            # member created with --namespaced in this pool".
+            extra = (f" --namespaced true --max-namespace-per-subsys {members + 2}"
+                     if i == 0 else " --namespaced true")
             out, err = self._cli(
                 f"{self.base_cmd} -d volume add {name} {self.VOL_SIZE} "
-                f"--pool {self.pool_name}{extra} 2>&1")
+                f"{self.pool_name}{extra} 2>&1")
             if "error" in (out + err).lower():
                 raise MigrationPreconditionError(
-                    f"[MIG-B] could not add {name} to a shared subsystem: "
-                    f"{(out + err)[:300]}. If --subsystem or "
-                    f"--max-namespaces is not accepted on this build, the "
-                    f"whole batch lane needs its group built another way.")
+                    f"[MIG-B] could not add {name} as a namespace on a "
+                    f"shared subsystem: {(out + err)[:300]}. The group is "
+                    f"built with --namespaced, which fills an existing "
+                    f"subsystem of this pool on the node before opening a "
+                    f"new one; if that is refused here the batch lane needs "
+                    f"its group built another way.")
             vid = self.sbcli_utils.get_lvol_id(lvol_name=name)
             self._mig_vols.append(name)
             group.append({"name": name, "id": vid,

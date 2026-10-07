@@ -285,7 +285,8 @@ class ReplicationTestBase(TestClusterBase):
                 self.logger.info("[AR-S] removing %s from cluster A", ip)
                 self.ssh_obj.exec_command(
                     node=mgmt,
-                    command=f"{self.base_cmd} -d storage-node remove {nid} --force")
+                    command=f"{self.base_cmd} -d storage-node remove {nid} "
+                            f"--force-remove")
                 sleep_n_sec(5)
             except Exception as exc:                  # noqa: BLE001
                 raise ReplicationPreconditionError(
@@ -360,8 +361,10 @@ class ReplicationTestBase(TestClusterBase):
     def policy_add(self, name, target, interval_min=None, mode=None,
                    consistency_group=False, retention=None, rpo_target=None):
         """``cluster replication-policy-add``. Returns the policy name."""
+        # --target is a REQUIRED FLAG, not a positional. Passing it
+        # positionally is an argparse error.
         cmd = (f"{self.base_cmd} -d cluster replication-policy-add "
-               f"{self.cluster_a} {name} {target}")
+               f"{self.cluster_a} {name} --target {target}")
         if interval_min is None:
             interval_min = self.REPL_INTERVAL_MIN
         cmd += f" --interval-min {interval_min}"
@@ -378,7 +381,11 @@ class ReplicationTestBase(TestClusterBase):
             # cadence is exactly where a declared target earns its keep.
             cmd += f" --rpo-target-sec {rpo_target}"
         if retention is not None:
-            cmd += f" --snapshot-retention {retention}"
+            # The flag is --keep ("replicated internal snapshots to retain on
+            # each side"). --snapshot-retention does not exist; there is also
+            # a --retention-schedule for tiered retention, which is a
+            # different thing.
+            cmd += f" --keep {retention}"
         out, err = self._cli(cmd)
         if "error" in (out + err).lower() and name not in out:
             raise ReplicationPreconditionError(
@@ -410,10 +417,24 @@ class ReplicationTestBase(TestClusterBase):
                            f"{volume_id} --json")
         return out
 
-    def replication_status(self, cluster_id=None):
-        out, _ = self._cli(f"{self.base_cmd} cluster replication-status "
-                           f"{cluster_id or self.cluster_a}")
-        return out
+    def replication_status(self, volume_id=None, cluster_id=None):
+        """The typed steady-state status.
+
+        There is NO `cluster replication-status` verb -- only
+        `volume replication-status <volume_id>`. An earlier version of this
+        helper invented the cluster form, which meant every caller silently
+        got an argparse usage error instead of a status. For a cluster-wide
+        view the nearest real thing is the policy and target listings, so
+        that is what this returns when no volume is named.
+        """
+        if volume_id:
+            out, _ = self._cli(f"{self.base_cmd} volume replication-status "
+                               f"{volume_id}")
+            return out
+        pols, _ = self._cli(f"{self.base_cmd} cluster replication-policy-list")
+        tgts, _ = self._cli(f"{self.base_cmd} cluster replication-target-list "
+                            f"--cluster-id {cluster_id or self.cluster_a}")
+        return chr(10).join(["targets:", tgts, "policies:", pols])
 
     # ── state ─────────────────────────────────────────────────────────────
     #: From models/lvol_model.py: LVolReplication.

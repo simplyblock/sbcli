@@ -188,8 +188,12 @@ class ReplicationStartsAndReports(ReplicationTestBase):
                          vol, pname)
         out, err = self.ssh_obj.exec_command(
             node=self.mgmt_nodes[0],
-            command=f"{self.base_cmd} -d volume add {vol} {self.REPL_VOLUME_SIZE} "
-                    f"--pool {self.pool_name} --replication-policy {pname} 2>&1")
+            # There is no --replication-policy on volume add either: the
+            # policy is attached afterwards with volume
+            # replication-policy-set. AR-F-006 therefore proves "replication
+            # starts with no separate kick-off", not "at create time".
+            command=f"{self.base_cmd} -d volume add {vol} "
+                    f"{self.REPL_VOLUME_SIZE} {self.pool_name} 2>&1")
         combined = (out or "") + (err or "")
         if "error" in combined.lower():
             raise ReplicationPreconditionError(

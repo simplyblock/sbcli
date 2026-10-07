@@ -491,8 +491,11 @@ class MigrationTestBase(TestClusterBase):
     def make_volume(self, name, size=None, pool=None, host_id=None,
                     seed=True):
         """Create a volume, optionally on a named node, and seed it."""
-        cmd = (f"{self.base_cmd} -d volume add {name} {size or self.VOL_SIZE} "
-               f"--pool {pool or self.pool_name}")
+        # `volume add <name> <size> <pool>` -- the pool is POSITIONAL.
+        # There is no --pool flag; passing one is an argparse error, which is
+        # how every case in this lane failed on its first line.
+        cmd = (f"{self.base_cmd} -d volume add {name} "
+               f"{size or self.VOL_SIZE} {pool or self.pool_name}")
         if host_id:
             cmd += f" --host-id {host_id}"
         out, err = self._cli(cmd + " 2>&1")

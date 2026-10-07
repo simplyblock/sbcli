@@ -123,15 +123,32 @@ class ConsistencyGroupPlacement(ReplicationTestBase):
             other_node = elsewhere.get("uuid") or elsewhere.get("id")
             self.logger.info("[AR-C-005] asking for a group member on %s, "
                              "away from the group's LVS", other_node)
+            # Creating a volume on another node is perfectly legal, so the
+            # refusal has to come from ATTACHING it to the group -- that is
+            # the step that would make the group span two LVS. Asserting on
+            # the create would test the wrong thing and pass for the wrong
+            # reason.
+            split = f"arcgsplit{stamp}"
             out, err = self._cli(
-                f"{self.base_cmd} -d volume add arcgsplit{stamp} "
-                f"{self.REPL_VOLUME_SIZE} --pool {self.pool_name} "
-                f"--replication-policy {pname} --host-id {other_node} 2>&1")
-            self.expect_refused(
-                "AR-C-005", (out, err),
-                "a consistency-group member placed on a different node, "
-                "which would make the group span two LVS",
-                allow=("same lvs", "same node", "consistency", "placement"))
+                f"{self.base_cmd} -d volume add {split} "
+                f"{self.REPL_VOLUME_SIZE} {self.pool_name} "
+                f"--host-id {other_node} 2>&1")
+            if "error" in (out + err).lower():
+                self.skip_case(
+                    "AR-C-005",
+                    f"could not place a volume on {other_node} to build the "
+                    f"two-LVS case: {(out + err)[:200]}")
+            else:
+                split_id = self.sbcli_utils.get_lvol_id(lvol_name=split)
+                self._vols.append({"name": split, "id": split_id})
+                out, err = self.policy_set(split_id, pname)
+                self.expect_refused(
+                    "AR-C-005", (out or "", err or ""),
+                    f"attaching {split} (on node {other_node}) to a "
+                    f"consistency group whose members live elsewhere, which "
+                    f"would make the group span two LVS",
+                    allow=("same lvs", "same node", "consistency",
+                           "placement", "lvs"))
 
         self.assert_no_corruption("after AR-C placement cases")
         self._teardown(pname)
