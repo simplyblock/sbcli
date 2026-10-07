@@ -148,6 +148,44 @@ def test_no_process_poll_counts_as_a_retry(runner, monkeypatch):
     rpc.bdev_lvol_s3_backup.assert_not_called()  # this poll only resets state
 
 
+def test_failed_poll_counts_as_a_retry_not_an_abort(runner, monkeypatch):
+    """A "Failed" transfer must retry exactly like "No process", not abort the
+    backup outright.
+
+    Regression for backup-retry-empty-issue.md: MinIO was OOM-killed mid-upload
+    and back within ~2 seconds -- a plain upload is additive, so re-issuing it
+    onto the same s3_id is safe, and the data plane giving up after an I/O
+    error is not known to be any more permanent than it dying outright (the
+    "No process" case already retries)."""
+    backup = Backup()
+    backup.uuid = "bk-1"
+    backup.status = Backup.STATUS_IN_PROGRESS
+    backup.snapshot_id = "snap-1"
+
+    snode = MagicMock()
+    snode.status = StorageNode.STATUS_ONLINE
+    rpc = MagicMock()
+    rpc.bdev_lvol_transfer_stat.return_value = {"transfer_state": "Failed"}
+    snode.rpc_client.return_value = rpc
+
+    snapshot = MagicMock()
+    snapshot.snap_bdev = "lvs/snap0"
+
+    fake_db = MagicMock()
+    fake_db.get_backup_by_id.return_value = backup
+    fake_db.get_storage_node_by_id.return_value = snode
+    fake_db.get_snapshot_by_id.return_value = snapshot
+    monkeypatch.setattr(runner, "db", fake_db)
+
+    task = _backup_task(retry=3, max_retry=10)
+    runner._run_backup(task)
+
+    assert task.retry == 4, "Failed re-issue must count toward the ceiling"
+    assert backup.status == Backup.STATUS_PENDING
+    assert task.status == JobSchedule.STATUS_SUSPENDED
+    rpc.bdev_lvol_s3_backup.assert_not_called()  # this poll only resets state
+
+
 # --------------------------------------------------------------------------
 # FDB backup runner: terminates instead of looping forever.
 #
