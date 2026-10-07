@@ -27,8 +27,7 @@ from simplyblock_core.services import snapshot_monitor
 def _mk_node(node_id, leadership=False, delete_status=None,
              secondary_node_id="", tertiary_node_id=""):
     rpc = MagicMock()
-    rpc.bdev_lvol_get_lvstores.return_value = [
-        {"name": "LVS_1", "lvs leadership": leadership}]
+    rpc.get_lvstore.return_value = {"name": "LVS_1", "lvs leadership": leadership}
     if delete_status is not None:
         rpc.bdev_lvol_get_lvol_delete_status.return_value = delete_status
     rpc.delete_lvol.return_value = (True, None)

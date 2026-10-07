@@ -51,7 +51,7 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.failure_domain = failure_domain
     # rpc_client mock: journal replication not active by default
     rpc = MagicMock()
-    rpc.bdev_lvol_get_lvstores = MagicMock(return_value=[{"name": lvstore}])
+    rpc.get_lvstore = MagicMock(return_value={"name": lvstore})
     rpc.jc_get_jm_status = MagicMock(return_value={"jm1": True})
     n.rpc_client = MagicMock(return_value=rpc)
     return n

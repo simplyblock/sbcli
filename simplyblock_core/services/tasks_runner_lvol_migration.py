@@ -1898,7 +1898,7 @@ def _get_lvol_delta_bytes(src_rpc, composite_name):
     last snapshot (the dirty delta that would be frozen by bdev_lvol_final_migration).
 
     Uses num_allocated_clusters from bdev_get_bdevs multiplied by the lvstore
-    cluster_size returned by bdev_lvol_get_lvstores.  Returns None on any RPC
+    cluster_size returned by get_lvstore.  Returns None on any RPC
     failure so callers can treat an unknown delta conservatively.
     """
     try:
@@ -1910,10 +1910,10 @@ def _get_lvol_delta_bytes(src_rpc, composite_name):
         if num_alloc is None:
             return None
         lvs_name = lvol_data.get('lvs_name') or composite_name.split('/')[0]
-        lvs_info = src_rpc.bdev_lvol_get_lvstores(lvs_name)
+        lvs_info = src_rpc.get_lvstore(lvs_name)
         if not lvs_info:
             return None
-        cluster_size = lvs_info[0].get('cluster_size', 0)
+        cluster_size = lvs_info.get('cluster_size', 0)
         if not cluster_size:
             return None
         return num_alloc * cluster_size

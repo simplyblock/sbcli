@@ -213,7 +213,7 @@ _DP_QUORUM_PROBE_TTL_SEC = 8
 def _probe_jm_replication(node):
     """Does ``node`` report an active JM replication task? RPC-backed."""
     try:
-        if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
+        if node.rpc_client(timeout=10).get_lvstore(node.lvstore):
             ret = node.rpc_client(timeout=8).jc_get_jm_status(node.jm_vuid)
             for jm in ret:
                 if ret[jm] is False:  # jm not ready (active replication task)

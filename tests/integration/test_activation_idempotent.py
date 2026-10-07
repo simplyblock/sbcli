@@ -48,12 +48,12 @@ class TestExistenceProbes(unittest.TestCase):
 
     def test_lvstore_exists_true(self):
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_A"}]
+        rpc.get_lvstore.return_value = {"name": "LVS_A"}
         self.assertTrue(_rpc_lvstore_exists(rpc, "LVS_A"))
 
     def test_lvstore_exists_false(self):
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = None
+        rpc.get_lvstore.return_value = None
         self.assertFalse(_rpc_lvstore_exists(rpc, "LVS_A"))
 
     def test_subsystem_has_ns_by_nsid_and_bdev(self):

@@ -105,6 +105,38 @@ class TestBdevGet(unittest.TestCase):
             client.bdev_get("LVS_1/LVOL_1")
 
 
+class TestGetLvstore(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request3")
+    def test_get_lvstore_delegates_to_rpc(self, mock_req):
+        mock_req.return_value = [{"name": "LVS_1"}]
+        client = _make_client()
+
+        self.assertEqual(client.get_lvstore("LVS_1"), {"name": "LVS_1"})
+        mock_req.assert_called_once_with("bdev_lvol_get_lvstores", lvs_name="LVS_1")
+
+    @patch.object(RPCClient, "_request3")
+    def test_get_lvstore_filter_miss_returns_none(self, mock_req):
+        mock_req.return_value = []
+        client = _make_client()
+        self.assertIsNone(client.get_lvstore("LVS_GONE"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_get_lvstore_no_such_device_returns_none(self, mock_req):
+        # SPDK answers ENODEV ("No such device") when the lvstore doesn't
+        # exist -- expected while it has not (yet, or no longer) recovered.
+        mock_req.side_effect = RPCRemoteError("No such device", code=-errno.ENODEV)
+        client = _make_client()
+        self.assertIsNone(client.get_lvstore("LVS_GONE"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_get_lvstore_other_rpc_error_propagates(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
+        client = _make_client()
+        with self.assertRaises(RPCException):
+            client.get_lvstore("LVS_1")
+
+
 class TestNbdGetDisk(unittest.TestCase):
 
     @patch.object(RPCClient, "_request3")

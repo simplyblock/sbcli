@@ -39,7 +39,7 @@ def _node(uuid, ip, status=StorageNode.STATUS_ONLINE, devices=(NVMeDevice.STATUS
     n.status = status
     n.nvme_devices = [_dev(s) for s in devices]
     n.rpc_client = MagicMock()
-    n.rpc_client.return_value.bdev_lvol_get_lvstores.return_value = []
+    n.rpc_client.return_value.get_lvstore.return_value = None
     return n
 
 

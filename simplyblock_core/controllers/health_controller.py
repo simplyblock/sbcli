@@ -324,10 +324,9 @@ def _check_node_hublvol(node: StorageNode) -> bool:
             logger.error(f"Cluster with id {node.cluster_id} not found")
             return False
 
-        ret = rpc_client.bdev_lvol_get_lvstores(node.lvstore)
-        if ret:
+        lvs_info = rpc_client.get_lvstore(node.lvstore)
+        if lvs_info:
             logger.info(f"Checking lvstore: {node.lvstore} ... ok")
-            lvs_info = ret[0]
             logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict[str, Any] = {}
@@ -708,10 +707,9 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
         except KeyError:
             logger.error(f"Cluster with id {node.cluster_id} not found")
             return False
-        ret = rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore)
-        if ret:
+        lvs_info = rpc_client.get_lvstore(primary_node.lvstore)
+        if lvs_info:
             logger.info(f"Checking lvstore: {primary_node.lvstore} ... ok")
-            lvs_info = ret[0]
             logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict [str, Any] = {}
@@ -887,7 +885,7 @@ def _check_node_lvstore(
             return False
     if bdev_lvstore:
         try:
-            ret = node.rpc_client().bdev_lvol_get_lvstores(bdev_lvstore)
+            ret = node.rpc_client().get_lvstore(bdev_lvstore)
         except Exception as e:
             logger.error(e)
             return False

@@ -864,8 +864,8 @@ for peer_id in [n.get_id(), n.secondary_node_id]:
         continue
     try:
         p = db.get_storage_node_by_id(peer_id)
-        r = p.rpc_client(timeout=8, retry=1).bdev_lvol_get_lvstores(n.lvstore)
-        if r and r[0].get('lvs leadership'):
+        r = p.rpc_client(timeout=8, retry=1).get_lvstore(n.lvstore)
+        if r and r.get('lvs leadership'):
             leader = True
             break
     except Exception:

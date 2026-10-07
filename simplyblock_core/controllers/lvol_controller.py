@@ -1969,11 +1969,11 @@ def is_node_leader(snode, lvs_name):
     """
     rpc_client = snode.rpc_client()
     try:
-        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+        lvs = rpc_client.get_lvstore(lvs_name)
     except RPCException:
         return False
-    if ret and len(ret) > 0 and "lvs leadership" in ret[0]:
-        is_leader = ret[0]["lvs leadership"]
+    if lvs and "lvs leadership" in lvs:
+        is_leader = lvs["lvs leadership"]
         return is_leader
     return False
 

@@ -220,7 +220,7 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
     storage_node_ops.find_leader_with_failover): probe only the
     recently-confirmed leader — the probe is itself a fresh confirmation, so a
     moved leadership simply misses and falls back to scanning every candidate.
-    Replaces the per-create full scan, which paid one bdev_lvol_get_lvstores
+    Replaces the per-create full scan, which paid one get_lvstore
     RPC per candidate node on every snapshot/clone.
 
     No-leader fail-fast: when the LVS was recently confirmed leaderless,

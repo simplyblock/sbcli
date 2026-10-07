@@ -530,10 +530,10 @@ def _read_lvs_leadership(target_node, lvs_name):
     treat ``None`` as "unknown" and retry, never as "not leader".
     """
     try:
-        ret = target_node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(lvs_name)
-        if not ret or len(ret) == 0:
+        lvs = target_node.rpc_client(timeout=5, retry=1).get_lvstore(lvs_name)
+        if not lvs:
             return False
-        return bool(ret[0].get("lvs leadership"))
+        return bool(lvs.get("lvs leadership"))
     except Exception as e:
         logger.warning("Leadership read for %s on %s failed: %s",
                        lvs_name, target_node.get_id()[:8], e)
@@ -750,9 +750,8 @@ def exec_port_allow_task(task):
         sec_node = db.get_storage_node_by_id(sec_id)
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
             try:
-                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if ret:
-                    lvs_info = ret[0]
+                lvs_info = sec_node.rpc_client().get_lvstore(snode.lvstore)
+                if lvs_info:
                     if lvs_info.get('lvs leadership'):
                         jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
                         retries = 10
@@ -876,8 +875,8 @@ def exec_port_allow_task(task):
         leadership_read_failed = None
         for peer in failback_peers:
             try:
-                ret = peer.rpc_client(timeout=5, retry=2).bdev_lvol_get_lvstores(node.lvstore)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                lvs = peer.rpc_client(timeout=5, retry=2).get_lvstore(node.lvstore)
+                if lvs and lvs.get("lvs leadership"):
                     current_leader = peer
                     logger.info("Current leader for %s is peer %s",
                                 node.lvstore, peer.get_id()[:8])
