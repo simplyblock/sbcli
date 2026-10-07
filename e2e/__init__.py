@@ -709,6 +709,82 @@ ALL_TESTS = [
     TestNodeShutdownRestart,
     # API parity audit
     TestAPIParityAudit,
+
+    # backup-stress: in its group but never in ALL_TESTS, so these four could
+    # only ever run as part of --testname backup-stress. Pre-existing; found by
+    # scripts/check_test_registry.py.
+    BackupStressLargeScale,
+    BackupStressFilesystemSecurityMix,
+    BackupStressRetentionMergeCycles,
+    BackupStressComprehensive,
+
+    # ── replication, migration and their stress/load lanes ───────────────
+    # These must be here as well as in their group functions. ALL_TESTS is
+    # what e2e.py searches when a class is named by hand (--testname
+    # MigrationSmoke); a class reachable only through a group key cannot be
+    # run on its own, which is how `--testname MigrationSmoke` failed with
+    # "Test not found" while `--testname migration` worked.
+    ReplicationHarness,
+    ReplicationTargetsAndPolicies,
+    ReplicationStartsAndReports,
+    ReplicationPolicyVariants,
+    ReplicationDataIsIdentical,
+    ReplicationConvergesUnderLoad,
+    ReplicationNoMetadataCorruption,
+    ConsistencyGroupPlacement,
+    ConsistencyGroupGeneration,
+    ReplicationFailoverScopes,
+    ReplicationFailoverDataLoss,
+    ReplicationFailback,
+    ReplicationMigration,
+    ReplicationSourceNodeOutages,
+    ReplicationTargetNodeOutage,
+    ReplicationNetworkOutages,
+    ReplicationOutageDuringOperations,
+    ReplicationConsistencyGroupNodeLoss,
+    ReplicationControlPlaneAndDeviceOutages,
+    ReplicationNegativeConfiguration,
+    ReplicationNegativeOperations,
+    CsiAddonsEnableAndReport,
+    CsiAddonsOwnership,
+    CsiAddonsPromoteDemote,
+    CsiAddonsForcedFailoverAndOutage,
+    CsiAddonsGroupReplication,
+    ReplicationOverlappingIntervals,
+    ReplicationManyVolumes,
+    ReplicationLargeVolume,
+    ReplicationSoak,
+    ReplicationSurvivesControlPlaneUpgrade,
+    ReplicationSurvivesOperatorUpgrade,
+    ReplicationAnnotationToCsiAddonsMigration,
+    MigrationSmoke,
+    MigrationHappyPath,
+    MigrationRoundTrip,
+    MigrationWithSnapshots,
+    MigrationHaOverlapMatrix,
+    MigrationSnapshotCloneTrees,
+    MigrationConcurrent,
+    MigrationBatchFlat,
+    MigrationBatchNsGaps,
+    MigrationBatchNegative,
+    MigrationBatchWithTrees,
+    MigrationNegativeTargets,
+    MigrationNegativeCapacity,
+    MigrationUnderReplication,
+    MigrationTargetOfflinePerPhase,
+    MigrationSourceAndTargetFaults,
+    MigrationCancel,
+    MigrationRetryAfterTargetReboot,
+    MigrationHaPartnerRestart,
+    MigrationClusterRestartBetween,
+    MigrationManyVolumes,
+    MigrationLargeVolume,
+    MigrationSoak,
+    MigrationFreezeByVolumeSize,
+    MigrationTimeBySnapshotCount,
+    MigrationConcurrencyCurve,
+    ReplicationCycleTimeBySize,
+    ReplicationDemoteDowntimeBySize,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -1150,8 +1226,22 @@ def get_replication_load_tests():
 
 
 def get_load_tests():
+    """The load runner's registry -- e2e/load.py resolves --testname here.
+
+    A load test sweeps a parameter and records a number per step; see
+    load_tests/_load_base.py. These are ALSO in e2e.py's group map, under
+    migration-load and replication-load, because no workflow calls load.py --
+    so the e2e route is the only way to run them from a pipeline. Same
+    classes, two front doors: load.py for a single sweep by hand, e2e.py for
+    CI.
+    """
     tests = [
-        TestLvolOutageLoadTest
+        TestLvolOutageLoadTest,
+        MigrationFreezeByVolumeSize,
+        MigrationTimeBySnapshotCount,
+        MigrationConcurrencyCurve,
+        ReplicationCycleTimeBySize,
+        ReplicationDemoteDowntimeBySize,
     ]
     return tests
 

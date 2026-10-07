@@ -318,8 +318,21 @@ def main():
                     seen.add(cls)
 
     if not test_class_run:
-        available_tests = ', '.join(cls.__name__ for cls in tests)
-        print(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
+        # Report what was actually SEARCHED. This used to print `tests`, the
+        # short default-suite list from get_all_tests(), while the lookup above
+        # searches ALL_TESTS -- so a class missing from ALL_TESTS produced a
+        # list of five unrelated names and sent you looking in the wrong place.
+        available_tests = ', '.join(sorted(cls.__name__ for cls in ALL_TESTS))
+        print(f"Test '{args.testname}' not found.")
+        print("")
+        print("A --testname is either a GROUP key or an exact class name.")
+        print(f"Groups: {', '.join(sorted(_GROUPS))}")
+        print("")
+        print("If you named a class and it exists in the tree, it is probably "
+              "missing from ALL_TESTS in e2e/__init__.py -- being in a group "
+              "function alone is not enough to name it directly.")
+        print("")
+        print(f"Known classes ({len(ALL_TESTS)}): {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
     
     test_run_api = TestRunsAPI(PROFILE_KEY)
