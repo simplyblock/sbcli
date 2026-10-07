@@ -23,6 +23,7 @@ from tenacity import (
     Retrying,
     before_sleep_log,
     retry_if_exception_type,
+    retry_if_result,
     stop_after_attempt,
     wait_fixed,
 )
@@ -1657,10 +1658,14 @@ def _create_device_partitions(rpc_client, nvme, snode: StorageNode, num_partitio
         return False
     time.sleep(3)
     rpc_client.nbd_stop_disk(nbd_device)
-    for i in range(10):
-        if not rpc_client.nbd_get_disks(nbd_device):
-            break
-        time.sleep(1)
+    try:
+        Retrying(
+            stop=stop_after_attempt(10),
+            wait=wait_fixed(1),
+            retry=retry_if_result(lambda disk: disk is not None),
+        )(rpc_client.nbd_get_disk, nbd_device)
+    except RetryError:
+        logger.warning(f"nbd device {nbd_device} still present 10s after nbd_stop_disk")
     rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
     for i in range(10):
         if not rpc_client.bdev_nvme_controller_list(nvme.nvme_controller):

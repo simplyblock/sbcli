@@ -105,6 +105,38 @@ class TestBdevGet(unittest.TestCase):
             client.bdev_get("LVS_1/LVOL_1")
 
 
+class TestNbdGetDisk(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request3")
+    def test_nbd_get_disk_delegates_to_rpc(self, mock_req):
+        mock_req.return_value = [{"nbd_device": "/dev/nbd0"}]
+        client = _make_client()
+
+        self.assertEqual(client.nbd_get_disk("/dev/nbd0"), {"nbd_device": "/dev/nbd0"})
+        mock_req.assert_called_once_with("nbd_get_disks", nbd_device="/dev/nbd0")
+
+    @patch.object(RPCClient, "_request3")
+    def test_nbd_get_disk_filter_miss_returns_none(self, mock_req):
+        mock_req.return_value = []
+        client = _make_client()
+        self.assertIsNone(client.nbd_get_disk("/dev/nbd0"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_nbd_get_disk_no_such_device_returns_none(self, mock_req):
+        # SPDK answers ENODEV ("No such device") once nbd_stop_disk has
+        # un-exported the device -- the expected poll result, not a failure.
+        mock_req.side_effect = RPCRemoteError("No such device", code=-errno.ENODEV)
+        client = _make_client()
+        self.assertIsNone(client.nbd_get_disk("/dev/nbd0"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_nbd_get_disk_other_rpc_error_propagates(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
+        client = _make_client()
+        with self.assertRaises(RPCException):
+            client.nbd_get_disk("/dev/nbd0")
+
+
 class TestBdevDistribCreate(unittest.TestCase):
     """bdev_distrib_create probes bdev_get for idempotency before creating.
     A transport/RPC failure on that probe must propagate, not be read as

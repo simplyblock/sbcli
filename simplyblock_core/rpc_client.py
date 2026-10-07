@@ -1460,8 +1460,18 @@ class RPCClient:
     def nbd_stop_disk(self, nbd_device):
         return self._request3("nbd_stop_disk", nbd_device=nbd_device)
 
-    def nbd_get_disks(self, nbd_device):
-        return self._request3("nbd_get_disks", nbd_device=nbd_device)
+    def nbd_get_disk(self, nbd_device) -> dict | None:
+        """Single nbd-exported disk lookup by ``nbd_device``, mirroring
+        ``bdev_get``/``subsystem_get``. ``None`` means the device is not
+        currently exported -- including right after ``nbd_stop_disk`` for the
+        device just stopped, which SPDK answers with ENODEV ("No such
+        device")."""
+        try:
+            return single_or_none(self._request3("nbd_get_disks", nbd_device=nbd_device))
+        except RPCRemoteError as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
 
     def bdev_jm_unmap_vuid(self, name, vuid):
         return self._request3("bdev_jm_unmap_vuid", name=name, vuid=vuid)
