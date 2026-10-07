@@ -920,7 +920,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          rm -rf sbcli
+          # sudo fallback: anything that ran as root in this workspace --
+          # a debug session, a container with it bind-mounted, a log
+          # collector -- leaves root-owned files under .git/objects, and
+          # then this rm fails with "Permission denied" and takes the whole
+          # run with it before a single test starts. The clone below
+          # recreates everything here, so removing it with privilege is
+          # safe and is strictly better than failing the run.
+          rm -rf sbcli 2>/dev/null || sudo rm -rf sbcli
 
           wf_branch="${{ github.ref_name }}"
           fallback_branch="${SBCLI_BRANCH}"
@@ -1011,7 +1018,22 @@ jobs:
           echo "MC_ALIAS=${MC_ALIAS}" >> "$GITHUB_ENV"
 
           # 1. Install mc (MinIO Client) to our own per-run path
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "${MC_BIN}"
+          # dl.min.io served the "latest" mc binary until MinIO retired that
+          # mirror. It now answers 410 Gone for the file AND the directory, so
+          # this step died with curl exit 22 before a single test ran. GitHub
+          # releases still publishes mc, but only under a versioned asset name
+          # -- releases/latest/download/mc.linux-amd64 is a 404, because the
+          # asset is mc.linux-amd64.RELEASE.<timestamp>. Hence the pin, with a
+          # lookup as the fallback for when the pin is eventually yanked.
+          MC_RELEASE="RELEASE.2025-08-13T08-35-41Z"
+          MC_URL="https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.linux-amd64.${MC_RELEASE}"
+          if ! curl -fsSL -o "${MC_BIN}" "${MC_URL}"; then
+            echo "pinned mc ${MC_RELEASE} unavailable; resolving the current release"
+            MC_API=$(curl -fsSL https://api.github.com/repos/minio/mc/releases/latest)
+            MC_URL=$(echo "${MC_API}" | jq -r '[.assets[] | select(.name | startswith("mc.linux-amd64.RELEASE")) | select(.name | endswith(".asc") | not) | .browser_download_url][0] // empty')
+            test -n "${MC_URL}" || { echo "ERROR: cannot resolve an mc download URL"; exit 1; }
+            curl -fsSL -o "${MC_BIN}" "${MC_URL}"
+          fi
           chmod +x "${MC_BIN}"
 
           # 2. Configure our own mc alias to external MinIO

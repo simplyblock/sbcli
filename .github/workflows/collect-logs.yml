@@ -330,7 +330,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          rm -rf sbcli
+          # sudo fallback: anything that ran as root in this workspace --
+          # a debug session, a container with it bind-mounted, a log
+          # collector -- leaves root-owned files under .git/objects, and
+          # then this rm fails with "Permission denied" and takes the whole
+          # run with it before a single test starts. The clone below
+          # recreates everything here, so removing it with privilege is
+          # safe and is strictly better than failing the run.
+          rm -rf sbcli 2>/dev/null || sudo rm -rf sbcli
           wf_branch="${{ github.ref_name }}"
           fallback_branch="main"
           if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then

@@ -31,6 +31,12 @@ def generate_random_sequence(length):
 
     return first_char + remaining_chars
 
+def _snake_case(name):
+    """MigrationSmoke -> migration_smoke. Safe as a directory name."""
+    s = re.sub(r"(?<!^)(?=[A-Z])", "_", str(name)).lower()
+    return re.sub(r"[^a-z0-9_.-]", "_", s) or "test"
+
+
 class TestClusterBase:
     # Heavyweight diagnostic collectors, scoped per platform: ON for k8s,
     # OFF for docker. Read them through the `COLLECT_DUMP_LVSTORE` /
@@ -243,7 +249,15 @@ class TestClusterBase:
         self.log_threads = []
         self._nvme_iostat_thread = None
         self._nvme_iostat_stop = None
-        self.test_name = ""
+        # Named after the class rather than left empty. TestClusterBase
+        # builds the run's log directory as f"{test_name}-{timestamp}",
+        # so an unset name put every one of the 36 cases that never
+        # assigned it into "<nfs>/-20261007-173614" -- a leading dash,
+        # no way to tell one test's logs from another's, and the
+        # "Logs Path:" line the workflow summary greps came back
+        # nameless too. A leaf that wants its own name still overrides
+        # this by assigning after super().__init__().
+        self.test_name = _snake_case(type(self).__name__)
         self.container_nodes = {}
         self.docker_logs_path = ""
         self.runner_k8s_log = ""
