@@ -17,14 +17,14 @@ from simplyblock_core.rpc_client import (
 
 class TestBdevNvmeControllerList(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_unmatched_name_negative_einval_returns_empty(self, mock_req):
         # Sign SPDK uses for most RPC errors (e.g. bdev_get_bdevs's ENODEV).
         mock_req.side_effect = RPCRemoteError("Controller foo does not exist", code=-errno.EINVAL)
         client = _make_client()
         self.assertEqual(client.bdev_nvme_controller_list("foo"), [])
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_unmatched_name_positive_einval_returns_empty(self, mock_req):
         # bdev_nvme_rpc.c:687 sends EINVAL un-negated for this RPC specifically
         # (spdk_jsonrpc_send_error_response_fmt(request, EINVAL, ...)) -- the
@@ -33,14 +33,14 @@ class TestBdevNvmeControllerList(unittest.TestCase):
         client = _make_client()
         self.assertEqual(client.bdev_nvme_controller_list("foo"), [])
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_other_rpc_error_propagates(self, mock_req):
         mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.ENODEV)
         client = _make_client()
         with self.assertRaises(RPCException):
             client.bdev_nvme_controller_list("foo")
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_no_name_einval_propagates(self, mock_req):
         # The [] translation only applies to a filtered (named) lookup.
         mock_req.side_effect = RPCRemoteError("bad request", code=errno.EINVAL)
@@ -57,7 +57,7 @@ def _make_client(**kwargs):
 
 class TestBdevList(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_bdev_list_calls_request_each_time(self, mock_req):
         mock_req.return_value = [{"name": "bdev0"}]
         client = _make_client()
@@ -65,7 +65,7 @@ class TestBdevList(unittest.TestCase):
         r1 = client.bdev_list()
         r2 = client.bdev_list()
 
-        # bdev_list uses _request3 directly (no caching)
+        # bdev_list uses _request directly (no caching)
         self.assertEqual(mock_req.call_count, 2)
         self.assertEqual(r1, r2)
         mock_req.assert_called_with("bdev_get_bdevs")
@@ -73,7 +73,7 @@ class TestBdevList(unittest.TestCase):
 
 class TestBdevGet(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_bdev_get_delegates_filtering_to_rpc(self, mock_req):
         mock_req.return_value = [{"name": "LVS_1/LVOL_1"}]
         client = _make_client()
@@ -81,13 +81,13 @@ class TestBdevGet(unittest.TestCase):
         self.assertEqual(client.bdev_get("LVS_1/LVOL_1")["name"], "LVS_1/LVOL_1")
         mock_req.assert_called_once_with("bdev_get_bdevs", name="LVS_1/LVOL_1")
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_bdev_get_filter_miss_returns_none(self, mock_req):
         mock_req.return_value = []
         client = _make_client()
         self.assertIsNone(client.bdev_get("LVS_1/GONE"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_bdev_get_no_such_device_returns_none(self, mock_req):
         # SPDK returns ENODEV (-19) "No such device" when the bdev is gone;
         # treat it as absent rather than propagating the error.
@@ -95,7 +95,7 @@ class TestBdevGet(unittest.TestCase):
         client = _make_client()
         self.assertIsNone(client.bdev_get("LVS_1/GONE"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_bdev_get_other_rpc_error_propagates(self, mock_req):
         # Generic RPC failures must still surface — an unknown answer is not
         # "absent" (the bug a bare `if not get_bdevs(name)` probe had).
@@ -107,7 +107,7 @@ class TestBdevGet(unittest.TestCase):
 
 class TestGetLvstore(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_get_lvstore_delegates_to_rpc(self, mock_req):
         mock_req.return_value = [{"name": "LVS_1"}]
         client = _make_client()
@@ -115,13 +115,13 @@ class TestGetLvstore(unittest.TestCase):
         self.assertEqual(client.get_lvstore("LVS_1"), {"name": "LVS_1"})
         mock_req.assert_called_once_with("bdev_lvol_get_lvstores", lvs_name="LVS_1")
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_get_lvstore_filter_miss_returns_none(self, mock_req):
         mock_req.return_value = []
         client = _make_client()
         self.assertIsNone(client.get_lvstore("LVS_GONE"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_get_lvstore_no_such_device_returns_none(self, mock_req):
         # SPDK answers ENODEV ("No such device") when the lvstore doesn't
         # exist -- expected while it has not (yet, or no longer) recovered.
@@ -129,7 +129,7 @@ class TestGetLvstore(unittest.TestCase):
         client = _make_client()
         self.assertIsNone(client.get_lvstore("LVS_GONE"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_get_lvstore_other_rpc_error_propagates(self, mock_req):
         mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
         client = _make_client()
@@ -139,7 +139,7 @@ class TestGetLvstore(unittest.TestCase):
 
 class TestNbdGetDisk(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_nbd_get_disk_delegates_to_rpc(self, mock_req):
         mock_req.return_value = [{"nbd_device": "/dev/nbd0"}]
         client = _make_client()
@@ -147,13 +147,13 @@ class TestNbdGetDisk(unittest.TestCase):
         self.assertEqual(client.nbd_get_disk("/dev/nbd0"), {"nbd_device": "/dev/nbd0"})
         mock_req.assert_called_once_with("nbd_get_disks", nbd_device="/dev/nbd0")
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_nbd_get_disk_filter_miss_returns_none(self, mock_req):
         mock_req.return_value = []
         client = _make_client()
         self.assertIsNone(client.nbd_get_disk("/dev/nbd0"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_nbd_get_disk_no_such_device_returns_none(self, mock_req):
         # SPDK answers ENODEV ("No such device") once nbd_stop_disk has
         # un-exported the device -- the expected poll result, not a failure.
@@ -161,7 +161,7 @@ class TestNbdGetDisk(unittest.TestCase):
         client = _make_client()
         self.assertIsNone(client.nbd_get_disk("/dev/nbd0"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_nbd_get_disk_other_rpc_error_propagates(self, mock_req):
         mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
         client = _make_client()
@@ -183,7 +183,7 @@ class TestBdevDistribCreate(unittest.TestCase):
         mock_probe.return_value = {"name": "distrib_1"}
         client = _make_client()
 
-        with patch.object(client, "_request3") as mock_request:
+        with patch.object(client, "_request") as mock_request:
             result = client.bdev_distrib_create(*self._args())
 
         self.assertEqual(result["name"], "distrib_1")
@@ -194,7 +194,7 @@ class TestBdevDistribCreate(unittest.TestCase):
         mock_probe.return_value = None
         client = _make_client()
 
-        with patch.object(client, "_request3", return_value=True) as mock_request:
+        with patch.object(client, "_request", return_value=True) as mock_request:
             self.assertTrue(client.bdev_distrib_create(*self._args()))
 
         mock_request.assert_called_once()
@@ -204,7 +204,7 @@ class TestBdevDistribCreate(unittest.TestCase):
         mock_probe.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
         client = _make_client()
 
-        with patch.object(client, "_request3") as mock_request:
+        with patch.object(client, "_request") as mock_request:
             with self.assertRaises(RPCException):
                 client.bdev_distrib_create(*self._args())
 
@@ -219,7 +219,7 @@ class TestBdevRaidCreate(unittest.TestCase):
         mock_probe.return_value = {"name": "raid_1"}
         client = _make_client()
 
-        with patch.object(client, "_request3") as mock_request:
+        with patch.object(client, "_request") as mock_request:
             result = client.bdev_raid_create("raid_1", ["a", "b"], "1")
 
         self.assertEqual(result["name"], "raid_1")
@@ -230,7 +230,7 @@ class TestBdevRaidCreate(unittest.TestCase):
         mock_probe.return_value = None
         client = _make_client()
 
-        with patch.object(client, "_request3", return_value=True) as mock_request:
+        with patch.object(client, "_request", return_value=True) as mock_request:
             self.assertTrue(client.bdev_raid_create("raid_1", ["a", "b"], "1"))
 
         mock_request.assert_called_once()
@@ -240,7 +240,7 @@ class TestBdevRaidCreate(unittest.TestCase):
         mock_probe.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
         client = _make_client()
 
-        with patch.object(client, "_request3") as mock_request:
+        with patch.object(client, "_request") as mock_request:
             with self.assertRaises(RPCException):
                 client.bdev_raid_create("raid_1", ["a", "b"], "1")
 
@@ -249,7 +249,7 @@ class TestBdevRaidCreate(unittest.TestCase):
 
 class TestSubsystem(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_subsystem_list_calls_request_each_time(self, mock_req):
         mock_req.return_value = [{"nqn": "nqn.test", "namespaces": []}]
         client = _make_client()
@@ -257,11 +257,11 @@ class TestSubsystem(unittest.TestCase):
         r1 = client.subsystem_list()
         r2 = client.subsystem_list()
 
-        # subsystem_list uses _request3 directly (no caching)
+        # subsystem_list uses _request directly (no caching)
         self.assertEqual(mock_req.call_count, 2)
         self.assertEqual(r1, r2)
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_subsystem_get_delegates_filtering_to_rpc(self, mock_req):
         # nvmf_get_subsystems filters server-side, so the RPC returns only the
         # matching subsystem when queried by nqn.
@@ -271,13 +271,13 @@ class TestSubsystem(unittest.TestCase):
         self.assertEqual(client.subsystem_get("nqn.b")["nqn"], "nqn.b")
         mock_req.assert_called_once_with("nvmf_get_subsystems", nqn="nqn.b")
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_subsystem_get_filter_miss_returns_none(self, mock_req):
         mock_req.return_value = []
         client = _make_client()
         self.assertIsNone(client.subsystem_get("nqn.nonexistent"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_subsystem_get_no_such_device_returns_none(self, mock_req):
         # SPDK returns ENODEV (-19) "No such device" when the subsystem is gone;
         # treat it as absent rather than propagating the error.
@@ -285,7 +285,7 @@ class TestSubsystem(unittest.TestCase):
         client = _make_client()
         self.assertIsNone(client.subsystem_get("nqn.gone"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_subsystem_get_other_rpc_error_propagates(self, mock_req):
         # Generic RPC failures must still surface.
         mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
@@ -355,7 +355,7 @@ class TestSessionPool(unittest.TestCase):
 
 class TestBdevLvolS3Merge(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_merge_eexist_treated_as_success_by_default(self, mock_req):
         # A prior call whose RPC connection dropped before the response
         # arrived can leave a matching merge already queued on the data
@@ -365,7 +365,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
 
         self.assertTrue(client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, s3_bdev="s3_lvs0"))
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_merge_eexist_propagates_when_disallowed(self, mock_req):
         mock_req.side_effect = RPCRemoteError("The same transfer task already exists.", code=-errno.EEXIST)
         client = _make_client()
@@ -373,7 +373,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
         with self.assertRaises(RPCRemoteError):
             client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, s3_bdev="s3_lvs0", allow_exist=False)
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_merge_other_rpc_error_propagates_regardless_of_allow_exist(self, mock_req):
         mock_req.side_effect = RPCRemoteError("Cannot find S3 transfer device.", code=-errno.EINVAL)
         client = _make_client()
@@ -381,7 +381,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
         with self.assertRaises(RPCRemoteError):
             client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, s3_bdev="s3_lvs0")
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_merge_success_passes_through(self, mock_req):
         mock_req.return_value = True
         client = _make_client()
@@ -393,7 +393,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
 
 class TestBdevLvolS3MergeStat(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request3")
+    @patch.object(RPCClient, "_request")
     def test_merge_stat_calls_request_with_ids(self, mock_req):
         mock_req.return_value = {"transfer_state": "In progress"}
         client = _make_client()

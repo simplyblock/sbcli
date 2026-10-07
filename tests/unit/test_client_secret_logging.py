@@ -116,7 +116,7 @@ def _sent_params(client):
 
 def test_bdev_s3_create_keys_reach_the_wire_but_not_the_log(rpc_client, caplog):
     # bdev_s3_create is the only RPC carrying S3 keys, and it goes through
-    # _request3, which logs its parameter dict directly -- only a SecretStr
+    # _request, which logs its parameter dict directly -- only a SecretStr
     # masks there.
     rpc_client._fake_session.post.return_value = _make_json_response({
         "jsonrpc": "2.0", "id": 1, "result": True,

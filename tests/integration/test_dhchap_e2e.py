@@ -342,7 +342,7 @@ class TestDHCHAPE2E(unittest.TestCase):
         dhchap_ctrlr_key = generate_dhchap_key()
 
         # Create subsystem
-        rpc_client._request3("nvmf_create_subsystem", nqn=subsys_nqn)
+        rpc_client._request("nvmf_create_subsystem", nqn=subsys_nqn)
 
         # Write key files
         safe_host = host_nqn.replace(":", "_").replace(".", "_")
@@ -382,7 +382,7 @@ class TestDHCHAPE2E(unittest.TestCase):
         rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", SecretStr(""))
 
         subsys_nqn = "nqn:test:subsys2"
-        rpc_client._request3("nvmf_create_subsystem", nqn=subsys_nqn)
+        rpc_client._request("nvmf_create_subsystem", nqn=subsys_nqn)
 
         # Try to add host with unregistered key name
         with self.assertRaises(RPCRemoteError):
