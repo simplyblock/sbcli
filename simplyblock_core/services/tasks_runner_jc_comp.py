@@ -4,6 +4,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
     TaskAbort,
@@ -42,13 +43,14 @@ def process_task(task):
 
     logger.info("no task found on same node, resuming compression")
     jm_vuid = task.function_params.get("jm_vuid", node.jm_vuid)
-    ret, err = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
-        jm_vuid=jm_vuid, suspend=False)
+    try:
+        ret = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
+            jm_vuid=jm_vuid, suspend=False)
+    except RPCException:
+        raise TaskRetry("JC comp resume failed, retry task")
 
     if not ret:
-        if err:
-            raise TaskAbort(f"JC {node.jm_vuid} compression not needed")
-        raise TaskRetry("JC comp resume failed, retry task")
+        raise TaskAbort(f"JC {node.jm_vuid} compression not needed")
 
     set_result(task, f"JC {node.jm_vuid} compression resumed on node")
 

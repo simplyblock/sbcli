@@ -1,4 +1,5 @@
 import copy
+import errno
 import random
 import sys
 import time
@@ -39,7 +40,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.services import replication_final_step
 from simplyblock_core.utils import capacity, nvmf_listener
 from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
@@ -1749,9 +1750,14 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 f"assigned ns_id; refusing auto-assignment (divergent nsid "
                 f"maps across the shared subsystem's paths)", is_primary=is_primary)
         requested_nsid = lvol.ns_id
-    ret, err = rpc_client.nvmf_subsystem_add_ns2(
-        lvol.nqn, lvol.top_bdev, ns_uuid or lvol.get_ns_uuid(), lvol.guid,
-        nsid=requested_nsid)
+    try:
+        ret = rpc_client.nvmf_subsystem_add_ns2(
+            lvol.nqn, lvol.top_bdev, ns_uuid or lvol.get_ns_uuid(), lvol.guid,
+            nsid=requested_nsid)
+        err = None
+    except RPCRemoteError as e:
+        ret = None
+        err = {"code": e.code, "message": str(e), "data": e.data}
     if err:
         def _ns_add_detail():
             """What the node actually holds for this subsystem.
@@ -2154,7 +2160,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
         name = bdev['name']
         ret = None
         if type == "bdev_distr":
-            ret = rpc_client.bdev_distrib_delete(name)
+            try:
+                ret = rpc_client.bdev_distrib_delete(name)
+            except RPCRemoteError:
+                ret = None
         elif type == "bmap_init":
             # Nothing to remove — it is a bookkeeping entry, not a bdev. It
             # fell through to the failure log below and reported "Failed to
@@ -2170,7 +2179,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
                 ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
 
         elif type == "bdev_lvstore":
-            ret = rpc_client.bdev_lvol_delete_lvstore(name)
+            try:
+                ret = rpc_client.bdev_lvol_delete_lvstore(name)
+            except RPCRemoteError:
+                ret = None
         elif type in ("bdev_lvol", "bdev_lvol_clone"):
             if type == "bdev_lvol":
                 name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
@@ -2199,13 +2211,17 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
                 logger.info(f"BDev {name} already deleted, skipping")
                 bdev['status'] = 'deleted'
                 continue
-            ret, err = rpc_client.delete_lvol(name, sync=sync)
-            if not ret and isinstance(err, dict) and err.get("code") == -19:
-                # "No such device" from the delete itself is confirmation that
-                # the bdev is gone — the one answer that closes the question.
-                logger.info(f"BDev {name} reported absent by the delete")
-                bdev['status'] = 'deleted'
-                continue
+            try:
+                ret = rpc_client.delete_lvol(name, sync=sync)
+            except RPCRemoteError as e:
+                if e.code == -errno.ENODEV:
+                    # "No such device" from the delete itself is confirmation
+                    # that the bdev is gone — the one answer that closes the
+                    # question.
+                    logger.info(f"BDev {name} reported absent by the delete")
+                    bdev['status'] = 'deleted'
+                    continue
+                ret = None
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
@@ -2631,12 +2647,14 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
                             # peer legs here, rather than leaving the whole
                             # sync stage to lvol_monitor, is what keeps a
                             # delete at ~0.3s instead of minutes behind a
-                            # drain backlog. -19 ("no such device") means this
-                            # peer is already clean and counts as done.
-                            ret, err = nl.rpc_client().delete_lvol(
-                                f"{lvol.lvs_name}/{lvol.lvol_bdev}", sync=True)
-                            synced = bool(ret) or bool(
-                                err and err.get("code") == -19)
+                            # drain backlog. ENODEV ("no such device") means
+                            # this peer is already clean and counts as done.
+                            try:
+                                nl.rpc_client().delete_lvol(
+                                    f"{lvol.lvs_name}/{lvol.lvol_bdev}", sync=True)
+                                synced = True
+                            except RPCRemoteError as e:
+                                synced = e.code == -errno.ENODEV
                 except Exception as e:
                     # Includes a per-node lock acquisition timeout: the node
                     # can die while this op WAITS for the lock. Never abort
