@@ -241,7 +241,7 @@ def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
 def _presumed_acting_leader(lvs_node, sec_nodes, disconnected_peers, snode):
     """The peer to quiesce when no connected peer reports lvs leadership.
 
-    ``bdev_lvol_get_lvstores``' "lvs leadership" is not a reliable signal for
+    ``get_lvstore``'s "lvs leadership" is not a reliable signal for
     a secondary that took over: in the lblk_rapid_outage run (2026-09-26
     22:23:21, LVS_1) c8a7e64d had been the acting leader since 22:22:39 --
     every distrib of jm_vuid 1 "state changed to leader", its JC writing the
@@ -304,10 +304,9 @@ def _rpc_bdev_exists(rpc_client, name):
 
 
 def _rpc_lvstore_exists(rpc_client, lvs_name):
-    """True iff bdev_lvol_get_lvstores(lvs_name) returns a live lvstore."""
+    """True iff get_lvstore(lvs_name) returns a live lvstore."""
     try:
-        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
-        return bool(ret)
+        return bool(rpc_client.get_lvstore(lvs_name))
     except Exception:
         return False
 
@@ -5942,8 +5941,10 @@ def _verify_replica_stacks(cluster_id, db_controller, context=""):
         key = (node.get_id(), lvstore)
         if key not in probed:
             try:
-                ret = node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore)
-                probed[key] = ret[0] if isinstance(ret, list) and ret else (ret or {})
+                # get_lvstore() -> None means "confirmed absent" (RPC succeeded,
+                # SPDK reports no such lvstore); normalized to {} here so it stays
+                # distinguishable below from a failed probe (None, RPCException).
+                probed[key] = node.rpc_client(timeout=10, retry=1).get_lvstore(lvstore) or {}
             except RPCException as e:
                 logger.warning(
                     f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
@@ -6100,7 +6101,7 @@ def _prune_stale_lvstore_ports(node_id, lvstore, db_controller):
     callers of this helper -- node removal, splice eviction -- know the
     replica isn't coming back to this node. A stale entry there only
     misrepresents `sn list`'s "LVS Ports" column (2026-08-12: found live via
-    bdev_lvol_get_lvstores disagreeing with the DB after a node removal).
+    get_lvstore disagreeing with the DB after a node removal).
     Re-fetches fresh to avoid clobbering unrelated concurrent edits."""
     if not lvstore:
         return
@@ -6258,11 +6259,10 @@ def _replica_role_held(node, lvstore):
     "tertiary", or None when it cannot be told -- the lvstore is absent or
     unreachable, or it is the leader after a failover."""
     try:
-        ret = node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore)
+        info = node.rpc_client(timeout=10, retry=1).get_lvstore(lvstore)
     except RPCException as e:
         logger.warning(f"[REMOVAL] could not read {lvstore} on {node.get_id()} ({e})")
         return None
-    info = ret[0] if isinstance(ret, list) and ret else ret
     if not isinstance(info, dict) or "lvs_tertiary" not in info or info.get("lvs leadership"):
         return None
     return "tertiary" if info["lvs_tertiary"] else "secondary"
@@ -9265,8 +9265,8 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            lvstores = node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(node.lvstore)
-            if lvstores:
+            lvstore = node.rpc_client(timeout=5, retry=1).get_lvstore(node.lvstore)
+            if lvstore:
                 ret = node.rpc_client(timeout=5, retry=1).jc_get_jm_status(node.jm_vuid)
                 for jm in ret:
                     if ret[jm] is False:
@@ -10871,8 +10871,10 @@ def _is_node_rpc_responsive(node: StorageNode, lvs_name, timeout=5, retry=2):
     """
     try:
         rpc = node.rpc_client(timeout=timeout, retry=retry)
-        ret = rpc.bdev_lvol_get_lvstores(lvs_name)
-        return ret is not None
+        # get_lvstore() answering at all -- present or confirmed-absent alike --
+        # is the signal: it means the RPC round-trip to SPDK completed.
+        rpc.get_lvstore(lvs_name)
+        return True
     except Exception:
         return False
 
@@ -11068,7 +11070,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     caps the probe/recovery machinery at one full pass per TTL window per
     process — under a mass-create workload against a leaderless LVS, running
     the pass per request stormed every LVS member with several
-    bdev_lvol_get_lvstores per second for hours (run 20260712-231123).
+    get_lvstore per second for hours (run 20260712-231123).
     """
     from simplyblock_core.utils.ttl_cache import NO_LEADER_TTL_SEC, no_leader_cache
 
@@ -11097,7 +11099,7 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
        so this replaces the 3-node scan on the hot create paths; the probe
        itself is a fresh confirmation, so a moved leadership simply misses and
        falls through to the full scan below.
-    1. Try each node as leader via bdev_lvol_get_lvstores (leadership field).
+    1. Try each node as leader via get_lvstore (leadership field).
        A node that answers leadership=True is CONFIRMED (the query is itself a
        successful RPC to that node) → return it directly. A confirmed leader is
        never failed over for being slow, only for genuinely not answering.
@@ -12520,7 +12522,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # primary/tertiary, missing here — and the divergence would never be
         # reconciled because there is no FDB↔SPDK lvol-set reconcile loop.
         if not activation_mode:
-            if not snode_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore):
+            if not snode_rpc_client.get_lvstore(primary_node.lvstore):
                 logger.error(
                     "Failed to recover lvstore %s on %s after examine",
                     primary_node.lvstore, snode.get_id())
@@ -13135,7 +13137,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 disconnected_peers.add(sec_node.get_id())
 
         # Identify the current leader among connected peers.
-        # Uses bdev_lvol_get_lvstores which returns "lvs leadership" field.
+        # Uses get_lvstore which returns the "lvs leadership" field.
         # Compression and replication checks run only against the current leader.
         current_leader = None
         for sec_node in sec_nodes:
@@ -13143,14 +13145,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 continue
             try:
                 sec_rpc = sec_node.rpc_client(timeout=5, retry=2)
-                ret = sec_rpc.bdev_lvol_get_lvstores(lvs_name)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                lvs = sec_rpc.get_lvstore(lvs_name)
+                if lvs and lvs.get("lvs leadership"):
                     current_leader = sec_node
                     logger.info("Current leader for %s is %s", lvs_name, sec_node.get_id())
                     break
                 logger.info(
                     "Peer %s does not report lvs leadership for %s (lvstore: %s)",
-                    sec_node.get_id(), lvs_name, ret[0] if ret else ret)
+                    sec_node.get_id(), lvs_name, lvs)
             except Exception as e:
                 # Cannot tell "peer down" from "peer mgmt slow" at this stage:
                 # snode has no peer-hublvol controller bdevs yet, so any
@@ -13330,10 +13332,10 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         keeping the fence short enough that leadership does not move inside it.
         """
         try:
-            ret = peer.rpc_client().bdev_lvol_get_lvstores(lvs_name)
+            lvs = peer.rpc_client().get_lvstore(lvs_name)
         except Exception:
             return                      # never let a probe delay the release
-        if not ret or ret[0].get("lvs leadership"):
+        if not lvs or lvs.get("lvs leadership"):
             return
         logger.error(
             "[RESTART] Unblocking %s for %s while it is NO LONGER leader -- "
@@ -14006,7 +14008,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # previous "raid_already → skip examine" shortcut broke the normal
             # restart path: _create_bdev_stack leaves the raid in place but does
             # not examine it, so the lvstore never surfaces and the subsequent
-            # bdev_lvol_get_lvstores validation fails every time.
+            # get_lvstore validation fails every time.
             _fenced("bdev_examine", lvs_raid)
 
             ### 6- wait for examine
@@ -14014,7 +14016,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC)
 
         # Validate lvstore recovery
-        ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
+        ret = _fenced("get_lvstore", lvs_name)
         if not ret:
             logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
             if activation_mode:
@@ -14079,8 +14081,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # budget on its own; give up the fence rather than the deadline.
             _check_fence_deadline("leader-restore poll")
             try:
-                ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                ret = _fenced("get_lvstore", lvs_name)
+                if ret and ret.get("lvs leadership"):
                     leader_restored = True
                     break
             except Exception:
@@ -16101,10 +16103,10 @@ def find_orphan_lvstore_blobs(node_id):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
 
-    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-    if not ret:
+    lvs = snode.rpc_client().get_lvstore(snode.lvstore)
+    if not lvs:
         raise RPCException(f"Failed to get lvstore info for {snode.lvstore}")
-    lvs_uuid = ret[0].get("uuid")
+    lvs_uuid = lvs.get("uuid")
     if not lvs_uuid:
         raise RPCException(f"Failed to get lvstore uuid for {snode.lvstore}")
 
@@ -16147,11 +16149,10 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         logger.error("Cluster is not in degraded or active state")
         return False
 
-    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-    if not ret:
+    lvs_info = snode.rpc_client().get_lvstore(snode.lvstore)
+    if not lvs_info:
         logger.error("Failed to get LVol info")
         return False
-    lvs_info = ret[0]
     if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
@@ -16329,11 +16330,10 @@ def lvs_dump_tree(node_id):
         logger.error("Storage node is not online")
         return False
 
-    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-    if not ret:
+    lvs_info = snode.rpc_client().get_lvstore(snode.lvstore)
+    if not lvs_info:
         logger.error("Failed to get LVol info")
         return False
-    lvs_info = ret[0]
     if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:

@@ -955,7 +955,7 @@ class StorageNode(BaseNodeObject):
         deadline = time.time() + retry * delay
         while retry > 0:
             try:
-                if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+                if not self.rpc_client().get_lvstore(self.lvstore):
                     return True  # no lvstore means no need to wait
                 jm_replication_tasks = False
                 ret = self.rpc_client().jc_get_jm_status(jm_vuid)

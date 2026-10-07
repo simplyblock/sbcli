@@ -1542,8 +1542,18 @@ class RPCClient:
     def bdev_raid_remove_base_bdev(self, base_bdev):
         return self._request3("bdev_raid_remove_base_bdev", name=base_bdev)
 
-    def bdev_lvol_get_lvstores(self, name):
-        return self._request3("bdev_lvol_get_lvstores", lvs_name=name)
+    def get_lvstore(self, name) -> dict | None:
+        """Single lvstore lookup by ``name``, mirroring ``bdev_get``/
+        ``subsystem_get``/``nbd_get_disk``. ``None`` means the lvstore does
+        not currently exist -- SPDK answers ENODEV ("No such device") for an
+        unmatched name, an expected outcome while an lvstore has not (yet, or
+        no longer) recovered, not a failure."""
+        try:
+            return single_or_none(self._request3("bdev_lvol_get_lvstores", lvs_name=name))
+        except RPCRemoteError as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
 
     def bdev_lvol_rename(self, old_name, new_name):
         return self._request3("bdev_lvol_rename", old_name=old_name, new_name=new_name)

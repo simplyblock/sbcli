@@ -115,7 +115,7 @@ def _lvol(uuid, node_id, lvs_name="LVS_100", ha_type="ha", nqn=None):
 def _mock_rpc():
     """Create a standard mock RPC client with all expected methods."""
     rpc = MagicMock()
-    rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+    rpc.get_lvstore.return_value = {"lvs leadership": True}
     # Include the standard _lvol()'s base bdev so the post-examine
     # lvol-presence check in recreate_lvstore_on_non_leader passes.
     rpc.bdev_get.return_value = {"name": "LVS_100/bdev_test", "aliases": []}

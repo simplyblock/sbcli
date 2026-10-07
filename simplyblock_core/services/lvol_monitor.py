@@ -251,10 +251,9 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
         leader_node = None
     snode = db.get_storage_node_by_id(snode.get_id())
     if not leader_independent and snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-        if not ret:
+        lvs_info = snode.rpc_client().get_lvstore(snode.lvstore)
+        if not lvs_info:
             raise Exception("Failed to get LVol info")
-        lvs_info = ret[0]
         if lvs_info.get('lvs leadership'):
             leader_node = snode
 
@@ -262,9 +261,8 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
         if not leader_node:
             for sec_node in sec_nodes:
                 if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                    if ret:
-                        lvs_info = ret[0]
+                    lvs_info = sec_node.rpc_client().get_lvstore(snode.lvstore)
+                    if lvs_info:
                         if lvs_info.get('lvs leadership'):
                             leader_node = sec_node
                             break
@@ -613,10 +611,9 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                 if leader_node is None:
                     snode = db.get_storage_node_by_id(snode.get_id())
                     if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                        if not ret:
+                        lvs_info = snode.rpc_client().get_lvstore(snode.lvstore)
+                        if not lvs_info:
                             raise Exception("Failed to get LVol info")
-                        lvs_info = ret[0]
                         if lvs_info.get('lvs leadership'):
                             leader_node = snode
 
@@ -627,9 +624,8 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                             except KeyError:
                                 continue
                             if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                                ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                                if ret:
-                                    lvs_info = ret[0]
+                                lvs_info = _sec.rpc_client().get_lvstore(snode.lvstore)
+                                if lvs_info:
                                     if lvs_info.get('lvs leadership'):
                                         leader_node = _sec
                                         break

@@ -635,7 +635,7 @@ class TestFDAwareClusterStatus(unittest.TestCase):
         # online nodes hit rpc_client for the JM-replication probe; stub it to
         # report "no lvstore" so the probe is skipped (no jm_replication_tasks).
         n.rpc_client = MagicMock()
-        n.rpc_client.return_value.bdev_lvol_get_lvstores.return_value = []
+        n.rpc_client.return_value.get_lvstore.return_value = None
         return n
 
     def _off(self, uuid, ip, fd):

@@ -3378,17 +3378,17 @@ class TestVerifyReplicaStacks(unittest.TestCase):
         cl = _cluster()
         p = _node("P", lvstore="LVS_P", secondary_id="A")
         a = _node("A", lvstore="LVS_A", stack_secondary="P")
-        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(**probe_result)
+        a.rpc_client.return_value.get_lvstore = MagicMock(**probe_result)
         return FakeDB(cl, [p, a]), a
 
     def test_reports_a_missing_stack(self):
-        db, _a = self._db({"return_value": []})
+        db, _a = self._db({"return_value": None})
         self.assertEqual(
             storage_node_ops._verify_replica_stacks("cluster-1", db),
             [("A", "LVS_P", "P", "secondary")])
 
     def test_clean_when_the_probe_finds_the_stack(self):
-        db, _a = self._db({"return_value": [{"name": "LVS_P"}]})
+        db, _a = self._db({"return_value": {"name": "LVS_P"}})
         self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
 
     def test_an_unreachable_node_is_not_reported_as_a_violation(self):
@@ -3401,7 +3401,7 @@ class TestVerifyReplicaStacks(unittest.TestCase):
         cl = _cluster()
         p = _node("P", lvstore="LVS_P", secondary_id="A")
         a = _node("A", status=StorageNode.STATUS_OFFLINE, stack_secondary="P")
-        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(return_value=[])
+        a.rpc_client.return_value.get_lvstore = MagicMock(return_value=None)
         db = FakeDB(cl, [p, a])
         self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
 

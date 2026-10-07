@@ -45,7 +45,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
     def test_dead_peer_abandons_the_wait_immediately(self):
         """The incident case: RPCs raise and the CP says the peer is offline."""
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("connection refused")
+        rpc.get_lvstore.side_effect = RuntimeError("connection refused")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_OFFLINE), \
                 patch("simplyblock_core.models.storage_node.time.time",
@@ -53,7 +53,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(node.wait_for_jm_rep_tasks_to_finish(10))
         sleep.assert_not_called()
-        self.assertEqual(rpc.bdev_lvol_get_lvstores.call_count, 1)
+        self.assertEqual(rpc.get_lvstore.call_count, 1)
 
     def test_unreachable_rpc_on_a_live_peer_is_bounded(self):
         """A peer the CP still believes in gets the full budget — but only it.
@@ -62,7 +62,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
         regression test rather than a smoke test.
         """
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("timeout")
+        rpc.get_lvstore.side_effect = RuntimeError("timeout")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_ONLINE), \
                 patch("simplyblock_core.models.storage_node.time.time",
@@ -70,14 +70,14 @@ class TestJmRepWaitBounds(unittest.TestCase):
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=4, delay=5))
-        self.assertEqual(rpc.bdev_lvol_get_lvstores.call_count, 4)
+        self.assertEqual(rpc.get_lvstore.call_count, 4)
         self.assertEqual(sleep.call_count, 3)  # no sleep after the last attempt
 
     def test_pre_check_failure_no_longer_escapes(self):
         """The lvstore pre-check used to sit outside the try and raise straight
         out of the method when the peer was already gone."""
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("connection refused")
+        rpc.get_lvstore.side_effect = RuntimeError("connection refused")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_ONLINE), \
                 patch("simplyblock_core.models.storage_node.time.time",
@@ -88,7 +88,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
 
     def test_no_lvstore_returns_immediately(self):
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = []
+        rpc.get_lvstore.return_value = None
         node = _node(rpc=rpc)
         with patch("simplyblock_core.models.storage_node.time.time",
                       return_value=1000.0), \
@@ -99,7 +99,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
 
     def test_busy_then_free_returns_true(self):
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.get_lvstore.return_value = {"name": "LVS_10"}
         rpc.jc_get_jm_status.side_effect = [
             {"jm_a": False, "jm_b": True},   # busy
             {"jm_a": True, "jm_b": True},    # free
@@ -114,7 +114,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
 
     def test_persistently_busy_peer_exhausts_the_budget(self):
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.get_lvstore.return_value = {"name": "LVS_10"}
         rpc.jc_get_jm_status.return_value = {"jm_a": False}
         node = _node(rpc=rpc)
         with patch("simplyblock_core.models.storage_node.time.time",
@@ -129,7 +129,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
         """If we cannot tell whether the peer is dead, don't abandon early —
         just stay inside the budget."""
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("timeout")
+        rpc.get_lvstore.side_effect = RuntimeError("timeout")
         node = _node(rpc=rpc)
         with patch("simplyblock_core.db_controller.DBController",
                    side_effect=RuntimeError("fdb down")), \
@@ -138,7 +138,7 @@ class TestJmRepWaitBounds(unittest.TestCase):
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=3, delay=1))
-        self.assertEqual(rpc.bdev_lvol_get_lvstores.call_count, 3)
+        self.assertEqual(rpc.get_lvstore.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
 
@@ -157,7 +157,7 @@ class TestJmRepWaitInsideAPortFence(unittest.TestCase):
 
     def test_single_unpaced_poll_never_sleeps(self):
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.get_lvstore.return_value = {"name": "LVS_10"}
         rpc.jc_get_jm_status.return_value = {"jm_a": False}   # busy
         node = _node(rpc=rpc)
         with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
@@ -168,7 +168,7 @@ class TestJmRepWaitInsideAPortFence(unittest.TestCase):
 
     def test_single_unpaced_poll_still_reports_a_clean_leader(self):
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.get_lvstore.return_value = {"name": "LVS_10"}
         rpc.jc_get_jm_status.return_value = {"jm_a": True}    # free
         node = _node(rpc=rpc)
         with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:

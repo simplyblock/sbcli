@@ -137,9 +137,9 @@ class _BasePortAllowTest(unittest.TestCase):
         # outage. The recovering primary does NOT lead — and never will
         # through this runner: it promotes itself on the first redirected
         # IO after running its LVS update.
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        self.sec_rpc.get_lvstore.return_value = {"lvs leadership": True}
         self.sec_rpc.jc_compression_get_status.return_value = False
-        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.node_rpc.get_lvstore.return_value = {"lvs leadership": False}
 
         self.node.rpc_client = MagicMock(return_value=self.node_rpc)
         self.sec.rpc_client = MagicMock(return_value=self.sec_rpc)
@@ -555,7 +555,7 @@ class TestLeadershipFailback(_BasePortAllowTest):
         self.sec_rpc.bdev_distrib_check_inflight_io.assert_not_called()
 
     def test_no_failback_when_no_peer_leader(self):
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.sec_rpc.get_lvstore.return_value = {"lvs leadership": False}
         self._run()
         leadership_calls = [
             c for c in self.calls
@@ -573,8 +573,8 @@ class TestLeadershipFailback(_BasePortAllowTest):
         # first arriving IO, after running its LVS update. The old
         # _take_leadership_on_primary healing is gone (it caused the
         # 2026-07-06 stale-metadata corruption).
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
-        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.sec_rpc.get_lvstore.return_value = {"lvs leadership": False}
+        self.node_rpc.get_lvstore.return_value = {"lvs leadership": False}
         self._run()
         leader_calls = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
         self.assertEqual(leader_calls, [],
@@ -669,10 +669,8 @@ class TestLeadershipFailbackTertiaryActingLeader(_BasePortAllowTest):
         self.tert.get_lvol_subsys_port = MagicMock(return_value=self.port)
         # The secondary does NOT lead; the tertiary took over during the
         # outage (e.g. the secondary was also briefly out).
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [
-            {"lvs leadership": False}]
-        self.tert_rpc.bdev_lvol_get_lvstores.return_value = [
-            {"lvs leadership": True}]
+        self.sec_rpc.get_lvstore.return_value = {"lvs leadership": False}
+        self.tert_rpc.get_lvstore.return_value = {"lvs leadership": True}
         self.tert_rpc.jc_compression_get_status.return_value = False
 
         def _jc_disable_tert(vuid):
@@ -958,7 +956,7 @@ class _StrictGateBase(_BasePortAllowTest):
         # Keep these tests focused on the strict gate: no peer holds
         # leadership, so the leadership failback block is a no-op (its own
         # coverage lives in TestLeadershipFailback).
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.sec_rpc.get_lvstore.return_value = {"lvs leadership": False}
 
 
 class TestStrictHublvolGate(_StrictGateBase):
@@ -1329,7 +1327,7 @@ class _SecRoleReconnectBase(_BasePortAllowTest):
         self.node.lvstore_stack_secondary = self.prim.uuid
         self.node.create_secondary_hublvol = MagicMock(return_value="nqn-p-hub")
         # Focus on the reconnect phase: no leadership failback in play.
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.sec_rpc.get_lvstore.return_value = {"lvs leadership": False}
 
         # P owns a DIFFERENT lvstore than the node's own, and leadership
         # reads are per-lvstore: the node leads its own LVS_TEST (so the
@@ -1337,11 +1335,11 @@ class _SecRoleReconnectBase(_BasePortAllowTest):
         # P's LVS_P; P itself reports leading LVS_P.
         self.prim.lvstore = "LVS_P"
         self.lvs_leadership_on_node = {"LVS_TEST": True, "LVS_P": False}
-        self.node_rpc.bdev_lvol_get_lvstores.side_effect = (
-            lambda lvs=None, *a, **kw: [
-                {"lvs leadership": self.lvs_leadership_on_node.get(lvs, False)}])
+        self.node_rpc.get_lvstore.side_effect = (
+            lambda lvs=None, *a, **kw:
+                {"lvs leadership": self.lvs_leadership_on_node.get(lvs, False)})
         self.prim_rpc = MagicMock(name="prim_rpc")
-        self.prim_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        self.prim_rpc.get_lvstore.return_value = {"lvs leadership": True}
         self.prim.rpc_client = MagicMock(return_value=self.prim_rpc)
 
     def _get_node(self, uuid):
@@ -1562,7 +1560,7 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
         # The node is then the legitimate acting leader; demoting it would
         # leave the LVS with zero writers. The primary's own recovery
         # performs that failback.
-        self.prim_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.prim_rpc.get_lvstore.return_value = {"lvs leadership": False}
         self._run()
         self.assertEqual(self._node_demotes(), [])
 
@@ -1770,7 +1768,7 @@ class TestTertiaryFollowsActingLeader(_BasePortAllowTest):
         self.prim2.tertiary_node_id = self.node.uuid
         self.node.lvstore_stack_tertiary = self.prim2.uuid
         self.node.connect_to_hublvol = MagicMock(return_value=True)
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.sec_rpc.get_lvstore.return_value = {"lvs leadership": False}
 
     def _get_node(self, uuid):
         if uuid == self.prim2.uuid:

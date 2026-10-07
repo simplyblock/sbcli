@@ -177,8 +177,7 @@ class TestAutoRepairRestoresClusterStatus(unittest.TestCase):
         snode = _node("node-a", secondary_node_id="node-b")
         snode.status = storage_node_ops.StorageNode.STATUS_ONLINE
         snode.cluster_id = "cl-1"
-        snode.rpc_client.return_value.bdev_lvol_get_lvstores.return_value = [
-            {"uuid": "lvs-uuid"}]
+        snode.rpc_client.return_value.get_lvstore.return_value = {"uuid": "lvs-uuid"}
         # One blob in SPDK that mgmt knows nothing about -> the delete path.
         snode.rpc_client.return_value.bdev_lvs_dump_tree.return_value = {
             "lvols": [{"blobid": 4294967344, "uuid": "c32876e5", "name": "SNAP_14", "ref": 2}]}
