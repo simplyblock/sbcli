@@ -9,18 +9,22 @@ proved nothing: all 19 classes failed in their first second on a CLI flag
 that does not exist, and each failure was followed by ten minutes of
 teardown. A ten-minute smoke test would have found it immediately.
 
-Six links, in order, each logged by name so a failure says which one:
+Seven links, in order, each logged by name so a failure says which one:
 
-    1  volume add          the CLI surface -- the one that broke last time
-    2  sn list / topology  can we read node ids, secondaries, tertiaries
-    3  volume migrate      pre-create, AND the nvme connect strings it
+    1  volume add          the CLI surface -- the one that broke first
+    2  connect/mkfs/mount  can the client use the volume at all. Split out
+                           of link 1, because when a seed failed the report
+                           blamed "the CLI surface" and sent people to audit
+                           an invocation that was fine
+    3  sn list / topology  can we read node ids, secondaries, tertiaries
+    4  volume migrate      pre-create, AND the nvme connect strings it
                            returns. The riskiest link: the connect-string
                            format was inferred from the original scripts,
                            never observed.
-    4  migrate-continue    does the task runner start, and can we read the
+    5  migrate-continue    does the task runner start, and can we read the
                            record's status and phase back
-    5  placement           does the volume actually end up on the target
-    6  data                is it byte-identical afterwards
+    6  placement           does the volume actually end up on the target
+    7  data                is it byte-identical afterwards
 
 What it deliberately does NOT do: inject a fault, run load, exercise
 post-migration operations, or touch more than one volume. Those are the

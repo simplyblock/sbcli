@@ -131,14 +131,24 @@ class MigrationTestBase(TestClusterBase):
         and which you get depends on the verb. The scripts hit this
         repeatedly; tolerating all of them is cheaper than tracking which
         verb spells it which way.
+
+        Both sides are reduced to alphanumerics-only lowercase rather than
+        guessed at with a list of transformations. The guesses were wrong:
+        migrate-list returns "Volume ID" and "Migration ID"
+        (migration_controller.list_migrations), and 'volume_id'.title()
+        is "Volume Id" -- so every id lookup here silently returned None
+        and migration_record never found a record at all.
         """
         if not isinstance(obj, dict):
             return None
+        norm = {}
+        for key, val in obj.items():
+            norm.setdefault(
+                "".join(ch for ch in str(key).lower() if ch.isalnum()), val)
         for k in keys:
-            for cand in (k, k.lower(), k.replace("_", " ").title(),
-                         k.replace("_", " ")):
-                if cand in obj and obj[cand] not in (None, ""):
-                    return obj[cand]
+            flat = "".join(ch for ch in k.lower() if ch.isalnum())
+            if norm.get(flat) not in (None, ""):
+                return norm[flat]
         return None
 
     # ── topology ─────────────────────────────────────────────────────────
@@ -280,7 +290,8 @@ class MigrationTestBase(TestClusterBase):
             if m:
                 mid = m.group(1)
                 self._migrations.append(mid)
-                self._connect_target_paths(combined)
+                self._connect_target_paths(
+                    combined, node=self._client_for_vol(vol_id))
                 self.logger.info("[MIG] pre-created %s -> %s (migration %s)",
                                  vol_id, target_node_id, mid)
                 return mid
@@ -309,21 +320,57 @@ class MigrationTestBase(TestClusterBase):
             f"[MIG] no Migration ID after {attempt} attempt(s) for {vol_id}. "
             f"Last output: {last[:300]!r}")
 
-    def _connect_target_paths(self, output):
+    def _client_for_vol(self, vol_id):
+        """The client machine this volume is actually attached to.
+
+        Not fio_node[0]. _connect_and_mount_dual searches every client and
+        records the one the device turned up on, and with two clients
+        configured those are regularly different machines. Attaching the
+        target paths to the wrong one leaves the client that holds the
+        volume connected to the source only, which turns the cutover into
+        the disconnect this whole protocol exists to avoid.
+        """
+        for name in reversed(self._mig_vols):
+            reg = self._volume_registry.get(name) or {}
+            node = reg.get("node")
+            if not node:
+                continue
+            try:
+                if self.sbcli_utils.get_lvol_id(lvol_name=name) == vol_id:
+                    return node
+            except Exception:                         # noqa: BLE001
+                continue
+        return self.fio_node[0] if self.fio_node else self.mgmt_nodes[0]
+
+    #: `sudo nvme connect ...` -- simplyblock_core/utils/nvme.py:118 builds
+    #: the string with the sudo already on it. Matching bare "nvme connect"
+    #: found nothing, so every pre-create logged "returned no nvme connect
+    #: strings" and the cutover ran as a disconnect; prefixing another sudo
+    #: onto what we did match would have produced `sudo sudo nvme connect`.
+    CONNECT_RE = re.compile(r"^\s*(?:sudo\s+)?(nvme\s+connect(?=\s|$).*)$")
+
+    def _connect_target_paths(self, output, node=None):
         """Connect the client to the target's inaccessible-ANA paths."""
-        cmds = [l.strip() for l in output.splitlines()
-                if l.strip().startswith("nvme connect")]
+        cmds = []
+        for line in output.splitlines():
+            m = self.CONNECT_RE.match(line)
+            if m:
+                cmds.append(m.group(1).strip())
         if not cmds:
             self.logger.warning(
                 "[MIG] pre-create returned no nvme connect strings. The "
                 "cutover needs the client attached to BOTH ends first; "
                 "without it this becomes a disconnect, not an ANA flip.")
-            return
-        node = self.fio_node[0] if self.fio_node else self.mgmt_nodes[0]
+            return 0
+        node = node or (self.fio_node[0] if self.fio_node
+                        else self.mgmt_nodes[0])
         for c in cmds:
-            self.ssh_obj.exec_command(node=node, command=f"sudo {c} 2>&1 || true")
+            self.ssh_obj.exec_command(node=node,
+                                      command=f"sudo {c} 2>&1 || true")
         sleep_n_sec(3)
-        self.logger.info("[MIG] connected %d target path(s)", len(cmds))
+        self.logger.info("[MIG] connected %d target path(s) on %s",
+                         len(cmds), node)
+        return len(cmds)
 
     def migrate_continue(self, migration_id, batch=False, max_retries=10,
                          deadline=14400, retry_on_failure=False):
@@ -369,7 +416,7 @@ class MigrationTestBase(TestClusterBase):
                               f"--cluster-id {self.cluster_id}")
         rows = data.get("results", data) if isinstance(data, dict) else data
         for m in (rows or []):
-            if migration_id and self._get(m, "id", "migration_id") == migration_id:
+            if migration_id and self._get(m, "uuid", "id", "migration_id") == migration_id:
                 return m
             if vol_id and self._get(m, "lvol_id", "volume_id") == vol_id:
                 return m
@@ -380,7 +427,7 @@ class MigrationTestBase(TestClusterBase):
                               f"--cluster-id {self.cluster_id}")
         rows = data.get("results", data) if isinstance(data, dict) else data
         for g in (rows or []):
-            if self._get(g, "id", "group_id") == group_id:
+            if self._get(g, "uuid", "id", "group_id") == group_id:
                 return g
         return None
 
@@ -396,13 +443,28 @@ class MigrationTestBase(TestClusterBase):
         timeout = timeout or self.MIGRATION_TIMEOUT
         deadline = time.time() + timeout
         last = {}
+        seen = False
         while time.time() < deadline:
             m = (self.migration_record(vol_id=vol_id, migration_id=migration_id)
                  or {})
             if not m:
-                self.logger.info("[MIG] record gone -- treating as done%s",
-                                 f" ({what})" if what else "")
-                return "done", ""
+                # A record that EXISTED and then vanished has been cleaned up,
+                # which is a completed migration. One that was never there is
+                # a record we cannot read -- and returning "done" for that is
+                # a false pass. It is not hypothetical: _get could not match
+                # migrate-list's "Volume ID"/"Migration ID" spellings at all,
+                # so every lane calling this directly would have been handed
+                # "done" without a single migration having been observed.
+                if seen:
+                    self.logger.info("[MIG] record gone -- treating as done%s",
+                                     f" ({what})" if what else "")
+                    return "done", ""
+                self.logger.info(
+                    "[MIG] no migration record yet%s; still waiting",
+                    f" ({what})" if what else "")
+                sleep_n_sec(self.MIGRATION_POLL)
+                continue
+            seen = True
             last = m
             status = str(self._get(m, "status") or "unknown").lower()
             phase = str(self._get(m, "phase") or "").lower()
@@ -419,6 +481,15 @@ class MigrationTestBase(TestClusterBase):
             if status == "cutover" and not terminal_only:
                 return "cutover", phase
             sleep_n_sec(self.MIGRATION_POLL)
+        if not seen:
+            raise AssertionError(
+                f"[MIG] no migration record was EVER readable within "
+                f"{timeout}s{(' (' + what + ')') if what else ''} for "
+                f"vol_id={vol_id!r} migration_id={migration_id!r}. Either "
+                f"migrate-list does not list it, or the field names this "
+                f"harness matches on differ from what it returns. Run "
+                f"`{self.base_cmd} volume migrate-list --cluster-id "
+                f"{self.cluster_id} --json` by hand and compare the keys.")
         raise AssertionError(
             f"[MIG] migration did not reach a terminal state within "
             f"{timeout}s{(' (' + what + ')') if what else ''}. Last record: "
