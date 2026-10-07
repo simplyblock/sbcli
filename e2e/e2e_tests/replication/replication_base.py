@@ -691,23 +691,13 @@ class ReplicationTestBase(TestClusterBase):
         FULL copy (see the module docstring), so the bytes written here set
         how long every later cycle takes.
         """
-        self._connect_and_mount_dual(lvol_name, format_disk=True)
-        mount = self.mount_path
-        if not self.k8s_test:
-            self.ssh_obj.create_random_files(
-                node=self.fio_node[0], mount_path=mount,
-                file_size=file_size, file_prefix="arseed", file_count=files)
-        else:
-            self._run_fio_dual(lvol_name, runtime=60, rw="write", bs="256K",
-                               size=file_size, numjobs=1, nrfiles=files,
-                               time_based=False, name="arseed")
-        sums = self._generate_checksums_dual(lvol_name)
-        if not sums:
+        try:
+            return self._seed_volume_dual(lvol_name, files=files,
+                                          size=file_size, prefix="arseed")
+        except AssertionError as exc:
             raise ReplicationPreconditionError(
-                f"[AR] seeded {lvol_name} but produced no checksums; there is "
-                f"nothing to compare after a fail-over.")
-        self.logger.info("[AR] seeded %s with %d file(s)", lvol_name, len(sums))
-        return sums
+                f"[AR] could not seed {lvol_name}: {exc}. There would be "
+                f"nothing to compare after a fail-over.") from exc
 
     def write_marker_files(self, lvol_name, prefix, count=2, size_mb=16):
         """Write *count* identifiable files into *lvol_name*. Both platforms.
@@ -739,11 +729,18 @@ class ReplicationTestBase(TestClusterBase):
                 if pod in self._k8s_utility_pods:
                     self._k8s_utility_pods.remove(pod)
         else:
+            reg = self._volume_registry.get(lvol_name, {})
+            mount = reg.get("mount")
+            if not mount:
+                raise ReplicationPreconditionError(
+                    f"[AR] {lvol_name} is not mounted, so there is nowhere to "
+                    f"write {prefix!r} markers. Seed the volume first.")
+            # The client the device actually appeared on, not fio_node[0] --
+            # they are not always the same machine.
             self.ssh_obj.create_random_files(
-                node=self.fio_node[0],
-                mount_path=self._volume_registry.get(lvol_name, {}).get(
-                    "mount") or self.mount_path,
-                file_size=f"{size_mb}M", file_prefix=prefix, file_count=count)
+                node=reg.get("node") or self.client_machines[0],
+                mount_path=mount, file_size=f"{size_mb}M",
+                file_prefix=prefix, file_count=count)
         sums = self._generate_checksums_dual(lvol_name)
         self.logger.info("[AR] wrote %d %r file(s) to %s (%d file(s) total)",
                          count, prefix, lvol_name, len(sums))

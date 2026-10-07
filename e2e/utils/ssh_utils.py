@@ -2500,11 +2500,34 @@ class SshUtils:
             
         self.exec_command(node=node, command=add_node_cmd)
 
+    #: 512K dd blocks per unit of `file_size`, by suffix.
+    _DD_BLOCKS_PER_UNIT = {"K": 1 / 512.0, "M": 2, "G": 2048}
+
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
+        """Write `file_count` files of `file_size` random bytes into mount_path.
+
+        `file_size` is a string with a K/M/G suffix and means what it says.
+        It used to be read as `int(file_size[:-1]) * 2048` 512K blocks -- the
+        suffix was sliced off and ignored, so every size was in GiB and
+        "32M" asked for 32 GiB. Three of those onto a 2G volume is what a
+        migration seed was doing.
+
+        Raises on failure. It used to log "Aborting." and return normally,
+        so a volume with nothing on it went on to be checksummed, compared
+        against an empty set, and reported as verified.
+        """
+        n = float(file_size[:-1])
+        unit = file_size[-1].upper()
+        if unit not in self._DD_BLOCKS_PER_UNIT:
+            raise ValueError(
+                f"create_random_files: file_size {file_size!r} needs a K, M "
+                f"or G suffix; a bare number has no meaning here.")
+        count = max(1, int(round(n * self._DD_BLOCKS_PER_UNIT[unit])))
         for i in range(1, file_count + 1):
             file_path = f"{mount_path}/{file_prefix}_{i}"
-            command = f"sudo dd if=/dev/urandom of={file_path} bs=512K count={int(file_size[:-1]) * 2048} status=none"
+            command = f"sudo dd if=/dev/urandom of={file_path} bs=512K count={count} status=none"
             retries = 3
+            last = None
             for attempt in range(retries):
                 try:
                     self.logger.info(f"Executing cmd: {command} (Attempt {attempt + 1}/{retries})")
@@ -2513,9 +2536,13 @@ class SshUtils:
                         raise Exception(error)
                     break
                 except Exception as e:
+                    last = e
                     self.logger.error(f"Error during `dd` command: {e}. Retrying...")
-                    if attempt == retries - 1:
-                        self.logger.error(f"Failed after {retries} retries. Aborting.")
+            else:
+                raise RuntimeError(
+                    f"could not write {file_path} on {node} after {retries} "
+                    f"attempts: {last}. Nothing was seeded, so every later "
+                    f"checksum comparison would run over an empty set.")
 
     def get_active_interfaces(self, node_ip):
         """

@@ -140,6 +140,59 @@ def check_no_naive_error_checks():
     return True
 
 
+def check_seed_writes_to_a_real_mount():
+    """A lane must not write to self.mount_path while holding many volumes.
+
+    self.mount_path is one suite-wide constant, "/mnt/test_location". A lane
+    that creates several volumes and writes all of them there has them
+    overwrite each other, and the last one standing verifies clean. Per-volume
+    mounts come from _connect_and_mount_dual, which records the mount in the
+    registry; _seed_volume_dual drives the whole sequence correctly.
+
+    This is check 4 of the week. The failure it encodes: seed() called
+    _connect_and_mount_dual WITHOUT mount_path -- the mount is conditional on
+    that argument -- then wrote to self.mount_path, which did not exist. dd
+    said "No such file or directory", create_random_files logged "Aborting."
+    and returned normally, and the run reached the checksum guard with an
+    empty volume.
+    """
+    print("=" * 68)
+    print("lanes seed through the registry, not self.mount_path")
+    print("=" * 68)
+    SCOPE = (os.path.join("e2e_tests", "migration"),
+             os.path.join("e2e_tests", "replication"),
+             "load_tests")
+    hits = []
+    for root, dirs, files in os.walk(E2E):
+        dirs[:] = [d for d in dirs
+                   if d not in ("__pycache__", "logs", "scripts", ".git")]
+        rel_root = os.path.relpath(root, E2E)
+        if not any(rel_root.startswith(sc) for sc in SCOPE):
+            continue
+        for f in sorted(files):
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(root, f)
+            for i, line in enumerate(
+                    open(path, encoding="utf-8", errors="replace"), 1):
+                if "mount_path=self.mount_path" in line.replace(" ", ""):
+                    hits.append((os.path.relpath(path, REPO), i, line.strip()))
+    if hits:
+        print(f"  {len(hits)} site(s) write to the shared mount point:")
+        for rel, i, line in hits:
+            print(f"    {rel}:{i}")
+            print(f"        {line[:96]}")
+        print("")
+        print("  self.mount_path is ONE directory for the whole suite. Use")
+        print("  self._seed_volume_dual(name), or take the mount point that")
+        print("  _connect_and_mount_dual returns and write to that.")
+        print("")
+        return False
+    print("  none")
+    print("")
+    return True
+
+
 def main():
     ok = True
     ok &= run("CLI invocations match simplyblock_cli/cli.py",
@@ -148,6 +201,7 @@ def main():
               [os.path.join("e2e", "scripts", "check_test_registry.py")])
     ok &= check_lane_creates_a_pool()
     ok &= check_no_naive_error_checks()
+    ok &= check_seed_writes_to_a_real_mount()
 
     print("=" * 68)
     if ok:

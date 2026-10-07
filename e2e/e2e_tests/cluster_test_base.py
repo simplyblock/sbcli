@@ -1263,6 +1263,26 @@ class TestClusterBase:
             self.logger.info(f"[k8s] _connect_and_mount_dual no-op for PVC '{pvc_name}'")
             return pvc_name, pvc_name
 
+        if mount_path is None:
+            # Two cases, both of which used to end with the volume formatted
+            # and not mounted, because the mount below is conditional on this
+            # argument being passed:
+            #
+            #   reconnecting (format_disk=False, after a fail-over or an
+            #   outage) -- put it back where it was, or the registry's mount
+            #   is overwritten with None and every later checksum reads an
+            #   empty directory;
+            #
+            #   a first connect -- derive /mnt/<name>. Per volume, not the
+            #   suite-wide self.mount_path, so lanes that hold several
+            #   volumes at once do not have them share one directory and
+            #   overwrite each other.
+            remembered = self._volume_registry.get(lvol_name, {}).get("mount")
+            mount_path = remembered or f"/mnt/{re.sub(r'[^A-Za-z0-9_.-]', '_', str(lvol_name))}"
+            self.logger.info(
+                f"No mount_path given for {lvol_name}; using {mount_path}"
+                f"{' (where it was mounted before)' if remembered else ''}")
+
         # Snapshot devices on ALL clients before connecting
         initial_devices_per_client = {}
         for client in self.client_machines:
@@ -1309,6 +1329,16 @@ class TestClusterBase:
         if format_disk:
             self.ssh_obj.format_disk(node=found_node, device=disk_use, fs_type=fs_type)
         if mount_path:
+            # ssh_utils.mount_path starts with `rm -rf <mount_path>`. Unmount
+            # by PATH first: the umount above is by device, and a volume that
+            # comes back after a fail-over can be handed a different /dev
+            # name, which would leave the old mount live and turn that rm -rf
+            # into a wipe of the data this test is about to verify.
+            if self.ssh_obj.is_mountpoint(found_node, mount_path):
+                self.logger.info(
+                    f"{mount_path} is still a live mount point; unmounting it "
+                    f"by path before remounting {disk_use}")
+                self.ssh_obj.unmount_path(node=found_node, device=mount_path)
             self.ssh_obj.mount_path(node=found_node, device=disk_use, mount_path=mount_path)
         reg = self._volume_registry.get(lvol_name, {})
         reg["device"] = disk_use
@@ -1316,6 +1346,59 @@ class TestClusterBase:
         reg["node"] = found_node
         self._volume_registry[lvol_name] = reg
         return disk_use, mount_path
+
+    def _seed_volume_dual(self, lvol_name, files=3, size="64M",
+                          prefix="seed", mount_path=None):
+        """Connect, format, MOUNT, write known files, return their checksums.
+
+        One helper because every lane that hand-rolled this sequence got the
+        same three things wrong, and each one fails silently rather than
+        loudly:
+
+          1. calling _connect_and_mount_dual WITHOUT mount_path. The mount is
+             conditional on that argument, so the volume is formatted and
+             left unmounted, and the writes land on the client's root disk --
+             or, as happened here, on a directory that does not exist.
+          2. writing to self.mount_path, a single suite-wide constant, while
+             running several volumes at once. They overwrite each other and
+             the survivor "verifies".
+          3. checksumming without a directory, so find_files searches None.
+
+        The mount is per volume for reason 2 -- _connect_and_mount_dual
+        derives /mnt/<name> when it is not given one. Everything else is
+        driven through the registry the dual helpers already maintain, so the
+        write and the read-back agree about which client holds the device.
+
+        Returns {path: md5}. Raises if that comes back empty -- a seed that
+        wrote nothing must not reach a comparison.
+        """
+        _dev, mounted = self._connect_and_mount_dual(
+            lvol_name, mount_path=mount_path, format_disk=True)
+        if self.k8s_test:
+            # k8s has no mount of ours to write into: the PVC is mounted
+            # inside the pod, so the seed is an fio job at /spdkvol.
+            handle = self._run_fio_dual(
+                lvol_name, runtime=120, rw="write", bs="256K", size=size,
+                numjobs=1, nrfiles=files, time_based=False,
+                name=f"{prefix}-{lvol_name}")
+            self._wait_fio_dual([handle], timeout=900)
+            self._cleanup_fio_k8s(handle)
+        else:
+            reg = self._volume_registry.get(lvol_name, {})
+            node = reg.get("node") or self.client_machines[0]
+            self.ssh_obj.create_random_files(
+                node=node, mount_path=mounted, file_size=size,
+                file_prefix=prefix, file_count=files)
+            self.ssh_obj.exec_command(node=node, command="sync")
+        sums = self._generate_checksums_dual(lvol_name)
+        if not sums:
+            raise AssertionError(
+                f"seeded {lvol_name} but it has no files on it. Every later "
+                f"checksum comparison would pass over an empty set and "
+                f"report success without having checked anything.")
+        self.logger.info("Seeded %s with %d file(s) at %s", lvol_name,
+                         len(sums), mounted)
+        return sums
 
     def _run_fio_dual(self, lvol_name, mount_path=None, log_path=None,
                       runtime=300, name=None, rw="randrw", size="1G",
@@ -1629,8 +1712,21 @@ class TestClusterBase:
                 if pod_name in self._k8s_utility_pods:
                     self._k8s_utility_pods.remove(pod_name)
         else:
-            node = self.client_machines[0]
-            mount = directory or self._volume_registry.get(lvol_name, {}).get("mount")
+            reg = self._volume_registry.get(lvol_name, {})
+            # The volume is read back from the client it was mounted on.
+            # _connect_and_mount_dual searches every client and records the
+            # one the device turned up on, and _run_fio_dual already honours
+            # that; this used to be the single place that assumed
+            # client_machines[0] and so silently checksummed the wrong box.
+            node = reg.get("node") or self.client_machines[0]
+            mount = directory or reg.get("mount")
+            if not mount:
+                raise AssertionError(
+                    f"no mount point known for {lvol_name}: it was never "
+                    f"mounted (pass mount_path to _connect_and_mount_dual) "
+                    f"or this is the wrong volume name. Without one, "
+                    f"find_files has nothing to search and the comparison "
+                    f"would silently run over an empty set.")
             if files is None:
                 files = self.ssh_obj.find_files(node, directory=mount)
             return self.ssh_obj.generate_checksums(node, files)

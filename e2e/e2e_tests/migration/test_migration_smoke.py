@@ -51,13 +51,16 @@ class MigrationSmoke(MigrationTestBase):
             step += 1
             self.logger.info("")
             self.logger.info("=" * 64)
-            self.logger.info("[MIG-S-001] LINK %d/6: %s", step, what)
+            self.logger.info("[MIG-S-001] LINK %d/7: %s", step, what)
             self.logger.info("=" * 64)
 
         # ── 1. the CLI surface ───────────────────────────────────────────
+        # Creating and seeding are separate links on purpose. They used to
+        # be one, and when a seed failed the report said "This is the CLI
+        # surface" and sent everyone to look at an invocation that was fine.
         nxt("volume add -- does the CLI accept how we call it")
         try:
-            vol_id, sums = self.make_volume(vol)
+            vol_id, _ = self.make_volume(vol, seed=False)
         except MigrationPreconditionError as exc:
             raise AssertionError(
                 f"[MIG-S-001] LINK 1 FAILED: could not create a volume. "
@@ -68,10 +71,25 @@ class MigrationSmoke(MigrationTestBase):
                 f"in about a second, and would have caught the last "
                 f"occurrence of this (volume add was called with --pool, "
                 f"which does not exist; the pool is positional).") from exc
-        self.logger.info("[MIG-S-001] LINK 1 OK: %s = %s, %d seeded file(s)",
-                         vol, vol_id, len(sums))
+        self.logger.info("[MIG-S-001] LINK 1 OK: %s = %s", vol, vol_id)
 
-        # ── 2. topology ──────────────────────────────────────────────────
+        # ── 2. the data path ───────────────────────────────────────────
+        nxt("connect, mount, write -- can the client use the volume at all")
+        try:
+            sums = self.seed(vol)
+        except MigrationPreconditionError as exc:
+            raise AssertionError(
+                f"[MIG-S-001] LINK 2 FAILED: {vol} exists but could not be "
+                f"seeded. {str(exc)[:400]}\n\n"
+                f"None of this is migration -- it is nvme connect, mkfs, "
+                f"mount and a write on the client, in that order. Check it "
+                f"in that order too: did a new block device appear after "
+                f"connecting (if not, suspect the connect strings or the "
+                f"client's network), did the mount succeed, and is there "
+                f"room on the volume for the files.") from exc
+        self.logger.info("[MIG-S-001] LINK 2 OK: %d seeded file(s)", len(sums))
+
+        # ── 3. topology ──────────────────────────────────────────────────
         nxt("topology -- can we read nodes, and find a target")
         nodes = self.online_nodes()
         self.logger.info("[MIG-S-001] %d online storage node(s)", len(nodes))
@@ -83,7 +101,7 @@ class MigrationSmoke(MigrationTestBase):
         src = self.lvol_node(vol_id)
         if not src:
             raise AssertionError(
-                f"[MIG-S-001] LINK 2 FAILED: {vol} exists but reports no "
+                f"[MIG-S-001] LINK 3 FAILED: {vol} exists but reports no "
                 f"node_id, so there is nothing to migrate FROM and no way to "
                 f"assert where it ends up. Check what "
                 f"`volume get {vol_id}` returns.")
@@ -91,23 +109,23 @@ class MigrationSmoke(MigrationTestBase):
             tgt = self.pick_target(src, "no-overlap")
         except MigrationPreconditionError as exc:
             raise AssertionError(
-                f"[MIG-S-001] LINK 2 FAILED: no target node. {str(exc)[:300]}\n"
+                f"[MIG-S-001] LINK 3 FAILED: no target node. {str(exc)[:300]}\n"
                 f"At least two online storage nodes are needed, and at "
                 f"NDCS+NPCS=1+1 so that one is spare. A 1+2 cluster on four "
                 f"nodes leaves nothing to migrate to.") from exc
-        self.logger.info("[MIG-S-001] LINK 2 OK: %s -> %s", src, tgt)
+        self.logger.info("[MIG-S-001] LINK 3 OK: %s -> %s", src, tgt)
 
-        # ── 3. pre-create, and the connect strings ───────────────────────
+        # ── 4. pre-create, and the connect strings ───────────────────────
         nxt("volume migrate -- pre-create and the nvme connect strings")
         try:
             mid = self.migrate(vol_id, tgt)
         except MigrationPreconditionError as exc:
             raise AssertionError(
-                f"[MIG-S-001] LINK 3 FAILED: pre-create did not return a "
+                f"[MIG-S-001] LINK 4 FAILED: pre-create did not return a "
                 f"migration id. {str(exc)[:400]}\n\n"
                 f"Either the verb is wrong, or the output does not contain "
                 f"'Migration ID: <uuid>' in the shape MIG_ID_RE expects.") from exc
-        self.logger.info("[MIG-S-001] LINK 3 OK: migration %s", mid)
+        self.logger.info("[MIG-S-001] LINK 4 OK: migration %s", mid)
 
         # The client MUST be attached to both ends before the cutover, or the
         # flip becomes a disconnect. migrate() does the connecting; this just
@@ -122,7 +140,7 @@ class MigrationSmoke(MigrationTestBase):
             self.logger.info("[MIG-S-001] client now has %s live path(s)",
                              (out or "?").strip().splitlines()[0:1])
 
-        # ── 4. continue, and read the record back ────────────────────────
+        # ── 5. continue, and read the record back ────────────────────────
         nxt("migrate-continue -- does the runner start and report phases")
         self.migrate_continue(mid)
         rec = None
@@ -134,13 +152,13 @@ class MigrationSmoke(MigrationTestBase):
             sleep_n_sec(5)
         if not rec:
             raise AssertionError(
-                f"[MIG-S-001] LINK 4 FAILED: no migration record for {vol_id} "
+                f"[MIG-S-001] LINK 5 FAILED: no migration record for {vol_id} "
                 f"within 120s of migrate-continue. Either migrate-list does "
                 f"not list it, or the field this harness matches on "
                 f"(lvol_id / volume_id) is spelled differently in the "
                 f"output. Run `{self.base_cmd} volume migrate-list "
                 f"--cluster-id {self.cluster_id} --json` by hand and compare.")
-        self.logger.info("[MIG-S-001] LINK 4 OK: record reads status=%s "
+        self.logger.info("[MIG-S-001] LINK 5 OK: record reads status=%s "
                          "phase=%s", self._get(rec, "status"),
                          self._get(rec, "phase"))
 
@@ -155,19 +173,19 @@ class MigrationSmoke(MigrationTestBase):
                 f"harness -- which is exactly what this test exists to tell "
                 f"you apart.")
 
-        # ── 5. placement ─────────────────────────────────────────────────
+        # ── 6. placement ─────────────────────────────────────────────────
         nxt("placement -- did it actually move")
         self.assert_placed_on(vol_id, tgt, "(MIG-S-001)")
-        self.logger.info("[MIG-S-001] LINK 5 OK")
+        self.logger.info("[MIG-S-001] LINK 6 OK")
 
-        # ── 6. data ──────────────────────────────────────────────────────
+        # ── 7. data ──────────────────────────────────────────────────────
         nxt("data -- is it byte-identical")
         self.verify(vol, sums, "after a plain migration (MIG-S-001)")
-        self.logger.info("[MIG-S-001] LINK 6 OK")
+        self.logger.info("[MIG-S-001] LINK 7 OK")
 
         self.logger.info("")
         self.logger.info("=" * 64)
-        self.logger.info("[MIG-S-001] PASS -- all six links work. The rest of "
+        self.logger.info("[MIG-S-001] PASS -- all seven links work. The rest of "
                          "the lane is variations on this; run")
         self.logger.info("           python e2e/e2e.py --testname migration")
         self.logger.info("=" * 64)

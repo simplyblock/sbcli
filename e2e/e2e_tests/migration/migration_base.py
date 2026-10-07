@@ -520,22 +520,18 @@ class MigrationTestBase(TestClusterBase):
         return vol_id, sums
 
     def seed(self, name, files=3, file_size="32M"):
-        """Connect, format, mount, write known content, return checksums."""
-        self._connect_and_mount_dual(name, format_disk=True)
-        if self.k8s_test:
-            self._run_fio_dual(name, runtime=60, rw="write", bs="256K",
-                               size=file_size, numjobs=1, nrfiles=files,
-                               time_based=False, name="migseed")
-        else:
-            self.ssh_obj.create_random_files(
-                node=self.fio_node[0], mount_path=self.mount_path,
-                file_size=file_size, file_prefix="migseed", file_count=files)
-        sums = self._generate_checksums_dual(name)
-        if not sums:
+        """Write known content to a fresh volume. Returns {path: md5}.
+
+        The mount is per volume, which this lane needs more than most:
+        MIG-T-010 migrates four at once, and a shared mount point would
+        have them overwrite each other.
+        """
+        try:
+            return self._seed_volume_dual(name, files=files, size=file_size,
+                                          prefix="migseed")
+        except AssertionError as exc:
             raise MigrationPreconditionError(
-                f"[MIG] seeded {name} but produced no checksums, so any later "
-                f"comparison would pass over an empty set.")
-        return sums
+                f"[MIG] could not seed {name}: {exc}") from exc
 
     def verify(self, name, expected, context=""):
         got = self._generate_checksums_dual(name)
