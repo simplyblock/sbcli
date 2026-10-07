@@ -391,6 +391,7 @@ from e2e_tests.replication.test_replication_negative import (
     ReplicationNegativeConfiguration,
     ReplicationNegativeOperations,
 )
+from e2e_tests.migration.test_migration_smoke import MigrationSmoke
 from e2e_tests.migration.test_migration_happy import (
     MigrationHappyPath,
     MigrationRoundTrip,
@@ -1231,6 +1232,12 @@ def get_migration_tests():
         MIG-F  15 cases  faults in a named phase -- longest, most disruptive
     """
     return [
+        # MIG-S first, always. Ten minutes, six named links, and a failure
+        # tells you WHICH link -- the CLI surface, the topology read, the
+        # pre-create, the record parsing, placement, or the data. The first
+        # full run of this lane spent nine hours proving nothing because a
+        # CLI flag did not exist; this is the guard against repeating that.
+        MigrationSmoke,                  # MIG-S-001
         # MIG-H: if a plain migration does not work, nothing below matters.
         MigrationHappyPath,              # MIG-H-001..004
         MigrationRoundTrip,              # MIG-H-005/006

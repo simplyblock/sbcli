@@ -2658,16 +2658,14 @@ class SshUtils:
     def check_tmux_installed(self, node_ip):
         """Check tmux installation
         """
-        check_tmux_command = "command -v tmux"
-        output, _ = self.exec_command(node_ip, check_tmux_command)
-        if not output.strip():
-            self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
-            install_tmux_command = (
-                "sudo apt-get update -y && sudo apt-get install -y tmux"
-                " || sudo yum install -y tmux"
-            )
-            self.exec_command(node_ip, install_tmux_command)
-            self.logger.info(f"'tmux' installed successfully on {node_ip}.")
+        if self.ensure_tool(node_ip, "tmux"):
+            return
+        # ensure_tool already probed, installed and re-probed, with the whole
+        # thing bounded. Reaching here means tmux is genuinely unavailable on
+        # this node; it has logged why.
+        self.logger.warning(
+            f"tmux is not available on {node_ip}; anything that needs a "
+            f"detached session on this node will be skipped.")
 
     def start_docker_logging(self, node_ip, containers, log_dir, test_name):
         """
@@ -3875,27 +3873,21 @@ class SshUtils:
     def check_and_install_tcpdump(self, node_ip):
         """Installs tcpdump on given node ip
         """
-        output, _ = self.exec_command(node_ip, "which tcpdump")
-        if not output:
-            self.logger.info("tcpdump not found, installing...")
-            install_tcpdump_command = (
-                "sudo apt-get update -y && sudo apt-get install -y tcpdump"
-                " || sudo yum install -y tcpdump"
-            )
-            output, _ = self.exec_command(node_ip, install_tcpdump_command)
-            self.logger.info(f"tcpdump installed successfully: {output}")
+        # Routed through ensure_tool so a node with no package repo cannot
+        # hang here -- see its docstring for what that cost once.
+        if self.ensure_tool(node_ip, "tcpdump"):
+            return
+        self.logger.warning(
+            f"tcpdump is not available on {node_ip}; its packet captures will "
+            f"be empty. Not failing the test for a diagnostic.")
 
     def check_and_install_tshark(self, node_ip):
         """Check if tshark is installed on the remote node and install it if missing."""
-        output, _ = self.exec_command(node_ip, "which tshark")
-        if not output:
-            self.logger.info("tshark not found, installing...")
-            install_tcpdump_command = (
-                "sudo apt-get update -y && sudo apt-get install -y tshark"
-                " || sudo yum install -y wireshark"
-            )
-            output, _ = self.exec_command(node_ip, install_tcpdump_command)
-            self.logger.info(f"tshark installed successfully: {output}")
+        if self.ensure_tool(node_ip, "tshark"):
+            return
+        self.logger.warning(
+            f"tshark is not available on {node_ip}; its captures will be "
+            f"empty. Not failing the test for a diagnostic.")
 
 
     def start_tcpdump_logging(self, node_ip, log_dir):
@@ -4068,10 +4060,98 @@ class SshUtils:
 
         return logs_in_window
     
+    def ensure_tool(self, node_ip, binary, package=None, timeout=60):
+        """Make sure netstat exists, without ever blocking the test.
+
+        The previous version of this was one line:
+
+            sudo apt-get update && sudo apt-get install -y net-tools               || sudo yum install -y net-tools
+
+        and it cost a nine-hour run. Three things wrong with it:
+
+        * **apt-get update HANGS on a node with no package-repo access.** It
+          does not fail and fall through to the yum branch -- it sits there
+          until the SSH command times out at 360s, then exec_command retries
+          twice more, so one diagnostic helper burns 18 minutes per node.
+        * **It ran unconditionally**, including on the overwhelming majority
+          of nodes that already have netstat.
+        * **A missing diagnostic should never stop a test.** netstat here
+          feeds a log file nobody reads unless something else has already
+          gone wrong.
+
+        So: check first, install only if missing, bound the install, pick the
+        package manager rather than chaining on failure, and carry on either
+        way. Returns True if *binary* is available afterwards.
+
+        Every tool the suite installs on a node goes through here, so the
+        same hang cannot come back under a different package name.
+        """
+        pkg = package or binary
+        try:
+            out, _ = self.exec_command(
+                node_ip, "command -v {binary} >/dev/null 2>&1 && echo yes || echo no",
+                timeout=30, max_retries=1, supress_logs=True)
+            if "yes" in (out or ""):
+                return True
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.debug(f"netstat probe on {node_ip} failed: "
+                              f"{str(exc)[:120]}")
+            return False
+
+        # Detect the package manager instead of chaining installs on failure:
+        # the chain is what let a hanging apt-get swallow the whole budget.
+        try:
+            mgr, _ = self.exec_command(
+                node_ip,
+                "for m in dnf yum apt-get; do command -v $m >/dev/null 2>&1 "
+                "&& { echo $m; break; }; done",
+                timeout=30, max_retries=1, supress_logs=True)
+            mgr = (mgr or "").strip().splitlines()[0] if (mgr or "").strip() else ""
+        except Exception:                             # noqa: BLE001
+            mgr = ""
+        if not mgr:
+            self.logger.warning(
+                f"{binary} is missing on {node_ip} and no package manager was "
+                f"found; the netstat log for this node will be empty. Not "
+                f"failing the test for a diagnostic.")
+            return False
+
+        if mgr == "apt-get":
+            # -o options keep apt from waiting on a lock or a prompt, and the
+            # whole thing is wrapped in `timeout` on the REMOTE side so a
+            # hanging repo fetch cannot outlive our budget.
+            cmd = (f"sudo timeout {timeout} apt-get -y "
+                   f"-o Acquire::Retries=1 -o Acquire::http::Timeout=10 "
+                   f"-o DPkg::Lock::Timeout=20 install {pkg}")
+        else:
+            cmd = (f"sudo timeout {timeout} {mgr} install -y {pkg}")
+
+        try:
+            self.exec_command(node_ip, f"{cmd} >/dev/null 2>&1 || true",
+                              timeout=timeout + 30, max_retries=1,
+                              supress_logs=True)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                f"could not install {pkg} on {node_ip} "
+                f"({str(exc)[:120]}); continuing without it.")
+            return False
+
+        try:
+            out, _ = self.exec_command(
+                node_ip, "command -v {binary} >/dev/null 2>&1 && echo yes || echo no",
+                timeout=30, max_retries=1, supress_logs=True)
+            ok = "yes" in (out or "")
+        except Exception:                             # noqa: BLE001
+            ok = False
+        if not ok:
+            self.logger.warning(
+                f"{pkg} still not present on {node_ip} after an install "
+                f"attempt; its netstat log will be empty.")
+        return ok
+
     def start_netstat_dmesg_logging(self, node_ip, log_dir):
         """Start continuous netstat and dmesg logging without using watch."""
-        # Ensure netstat is installed
-        self.exec_command(node_ip, 'sudo apt-get update && sudo apt-get install -y net-tools || sudo yum install -y net-tools')
+        self.ensure_tool(node_ip, "netstat", "net-tools")
 
         # Start logging netstat and dmesg by directly redirecting output to files
         netstat_log = f"{log_dir}/netstat_segments_{node_ip}.log"
@@ -4944,7 +5024,12 @@ class RunnerK8sLog:
             print("tmux is already installed.")
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("tmux is not installed. Installing now...")
-            install_cmd = "sudo apt-get update -y && sudo apt-get install -y tmux || sudo yum install -y tmux"
+            # Bounded, and it picks the package manager rather than chaining
+            # on failure -- an unbounded apt-get update on a node with no repo
+            # is what turned one diagnostic into an 18-minute stall per node.
+            install_cmd = ("sudo timeout 60 sh -c 'for m in dnf yum apt-get; "
+                           "do command -v $m >/dev/null 2>&1 && exec $m "
+                           "install -y tmux; done' >/dev/null 2>&1 || true")
             subprocess.run(install_cmd, shell=True, check=True)
             print("tmux installed successfully.")
 
