@@ -783,6 +783,36 @@ def wait_control_plane_ready(timeout=1800):
         f"that cannot answer them. Check: kubectl -n {NS} get controlplane")
 
 
+#: How long the deadline may be pushed out in total while OpenShift is
+#: rebooting workers underneath us. Generous because a rolling MachineConfig
+#: across four workers is drain + reboot + rejoin, one at a time.
+MCO_GRACE_TOTAL = int(os.environ.get("TIMEOUT_MCO_GRACE", "3600"))
+
+
+def mco_updating():
+    """MachineConfigPools OpenShift is currently applying, by name.
+
+    Creating a StorageCluster writes a KubeletConfig and a MachineConfigPool,
+    and the machine-config operator then drains, reboots and rejoins every
+    worker in that pool one at a time. Storage nodes cannot come up while
+    their worker is cordoned, so the deployment sits still through all of
+    it -- and reports only the phase it is stuck in.
+
+    That is what happened on 2026-10-07: "worker worker-1 is cordoned" at
+    20:06, the 1800s deadline fired at 20:33, and the SPDK pods came up at
+    21:00 -- the bring-up was still making progress when we gave up on it.
+
+    Columns, not jsonpath: NAME CONFIG UPDATED UPDATING DEGRADED ...
+    """
+    out = kubectl("get", "machineconfigpool", "--no-headers", check=False)
+    rolling = []
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[3] == "True":
+            rolling.append(parts[0])
+    return rolling
+
+
 def dump_stall_state(name: str) -> None:
     """Everything worth seeing when the deployment stops advancing.
 
@@ -814,6 +844,8 @@ def dump_stall_state(name: str) -> None:
 
     log("")
     log("state at the point the deployment stopped advancing:")
+    show("machine config pools (OpenShift reboots workers here)",
+         "get", "machineconfigpool", "--no-headers", limit=40)
     show("storage nodes", "get", "storagenode", "-o", "wide")
     show("storage cluster", "get", "storagecluster", "-o", "wide")
     show("pods that are not Running", "get", "pods",
@@ -838,6 +870,8 @@ def approve_and_wait(name: str, timeout: int) -> None:
     deadline = time.time() + timeout
     last = ""
     reported_failed = set()
+    mco_granted = 0.0
+    mco_seen = set()
     while time.time() < deadline:
         out = kubectl("get", "clusterdeploymentconfig", name, "-o", "json",
                       check=False)
@@ -878,6 +912,29 @@ def approve_and_wait(name: str, timeout: int) -> None:
                 f"--field-selector involvedObject.name={node}")
             log("         still waiting -- usually terminal, but the deadline "
                 "decides, not this check")
+        # OpenShift is rebooting the workers this cluster needs, because
+        # creating the cluster is what asked it to. Nothing can progress
+        # until it finishes, so do not spend the deadline on it -- but cap
+        # the generosity, or a genuinely stuck pool buys unlimited time.
+        rolling = mco_updating()
+        if rolling and mco_granted < MCO_GRACE_TOTAL:
+            grant = min(15.0, MCO_GRACE_TOTAL - mco_granted)
+            deadline += grant
+            mco_granted += grant
+            for pool in rolling:
+                if pool in mco_seen:
+                    continue
+                mco_seen.add(pool)
+                log(f"NOTE: OpenShift is rolling MachineConfigPool {pool}. "
+                    f"It drains, reboots and rejoins each worker in turn, and "
+                    f"a cordoned worker cannot bring a storage node up. "
+                    f"Holding the deadline open for up to {MCO_GRACE_TOTAL}s "
+                    f"while it works.")
+        elif rolling:
+            joined = ", ".join(rolling)
+            log(f"WARNING: MachineConfigPool(s) {joined} are still rolling "
+                f"after {MCO_GRACE_TOTAL}s of grace; the deadline is running "
+                f"again.")
         time.sleep(15)
     dump_stall_state(name)
     raise RuntimeError(
