@@ -151,6 +151,11 @@ spec:
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
       imagePullPolicy: "Always"
       command: ["python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
+      ports:
+        # Descriptive for introspection, e.g. automated prometheus scraping
+        - name: proxy-http
+          containerPort: {{ RPC_PORT }}
+          protocol: TCP
       securityContext:
         privileged: true
         runAsUser: 0
