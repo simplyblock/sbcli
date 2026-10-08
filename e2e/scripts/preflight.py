@@ -193,6 +193,121 @@ def check_seed_writes_to_a_real_mount():
     return True
 
 
+def check_helper_kwargs():
+    """Calls into the suite's helper objects must use parameter names they have.
+
+    `check_cli_usage.py` catches invented CLI flags. This catches the same
+    mistake one layer up -- invented PYTHON keyword arguments -- which cost a
+    whole case:
+
+        self.ssh_obj.disconnect_all_active_interfaces(
+            node=ip, interfaces=None, duration=90)
+
+        TypeError: got an unexpected keyword argument 'node'
+
+    The real signature is (node_ip, interfaces, duration_secs=300). Three
+    wrong names in one call, and an identical call sat in the replication
+    lane waiting to do the same on its first outage run. Nothing executes
+    until the test is mid-flight, so this is cheap here and expensive later.
+
+    Matched on the RECEIVER, not the method name: `x.connect(...)` is usually
+    paramiko's connect, not SshUtils.connect, and judging every call by name
+    alone reports those as errors.
+    """
+    import ast
+    import inspect
+
+    print("=" * 68)
+    print("helper calls use parameter names the helper actually has")
+    print("=" * 68)
+
+    #: attribute name a helper is reached through -> the class behind it
+    # One receiver can be several classes: self.sbcli_utils is SbcliUtils on
+    # docker and K8sSbcliUtils on k8s, and the k8s one takes parameters the
+    # docker one does not (allowed_nodes, storage_class_parameters). So a
+    # keyword is only wrong when NO candidate class accepts it.
+    RECEIVERS = {
+        "ssh_obj": [("utils.ssh_utils", "SshUtils")],
+        "sbcli_utils": [("utils.sbcli_utils", "SbcliUtils"),
+                        ("utils.k8s_utils", "K8sSbcliUtils")],
+        "common_utils": [("utils.common_utils", "CommonUtils")],
+    }
+
+    sigs, wildcard = {}, set()
+    for recv, candidates in RECEIVERS.items():
+        for modname, attr in candidates:
+            try:
+                cls = getattr(__import__(modname, fromlist=[attr]), attr)
+            except Exception as exc:                  # noqa: BLE001
+                print(f"  (skipped {modname}.{attr}: {str(exc)[:70]})")
+                continue
+            for name, fn in vars(cls).items():
+                if name.startswith("__") or not callable(fn):
+                    continue
+                try:
+                    params = inspect.signature(fn).parameters
+                except (TypeError, ValueError):
+                    continue
+                if any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in params.values()):
+                    wildcard.add((recv, name))   # **kwargs takes anything
+                    continue
+                sigs.setdefault((recv, name), set()).update(
+                    set(params) - {"self"})
+    for key in wildcard:
+        sigs.pop(key, None)
+
+    def receiver_of(node):
+        """'self.ssh_obj' / 'ssh_obj' -> 'ssh_obj'; anything else -> None."""
+        v = node.func.value
+        if isinstance(v, ast.Attribute):
+            return v.attr
+        if isinstance(v, ast.Name):
+            return v.id
+        return None
+
+    bad = []
+    for root, dirs, files in os.walk(E2E):
+        dirs[:] = [d for d in dirs
+                   if d not in ("__pycache__", "logs", ".git", "scripts")]
+        for f in sorted(files):
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(root, f)
+            try:
+                tree = ast.parse(open(path, encoding="utf-8").read())
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.keywords:
+                    continue
+                if not isinstance(node.func, ast.Attribute):
+                    continue
+                allowed = sigs.get((receiver_of(node), node.func.attr))
+                if allowed is None:
+                    continue
+                for kw in node.keywords:
+                    if kw.arg and kw.arg not in allowed:
+                        bad.append((os.path.relpath(path, REPO), node.lineno,
+                                    node.func.attr, kw.arg, sorted(allowed)))
+    if bad:
+        print(f"  {len(bad)} call(s) pass a keyword the helper does not take:")
+        for rel, line, meth, kw, allowed in bad[:20]:
+            print(f"    {rel}:{line}")
+            print(f"        {meth}(... {kw}=...) -- it takes: "
+                  f"{', '.join(allowed)}")
+        if len(bad) > 20:
+            print(f"    ... and {len(bad) - 20} more")
+        print()
+        print("  Each raises TypeError the moment the line runs, which on a")
+        print("  fault-injection path is several minutes into a case.")
+        print()
+        return False
+    print(f"  none ({len(sigs)} helper signature(s) checked)")
+    print()
+    return True
+
+
 def main():
     ok = True
     ok &= run("CLI invocations match simplyblock_cli/cli.py",
@@ -202,6 +317,7 @@ def main():
     ok &= check_lane_creates_a_pool()
     ok &= check_no_naive_error_checks()
     ok &= check_seed_writes_to_a_real_mount()
+    ok &= check_helper_kwargs()
 
     print("=" * 68)
     if ok:

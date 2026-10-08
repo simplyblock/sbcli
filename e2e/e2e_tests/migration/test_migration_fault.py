@@ -53,8 +53,38 @@ class _FaultBase(MigrationTestBase):
                 return n.get("mgmt_ip")
         return None
 
+    #: How long to wait for an injected fault to actually show up as the node
+    #: leaving "online". A graceful shutdown is a request, not an event.
+    FAULT_LANDS_SEC = 180
+
+    def _await_offline(self, node_id, kind):
+        """Block until the node stops reporting online. Raises if it never does.
+
+        MIG-F-001 failed without this. shutdown_node is a single fire-and-
+        forget GET -- no wait, no confirmation -- and a graceful shutdown of
+        a node serving an in-flight migration is deferred. The node never
+        left "online", the migration copied all 21 snapshots and completed
+        onto a healthy target, and the test then asserted the volume should
+        have stayed on the source. A fault that did not land must be a skip,
+        not a failure, and must never be reported as the product's doing.
+        """
+        try:
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id, ["offline", "unreachable", "removed", "in_shutdown"],
+                timeout=self.FAULT_LANDS_SEC)
+            self.logger.info("[MIG-F] %s landed: %s is no longer online",
+                             kind, node_id)
+            return True
+        except TimeoutError:
+            return False
+
     def _break(self, node_id, kind):
-        """Inject *kind* on *node_id*; return a callable that undoes it."""
+        """Inject *kind* on *node_id*; return a callable that undoes it.
+
+        Raises MigrationPreconditionError when the fault does not take, so
+        the caller records a skip rather than asserting against a cluster
+        nothing happened to.
+        """
         ip = self._node_ip(node_id)
         if not ip:
             raise MigrationPreconditionError(
@@ -62,6 +92,14 @@ class _FaultBase(MigrationTestBase):
         self.logger.info("[MIG-F] injecting %s on %s (%s)", kind, node_id, ip)
         if kind == "graceful_shutdown":
             self.sbcli_utils.shutdown_node(node_uuid=node_id)
+            if not self._await_offline(node_id, kind):
+                raise MigrationPreconditionError(
+                    f"[MIG-F] {node_id} was still online "
+                    f"{self.FAULT_LANDS_SEC}s after a graceful shutdown was "
+                    f"requested. A graceful shutdown of a node serving an "
+                    f"in-flight migration is deferred, so the fault never "
+                    f"landed and anything this case went on to assert would "
+                    f"be about an undisturbed cluster.")
             return lambda: self.sbcli_utils.restart_node(node_uuid=node_id)
         if kind == "spdk_crash":
             if self.k8s_test:
@@ -71,28 +109,60 @@ class _FaultBase(MigrationTestBase):
                     node=ip,
                     command="sudo docker kill $(sudo docker ps -q -f "
                             "name=spdk_ | head -1) 2>&1 || true")
+            if not self._await_offline(node_id, kind):
+                raise MigrationPreconditionError(
+                    f"[MIG-F] {node_id} still reports online "
+                    f"{self.FAULT_LANDS_SEC}s after its SPDK was killed; the "
+                    f"fault did not land.")
             return lambda: self.sbcli_utils.restart_node(node_uuid=node_id,
                                                           force=True)
         if kind == "nic_down":
+            # The real signature is (node_ip, interfaces, duration_secs=...),
+            # and interfaces is a required list -- every working call site
+            # reads it from get_active_interfaces first. Calling it as
+            # (node=..., interfaces=None, duration=...) raised TypeError and
+            # took MigrationSourceAndTargetFaults out before it ran.
+            if_names = self.ssh_obj.get_active_interfaces(ip)
+            if not if_names:
+                raise MigrationPreconditionError(
+                    f"[MIG-F] no active interfaces on {ip} to drop")
             self.ssh_obj.disconnect_all_active_interfaces(
-                node=ip, interfaces=None, duration=90)
-            return lambda: True       # self-restoring
+                ip, if_names, duration_secs=90)
+            return lambda: True       # self-restoring after duration_secs
         raise MigrationPreconditionError(f"[MIG-F] unknown fault {kind!r}")
 
-    def _assert_terminal_and_placed(self, case_id, expect_node, mid=None):
+    def _assert_terminal_and_placed(self, case_id, src, tgt=None, mid=None):
+        """Terminate, and land where the outcome says it should.
+
+        The rule has two arms and the assertion has to pick by status: a
+        migration that FAILED must leave the volume on the source, still
+        serving; one that SUCCEEDED must leave it on the target. Only a
+        third node is always wrong.
+
+        This used to take one expected node and the callers always passed
+        the source, so a migration that completed -- which is allowed, and
+        does happen when the fault lands after the phase it was aimed at --
+        was reported as the volume being in the wrong place. That is how
+        MIG-F-001 produced "the volume is on X, expected Y" for a cluster
+        behaving correctly, and it made the 'completed despite the fault'
+        branch below it unreachable.
+        """
         status, phase = self.await_migration(
             vol_id=self._vol_id, migration_id=mid, timeout=1800,
             what=f"{case_id} must terminate, whatever the outcome")
         self.logger.info("[%s] terminal: status=%s phase=%s", case_id,
                          status, phase)
         node = self.lvol_node(self._vol_id)
-        if node != expect_node:
+        succeeded = status in self.OK_TERMINAL
+        expect = (tgt if succeeded else src) if tgt else src
+        if node != expect:
             raise AssertionError(
-                f"[{case_id}] after the fault the volume is on {node!r}, "
-                f"expected {expect_node!r}. A migration that fails must leave "
-                f"the volume where it started, still serving; one that "
-                f"succeeds must leave it on the target. Anything else means "
-                f"the data and the database disagree about where it lives.")
+                f"[{case_id}] the migration ended {status!r} and the volume "
+                f"is on {node!r}, but a migration that "
+                f"{'succeeds must leave it on the target' if succeeded else 'fails must leave it on the source'} "
+                f"-- {expect!r}. Source was {src!r}, target was {tgt!r}. "
+                f"Anything else means the data and the database disagree "
+                f"about where the volume lives.")
         return status, phase
 
     def _teardown(self):
@@ -131,10 +201,18 @@ class MigrationTargetOfflinePerPhase(_FaultBase):
                 self._teardown()
                 continue
 
-            undo = self._break(self._tgt, "graceful_shutdown")
+            try:
+                undo = self._break(self._tgt, "graceful_shutdown")
+            except MigrationPreconditionError as exc:
+                # The fault did not take. Asserting now would be a
+                # statement about an undisturbed cluster.
+                self.logger.warning(
+                    "[%s] SKIPPED: %s", case_id, str(exc)[:240])
+                self._teardown()
+                continue
             try:
                 status, _ = self._assert_terminal_and_placed(
-                    case_id, self._src, mid)
+                    case_id, self._src, self._tgt, mid)
                 if status in self.OK_TERMINAL:
                     self.logger.warning(
                         "[%s] the migration COMPLETED despite the target "
@@ -211,7 +289,15 @@ class MigrationSourceAndTargetFaults(_FaultBase):
                 self._teardown()
                 continue
 
-            undo = self._break(victim, kind)
+            try:
+                undo = self._break(victim, kind)
+            except MigrationPreconditionError as exc:
+                # The fault did not take. Asserting now would be a
+                # statement about an undisturbed cluster.
+                self.logger.warning(
+                    "[%s] SKIPPED: %s", case_id, str(exc)[:240])
+                self._teardown()
+                continue
             try:
                 # Either outcome is defensible; being stuck is not.
                 status, phase = self.await_migration(
@@ -275,8 +361,11 @@ class MigrationCancel(_FaultBase):
                     continue
 
             self.migrate_cancel(mid)
-            status, _ = self._assert_terminal_and_placed(case_id, self._src,
-                                                         mid)
+            # A cancelled migration must leave the volume on the source;
+            # pass the target too so a cancel that nevertheless
+            # completed is judged against the right node.
+            status, _ = self._assert_terminal_and_placed(
+                case_id, self._src, self._tgt, mid)
             if status not in ("cancelled", "failed", "error"):
                 self.logger.warning(
                     "[%s] cancel was issued but the migration ended %r. The "
@@ -372,7 +461,13 @@ class MigrationHaPartnerRestart(_FaultBase):
 
         self.logger.info("[MIG-F-014] restarting HA partner %s mid-transfer",
                          partner)
-        undo = self._break(partner, "graceful_shutdown")
+        try:
+            undo = self._break(partner, "graceful_shutdown")
+        except MigrationPreconditionError as exc:
+            self.logger.warning(
+                "[MIG-F-014] SKIPPED: %s", str(exc)[:240])
+            self._teardown()
+            return
         try:
             status, phase = self.await_migration(
                 vol_id=self._vol_id, migration_id=mid, timeout=1800,

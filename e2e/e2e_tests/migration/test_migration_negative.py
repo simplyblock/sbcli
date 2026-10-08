@@ -138,6 +138,26 @@ class MigrationNegativeCapacity(MigrationTestBase):
     that skips.
     """
 
+    def _free_bytes(self):
+        """Cluster size_free in bytes, or None when it cannot be read.
+
+        The capacity endpoint returns a list of samples; the newest is the
+        one that matters.
+        """
+        try:
+            data = self.sbcli_utils.get_cluster_capacity()
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[MIG-N-005] capacity read failed: %s",
+                                str(exc)[:140])
+            return None
+        rows = data.get("results", data) if isinstance(data, dict) else data
+        if isinstance(rows, list) and rows:
+            rows = sorted(rows, key=lambda r: r.get("date", 0))
+            return rows[-1].get("size_free")
+        if isinstance(rows, dict):
+            return rows.get("size_free")
+        return None
+
     def run(self):
         stamp = int(time.time()) % 100000
         vol = f"migcap{stamp}"
@@ -154,24 +174,53 @@ class MigrationNegativeCapacity(MigrationTestBase):
         self.logger.info("[MIG-N-005] cluster capacity: %s",
                          str(cap)[:200] if cap else "unknown")
 
-        # Fill the target by provisioning a volume pinned to it that is
-        # larger than what is left. If the cluster refuses the filler, the
-        # precondition cannot be made and this is a skip, not a pass.
+        # Try to fill the target by provisioning a volume pinned to it that
+        # is larger than what is left.
+        #
+        # Provisioning alone does NOT fill anything: volumes are thin, so a
+        # 10T request is accepted on a 6.4T cluster and size_free does not
+        # move. This case used to take that acceptance as proof the target
+        # was full, migrate into a target with plenty of room, and then fail
+        # the product for succeeding. The precondition is measured now, and
+        # when it cannot be created the result is a skip, which is honest.
+        free_before = self._free_bytes()
         filler = f"migfill{stamp}"
         huge = os.environ.get("MIG_FILLER_SIZE", "10T")
         out, err = self._cli(f"{self.base_cmd} -d volume add {filler} {huge} "
                              f"{self.pool_name} --host-id {tgt} 2>&1")
         if cli_failed(out, err):
             self.logger.warning(
-                "[MIG-N-005] SKIPPED: could not fill the target to create "
-                "the out-of-space condition (%s). The lab has more capacity "
-                "than this case can consume; set MIG_FILLER_SIZE higher or "
-                "run it on a smaller cluster.",
-                (out + err).strip()[:200])
+                "[MIG-N-005] SKIPPED: the cluster refused the %s filler "
+                "(%s), so the out-of-space condition could not be created.",
+                huge, (out + err).strip()[:200])
             self.cleanup_migrations()
             return
         self._mig_vols.append(filler)
         sleep_n_sec(20)
+
+        free_after = self._free_bytes()
+        self.logger.info("[MIG-N-005] size_free before=%s after=%s",
+                         free_before, free_after)
+        if free_after is None:
+            self.logger.warning(
+                "[MIG-N-005] SKIPPED: cluster capacity could not be read, so "
+                "there is no way to confirm the target is actually full.")
+            self.cleanup_migrations()
+            return
+        if free_after > 0:
+            self.logger.warning(
+                "[MIG-N-005] SKIPPED: the %s filler was accepted but "
+                "size_free is still %s bytes. Volumes are thin, so "
+                "provisioning a large one consumes nothing and the target "
+                "still has room -- a migration into it succeeding would be "
+                "CORRECT. Genuinely filling a target means writing data to "
+                "it, which is a different and much longer test than this.",
+                huge, free_after)
+            self.cleanup_migrations()
+            return
+        self.logger.info("[MIG-N-005] target is genuinely out of space "
+                         "(size_free=0); the migration below must not land "
+                         "there")
 
         self.logger.info("[MIG-N-005] migrating to a target with no room")
         out, err = self._cli(f"{self.base_cmd} --dev volume migrate "

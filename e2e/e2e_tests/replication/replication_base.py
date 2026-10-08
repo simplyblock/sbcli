@@ -831,9 +831,18 @@ class ReplicationTestBase(TestClusterBase):
             self.ssh_obj.reboot_node(node_ip=node_ip)
             return lambda: True       # reboot_node waits for the node itself
         if kind in ("network_interrupt", "short_network_interrupt"):
+            # (node_ip, interfaces, duration_secs=...) -- interfaces is a
+            # required list, and every working call site reads it from
+            # get_active_interfaces first. Called as (node=...,
+            # interfaces=None, duration=...) this raises TypeError, which is
+            # exactly how the migration lane's equivalent died.
+            if_names = self.ssh_obj.get_active_interfaces(node_ip)
+            if not if_names:
+                raise ReplicationPreconditionError(
+                    f"[AR] no active interfaces on {node_ip} to drop")
             self.ssh_obj.disconnect_all_active_interfaces(
-                node=node_ip, interfaces=None, duration=duration)
-            return lambda: True       # self-restoring after `duration`
+                node_ip, if_names, duration_secs=duration)
+            return lambda: True       # self-restoring after duration_secs
         raise ReplicationPreconditionError(f"[AR] unknown outage kind {kind!r}")
 
     # ── reporting ─────────────────────────────────────────────────────────

@@ -127,8 +127,10 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
         clones = []
         for i in range(2):
             cn = f"migtclone{stamp}n{i}"
-            # Distinct subsystems on purpose: clones sharing one would make
-            # this the batch path, which MIG-B covers separately.
+            # These land in the PARENT's subsystem, not their own:
+            # --namespaced defaults to true on snapshot clone and
+            # cannot be set false from the CLI (SFAM-2819). The cases
+            # below detect that rather than assume either way.
             out, err = self._cli(f"{self.base_cmd} -d snapshot clone "
                                  f"{snap_id} {cn} 2>&1")
             if cli_failed(out, err):
@@ -138,10 +140,45 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
             clones.append((cn, self.sbcli_utils.get_lvol_id(lvol_name=cn)))
         tgt = self.pick_target(src, "no-overlap")
 
-        # ── MIG-T-006 migrate the parent while clones exist ──────────────
-        self.logger.info("[MIG-T-006] migrating the parent with %d clones "
-                         "attached", len(clones))
-        self.full_migration(vol_id, tgt, what="MIG-T-006 parent with clones")
+        # ── MIG-T-006 migrate the parent while clones exist ────────────
+        # Whether the clones share the parent's subsystem is the product's
+        # choice, not ours: snapshot clone --namespaced defaults to true and
+        # cannot be turned off from the CLI (SFAM-2819). So ask the cluster,
+        # and assert whichever contract actually applies.
+        shared = any(self.shares_subsystem(vol_id, cid) for _, cid in clones)
+        self.logger.info("[MIG-T-006] parent nqn=%s; clones %s the subsystem",
+                         self.lvol_nqn(vol_id),
+                         "SHARE" if shared else "do not share")
+
+        if shared:
+            # Moving one member of a shared subsystem must be refused, and
+            # the refusal must say how to do it properly. Accepting it would
+            # split one subsystem across two nodes.
+            out, err = self._cli(f"{self.base_cmd} --dev volume migrate "
+                                 f"{vol_id} {tgt} 2>&1")
+            combined = out + err
+            if self.MIG_ID_RE.search(combined):
+                raise AssertionError(
+                    f"[MIG-T-006] a single-volume migrate was ACCEPTED for "
+                    f"{vol}, which shares a subsystem with its clones. That "
+                    f"moves one namespace and leaves the others behind, "
+                    f"splitting one subsystem across two nodes. It should be "
+                    f"refused with a pointer to --batch. Output: "
+                    f"{combined[:300]}")
+            if "--batch" not in combined:
+                raise AssertionError(
+                    f"[MIG-T-006] the single-volume migrate was refused, "
+                    f"which is right, but the message does not tell the "
+                    f"operator to use --batch: {combined[:300]}")
+            self.logger.info("[MIG-T-006] single-volume migrate correctly "
+                             "refused, pointing at --batch")
+            self.full_migration(vol_id, tgt, batch=True,
+                                what="MIG-T-006 parent and clones as a group")
+            for cn, cid in clones:
+                self.assert_placed_on(cid, tgt, f"({cn}, MIG-T-006 batch)")
+        else:
+            self.full_migration(vol_id, tgt,
+                                what="MIG-T-006 parent with clones")
         self.assert_placed_on(vol_id, tgt, "(MIG-T-006)")
         self.verify(vol, sums, "after migrating the parent (MIG-T-006)")
         for cn, cid in clones:
@@ -152,40 +189,57 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
                     f"[MIG-T-006] clone {cn} has no node after its parent "
                     f"migrated. Moving a parent must not orphan its "
                     f"descendants.")
-        self.logger.info("[MIG-T-006] PASS: clones survived the parent's move")
+        self.logger.info("[MIG-T-006] PASS")
 
-        # ── MIG-T-007 migrate a clone away from its parent ───────────────
+        # ── MIG-T-007 a clone on its own ───────────────────────────────
         cn, cid = clones[0]
-        cl_src = self.lvol_node(cid)
-        cl_tgt = self.pick_target(cl_src, "no-overlap")
-        self.logger.info("[MIG-T-007] migrating clone %s away from its parent",
-                         cn)
-        self.full_migration(cid, cl_tgt, what="MIG-T-007 clone alone")
-        self.assert_placed_on(cid, cl_tgt, "(MIG-T-007)")
-        if self.lvol_node(vol_id) != tgt:
-            raise AssertionError(
-                "[MIG-T-007] migrating a clone moved its PARENT as well. The "
-                "two are separate volumes; only the one named should move.")
-        self.logger.info("[MIG-T-007] PASS: clone moved alone")
+        if shared:
+            # The same rule from the other side. There is no "move one clone"
+            # while the subsystem is shared, and that refusal is the thing
+            # worth pinning down rather than working around.
+            cl_tgt = self.pick_target(self.lvol_node(cid), "no-overlap")
+            out, err = self._cli(f"{self.base_cmd} --dev volume migrate "
+                                 f"{cid} {cl_tgt} 2>&1")
+            if self.MIG_ID_RE.search(out + err):
+                raise AssertionError(
+                    f"[MIG-T-007] migrating clone {cn} alone was ACCEPTED "
+                    f"while it shares a subsystem with its parent; that "
+                    f"splits the subsystem across nodes.")
+            self.logger.info("[MIG-T-007] PASS: a lone clone is refused while "
+                             "the subsystem is shared")
+        else:
+            cl_src = self.lvol_node(cid)
+            cl_tgt = self.pick_target(cl_src, "no-overlap")
+            self.logger.info("[MIG-T-007] migrating clone %s away from its "
+                             "parent", cn)
+            self.full_migration(cid, cl_tgt, what="MIG-T-007 clone alone")
+            self.assert_placed_on(cid, cl_tgt, "(MIG-T-007)")
+            if self.lvol_node(vol_id) != tgt:
+                raise AssertionError(
+                    "[MIG-T-007] migrating a clone moved its PARENT as well. "
+                    "The two are separate volumes; only the one named should "
+                    "move.")
+            self.logger.info("[MIG-T-007] PASS: clone moved alone")
 
-        # ── MIG-T-008 the tree comes home ────────────────────────────────
+        # ── MIG-T-008 the tree comes home ──────────────────────────────
         self.logger.info("[MIG-T-008] bringing the parent back to %s", src)
-        self.full_migration(vol_id, src, what="MIG-T-008 tree round trip")
+        self.full_migration(vol_id, src, batch=shared,
+                            what="MIG-T-008 tree round trip")
         self.assert_placed_on(vol_id, src, "(MIG-T-008)")
         self.verify(vol, sums, "after the tree round trip (MIG-T-008)")
         self.assert_no_target_leftovers(
             tgt, vol_id, "after the tree left it again (MIG-T-008)")
         self.logger.info("[MIG-T-008] PASS: no stale tree state left behind")
 
-        # ── MIG-T-009 snapshots still usable after all that ──────────────
+        # ── MIG-T-009 snapshots still usable after all that ────────────
         newclone = f"migtpost{stamp}"
         out, err = self._cli(f"{self.base_cmd} -d snapshot clone {snap_id} "
                              f"{newclone} 2>&1")
         if cli_failed(out, err):
             raise AssertionError(
                 f"[MIG-T-009] the snapshot cannot be cloned after its volume "
-                f"was migrated twice: {(out + err)[:300]}. The chain has been "
-                f"left pointing at something that moved.")
+                f"was migrated twice: {(out + err)[:300]}. The chain has "
+                f"been left pointing at something that moved.")
         self._mig_vols.append(newclone)
         self.logger.info("[MIG-T-009] PASS: the chain is still usable")
         self.cleanup_migrations()
@@ -217,27 +271,55 @@ class MigrationConcurrent(MigrationTestBase):
             name = f"migcon{stamp}n{i}"
             vid, sums = self.make_volume(name, seed=(i == 0))
             vols.append({"name": name, "id": vid, "sums": sums})
-        src = self.lvol_node(vols[0]["id"])
+        # The scheduler spreads these four across nodes; they do NOT all land
+        # together. Taking the target from vols[0] alone and then moving all
+        # four to it meant one of them was already there, and the product
+        # correctly refused: "LVol ... is already on node ...; cannot migrate
+        # to the same node". Record where each one actually is, and skip any
+        # that is already on the target rather than asking for a no-op.
+        for v in vols:
+            v["start"] = self.lvol_node(v["id"])
+        src = vols[0]["start"]
         tgt = self.pick_target(src, "no-overlap")
+        self.logger.info("[MIG-T] starting placement: %s; target %s",
+                         {v["name"]: v["start"] for v in vols}, tgt)
 
         # ── MIG-T-010 sequential, as the control ─────────────────────────
+        movable = [v for v in vols if v["start"] != tgt]
+        if len(movable) < len(vols):
+            self.logger.info(
+                "[MIG-T-010] %d of %d volume(s) were already on the target "
+                "and are not migrated: moving a volume to the node it is "
+                "already on is refused, correctly.",
+                len(vols) - len(movable), len(vols))
         self.logger.info("[MIG-T-010] %d migrations one after another",
-                         self.COUNT)
+                         len(movable))
         t0 = time.time()
-        for v in vols:
+        for v in movable:
             self.full_migration(v["id"], tgt,
                                 what=f"MIG-T-010 sequential {v['name']}")
             self.assert_placed_on(v["id"], tgt, "(MIG-T-010)")
         seq = time.time() - t0
         self.logger.info("[MIG-T-010] PASS: %d sequential in %.0fs",
-                         self.COUNT, seq)
+                         len(movable), seq)
 
         # ── MIG-T-011 concurrent, back the other way ─────────────────────
+        # Same rule in reverse: only volumes not already on the source.
+        # Placement is read again rather than inferred from the loop
+        # above, so a volume the product moved for its own reasons is
+        # still handled correctly.
+        back = [v for v in vols if self.lvol_node(v["id"]) != src]
+        if not back:
+            self.logger.warning(
+                "[MIG-T-011] SKIPPED: every volume is already on %s, so "
+                "there is no concurrent migration to start.", src)
+            self.cleanup_migrations()
+            return
         self.logger.info("[MIG-T-011] %d migrations started together",
-                         self.COUNT)
+                         len(back))
         t0 = time.time()
         mids = []
-        for v in vols:
+        for v in back:
             try:
                 mid = self.migrate(v["id"], src)
                 self.migrate_continue(mid)
@@ -263,9 +345,9 @@ class MigrationConcurrent(MigrationTestBase):
 
         if failures:
             raise AssertionError(
-                f"[MIG-T-011] {len(failures)} of {self.COUNT} concurrent "
+                f"[MIG-T-011] {len(failures)} of {len(back)} concurrent "
                 f"migrations did not complete: {failures}. The same "
-                f"{self.COUNT} volumes migrated cleanly one at a time "
+                f"{len(movable)} volume(s) migrated cleanly one at a time "
                 f"({seq:.0f}s), so this is contention between concurrent "
                 f"migrations on one source/target pair.")
         for v, _ in mids:
@@ -273,5 +355,5 @@ class MigrationConcurrent(MigrationTestBase):
         self.verify(vols[0]["name"], vols[0]["sums"],
                     "after concurrent migrations (MIG-T-011)")
         self.logger.info("[MIG-T-011] PASS: %d concurrent in %.0fs "
-                         "(sequential was %.0fs)", self.COUNT, con, seq)
+                         "(sequential was %.0fs)", len(back), con, seq)
         self.cleanup_migrations()

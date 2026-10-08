@@ -241,6 +241,29 @@ class MigrationTestBase(TestClusterBase):
                 f"source ({source_id}). No such node in this cluster.")
         raise MigrationPreconditionError(f"[MIG] unknown overlap {overlap!r}")
 
+    def lvol_nqn(self, vol_id):
+        """The NVMe-oF subsystem NQN this volume is served under."""
+        try:
+            d = self.sbcli_utils.get_lvol_details(lvol_id=vol_id)
+            rows = d.get("results", d) if isinstance(d, dict) else d
+            row = (rows[0] if isinstance(rows, list) and rows else rows) or {}
+            return row.get("nqn")
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[MIG] could not read the nqn of %s: %s",
+                                vol_id, str(exc)[:140])
+            return None
+
+    def shares_subsystem(self, vol_id, other_id):
+        """True when two volumes are namespaces of ONE subsystem.
+
+        Worth asking rather than assuming: `snapshot clone --namespaced`
+        defaults to true and cannot be turned off from the CLI (SFAM-2819),
+        so clones land in their parent's subsystem and the single-volume
+        migrate verb refuses them, pointing at --batch.
+        """
+        a, b = self.lvol_nqn(vol_id), self.lvol_nqn(other_id)
+        return bool(a) and a == b
+
     def lvol_node(self, vol_id):
         """Which node currently hosts the volume. The placement assertion."""
         try:
@@ -254,7 +277,18 @@ class MigrationTestBase(TestClusterBase):
             return None
 
     # ── the two-phase protocol ───────────────────────────────────────────
-    MIG_ID_RE = re.compile(r"Migration ID:\s*([0-9a-f-]{36})", re.IGNORECASE)
+    #: `volume migrate` prints "Migration ID: <uuid>"; `volume migrate
+    #: --batch` prints "Migration Group ID: <uuid>" instead (clibase.py:978
+    #: vs :992). MIG_ID_RE does not match the group line -- "Migration ID:"
+    #: is not a substring of "Migration Group ID:" -- so every batch
+    #: pre-create looked like it had returned nothing, retried five times
+    #: against a product that idempotently reused the group it had already
+    #: built, and then failed. Three of the four batch cases died that way
+    #: on a pre-create that had in fact succeeded.
+    MIG_ID_RE = re.compile(r"(?<!Group )Migration ID:\s*([0-9a-f-]{36})",
+                           re.IGNORECASE)
+    GROUP_ID_RE = re.compile(r"Migration Group ID:\s*([0-9a-f-]{36})",
+                             re.IGNORECASE)
 
     def migrate(self, vol_id, target_node_id, batch=False, ctrl_loss_tmo=3600,
                 host_nqn=None, retries=5, retry_interval=10,
@@ -286,14 +320,20 @@ class MigrationTestBase(TestClusterBase):
             attempt += 1
             out, err = self._cli(cmd + " 2>&1")
             combined = out + err
-            m = self.MIG_ID_RE.search(combined)
+            # --batch returns a GROUP id under a different label. Accept the
+            # group line first when we asked for a batch, and fall back to
+            # the single-volume line, so a product that stops distinguishing
+            # them does not break this.
+            m = (self.GROUP_ID_RE.search(combined) if batch else None) \
+                or self.MIG_ID_RE.search(combined)
             if m:
                 mid = m.group(1)
                 self._migrations.append(mid)
                 self._connect_target_paths(
                     combined, node=self._client_for_vol(vol_id))
-                self.logger.info("[MIG] pre-created %s -> %s (migration %s)",
-                                 vol_id, target_node_id, mid)
+                self.logger.info("[MIG] pre-created %s -> %s (%s %s)",
+                                 vol_id, target_node_id,
+                                 "group" if batch else "migration", mid)
                 return mid
             last = combined
             if "rebalancing" in combined.lower():
