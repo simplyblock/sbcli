@@ -11,10 +11,11 @@ Tests cover all FTT scenarios:
 """
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCConnectionError
 from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
 from tests._mocks import unique_ip
 
@@ -958,6 +959,149 @@ class TestReasonStrings(unittest.TestCase):
         self.assertIn("n1", reason)
         self.assertIn("n2", reason)
         self.assertIn("offline", reason)
+
+
+# ---------------------------------------------------------------------------
+# A secondary of the removed node that SPDK fenced after the shutdown
+# ---------------------------------------------------------------------------
+
+#: Substrings the operator reads as "ask again later" (operator main,
+#: internal/controllers/node/remove.go, ``passingRefusals``). The fenced-
+#: secondary refusal must contain NONE of them, or the operator keeps
+#: re-asking a question whose answer cannot change (run 57 removal 3: 3h).
+OPERATOR_PASSING_REFUSALS = (
+    "wait for rebalancing",
+    "is rebalancing",
+    "active task(s) on the node",
+    "not-online node",
+    "is not online",
+    "risk budget already committed",
+    "peer node(s) not online",
+)
+
+EVENT = "simplyblock_core.storage_node_ops.storage_events.snode_removal_aborted_fenced_secondary"
+
+
+def _fence(node, port):
+    """Make ``node`` report ``port`` fenced in reject mode and serve every
+    lvstore on that port."""
+    node.get_lvol_subsys_port = MagicMock(return_value=port)
+    node.rpc_client().nvmf_get_blocked_ports = MagicMock(return_value={
+        "total_blocked_ports": 1,
+        "blocked_ports": [{"port": port, "is_reject": True}],
+    })
+
+
+class TestFencedOwnSecondary(unittest.TestCase):
+    """FTT=1, n1 is being removed and is already offline; n2 is its secondary."""
+
+    def _nodes(self, removed_status=StorageNode.STATUS_OFFLINE,
+               secondary_status=StorageNode.STATUS_DOWN):
+        return [
+            _node("n1", status=removed_status, secondary_id="n2", lvstore="LVS_10"),
+            _node("n2", status=secondary_status, lvstore="LVS_3"),
+            _node("n3"),
+        ]
+
+    def test_fenced_secondary_is_a_terminal_refusal(self):
+        nodes = self._nodes()
+        _fence(nodes[1], 4440)
+        db = _db(_cluster(npcs=1, ft=1), nodes)
+        with patch(EVENT) as event:
+            allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("aborted", reason)
+        self.assertIn("n2", reason)
+        self.assertIn("4440", reason)
+        self.assertIn("LVS_10", reason)
+        self.assertIn("restart node n1", reason)
+        for passing in OPERATOR_PASSING_REFUSALS:
+            self.assertNotIn(passing, reason.lower(), passing)
+        event.assert_called_once()
+        node, sec, port = event.call_args.args
+        self.assertEqual((node.get_id(), sec.get_id(), port), ("n1", "n2", 4440))
+
+    def test_fence_before_the_shutdown_stays_a_passing_refusal(self):
+        """While the primary is still online the monitors can release the
+        fence, so the generic refusal (which the operator waits out) is the
+        right one."""
+        nodes = self._nodes(removed_status=StorageNode.STATUS_ONLINE)
+        _fence(nodes[1], 4440)
+        db = _db(_cluster(npcs=1, ft=1), nodes)
+        with patch(EVENT) as event:
+            allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("not-online node", reason)
+        self.assertNotIn("aborted", reason)
+        event.assert_not_called()
+
+    def test_down_secondary_without_a_fence_stays_a_passing_refusal(self):
+        nodes = self._nodes()
+        nodes[1].get_lvol_subsys_port = MagicMock(return_value=4440)
+        nodes[1].rpc_client().nvmf_get_blocked_ports = MagicMock(
+            return_value={"total_blocked_ports": 0, "blocked_ports": []})
+        db = _db(_cluster(npcs=1, ft=1), nodes)
+        with patch(EVENT) as event:
+            allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("not-online node", reason)
+        event.assert_not_called()
+
+    def test_fence_on_a_node_that_is_not_our_secondary_is_not_ours(self):
+        nodes = self._nodes(secondary_status=StorageNode.STATUS_ONLINE)
+        nodes[2].status = StorageNode.STATUS_DOWN
+        _fence(nodes[2], 4442)
+        db = _db(_cluster(npcs=1, ft=1), nodes)
+        with patch(EVENT) as event:
+            allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("not-online node", reason)
+        event.assert_not_called()
+
+    def test_a_fence_on_another_lvstore_port_is_not_ours(self):
+        """n2 also fences its own LVS_3 port; that is not this removal's
+        business."""
+        nodes = self._nodes()
+        nodes[1].get_lvol_subsys_port = MagicMock(
+            side_effect=lambda lvs: {"LVS_10": 4440, "LVS_3": 4434}[lvs])
+        nodes[1].rpc_client().nvmf_get_blocked_ports = MagicMock(return_value={
+            "total_blocked_ports": 1,
+            "blocked_ports": [{"port": 4434, "is_reject": True}],
+        })
+        db = _db(_cluster(npcs=1, ft=1), nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("not-online node", reason)
+
+    def test_unreadable_secondary_stays_a_passing_refusal(self):
+        """A secondary whose SPDK cannot be asked is a node that may merely
+        be unreachable; that is the generic refusal's case."""
+        nodes = self._nodes()
+        nodes[1].get_lvol_subsys_port = MagicMock(return_value=4440)
+        nodes[1].rpc_client().nvmf_get_blocked_ports = MagicMock(
+            side_effect=RPCConnectionError("proxy unreachable"))
+        db = _db(_cluster(npcs=1, ft=1), nodes)
+        with patch(EVENT) as event:
+            allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("not-online node", reason)
+        event.assert_not_called()
+
+    def test_tertiary_counts_as_own_secondary(self):
+        nodes = [
+            _node("n1", status=StorageNode.STATUS_OFFLINE, secondary_id="n2",
+                  secondary_id_2="n3", lvstore="LVS_10"),
+            _node("n2"),
+            _node("n3", status=StorageNode.STATUS_DOWN),
+            _node("n4"),
+        ]
+        _fence(nodes[2], 4440)
+        db = _db(_cluster(npcs=2, ft=2), nodes)
+        with patch(EVENT):
+            allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("aborted", reason)
+        self.assertIn("n3", reason)
 
 
 if __name__ == "__main__":

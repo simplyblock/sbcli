@@ -9195,6 +9195,32 @@ def list_storage_devices(node_id):
     return data
 
 
+def _fenced_secondary_of(snode: StorageNode, not_online_nodes):
+    """The (secondary, port) of ``snode`` whose client port for ``snode``'s
+    lvstore SPDK has fenced, or ``None``.
+
+    Only ``snode``'s own secondary and tertiary are looked at: a fence on a
+    node that is not serving ``snode``'s lvstore has nothing to do with this
+    removal. A secondary whose blocked-port list cannot be read is treated as
+    not fenced -- the generic not-online refusal still covers it, and that
+    one is the right answer for a node that merely cannot be reached.
+    """
+    own_secondaries = {snode.secondary_node_id, snode.tertiary_node_id} - {"", None}
+    for sec in not_online_nodes:
+        if sec.get_id() not in own_secondaries:
+            continue
+        port = sec.get_lvol_subsys_port(snode.lvstore)
+        try:
+            blocked = port_block.get_blocked_ports_set(sec, timeout=5, retry=1)
+        except (RPCException, SNodeClientException, OSError) as e:
+            logger.warning("Cannot read blocked ports of secondary %s of %s: %s",
+                           sec.get_id(), snode.get_id(), e)
+            continue
+        if blocked and port in blocked:
+            return sec, port
+    return None
+
+
 def _check_ftt_allows_node_removal(node_id, db_controller):
     """Check whether FTT constraints allow removing (suspend/shutdown) a node.
 
@@ -9280,6 +9306,29 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     not_online_count = len(not_online_nodes)
     if jm_replication_active:
         not_online_count += 1
+
+    # A secondary of the node being removed that SPDK fenced AFTER the node
+    # went down is a terminal refusal, not a passing one. The generic
+    # "not-online node" refusals below describe a moment the operator waits
+    # out, and the operator does wait: it re-asks prepare-removal until the
+    # count clears. This one never clears by itself -- the fence is released
+    # only once the secondary's hublvol to the primary is healthy again, and
+    # the primary is the node we are removing (run 57 removal 3, 2026-10-06:
+    # dhxfw fenced 4440 at 14:58:47, "NOT unblocking" every 6s for 3h, the
+    # removal re-asked for 3h). Name it so the operator fails the operation
+    # and leaves the node offline; a Restart of the removed node brings the
+    # primary back and lets the monitors release the fence.
+    if snode.status != StorageNode.STATUS_ONLINE:
+        fenced = _fenced_secondary_of(snode, not_online_nodes)
+        if fenced is not None:
+            sec, port = fenced
+            storage_events.snode_removal_aborted_fenced_secondary(snode, sec, port)
+            return False, (
+                f"removal of node {node_id} aborted: its secondary {sec.get_id()} "
+                f"({sec.status}) has port {port} for {snode.lvstore} fenced by SPDK since "
+                f"the shutdown and nothing can release it while the primary is gone; "
+                f"restart node {node_id} to bring the primary back, then retry the removal"
+            )
 
     fd_on = cluster.enable_failure_domain and snode.failure_domain >= 0
     blocked_by_capacity = False
