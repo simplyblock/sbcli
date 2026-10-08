@@ -4249,19 +4249,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # mask (the old create_s3_bdev path did this with app_thread_mask)
         # either fails or lands the pollers on the wrong core.
         #
-        # lvol_poller_mask is the single source of truth for which core this
-        # runs on: calculate_core_allocations() already colocates
-        # lvol_poller_core with jc_singleton_core unless the config gives it
-        # its own dedicated core (>=32 vCPU, compression-thread layout), so
-        # using it directly honors both cases correctly. Do NOT override it
-        # with jc_singleton_mask unconditionally here — that was tried
-        # (e3e8fd08) before lvol_poller_core was aligned with jc_singleton_core
-        # at the source, and it silently clobbered the dedicated-core case,
-        # forcing the poller group onto JC's core even when the config
-        # deliberately gave it a separate one. jc_singleton_mask is only a
-        # last-resort fallback for the pathological case where
-        # lvol_poller_core's own reservation came up empty (cores exhausted)
-        # while a JC core still exists — this RPC must still run on some core.
+        # lvol_poller_mask is the single source of truth for which cores this
+        # runs on: calculate_core_allocations() places the lvol poller group
+        # on the nvmf poller core set (utils._lvol_poller_cores), falling back
+        # to the JC singleton core only when the layout has no poller core.
+        # Do NOT override it with jc_singleton_mask unconditionally here —
+        # that was tried (e3e8fd08) and silently pinned the whole group to
+        # JC's single core. jc_singleton_mask is only a last-resort fallback
+        # for a persisted node whose lvol_poller_mask is empty — this RPC must
+        # still run on some core.
         poller_group_mask = snode.lvol_poller_mask or snode.jc_singleton_mask
         if poller_group_mask:
             try:
@@ -8573,11 +8569,10 @@ def _restart_storage_node_impl(
     rpc_client.log_set_print_level("DEBUG")
 
     # ONCE per SPDK process lifetime. lvol_poller_mask is the single source
-    # of truth for which core this runs on (already colocated with
-    # jc_singleton_core unless the config gave it its own dedicated core);
-    # jc_singleton_mask is only a last-resort fallback if that reservation
-    # came up empty. See the add-node twin of this call for the full
-    # rationale.
+    # of truth for which cores this runs on (the nvmf poller core set, see
+    # utils._lvol_poller_cores); jc_singleton_mask is only a last-resort
+    # fallback for a persisted node whose mask is empty. See the add-node
+    # twin of this call for the full rationale.
     poller_group_mask = snode.lvol_poller_mask or snode.jc_singleton_mask
     if poller_group_mask:
         try:

@@ -73,8 +73,8 @@ class TestTinyNodeLayouts:
         assert assigned["app_thread_core"] == [0]
         assert assigned["jc_singleton_core"] == [0]
         assert assigned["jm_cpu_core"] == [1]
-        assert assigned["lvol_poller_core"] == [1]
         assert assigned["poller_cpu_cores"] == [2]
+        assert assigned["lvol_poller_core"] == [2]
         assert assigned["distrib_cpu_cores"] == [3]
         assert assigned["alceml_cpu_cores"] == [4]
 
@@ -111,11 +111,13 @@ class TestDistribPriorityAt22PlusVcpus:
     """22+ vCPUs is the tier where alceml used to scale with the device
     count and eat into distrib/poller's budget before they saw it."""
 
-    # V, expected distrib-core count -- independent of alceml_count.
+    # V, expected distrib-core count -- independent of alceml_count. The base
+    # roles take 3 cores at every size (the lvol poller group shares the
+    # poller cores, it reserves none), so the 24-core step lands at 37 vCPU.
     DISTRIB_CORES_BY_VCPU: ClassVar[dict] = {
         22: 9, 23: 10, 24: 10, 25: 11, 26: 11,
-        27: 12, 30: 12, 37: 12,  # capped at 12 through this range
-        38: 24, 40: 24,          # jumps straight to 24, no ramp
+        27: 12, 30: 12, 36: 12,  # capped at 12 through this range
+        37: 24, 40: 24,          # jumps straight to 24, no ramp
     }
 
     def test_distrib_count_is_independent_of_alceml_count(self):
@@ -148,10 +150,9 @@ class TestDistribPriorityAt22PlusVcpus:
             exclusive = (assigned["app_thread_core"] + assigned["jm_cpu_core"]
                         + assigned["jc_singleton_core"] + assigned["alceml_cpu_cores"]
                         + assigned["distrib_cpu_cores"] + assigned["poller_cpu_cores"])
-            # lvol_poller co-locates with jc_singleton by design below 32 vCPU
-            # -- only count it separately once it has its own core.
-            if assigned["lvol_poller_core"] != assigned["jc_singleton_core"]:
-                exclusive += assigned["lvol_poller_core"]
+            # lvol_poller is a view of the poller core set, never a core of
+            # its own, so it is not an exclusive role.
+            assert assigned["lvol_poller_core"] == assigned["poller_cpu_cores"]
             dupes = {c for c in exclusive if exclusive.count(c) > 1}
             assert not dupes, f"V={vcpu_count}: {dupes} assigned to more than one role"
             assert len(exclusive) <= vcpu_count
