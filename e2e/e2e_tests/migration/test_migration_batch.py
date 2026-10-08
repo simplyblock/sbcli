@@ -25,10 +25,10 @@ namespaces by id and renumbering them silently repoints every one of them.
 import time
 
 from e2e_tests.migration.migration_base import (
-    MigrationTestBase,
     MigrationPreconditionError,
+    MigrationTestBase,
 )
-from utils.common_utils import sleep_n_sec, cli_failed
+from utils.common_utils import cli_failed, sleep_n_sec
 
 
 class _BatchBase(MigrationTestBase):

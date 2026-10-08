@@ -107,7 +107,7 @@ for _fn in [n for n in _ast.walk(_tree) if isinstance(n, _ast.FunctionDef)]:
 #    mismatch is a runtime ValueError deep into a multi-hour run, so check
 #    that every unpack matches the append.
 _src = inspect.getsource(C)
-_app = _re.search(r"handles\.append\(\((.*?)self\._run_fio_dual", _src, _re.S)
+_app = _re.search(r"handles\.append\(\((.*?)self\._run_fio_dual", _src, _re.DOTALL)
 if _app:
     _n = _app.group(1).count(",") + 1
     for _m in _re.finditer(r"for ([\w_, ]+) in handles", _src):

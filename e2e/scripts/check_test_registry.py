@@ -38,7 +38,7 @@ import __init__ as suite  # noqa: E402
 def groups_wired_into_e2e():
     """The group keys e2e.py's _GROUPS actually maps, read from the source."""
     src = open(os.path.join(E2E, "e2e.py"), encoding="utf-8").read()
-    m = re.search(r"_GROUPS\s*=\s*\{(.*?)\n    \}", src, re.S)
+    m = re.search(r"_GROUPS\s*=\s*\{(.*?)\n    \}", src, re.DOTALL)
     if not m:
         return {}
     return dict(re.findall(r'"([a-z0-9-]+)"\s*:\s*(get_[a-z0-9_]+)', m.group(1)))
@@ -97,16 +97,16 @@ def main():
         print(f"{runner:<12}{fn_name}: {n} classes")
 
     if problems:
-        print("")
+        print()
         print(f"{len(problems)} problem(s):")
         for where, msg in problems:
             print(f"  {where}: {msg}")
-        print("")
+        print()
         print("Fix: add the classes to ALL_TESTS in e2e/__init__.py. Being in a")
         print("group function alone is not enough to name a class directly.")
         return 1
 
-    print("")
+    print()
     print("every group class is also nameable individually")
     return 0
 

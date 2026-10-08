@@ -26,12 +26,10 @@ CI change rather than a test change. Where a case can only do the weaker
 thing, it says so rather than claiming the stronger one.
 """
 import json
-import os
 import time
 
 from e2e_tests.replication.replication_base import (
     ReplicationTestBase,
-    ReplicationPreconditionError,
 )
 from utils.common_utils import sleep_n_sec
 

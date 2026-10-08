@@ -12,23 +12,26 @@ overlapping IO, so a mismatch it reports is a real integrity defect rather than
 an artefact of the test.
 """
 
-from stress_test.continuous_failover_ha_multi_outage_all_nodes import (
-    RandomMultiClientMultiFailoverAllNodesTest,
+from stress_test.continuous_failover_ha_multi_client_quick_outage import (
+    RandomRapidFailoverNoGapV2NoMigration,
+    RandomRapidFailoverNoGapV2WithMigration,
 )
 from stress_test.continuous_failover_ha_multi_outage import (
     RandomMultiClientMultiFailoverTest,
+)
+from stress_test.continuous_failover_ha_multi_outage_all_nodes import (
+    RandomMultiClientMultiFailoverAllNodesTest,
 )
 from stress_test.continuous_k8s_native_failover import (
     K8sNativeFailoverTest,
     K8sNativeRapidFailoverNoGapTest,
     K8sNativeResilientFailoverTest,
 )
-from stress_test.continuous_failover_ha_multi_client_quick_outage import (
-    RandomRapidFailoverNoGapV2NoMigration,
-    RandomRapidFailoverNoGapV2WithMigration,
+from utils.md_journal import (
+    MdJournalAbsent,
+    assert_journal_enabled,
+    scan_log_for_corruption,
 )
-from utils.md_journal import (MdJournalAbsent, assert_journal_enabled,
-                              scan_log_for_corruption)
 from utils.raw_device_verify import RawDeviceVerifier
 
 

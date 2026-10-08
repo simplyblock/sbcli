@@ -4,18 +4,17 @@ Catches the class of bug that has now bitten twice: a method that exists in a
 module but on a different class than the object being called.
 """
 import ast
-import io
 import sys
 
 sys.path.insert(0, ".")
 
-from utils.k8s_utils import K8sUtils, K8sSbcliUtils      # noqa: E402
-from utils.sbcli_utils import SbcliUtils                 # noqa: E402
-from utils.ssh_utils import SshUtils                     # noqa: E402
 from stress_test.lblk_outage_matrix import _LblkOutageMatrix  # noqa: E402
+from utils.k8s_utils import K8sSbcliUtils, K8sUtils  # noqa: E402
+from utils.sbcli_utils import SbcliUtils  # noqa: E402
+from utils.ssh_utils import SshUtils  # noqa: E402
 
 SRC = "stress_test/lblk_outage_matrix.py"
-tree = ast.parse(io.open(SRC, encoding="utf-8").read())
+tree = ast.parse(open(SRC, encoding="utf-8").read())
 
 # receiver expression -> the type(s) it can be at runtime
 TARGETS = {

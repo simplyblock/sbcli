@@ -1,13 +1,15 @@
+import csv
 import random
 import threading
-import csv
-from logger_config import setup_logger
+
 # Imported lazily in generate_graph(). At module top this made a missing
 # plotting library break the import of e2e/__init__.py itself -- the whole
 # suite, not just this test -- because __init__ imports this module
 # eagerly. A missing plot should cost the plot.
 from datetime import datetime
 from pathlib import Path
+
+from logger_config import setup_logger
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from utils.common_utils import sleep_n_sec
 

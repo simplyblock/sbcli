@@ -39,7 +39,7 @@ import json
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 class RunState:
@@ -82,7 +82,7 @@ class RunState:
         doc = {k: fields.get(k) for k in self.FIELDS if k in fields}
         doc["test_name"] = self.test_name
         doc["cluster_id"] = self.cluster_id
-        doc["updated_at"] = datetime.now(timezone.utc).strftime(
+        doc["updated_at"] = datetime.now(UTC).strftime(
             "%Y-%m-%dT%H:%M:%SZ")
         try:
             os.makedirs(self.dir, exist_ok=True)

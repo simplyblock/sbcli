@@ -47,8 +47,8 @@ import json
 import time
 
 from e2e_tests.replication.replication_base import (
-    ReplicationTestBase,
     ReplicationPreconditionError,
+    ReplicationTestBase,
 )
 from utils.common_utils import sleep_n_sec
 

@@ -32,10 +32,10 @@ expires and reports a pass that proves the fallback works, not the feature.
 import time
 
 from e2e_tests.replication.replication_base import (
-    ReplicationTestBase,
     ReplicationPreconditionError,
+    ReplicationTestBase,
 )
-from utils.common_utils import sleep_n_sec, cli_failed
+from utils.common_utils import cli_failed, sleep_n_sec
 
 
 class _RecoveryBase(ReplicationTestBase):

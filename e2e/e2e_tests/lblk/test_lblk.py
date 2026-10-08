@@ -32,8 +32,8 @@ from utils.common_utils import sleep_n_sec
 from utils.md_journal import (
     MdJournalAbsent,
     MdJournalError,
-    call_rpc,
     assert_journal_enabled,
+    call_rpc,
     get_stats,
     scan_log_for_corruption,
     set_drain_paused,

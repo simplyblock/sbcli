@@ -29,7 +29,6 @@ the drain is the only way to test the path that matters.
 
 import json
 
-
 #: NOTICE-level lines the journal emits. Tests assert on these.
 LOG_ENABLED = "md journal enabled"
 LOG_RECOVERY_EMPTY = "md journal recovery: ring empty"

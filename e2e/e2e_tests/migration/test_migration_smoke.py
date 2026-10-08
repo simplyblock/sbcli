@@ -33,8 +33,8 @@ other lanes. If this passes, run `--testname migration`.
 import time
 
 from e2e_tests.migration.migration_base import (
-    MigrationTestBase,
     MigrationPreconditionError,
+    MigrationTestBase,
 )
 from utils.common_utils import sleep_n_sec
 

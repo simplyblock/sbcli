@@ -29,18 +29,18 @@ import json
 import os
 import random
 import re
-
-from utils.fio_defaults import FIO_MAX_LATENCY
 import threading
 import time
+from typing import ClassVar
 
 from e2e_tests.lblk.test_lblk import (
+    LblkPreconditionError,
     _LblkBase,
     _LblkDockerMixin,
     _LblkK8sMixin,
-    LblkPreconditionError,
 )
 from utils.common_utils import sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
 
 
 class _LblkOutageMatrix(_LblkBase):
@@ -221,7 +221,7 @@ class _LblkOutageMatrix(_LblkBase):
     #: no k8s outage suite has ever checked.
     #:
     #: k8s only. Docker has no scheduler to move anything.
-    FIO_WORKER_OUTAGES = {
+    FIO_WORKER_OUTAGES: ClassVar = {
         "storage_node_reboot_fio_worker": "storage_node_reboot",
         "node_network_isolation_fio_worker": "node_network_isolation",
         "short_network_interrupt_fio_worker": "short_network_interrupt",
@@ -307,7 +307,7 @@ class _LblkOutageMatrix(_LblkBase):
     #: 7470s of cycles on k8s -- the last 24 minutes of outages would have run
     #: with no live IO at all, and the availability lane would have been blind
     #: for them without saying so.
-    SEC_PER_OUTAGE = {
+    SEC_PER_OUTAGE: ClassVar = {
         "graceful_shutdown": 170,
         "container_stop": 190,
         "storage_node_reboot": 900,
@@ -1775,9 +1775,8 @@ class _LblkOutageMatrix(_LblkBase):
         deadline = started + self._fio_runtime + self.FIO_SLACK_SEC + 300
         for name, _log, job, handle in handles:
             while time.time() < deadline:
-                running = (self._k8s_fio_running(job if isinstance(handle, str)
-                                                 else job)
-                           if self.k8s_test else self._docker_fio_running(job))
+                running = (self._k8s_fio_running(job) if self.k8s_test
+                           else self._docker_fio_running(job))
                 if not running:
                     self.logger.info("[matrix] live FIO on %s finished after "
                                      "%.0fs", name, time.time() - started)

@@ -6,12 +6,14 @@
 # ]
 # ///
 import os
-import paramiko
 import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from utils import ssh_auth  # noqa: E402
 
+import paramiko
+
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import time
+
+from utils import ssh_auth  # noqa: E402
 
 # SSH Configuration
 BASTION_IP = os.getenv("BASTION_IP")

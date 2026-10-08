@@ -57,7 +57,7 @@ import re
 import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec, cli_failed
+from utils.common_utils import cli_failed, sleep_n_sec
 
 
 class MigrationPreconditionError(Exception):
@@ -651,11 +651,10 @@ class MigrationTestBase(TestClusterBase):
         # client would show the client's view, which is not the question --
         # the leftover we care about is on the TARGET, and it survives the
         # client disconnecting.
-        rpc = ("bdev_get_bdevs" if not self.k8s_test else "bdev_get_bdevs")
+        rpc = "bdev_get_bdevs"          # same RPC on both platforms
         try:
             if self.k8s_test:
                 k8s = self._ensure_k8s_utils()
-                pod = k8s.get_spdk_pod_name(ip)
                 out, _ = k8s.exec_in_spdk_container(
                     ip, f"/root/spdk/scripts/rpc.py {rpc} 2>/dev/null | grep -i {short} || true")
             else:

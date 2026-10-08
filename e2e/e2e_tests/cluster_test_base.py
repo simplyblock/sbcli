@@ -1,24 +1,24 @@
+import json
 import os
+import random
 import re
+import shlex
+import string
 import threading
 import time
+import traceback
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
 import boto3
 import requests
-from utils.sbcli_utils import SbcliUtils
-from utils.fio_defaults import FIO_MAX_LATENCY
-from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
 from exceptions.custom_exception import LvolNotConnectException
-from utils.k8s_utils import K8sUtils, K8sSbcliUtils
-from utils.common_utils import CommonUtils
 from logger_config import setup_logger, start_log_flusher
-from utils.common_utils import sleep_n_sec
-import traceback
-from datetime import datetime, timedelta, UTC
-from pathlib import Path
-import string
-import random
-import json
-import shlex
+from utils.common_utils import CommonUtils, sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
+from utils.k8s_utils import K8sSbcliUtils, K8sUtils
+from utils.sbcli_utils import SbcliUtils
+from utils.ssh_utils import RunnerK8sLog, SshUtils, _compress_and_cleanup_old_dumps
 
 
 def generate_random_sequence(length):
@@ -3002,7 +3002,7 @@ class TestClusterBase:
         except Exception as e:
             # Teardown must NEVER fail the test
             self.logger.warning(
-                f"[SPDK-MEM] Exception during mem stats teardown: {str(e)}"
+                f"[SPDK-MEM] Exception during mem stats teardown: {e!s}"
             )
 
     def _fetch_spdk_mem_stats_for_node(self, storage_node_ip, storage_node_id):
@@ -3147,7 +3147,7 @@ class TestClusterBase:
 
         except Exception as e:
             self.logger.info(
-                f"[DEBUG][SPDK-MEM] FAILURE node={storage_node_ip} error={str(e)}"
+                f"[DEBUG][SPDK-MEM] FAILURE node={storage_node_ip} error={e!s}"
             )
 
     
@@ -3218,7 +3218,7 @@ class TestClusterBase:
 
             except Exception as e:
                 self.logger.info(
-                    f"[SPDK-MEM] Worker loop exception: {str(e)}"
+                    f"[SPDK-MEM] Worker loop exception: {e!s}"
                 )
 
             time.sleep(interval_sec)
@@ -4530,7 +4530,7 @@ class TestClusterBase:
                 ordered.append(n)
         return ordered
 
-    def cleanup_root_when_high_usage(self, threshold: int = None):
+    def cleanup_root_when_high_usage(self, threshold: int | None = None):
         """
         For each mgmt/storage node, if /root usage >= threshold,
         delete /root/distrib_* , /root/bdev_* , and /etc/simplyblock/LVS_* ONLY on that node.
@@ -4572,7 +4572,7 @@ class TestClusterBase:
             else:
                 self.logger.info(f"[{node}] /root usage {used}% < {thr}%. No cleanup needed.")
 
-    def start_root_monitor(self, interval_minutes: int = None, threshold: int = None):
+    def start_root_monitor(self, interval_minutes: int | None = None, threshold: int | None = None):
         """
         Start a background thread that checks /root usage periodically
         and cleans if usage >= threshold on a per-node basis.
@@ -5400,7 +5400,7 @@ class TestClusterBase:
                 f"[gap] {elapsed:.1f}s since nodes came online; letting paths settle "
                 f"for {target - elapsed:.1f}s more (target {target:.1f}s)"
             )
-            sleep_n_sec(int(round(target - elapsed)))
+            sleep_n_sec(round(target - elapsed))
             elapsed = time.monotonic() - self._node_online_ts
         self._node_online_ts = None
         if elapsed > self.MAX_OUTAGE_GAP_SEC:

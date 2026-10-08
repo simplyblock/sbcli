@@ -7,15 +7,17 @@
 # ]
 # ///
 import os
-import paramiko
 import sys as _sys
+
+import paramiko
+
 _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from utils import ssh_auth  # noqa: E402
+import argparse
+import subprocess
+import time
 
 import boto3
-import argparse
-import time
-import subprocess
+from utils import ssh_auth  # noqa: E402
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Fetch and upload logs from Docker and/or Kubernetes.")

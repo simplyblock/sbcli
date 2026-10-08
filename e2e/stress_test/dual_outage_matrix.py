@@ -63,10 +63,12 @@ from stress_test.continuous_failover_ha_multi_outage_all_nodes import (
     RandomMultiClientMultiFailoverAllNodesTest,
 )
 from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest
-from stress_test.lblk_stress import (_LblkDockerPlatform, _LblkK8sPlatform,
-                                     _LblkStressMixin)
+from stress_test.lblk_stress import (
+    _LblkDockerPlatform,
+    _LblkK8sPlatform,
+    _LblkStressMixin,
+)
 from utils.common_utils import sleep_n_sec
-
 
 # ── the axes ──────────────────────────────────────────────────────────────
 OUTAGE_TYPES = (

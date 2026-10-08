@@ -29,6 +29,7 @@ Two deliberate differences from the original:
   finding, and it is lost if the run aborts.
 """
 import csv
+import math
 import os
 import time
 from pathlib import Path
@@ -167,7 +168,7 @@ class LoadSweepMixin:
 
         plt.figure()
         for c, ys in series.items():
-            if any(y == y for y in ys):               # any non-NaN
+            if any(not math.isnan(y) for y in ys):    # skip all-NaN series
                 plt.plot(x, ys, marker="o", label=c)
         plt.title(self.PLOT_TITLE)
         plt.xlabel(self.PLOT_X)
@@ -190,7 +191,7 @@ class LoadSweepMixin:
         self._load_log.info("  %s", "  ".join(f"{c:>18}" for c in self.COLUMNS))
         for r in rows:
             self._load_log.info("  %s", "  ".join(
-                f"{str(r.get(c, '')):>18}" for c in self.COLUMNS))
+                f"{r.get(c, '')!s:>18}" for c in self.COLUMNS))
         errs = [r for r in rows if r.get("error")]
         if errs:
             self._load_log.warning(

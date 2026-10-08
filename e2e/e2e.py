@@ -351,14 +351,14 @@ def main():
         # list of five unrelated names and sent you looking in the wrong place.
         available_tests = ', '.join(sorted(cls.__name__ for cls in ALL_TESTS))
         print(f"Test '{args.testname}' not found.")
-        print("")
+        print()
         print("A --testname is either a GROUP key or an exact class name.")
         print(f"Groups: {', '.join(sorted(_GROUPS))}")
-        print("")
+        print()
         print("If you named a class and it exists in the tree, it is probably "
               "missing from ALL_TESTS in e2e/__init__.py -- being in a group "
               "function alone is not enough to name it directly.")
-        print("")
+        print()
         print(f"Known classes ({len(ALL_TESTS)}): {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
     

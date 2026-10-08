@@ -2,328 +2,12 @@
 # constants, and e2e runs from e2e/ where the repo root is not on sys.path.
 # See _product_path.py -- this used to work only by accident.
 import _product_path  # noqa: F401
-
-from e2e_tests.single_node_outage import (
-    TestSingleNodeOutage,
-    TestHASingleNodeOutage
-)
-from e2e_tests.single_node_failure import (
-    TestSingleNodeFailure,
-    TestHASingleNodeFailure
-)
-from e2e_tests.single_node_reboot import (
-    TestSingleNodeReboot,
-    TestHASingleNodeReboot
-)
-from e2e_tests.single_node_multi_fio_perf import (
-    TestLvolFioNpcs0, TestLvolFioNpcs1, TestLvolFioNpcs2, TestLvolFioNpcsCustom
-)
-
-from e2e_tests.single_node_qos import (
-    TestLvolFioQOSBW,
-    TestLvolFioQOSIOPS
-)
-
-from e2e_tests.single_node_resize import TestSingleNodeResizeLvolCone
-
-from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
-from e2e_tests.batch_lvol_limit import TestBatchLVOLsLimit
-from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvolFio
-from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
-from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
-from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
-from e2e_tests.test_multi_node_outage import (
-    TestMultiNodeOutageDocker,
-    TestMultiNodeOutageK8s,
-    TestMultiNodeVMRebootDocker
-)
-
-
 from e2e_tests.add_node_fio_run import (
-    TestAddNodesDuringFioRun,
+    TestAddK8sNodesDualNodePerHost,
     TestAddK8sNodesDuringFioRun,
     TestAddNodesDualNodePerHost,
-    TestAddK8sNodesDualNodePerHost,
+    TestAddNodesDuringFioRun,
 )
-from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
-from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
-from e2e_tests.test_add_node_edge_cases import (
-    TestSequentialNodeAdd,
-    TestAddNodeSnapshotCloneOnNewNode,
-)
-from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
-from e2e_tests.mgmt_restart_fio_run import TestMgmtNodeReboot
-from e2e_tests.single_node_vm_reboot import TestRebootNodeHost
-
-
-from stress_test.lvol_stress_fio_run import TestStressLvolCloneClusterFioRun
-from stress_test.lvol_ha_stress_fio import (
-    TestLvolHAClusterGracefulShutdown,
-    TestLvolHAClusterStorageNodeCrash,
-    TestLvolHAClusterNetworkInterrupt,
-    TestLvolHAClusterPartialNetworkOutage,
-    TestLvolHAClusterRunAllScenarios
-)
-from stress_test.lvol_snap_clone_fio_failover import(
-    TestFailoverScenariosStorageNodes
-)
-from stress_test.continuous_failover_ha import RandomFailoverTest
-from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
-from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
-from stress_test.continuous_failover_ha_multi_outage_all_nodes import RandomMultiClientMultiFailoverAllNodesTest
-from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
-from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
-from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
-from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
-from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest, K8sNativeScaleBreakTest, K8sNativeRapidFailoverNoGapTest
-from stress_test.continuous_failover_ha_multi_client_quick_outage import (
-    RandomRapidFailoverNoGap,
-    RandomRapidFailoverNoGapV2WithMigration,
-    RandomRapidFailoverNoGapV2NoMigration,
-)
-from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
-from stress_test.continuous_lvol_dirfill_stress import TestLvolDirFillStress
-from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
-from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
-from stress_test.continuous_parallel_namespace_lvol import (
-    TestParallelNamespaceLvolDocker,
-    TestParallelNamespaceLvolK8s,
-)
-from stress_test.continuous_bulk_lvol_delete import (
-    BulkLvolDeleteDocker,
-    BulkLvolDeleteK8s,
-    BulkLvolHotDeleteDocker,
-    BulkLvolHotDeleteK8s,
-)
-from stress_test.large_scale_lvol_stress import (
-    LargeScaleLvolDocker,
-    LargeScaleLvolK8s,
-)
-from stress_test.dual_outage_matrix import (
-    DualOutageMatrixDocker,
-    DualOutageMatrixK8s,
-    LblkDualOutageMatrixDocker,
-    LblkDualOutageMatrixK8s,
-)
-from e2e_tests.lblk.test_lblk import (
-    LblkFunctionalDocker,
-    LblkFunctionalK8s,
-    LblkIntegrityDocker,
-    LblkIntegrityK8s,
-    LblkDeviceFaultDocker,
-    LblkDeviceFaultK8s,
-    LblkJournalRecoveryDocker,
-    LblkJournalRecoveryK8s,
-)
-from stress_test.lblk_outage_matrix import (
-    LblkOutageMatrixDocker,
-    LblkOutageMatrixK8s,
-)
-from stress_test.lblk_stress import (
-    LblkStressDocker,
-    LblkStressK8s,
-    LblkMultiOutageStressDocker,
-    LblkQuickOutageStressDocker,
-    LblkRapidOutageStressDocker,
-    LblkRapidOutageStressK8s,
-    LblkResilientStressK8s,
-)
-from stress_test.product_limits_stress import (
-    ProductLimits_Docker,
-    ProductLimits_K8s,
-    ProductLimits_70TiB_Docker,
-    ProductLimits_70TiB_K8s,
-)
-from stress_test.mass_create_delete_stress import (
-    MassCreateDelete_1x500_Docker,
-    MassCreateDelete_30x100_Docker,
-    MassCreateDelete_300x10_Docker,
-    MassCreateDelete_500x1_Docker,
-    MassCreateDelete_3000x1_Docker,
-    MassCreateDelete_1x500_K8s,
-    MassCreateDelete_30x100_K8s,
-    MassCreateDelete_300x10_K8s,
-    MassCreateDelete_500x1_K8s,
-    MassCreateDelete_3000x1_K8s,
-    MassCreateDeletePersistent_1x500_Docker,
-    MassCreateDeletePersistent_30x100_Docker,
-    MassCreateDeletePersistent_300x10_Docker,
-    MassCreateDeletePersistent_300x10_6Snap_Docker,
-    MassCreateDeletePersistent_300x10_10Snap_Docker,
-    MassCreateDeletePersistent_500x1_Docker,
-    MassCreateDeletePersistent_3000x1_Docker,
-    MassCreateDeletePersistent_1x500_K8s,
-    MassCreateDeletePersistent_30x100_K8s,
-    MassCreateDeletePersistent_300x10_K8s,
-    MassCreateDeletePersistent_300x10_6Snap_K8s,
-    MassCreateDeletePersistent_300x10_10Snap_K8s,
-    MassCreateDeletePersistent_500x1_K8s,
-    MassCreateDeletePersistent_3000x1_K8s,
-    MassCreateDeleteRestart_300x10_Docker,
-    MassCreateDeleteRestart_300x10_6Snap_Docker,
-    MassCreateDeleteRestart_300x10_10Snap_Docker,
-    MassCreateDeleteRestart_300x10_K8s,
-    MassCreateDeleteRestart_300x10_6Snap_K8s,
-    MassCreateDeleteRestart_300x10_10Snap_K8s,
-    MassCreateRapidRestart_6k_3Snap_Docker,
-    MassCreateRapidRestart_6k_3Snap_K8s,
-)
-from stress_test.device_failure_migration import (
-    DeviceFailureMigrationNoLoadDocker,
-    DeviceFailureMigrationUnderLoadDocker,
-    DeviceFailureMigrationPCIeNoLoadDocker,
-    DeviceFailureMigrationPCIeUnderLoadDocker,
-    DeviceFailureMigrationNoLoadK8s,
-    DeviceFailureMigrationUnderLoadK8s,
-    DeviceFailureMigrationPCIeNoLoadK8s,
-    DeviceFailureMigrationPCIeUnderLoadK8s,
-    DevicePCIeRestartNoLoadDocker,
-    DevicePCIeRestartUnderLoadDocker,
-    DevicePCIeRestartNoLoadK8s,
-    DevicePCIeRestartUnderLoadK8s,
-    DeviceAddAfterBootstrapDocker,
-    DeviceAddAfterBootstrapUnderLoadDocker,
-)
-from stress_test.continuous_failover_ha_security import (
-    RandomSecurityFailoverTest,
-    RandomAllSecurityFailoverTest,
-)
-from stress_test.mgmt_node_network_outage import MgmtNodeNetworkOutageTest, MgmtNodeRebootTest
-from stress_test.k8s_native_namespace_failover import (
-    K8sNativeNamespacedFailoverTest,
-    K8sNativeRapidLifecycleTest,
-    K8sNativeMountVerifiedFailoverTest,
-)
-
-from e2e_tests.security.test_lvol_security import (
-    TestLvolSecurityCombinations,
-    TestLvolDynamicHostManagement,
-    TestLvolCryptoWithDhchap,
-    TestLvolDhchapBidirectional,
-    TestLvolSecurityNegativeHostOps,
-    TestLvolSecuritySnapshotClone,
-    TestLvolSecurityRDMAv2,
-    TestLvolSecurityStorageNodeOutage,
-    TestLvolSecurityMgmtNodeReboot,
-    TestLvolSecurityHAFailover,
-    TestLvolSecurityNetworkInterrupt,
-    TestLvolSecurityNegativeCreation,
-    TestLvolSecurityNegativeConnect,
-    TestLvolSecurityDynamicModification,
-    TestLvolSecurityScaleAndRapidOps,
-    TestLvolSecurityResize,
-    TestLvolSecurityWithBackup,
-    TestLvolSecurityMultiClientConcurrent,
-    TestDhchapPodScheduling,
-)
-
-from e2e_tests.upgrade_tests.major_upgrade import (
-    TestMajorUpgrade,
-    TestMajorUpgradeSingleNode,
-    TestMajorUpgradeDualNode,
-)
-from e2e_tests.upgrade_tests.k8s_major_upgrade import (
-    K8sNativeMajorUpgrade,
-    K8sNativeMajorUpgradeDualNode,
-)
-
-# ── Phase 1 functional E2E tests ─────────────────────────────────────
-from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
-from e2e_tests.test_lvol_stats import TestLvolCapacityIOStats
-from e2e_tests.test_lvol_negative import TestLvolNegativeCases
-from e2e_tests.test_snapshot_negative import TestSnapshotNegativeCases
-# from e2e_tests.test_pool_attributes import TestPoolAttributes  # DISABLED: QoS crash
-from e2e_tests.test_pool_enable_disable import TestPoolEnableDisable
-from e2e_tests.test_pool_negative import TestPoolNegativeCases
-from e2e_tests.test_pool_disable_io import TestPoolDisableIO
-from e2e_tests.test_negative_cases import TestCrossResourceNegative
-from e2e_tests.test_namespace_placement import TestNamespacePlacement
-from e2e_tests.test_namespace_fio import TestNamespaceFio
-from e2e_tests.test_namespace_limits import TestNamespaceLimits
-from e2e_tests.test_object_limits import TestObjectLimits
-from e2e_tests.test_namespace_negative import TestNamespaceNegative
-from e2e_tests.test_volume_suspend_resume import TestVolumeSuspendResume      # UNCERTAIN: volume suspend/resume may not be wired
-from e2e_tests.test_volume_clone_lvol import TestVolumeCloneLvol
-from e2e_tests.test_node_anti_affinity import TestNodeAntiAffinity            # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
-
-# ── Phase 2 functional E2E tests ─────────────────────────────────────
-from e2e_tests.test_lvol_inflate import TestLvolInflate
-from e2e_tests.test_lvol_migration_load import TestLvolMigrationLoad
-from e2e_tests.test_storage_node_stats import TestStorageNodeStats
-from e2e_tests.test_storage_node_ports import TestStorageNodePorts
-from e2e_tests.test_cluster_stats import TestClusterStats
-from e2e_tests.test_cluster_tasks import TestClusterTasks
-from e2e_tests.test_cluster_secret import TestClusterSecret
-from e2e_tests.test_qos_class import TestQosClass                            # DEPRECATED: QoS class API not verified
-from e2e_tests.test_qos_enforcement import TestQosEnforcement                # DEPRECATED: QoS enforcement API not verified
-from e2e_tests.test_pool_stats import TestPoolStats
-from e2e_tests.test_cluster_graceful_shutdown import TestClusterGracefulShutdown
-from e2e_tests.test_multi_client_connect import TestMultiClientConnect
-from e2e_tests.test_pool_dhchap import TestPoolDhchap
-from e2e_tests.test_pool_capacity_limits import TestPoolCapacityLimits
-from e2e_tests.test_namespace_e2e import TestNamespaceE2E
-from e2e_tests.test_device_restart import TestDeviceRestart
-from e2e_tests.test_volume_priority import TestVolumePriority                # UNCERTAIN: volume priority enforcement unclear
-from e2e_tests.test_shared_placement import TestSharedPlacement              # UNCERTAIN: requires cluster set-shared-placement
-from e2e_tests.test_qpair_tuning import TestQpairTuning                     # UNCERTAIN: requires RDMA-enabled cluster
-from e2e_tests.test_capacity_thresholds import TestCapacityThresholds
-
-# ── Phase 3 functional E2E tests (new coverage gaps) ────────────────
-from e2e_tests.test_health_checks import TestHealthChecks
-from e2e_tests.test_snapshot_lifecycle import TestSnapshotLifecycle
-from e2e_tests.test_migration_lifecycle import TestMigrationLifecycle
-from e2e_tests.test_storage_node_listing import TestStorageNodeListing
-from e2e_tests.test_device_capacity_io import TestDeviceCapacityIO
-from e2e_tests.test_lvol_connect_lifecycle import TestLvolConnectLifecycle
-from e2e_tests.test_volume_qos_dynamic import TestVolumeQosDynamic
-from e2e_tests.test_cluster_operations import TestClusterOperations
-from e2e_tests.test_concurrent_operations import TestConcurrentOperations
-from e2e_tests.test_pool_host_management import TestPoolHostManagement
-from e2e_tests.test_lvol_placement import TestLvolPlacement
-from e2e_tests.test_node_shutdown_restart import TestNodeShutdownRestart
-
-from e2e_tests.backup.test_backup_restore import (
-    TestBackupBasicPositive,
-    TestBackupRestoreDataIntegrity,
-    TestBackupPolicy,
-    TestBackupNegative,
-    TestBackupCryptoLvol,
-    TestBackupCustomGeometry,
-    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
-    # TestBackupRetentionMergeAfterDelete,
-    # TestBackupDeleteAndRestore,
-    TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
-    # Extra coverage tests (TC-BCK-100..148)
-    TestBackupConcurrentIO,
-    TestBackupMultipleRestores,
-    TestBackupDeltaChainPointInTime,
-    TestBackupEmptyLvol,
-    TestBackupPoolRecreateRestore,
-    TestBackupPolicyAgeOnly,
-    TestBackupSnapshotClone,
-    TestBackupFilesystemXFS,
-    TestBackupLargeLvol,
-    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
-    # TestBackupDeleteInProgress,
-    TestBackupPolicyMultipleLvols,
-    TestBackupBulkLoadIntegrity,
-    TestBackupHighVolumeCombosSequential,
-    # Extended backup tests (TC-BCK-150..190)
-    TestBackupSecurityLvol,
-    TestBackupPolicyVersionsOne,
-    TestBackupPolicyMultipleOnSameLvol,
-    TestBackupPolicyLvolLevel,
-    TestBackupResizedLvol,
-    TestBackupListFields,
-    TestBackupUpgradeCompatibility,
-    TestBackupRestoreEdgeCases,
-    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
-    # Interrupted backup/restore E2E tests (TC-BCK-080..097)
-    TestBackupInterruptedBackup,
-    TestBackupInterruptedRestore,
-)
-
 from e2e_tests.backup.test_backup_node_add import (
     TestBackupAfterNodeAdd,
     TestBackupWithFioOnNewNode,
@@ -332,93 +16,85 @@ from e2e_tests.backup.test_backup_node_migration import (
     TestBackupAfterNodeMigration,
     TestBackupDuringMigration,
 )
-
-from stress_test.continuous_backup_stress import (
-    BackupStressParallelSnapshots,
-    BackupStressTcpFailover,
-    BackupStressRdmaFailover,
-    BackupStressCryptoMix,
-    BackupStressPolicyRetention,
-    BackupStressRestoreConcurrent,
-    BackupStressMarathon,
-    BackupStressLargeScale,
-    BackupStressFilesystemSecurityMix,
-    BackupStressRetentionMergeCycles,
-    BackupStressComprehensive,
+from e2e_tests.backup.test_backup_restore import (
+    TestBackupBasicPositive,
+    TestBackupBulkLoadIntegrity,
+    # Extra coverage tests (TC-BCK-100..148)
+    TestBackupConcurrentIO,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupRetentionMergeAfterDelete,
+    # TestBackupDeleteAndRestore,
+    TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
+    TestBackupCryptoLvol,
+    TestBackupCustomGeometry,
+    TestBackupDeltaChainPointInTime,
+    TestBackupEmptyLvol,
+    TestBackupFilesystemXFS,
+    TestBackupHighVolumeCombosSequential,
+    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
+    # Interrupted backup/restore E2E tests (TC-BCK-080..097)
+    TestBackupInterruptedBackup,
+    TestBackupInterruptedRestore,
+    TestBackupLargeLvol,
+    TestBackupListFields,
+    TestBackupMultipleRestores,
+    TestBackupNegative,
+    TestBackupPolicy,
+    TestBackupPolicyAgeOnly,
+    TestBackupPolicyLvolLevel,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupDeleteInProgress,
+    TestBackupPolicyMultipleLvols,
+    TestBackupPolicyMultipleOnSameLvol,
+    TestBackupPolicyVersionsOne,
+    TestBackupPoolRecreateRestore,
+    TestBackupResizedLvol,
+    TestBackupRestoreDataIntegrity,
+    TestBackupRestoreEdgeCases,
+    # Extended backup tests (TC-BCK-150..190)
+    TestBackupSecurityLvol,
+    TestBackupSnapshotClone,
+    TestBackupUpgradeCompatibility,
 )
-
-
-from load_tests.lvol_outage_load import TestLvolOutageLoadTest
-from load_tests.migration_load import (
-    MigrationFreezeByVolumeSize,
-    MigrationTimeBySnapshotCount,
-    MigrationConcurrencyCurve,
+from e2e_tests.batch_lvol_limit import TestBatchLVOLsLimit
+from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvolFio
+from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
+from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
+from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
+from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
+from e2e_tests.lblk.test_lblk import (
+    LblkDeviceFaultDocker,
+    LblkDeviceFaultK8s,
+    LblkFunctionalDocker,
+    LblkFunctionalK8s,
+    LblkIntegrityDocker,
+    LblkIntegrityK8s,
+    LblkJournalRecoveryDocker,
+    LblkJournalRecoveryK8s,
 )
-from load_tests.replication_load import (
-    ReplicationCycleTimeBySize,
-    ReplicationDemoteDowntimeBySize,
+from e2e_tests.mgmt_restart_fio_run import TestMgmtNodeReboot
+from e2e_tests.migration.test_migration_batch import (
+    MigrationBatchFlat,
+    MigrationBatchNegative,
+    MigrationBatchNsGaps,
+    MigrationBatchWithTrees,
 )
-from e2e_tests.replication.test_replication_functional import (
-    ReplicationHarness,
-    ReplicationTargetsAndPolicies,
-    ReplicationStartsAndReports,
-    ReplicationPolicyVariants,
+from e2e_tests.migration.test_migration_fault import (
+    MigrationCancel,
+    MigrationClusterRestartBetween,
+    MigrationHaPartnerRestart,
+    MigrationRetryAfterTargetReboot,
+    MigrationSourceAndTargetFaults,
+    MigrationTargetOfflinePerPhase,
 )
-from e2e_tests.replication.test_replication_integrity import (
-    ReplicationDataIsIdentical,
-    ReplicationConvergesUnderLoad,
-    ReplicationNoMetadataCorruption,
-)
-from e2e_tests.replication.test_replication_consistency import (
-    ConsistencyGroupPlacement,
-    ConsistencyGroupGeneration,
-)
-from e2e_tests.replication.test_replication_recovery import (
-    ReplicationFailoverScopes,
-    ReplicationFailoverDataLoss,
-    ReplicationFailback,
-    ReplicationMigration,
-)
-from e2e_tests.replication.test_replication_outage import (
-    ReplicationSourceNodeOutages,
-    ReplicationTargetNodeOutage,
-    ReplicationNetworkOutages,
-    ReplicationOutageDuringOperations,
-    ReplicationConsistencyGroupNodeLoss,
-    ReplicationControlPlaneAndDeviceOutages,
-)
-from e2e_tests.replication.test_replication_negative import (
-    ReplicationNegativeConfiguration,
-    ReplicationNegativeOperations,
-)
-from e2e_tests.migration.test_migration_smoke import MigrationSmoke
 from e2e_tests.migration.test_migration_happy import (
     MigrationHappyPath,
     MigrationRoundTrip,
     MigrationWithSnapshots,
 )
-from e2e_tests.migration.test_migration_fault import (
-    MigrationTargetOfflinePerPhase,
-    MigrationSourceAndTargetFaults,
-    MigrationCancel,
-    MigrationRetryAfterTargetReboot,
-    MigrationHaPartnerRestart,
-    MigrationClusterRestartBetween,
-)
-from e2e_tests.migration.test_migration_topology import (
-    MigrationHaOverlapMatrix,
-    MigrationSnapshotCloneTrees,
-    MigrationConcurrent,
-)
-from e2e_tests.migration.test_migration_batch import (
-    MigrationBatchFlat,
-    MigrationBatchNsGaps,
-    MigrationBatchNegative,
-    MigrationBatchWithTrees,
-)
 from e2e_tests.migration.test_migration_negative import (
-    MigrationNegativeTargets,
     MigrationNegativeCapacity,
+    MigrationNegativeTargets,
     MigrationUnderReplication,
 )
 from e2e_tests.migration.test_migration_scale import (
@@ -426,26 +102,360 @@ from e2e_tests.migration.test_migration_scale import (
     MigrationManyVolumes,
     MigrationSoak,
 )
-from e2e_tests.replication.test_replication_scale import (
-    ReplicationOverlappingIntervals,
-    ReplicationManyVolumes,
-    ReplicationLargeVolume,
-    ReplicationSoak,
+from e2e_tests.migration.test_migration_smoke import MigrationSmoke
+from e2e_tests.migration.test_migration_topology import (
+    MigrationConcurrent,
+    MigrationHaOverlapMatrix,
+    MigrationSnapshotCloneTrees,
 )
-from e2e_tests.replication.test_replication_upgrade import (
-    ReplicationSurvivesControlPlaneUpgrade,
-    ReplicationSurvivesOperatorUpgrade,
-    ReplicationAnnotationToCsiAddonsMigration,
+from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
+from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
+from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
+from e2e_tests.replication.test_replication_consistency import (
+    ConsistencyGroupGeneration,
+    ConsistencyGroupPlacement,
 )
 from e2e_tests.replication.test_replication_csi_addons import (
     CsiAddonsEnableAndReport,
-    CsiAddonsOwnership,
-    CsiAddonsPromoteDemote,
     CsiAddonsForcedFailoverAndOutage,
     CsiAddonsGroupReplication,
+    CsiAddonsOwnership,
+    CsiAddonsPromoteDemote,
+)
+from e2e_tests.replication.test_replication_functional import (
+    ReplicationHarness,
+    ReplicationPolicyVariants,
+    ReplicationStartsAndReports,
+    ReplicationTargetsAndPolicies,
+)
+from e2e_tests.replication.test_replication_integrity import (
+    ReplicationConvergesUnderLoad,
+    ReplicationDataIsIdentical,
+    ReplicationNoMetadataCorruption,
+)
+from e2e_tests.replication.test_replication_negative import (
+    ReplicationNegativeConfiguration,
+    ReplicationNegativeOperations,
+)
+from e2e_tests.replication.test_replication_outage import (
+    ReplicationConsistencyGroupNodeLoss,
+    ReplicationControlPlaneAndDeviceOutages,
+    ReplicationNetworkOutages,
+    ReplicationOutageDuringOperations,
+    ReplicationSourceNodeOutages,
+    ReplicationTargetNodeOutage,
+)
+from e2e_tests.replication.test_replication_recovery import (
+    ReplicationFailback,
+    ReplicationFailoverDataLoss,
+    ReplicationFailoverScopes,
+    ReplicationMigration,
+)
+from e2e_tests.replication.test_replication_scale import (
+    ReplicationLargeVolume,
+    ReplicationManyVolumes,
+    ReplicationOverlappingIntervals,
+    ReplicationSoak,
+)
+from e2e_tests.replication.test_replication_upgrade import (
+    ReplicationAnnotationToCsiAddonsMigration,
+    ReplicationSurvivesControlPlaneUpgrade,
+    ReplicationSurvivesOperatorUpgrade,
+)
+from e2e_tests.security.test_lvol_security import (
+    TestDhchapPodScheduling,
+    TestLvolCryptoWithDhchap,
+    TestLvolDhchapBidirectional,
+    TestLvolDynamicHostManagement,
+    TestLvolSecurityCombinations,
+    TestLvolSecurityDynamicModification,
+    TestLvolSecurityHAFailover,
+    TestLvolSecurityMgmtNodeReboot,
+    TestLvolSecurityMultiClientConcurrent,
+    TestLvolSecurityNegativeConnect,
+    TestLvolSecurityNegativeCreation,
+    TestLvolSecurityNegativeHostOps,
+    TestLvolSecurityNetworkInterrupt,
+    TestLvolSecurityRDMAv2,
+    TestLvolSecurityResize,
+    TestLvolSecurityScaleAndRapidOps,
+    TestLvolSecuritySnapshotClone,
+    TestLvolSecurityStorageNodeOutage,
+    TestLvolSecurityWithBackup,
+)
+from e2e_tests.single_node_failure import TestHASingleNodeFailure, TestSingleNodeFailure
+from e2e_tests.single_node_multi_fio_perf import (
+    TestLvolFioNpcs0,
+    TestLvolFioNpcs1,
+    TestLvolFioNpcs2,
+    TestLvolFioNpcsCustom,
+)
+from e2e_tests.single_node_outage import TestHASingleNodeOutage, TestSingleNodeOutage
+from e2e_tests.single_node_qos import TestLvolFioQOSBW, TestLvolFioQOSIOPS
+from e2e_tests.single_node_reboot import TestHASingleNodeReboot, TestSingleNodeReboot
+from e2e_tests.single_node_resize import TestSingleNodeResizeLvolCone
+from e2e_tests.single_node_vm_reboot import TestRebootNodeHost
+from e2e_tests.test_add_node_edge_cases import (
+    TestAddNodeSnapshotCloneOnNewNode,
+    TestSequentialNodeAdd,
 )
 from e2e_tests.test_api_parity_audit import TestAPIParityAudit
+from e2e_tests.test_capacity_thresholds import TestCapacityThresholds
+from e2e_tests.test_cluster_graceful_shutdown import TestClusterGracefulShutdown
+from e2e_tests.test_cluster_operations import TestClusterOperations
+from e2e_tests.test_cluster_secret import TestClusterSecret
+from e2e_tests.test_cluster_stats import TestClusterStats
+from e2e_tests.test_cluster_tasks import TestClusterTasks
+from e2e_tests.test_concurrent_operations import TestConcurrentOperations
+from e2e_tests.test_device_capacity_io import TestDeviceCapacityIO
+from e2e_tests.test_device_restart import TestDeviceRestart
 
+# ── Phase 3 functional E2E tests (new coverage gaps) ────────────────
+from e2e_tests.test_health_checks import TestHealthChecks
+
+# ── Phase 1 functional E2E tests ─────────────────────────────────────
+from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
+from e2e_tests.test_lvol_connect_lifecycle import TestLvolConnectLifecycle
+
+# ── Phase 2 functional E2E tests ─────────────────────────────────────
+from e2e_tests.test_lvol_inflate import TestLvolInflate
+from e2e_tests.test_lvol_migration_load import TestLvolMigrationLoad
+from e2e_tests.test_lvol_negative import TestLvolNegativeCases
+from e2e_tests.test_lvol_placement import TestLvolPlacement
+from e2e_tests.test_lvol_stats import TestLvolCapacityIOStats
+from e2e_tests.test_migration_lifecycle import TestMigrationLifecycle
+from e2e_tests.test_multi_client_connect import TestMultiClientConnect
+from e2e_tests.test_multi_node_outage import (
+    TestMultiNodeOutageDocker,
+    TestMultiNodeOutageK8s,
+    TestMultiNodeVMRebootDocker,
+)
+from e2e_tests.test_namespace_e2e import TestNamespaceE2E
+from e2e_tests.test_namespace_fio import TestNamespaceFio
+from e2e_tests.test_namespace_limits import TestNamespaceLimits
+from e2e_tests.test_namespace_negative import TestNamespaceNegative
+from e2e_tests.test_namespace_placement import TestNamespacePlacement
+from e2e_tests.test_negative_cases import TestCrossResourceNegative
+from e2e_tests.test_node_anti_affinity import (
+    TestNodeAntiAffinity,  # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
+)
+from e2e_tests.test_node_shutdown_restart import TestNodeShutdownRestart
+from e2e_tests.test_object_limits import TestObjectLimits
+from e2e_tests.test_pool_capacity_limits import TestPoolCapacityLimits
+from e2e_tests.test_pool_dhchap import TestPoolDhchap
+from e2e_tests.test_pool_disable_io import TestPoolDisableIO
+
+# from e2e_tests.test_pool_attributes import TestPoolAttributes  # DISABLED: QoS crash
+from e2e_tests.test_pool_enable_disable import TestPoolEnableDisable
+from e2e_tests.test_pool_host_management import TestPoolHostManagement
+from e2e_tests.test_pool_negative import TestPoolNegativeCases
+from e2e_tests.test_pool_stats import TestPoolStats
+from e2e_tests.test_qos_class import (
+    TestQosClass,  # DEPRECATED: QoS class API not verified
+)
+from e2e_tests.test_qos_enforcement import (
+    TestQosEnforcement,  # DEPRECATED: QoS enforcement API not verified
+)
+from e2e_tests.test_qpair_tuning import (
+    TestQpairTuning,  # UNCERTAIN: requires RDMA-enabled cluster
+)
+from e2e_tests.test_shared_placement import (
+    TestSharedPlacement,  # UNCERTAIN: requires cluster set-shared-placement
+)
+from e2e_tests.test_snapshot_lifecycle import TestSnapshotLifecycle
+from e2e_tests.test_snapshot_negative import TestSnapshotNegativeCases
+from e2e_tests.test_storage_node_listing import TestStorageNodeListing
+from e2e_tests.test_storage_node_ports import TestStorageNodePorts
+from e2e_tests.test_storage_node_stats import TestStorageNodeStats
+from e2e_tests.test_volume_clone_lvol import TestVolumeCloneLvol
+from e2e_tests.test_volume_priority import (
+    TestVolumePriority,  # UNCERTAIN: volume priority enforcement unclear
+)
+from e2e_tests.test_volume_qos_dynamic import TestVolumeQosDynamic
+from e2e_tests.test_volume_suspend_resume import (
+    TestVolumeSuspendResume,  # UNCERTAIN: volume suspend/resume may not be wired
+)
+from e2e_tests.upgrade_tests.k8s_major_upgrade import (
+    K8sNativeMajorUpgrade,
+    K8sNativeMajorUpgradeDualNode,
+)
+from e2e_tests.upgrade_tests.major_upgrade import (
+    TestMajorUpgrade,
+    TestMajorUpgradeDualNode,
+    TestMajorUpgradeSingleNode,
+)
+from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+from load_tests.migration_load import (
+    MigrationConcurrencyCurve,
+    MigrationFreezeByVolumeSize,
+    MigrationTimeBySnapshotCount,
+)
+from load_tests.replication_load import (
+    ReplicationCycleTimeBySize,
+    ReplicationDemoteDowntimeBySize,
+)
+from stress_test.continuous_backup_stress import (
+    BackupStressComprehensive,
+    BackupStressCryptoMix,
+    BackupStressFilesystemSecurityMix,
+    BackupStressLargeScale,
+    BackupStressMarathon,
+    BackupStressParallelSnapshots,
+    BackupStressPolicyRetention,
+    BackupStressRdmaFailover,
+    BackupStressRestoreConcurrent,
+    BackupStressRetentionMergeCycles,
+    BackupStressTcpFailover,
+)
+from stress_test.continuous_bulk_lvol_delete import (
+    BulkLvolDeleteDocker,
+    BulkLvolDeleteK8s,
+    BulkLvolHotDeleteDocker,
+    BulkLvolHotDeleteK8s,
+)
+from stress_test.continuous_failover_ha import RandomFailoverTest
+from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
+from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
+from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
+from stress_test.continuous_failover_ha_multi_client import (
+    RandomMultiClientFailoverTest,
+)
+from stress_test.continuous_failover_ha_multi_client_quick_outage import (
+    RandomRapidFailoverNoGap,
+    RandomRapidFailoverNoGapV2NoMigration,
+    RandomRapidFailoverNoGapV2WithMigration,
+)
+from stress_test.continuous_failover_ha_multi_outage import (
+    RandomMultiClientMultiFailoverTest,
+)
+from stress_test.continuous_failover_ha_multi_outage_all_nodes import (
+    RandomMultiClientMultiFailoverAllNodesTest,
+)
+from stress_test.continuous_failover_ha_namespace import (
+    RandomMultiClientFailoverNamespaceTest,
+)
+from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
+from stress_test.continuous_failover_ha_rdma_multi_outage import (
+    RandomRDMAMultiFailoverTest,
+)
+from stress_test.continuous_failover_ha_security import (
+    RandomAllSecurityFailoverTest,
+    RandomSecurityFailoverTest,
+)
+from stress_test.continuous_k8s_native_failover import (
+    K8sNativeBasicFailoverTest,
+    K8sNativeFailoverTest,
+    K8sNativeQuickFailoverTest,
+    K8sNativeRapidFailoverNoGapTest,
+    K8sNativeResilientFailoverTest,
+    K8sNativeScaleBreakTest,
+)
+from stress_test.continuous_lvol_dirfill_stress import TestLvolDirFillStress
+from stress_test.continuous_parallel_lvol_snapshot_clone import (
+    TestParallelLvolSnapshotCloneAPI,
+)
+from stress_test.continuous_parallel_namespace_lvol import (
+    TestParallelNamespaceLvolDocker,
+    TestParallelNamespaceLvolK8s,
+)
+from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
+from stress_test.device_failure_migration import (
+    DeviceAddAfterBootstrapDocker,
+    DeviceAddAfterBootstrapUnderLoadDocker,
+    DeviceFailureMigrationNoLoadDocker,
+    DeviceFailureMigrationNoLoadK8s,
+    DeviceFailureMigrationPCIeNoLoadDocker,
+    DeviceFailureMigrationPCIeNoLoadK8s,
+    DeviceFailureMigrationPCIeUnderLoadDocker,
+    DeviceFailureMigrationPCIeUnderLoadK8s,
+    DeviceFailureMigrationUnderLoadDocker,
+    DeviceFailureMigrationUnderLoadK8s,
+    DevicePCIeRestartNoLoadDocker,
+    DevicePCIeRestartNoLoadK8s,
+    DevicePCIeRestartUnderLoadDocker,
+    DevicePCIeRestartUnderLoadK8s,
+)
+from stress_test.dual_outage_matrix import (
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+    LblkDualOutageMatrixDocker,
+    LblkDualOutageMatrixK8s,
+)
+from stress_test.k8s_native_namespace_failover import (
+    K8sNativeMountVerifiedFailoverTest,
+    K8sNativeNamespacedFailoverTest,
+    K8sNativeRapidLifecycleTest,
+)
+from stress_test.large_scale_lvol_stress import (
+    LargeScaleLvolDocker,
+    LargeScaleLvolK8s,
+)
+from stress_test.lblk_outage_matrix import (
+    LblkOutageMatrixDocker,
+    LblkOutageMatrixK8s,
+)
+from stress_test.lblk_stress import (
+    LblkMultiOutageStressDocker,
+    LblkQuickOutageStressDocker,
+    LblkRapidOutageStressDocker,
+    LblkRapidOutageStressK8s,
+    LblkResilientStressK8s,
+    LblkStressDocker,
+    LblkStressK8s,
+)
+from stress_test.lvol_ha_stress_fio import (
+    TestLvolHAClusterGracefulShutdown,
+    TestLvolHAClusterNetworkInterrupt,
+    TestLvolHAClusterPartialNetworkOutage,
+    TestLvolHAClusterRunAllScenarios,
+    TestLvolHAClusterStorageNodeCrash,
+)
+from stress_test.lvol_snap_clone_fio_failover import TestFailoverScenariosStorageNodes
+from stress_test.lvol_stress_fio_run import TestStressLvolCloneClusterFioRun
+from stress_test.mass_create_delete_stress import (
+    MassCreateDelete_1x500_Docker,
+    MassCreateDelete_1x500_K8s,
+    MassCreateDelete_30x100_Docker,
+    MassCreateDelete_30x100_K8s,
+    MassCreateDelete_300x10_Docker,
+    MassCreateDelete_300x10_K8s,
+    MassCreateDelete_500x1_Docker,
+    MassCreateDelete_500x1_K8s,
+    MassCreateDelete_3000x1_Docker,
+    MassCreateDelete_3000x1_K8s,
+    MassCreateDeletePersistent_1x500_Docker,
+    MassCreateDeletePersistent_1x500_K8s,
+    MassCreateDeletePersistent_30x100_Docker,
+    MassCreateDeletePersistent_30x100_K8s,
+    MassCreateDeletePersistent_300x10_6Snap_Docker,
+    MassCreateDeletePersistent_300x10_6Snap_K8s,
+    MassCreateDeletePersistent_300x10_10Snap_Docker,
+    MassCreateDeletePersistent_300x10_10Snap_K8s,
+    MassCreateDeletePersistent_300x10_Docker,
+    MassCreateDeletePersistent_300x10_K8s,
+    MassCreateDeletePersistent_500x1_Docker,
+    MassCreateDeletePersistent_500x1_K8s,
+    MassCreateDeletePersistent_3000x1_Docker,
+    MassCreateDeletePersistent_3000x1_K8s,
+    MassCreateDeleteRestart_300x10_6Snap_Docker,
+    MassCreateDeleteRestart_300x10_6Snap_K8s,
+    MassCreateDeleteRestart_300x10_10Snap_Docker,
+    MassCreateDeleteRestart_300x10_10Snap_K8s,
+    MassCreateDeleteRestart_300x10_Docker,
+    MassCreateDeleteRestart_300x10_K8s,
+    MassCreateRapidRestart_6k_3Snap_Docker,
+    MassCreateRapidRestart_6k_3Snap_K8s,
+)
+from stress_test.mgmt_node_network_outage import (
+    MgmtNodeNetworkOutageTest,
+    MgmtNodeRebootTest,
+)
+from stress_test.product_limits_stress import (
+    ProductLimits_70TiB_Docker,
+    ProductLimits_70TiB_K8s,
+    ProductLimits_Docker,
+    ProductLimits_K8s,
+)
 
 ALL_TESTS = [
     TestLvolFioNpcsCustom,

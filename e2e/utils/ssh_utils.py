@@ -1,29 +1,34 @@
 from __future__ import annotations
 
-import time
-import paramiko
-# paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
-import os
 import gzip
 import json
+
+# paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
+import os
+import random
+import re
+import shlex
 import shutil
+import string
+import subprocess
+import threading
+import time
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import ClassVar
+
+import paramiko
 import paramiko.buffered_pipe
 import paramiko.ssh_exception
+from exceptions.custom_exception import NodeUnreachableTimeout
 from logger_config import setup_logger
-from pathlib import Path
-from datetime import datetime
-import threading
-import random
 from utils.fio_defaults import FIO_MAX_LATENCY
-import string
-import re
-import subprocess
-import shlex
-from collections import defaultdict
+
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
-from exceptions.custom_exception import NodeUnreachableTimeout
+
 # import importlib
 # from glob import glob
 
@@ -651,7 +656,7 @@ class SshUtils:
     #     )
 
     def connect(self, address: str, port: int = 22,
-            bastion_server_address: str = None,
+            bastion_server_address: str | None = None,
             username: str = "ec2-user",
             is_bastion_server: bool = False):
         """
@@ -696,7 +701,7 @@ class SshUtils:
                         return
                     except Exception as e:
                         last_err = e
-            raise Exception(f"All usernames failed for {address}. Last error: {repr(last_err)}")
+            raise Exception(f"All usernames failed for {address}. Last error: {last_err!r}")
 
         # --- VIA BASTION ---
         # ensure bastion client (reuse if alive)
@@ -724,7 +729,7 @@ class SshUtils:
                     continue
                 break
             if (not self._bastion_client) or (not self._bastion_client.get_transport()) or (not self._bastion_client.get_transport().is_active()):
-                raise Exception(f"All usernames failed for bastion {bastion_server_address}. Last error: {repr(last_err)}")
+                raise Exception(f"All usernames failed for bastion {bastion_server_address}. Last error: {last_err!r}")
 
         if is_bastion_server:
             # caller only wanted bastion connection open
@@ -762,7 +767,7 @@ class SshUtils:
             except Exception:
                 pass
 
-        raise Exception(f"Tunnel established, but all usernames failed for target {address}. Last error: {repr(last_err)}")
+        raise Exception(f"Tunnel established, but all usernames failed for target {address}. Last error: {last_err!r}")
 
 
 
@@ -2501,7 +2506,7 @@ class SshUtils:
         self.exec_command(node=node, command=add_node_cmd)
 
     #: 512K dd blocks per unit of `file_size`, by suffix.
-    _DD_BLOCKS_PER_UNIT = {"K": 1 / 512.0, "M": 2, "G": 2048}
+    _DD_BLOCKS_PER_UNIT: ClassVar = {"K": 1 / 512.0, "M": 2, "G": 2048}
 
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
         """Write `file_count` files of `file_size` random bytes into mount_path.
@@ -2522,7 +2527,7 @@ class SshUtils:
             raise ValueError(
                 f"create_random_files: file_size {file_size!r} needs a K, M "
                 f"or G suffix; a bare number has no meaning here.")
-        count = max(1, int(round(n * self._DD_BLOCKS_PER_UNIT[unit])))
+        count = max(1, round(n * self._DD_BLOCKS_PER_UNIT[unit]))
         for i in range(1, file_count + 1):
             file_path = f"{mount_path}/{file_prefix}_{i}"
             command = f"sudo dd if=/dev/urandom of={file_path} bs=512K count={count} status=none"
@@ -3475,7 +3480,7 @@ class SshUtils:
                     self.logger.error(f"[PLACEMENT_DUMP] INVALID: {fp}")
                     all_ok = False
             except Exception as e:
-                self.logger.error(f"[PLACEMENT_DUMP] ERROR validating {fp}: {repr(e)}")
+                self.logger.error(f"[PLACEMENT_DUMP] ERROR validating {fp}: {e!r}")
                 all_ok = False
         return all_ok
 
@@ -5635,8 +5640,8 @@ class RunnerK8sLog:
             self.logger.info("K8s resource monitor thread stopped.")
 
 def _rid(n=6):
-    import string
     import random
+    import string
     letters = string.ascii_uppercase
     digits = string.digits
     return random.choice(letters) + ''.join(random.choices(letters + digits, k=n-1))

@@ -39,7 +39,7 @@ def run(name, argv):
     print(name)
     print("=" * 68)
     r = subprocess.run([sys.executable] + argv, cwd=REPO)
-    print("")
+    print()
     return r.returncode == 0
 
 
@@ -72,16 +72,16 @@ def check_lane_creates_a_pool():
         else:
             print(f"  MISS  {rel}")
             bad.append(rel)
-    print("")
+    print()
     if bad:
         print("  These lane bases never create a pool. On docker the base setup")
         print("  deletes every pool first, so the first `volume add` will fail")
         print("  with 'Pool not found' -- which contains no 'error' substring,")
         print("  so a naive check will pass it through and the test will die")
         print("  somewhere else entirely.")
-        print("")
+        print()
         print("  Fix: call self.ensure_pool() in the base's setup().")
-        print("")
+        print()
         return False
     return True
 
@@ -130,13 +130,13 @@ def check_no_naive_error_checks():
             print(f"        {line[:96]}")
         if len(hits) > 20:
             print(f"    ... and {len(hits) - 20} more")
-        print("")
+        print()
         print("  Use utils.common_utils.cli_failed(out, err) instead. 'Pool not")
         print("  found: testpool' contains no 'error' and cost a nine-hour run.")
-        print("")
+        print()
         return False
     print("  none")
-    print("")
+    print()
     return True
 
 
@@ -182,14 +182,14 @@ def check_seed_writes_to_a_real_mount():
         for rel, i, line in hits:
             print(f"    {rel}:{i}")
             print(f"        {line[:96]}")
-        print("")
+        print()
         print("  self.mount_path is ONE directory for the whole suite. Use")
         print("  self._seed_volume_dual(name), or take the mount point that")
         print("  _connect_and_mount_dual returns and write to that.")
-        print("")
+        print()
         return False
     print("  none")
-    print("")
+    print()
     return True
 
 
@@ -206,7 +206,7 @@ def main():
     print("=" * 68)
     if ok:
         print("PREFLIGHT PASSED -- nothing a cluster was needed to find")
-        print("")
+        print()
         print("Still unproven by this: anything that needs a real cluster.")
         print("Run the smallest case next, not the whole lane.")
         return 0

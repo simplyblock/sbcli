@@ -21,9 +21,8 @@ import time
 
 from e2e_tests.replication.replication_base import (
     ReplicationTestBase,
-    ReplicationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec, cli_failed
+from utils.common_utils import cli_failed, sleep_n_sec
 
 
 class ConsistencyGroupPlacement(ReplicationTestBase):

@@ -23,9 +23,8 @@ import time
 
 from e2e_tests.migration.migration_base import (
     MigrationTestBase,
-    MigrationPreconditionError,
 )
-from utils.common_utils import sleep_n_sec, cli_failed
+from utils.common_utils import cli_failed, sleep_n_sec
 
 
 class MigrationNegativeTargets(MigrationTestBase):
@@ -73,7 +72,7 @@ class MigrationNegativeTargets(MigrationTestBase):
 
         # ── MIG-N-003 a target that is offline ───────────────────────────
         tgt = self.pick_target(src, "no-overlap")
-        ip = next((n.get("mgmt_ip") for n in self.online_nodes()
+        next((n.get("mgmt_ip") for n in self.online_nodes()
                    if (n.get("uuid") or n.get("id")) == tgt), None)
         self.logger.info("[MIG-N-003] shutting %s down, then migrating to it",
                          tgt)

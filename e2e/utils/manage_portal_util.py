@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+
 import requests
-from datetime import datetime, UTC
 
 SUPABASE_TOKEN = os.getenv("SUPABASE_ANON_KEY")
 if not SUPABASE_TOKEN:
@@ -130,7 +131,7 @@ class TestRunsAPI:
         completion_comment: str,
         completion_jira_ticket: str | None = None,
         failure_reason_id: str | None = None,
-        errors: dict = None,
+        errors: dict | None = None,
     ):
         if not self.run_id:
             raise RuntimeError("No run_id found. Call create_run() first.")

@@ -35,7 +35,7 @@ import re
 import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec, cli_failed
+from utils.common_utils import cli_failed, sleep_n_sec
 
 
 class ReplicationPreconditionError(Exception):

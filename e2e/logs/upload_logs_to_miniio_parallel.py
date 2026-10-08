@@ -17,22 +17,22 @@ Parallel MinIO uploader with:
 """
 from __future__ import annotations
 
-import os
-import json
 import argparse
-import time
-import subprocess
+import json
+import os
 import random
+import subprocess
+import sys as _sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import paramiko
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from utils import ssh_auth  # noqa: E402
 
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import boto3
 from boto3.s3.transfer import TransferConfig
+from utils import ssh_auth  # noqa: E402
 
 # Optional tqdm for byte-level progress
 try:
