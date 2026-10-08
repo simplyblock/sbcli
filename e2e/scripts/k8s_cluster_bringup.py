@@ -783,6 +783,48 @@ def wait_control_plane_ready(timeout=1800):
         f"that cannot answer them. Check: kubectl -n {NS} get controlplane")
 
 
+def dump_stall_state(name: str) -> None:
+    """Everything worth seeing when the deployment stops advancing.
+
+    Written after a run sat in Expanding/Activating for the full 1800s and
+    then failed with nothing but the phase name. No node had reached Failed,
+    so the per-node warning above never fired; the test step never ran, so no
+    logs were collected; and the cluster was gone by the time anyone looked.
+    That left one phase string as the only evidence a 30 minute wait
+    produced. Not enough to act on.
+
+    Reads only, each independent and best-effort: this runs on the failure
+    path, and a dump that raises would replace the real error with its own.
+    """
+    def show(title, *args, limit=50):
+        log(f"---- {title}")
+        try:
+            out = kubectl(*args, check=False)
+        except Exception as exc:                       # noqa: BLE001
+            log(f"     (could not read: {str(exc)[:120]})")
+            return
+        lines = (out or "").strip().splitlines()
+        if not lines:
+            log("     (nothing)")
+            return
+        for line in lines[:limit]:
+            log(f"     {line}")
+        if len(lines) > limit:
+            log(f"     ... {len(lines) - limit} more line(s)")
+
+    log("")
+    log("state at the point the deployment stopped advancing:")
+    show("storage nodes", "get", "storagenode", "-o", "wide")
+    show("storage cluster", "get", "storagecluster", "-o", "wide")
+    show("pods that are not Running", "get", "pods",
+         "--field-selector=status.phase!=Running", "-o", "wide")
+    show("recent warnings", "get", "events", "--field-selector=type=Warning",
+         "--sort-by=.lastTimestamp", limit=30)
+    show(f"clusterdeploymentconfig {name}", "describe",
+         "clusterdeploymentconfig", name, limit=80)
+    log("")
+
+
 def approve_and_wait(name: str, timeout: int) -> None:
     # The gate the manual deploy waits on before it edits the draft.
     wait_control_plane_ready(int(os.environ.get("TIMEOUT_CP_READY", "1800")))
@@ -837,6 +879,7 @@ def approve_and_wait(name: str, timeout: int) -> None:
             log("         still waiting -- usually terminal, but the deadline "
                 "decides, not this check")
         time.sleep(15)
+    dump_stall_state(name)
     raise RuntimeError(
         f"deployment did not finish within {timeout}s ({last}).\n"
         f"This one is not retryable in place: an approved document is "

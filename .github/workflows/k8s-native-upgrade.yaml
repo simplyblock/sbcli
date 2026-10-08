@@ -1799,7 +1799,20 @@ jobs:
       - name: Calculate Total Time Taken
         if: always()
         run: |
-          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          # Both default, because this step is if: always() and the test step
+          # may never have run -- a bring-up that stalls leaves TEST_END_TIME
+          # unset, and $(( 1791405229 - )) is "operand expected", which then
+          # leaves TEST_TIME unset for every line below it including
+          # LOG_COLLECT_TIMEOUT_MINS. Four shell errors in the summary of a
+          # run whose real failure was somewhere else entirely.
+          TEST_START_TIME="${TEST_START_TIME:-0}"
+          TEST_END_TIME="${TEST_END_TIME:-$(date +%s)}"
+          if [ "$TEST_START_TIME" -gt 0 ]; then
+            TEST_TIME=$((TEST_END_TIME - TEST_START_TIME))
+          else
+            TEST_TIME=0
+          fi
+          [ "$TEST_TIME" -ge 0 ] || TEST_TIME=0
           TEST_TIME_HOURS=$(($TEST_TIME / 3600))
           TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))
           TEST_TIME_SECS=$(($TEST_TIME % 60))
