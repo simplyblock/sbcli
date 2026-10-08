@@ -739,8 +739,7 @@ class TestAccessLog(unittest.TestCase):
 
     def test_scrapes_are_not_logged(self):
         with captured_records(proxy_mod.access_logger) as records:
-            response = self.client.get(
-                proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+            response = self.client.get(proxy_mod.METRICS_ENDPOINT)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(records, [])
@@ -928,13 +927,13 @@ class TestMetricsEndpoint(MetricsReader, unittest.TestCase):
         self.proxy = self.app.state.proxy
         self.client = TestClient(self.app)
 
-    def test_metrics_require_credentials(self):
+    def test_metrics_do_not_require_credentials(self):
         response = self.client.get(proxy_mod.METRICS_ENDPOINT)
 
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 200)
 
-    def test_metrics_are_served_to_an_authorized_caller(self):
-        response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+    def test_metrics_are_served(self):
+        response = self.client.get(proxy_mod.METRICS_ENDPOINT)
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("spdk_proxy_response_duration_seconds", response.text)
@@ -947,7 +946,7 @@ class TestMetricsEndpoint(MetricsReader, unittest.TestCase):
     def test_observations_reach_the_exposition(self):
         self.proxy.metrics.observe_response("bdev_get_bdevs", 0.25)
 
-        response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+        response = self.client.get(proxy_mod.METRICS_ENDPOINT)
 
         self.assertIn('method="bdev_get_bdevs"', response.text)
 
@@ -978,7 +977,7 @@ class TestMetricsEndpoint(MetricsReader, unittest.TestCase):
                 )
 
     def test_credentials_never_appear_in_the_exposition(self):
-        response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+        response = self.client.get(proxy_mod.METRICS_ENDPOINT)
 
         self.assertNotIn("secret", response.text)
 

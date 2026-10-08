@@ -626,8 +626,8 @@ def create_app(settings: ProxySettings) -> FastAPI:
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.proxy = proxy
 
-    # Served on the RPC port behind the same credentials as the RPCs
-    # themselves: `expose` forwards kwargs to the route decorator.
+    # Served on the RPC port, unauthenticated: a scraper has no JSON-RPC
+    # credentials to present, same as `simplyblock_web`'s `/_meta/metrics`.
     # Ungrouped status codes: the default folds every client-side rejection
     # into one `4xx` series, which cannot tell a malformed body (400) from bad
     # credentials (401), and only a handful of codes are reachable here.
@@ -641,7 +641,6 @@ def create_app(settings: ProxySettings) -> FastAPI:
         app,
         endpoint=METRICS_ENDPOINT,
         include_in_schema=False,
-        dependencies=[Depends(require_authorization)],
     )
 
     app.add_middleware(AccessLogMiddleware)
