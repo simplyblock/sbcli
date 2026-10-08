@@ -1269,14 +1269,30 @@ jobs:
           CLUSTER_SEC="${{ inputs.cluster_security || 'none' }}"
           TESTNAME_INPUT="${{ inputs.testname || '' }}"
           if [ "$CLUSTER_SEC" = "backup" ] || [ "$TESTNAME_INPUT" = "backup-topology" ] || echo "$TESTNAME_INPUT" | grep -qi "Backup"; then
+            # v1alpha2 replaced the backup block outright. bucket, endpoint
+            # and credentialsSecretRef are REQUIRED; localEndpoint became
+            # endpoint; and localTesting, secondaryTarget, snapshotBackups
+            # and withCompression are gone -- not renamed, gone -- so they
+            # are dropped rather than guessed at. Sending the old shape got
+            # "unknown field" warnings for five keys and then a hard
+            # "spec.backup.bucket: Required value", which failed the run.
+            #
+            # The bucket is named for the cluster uuid because that is what
+            # the MinIO cleanup step deletes (simplyblock-backup-$CLUSTER_ID).
+            # CLUSTER_ID is not parsed until much later in this job, but the
+            # StorageCluster exists by now and carries the same value in
+            # .status.uuid, so read it from there.
+            SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
+            if [ -z "${SB_UUID}" ]; then
+              echo "::warning::could not read StorageCluster .status.uuid; naming the backup bucket after the run id, which the MinIO cleanup step will not match"
+              SB_UUID="${GITHUB_RUN_ID}"
+            fi
+            echo "backup bucket: simplyblock-backup-${SB_UUID}"
             BACKUP_SPEC="  backup:
+              bucket: simplyblock-backup-${SB_UUID}
+              endpoint: ${MINIO_ENDPOINT}
               credentialsSecretRef:
-                name: backup-credentials
-              localEndpoint: ${MINIO_ENDPOINT}
-              localTesting: true
-              secondaryTarget: 0
-              snapshotBackups: true
-              withCompression: false"
+                name: backup-credentials"
           fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)

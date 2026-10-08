@@ -1001,10 +1001,11 @@ jobs:
           # region. localEndpoint is endpoint; localTesting, secondaryTarget,
           # snapshotBackups and withCompression have no field here any more --
           # not renamed, gone -- so they are dropped rather than guessed at.
-          BACKUP_SPEC="  backup:
-              credentialsSecretRef:
-                name: backup-credentials
-              endpoint: ${MINIO_ENDPOINT}"
+          # Built at the patch site below, not here: v1alpha2 requires
+          # spec.backup.bucket, the bucket is named for the cluster uuid so the
+          # MinIO cleanup step can find it, and that uuid does not exist until
+          # the cluster has been brought up a few lines further down.
+          BACKUP_SPEC=""
 
           echo "=== Bringing C1 up in ${NS_C1} through the deployment config ==="
           NAMESPACE="${NS_C1}"
@@ -1085,6 +1086,17 @@ jobs:
           # so the whole step aborted here and the pool below was never
           # applied. enableNodeAffinity and the two thresholds carry the same
           # names in v1alpha2; only backup and vault are reshaped.
+          SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
+          if [ -n "${SB_UUID}" ]; then
+            BACKUP_SPEC="  backup:
+              bucket: simplyblock-backup-${SB_UUID}
+              endpoint: ${MINIO_ENDPOINT}
+              credentialsSecretRef:
+                name: backup-credentials"
+            echo "backup bucket: simplyblock-backup-${SB_UUID}"
+          else
+            echo "::warning::no StorageCluster .status.uuid yet; leaving spec.backup unset rather than sending an invalid one"
+          fi
           cat > /tmp/cluster-extra.yaml <<EOF
           spec:
             enableNodeAffinity: true
@@ -1183,10 +1195,11 @@ jobs:
           # region. localEndpoint is endpoint; localTesting, secondaryTarget,
           # snapshotBackups and withCompression have no field here any more --
           # not renamed, gone -- so they are dropped rather than guessed at.
-          BACKUP_SPEC="  backup:
-              credentialsSecretRef:
-                name: backup-credentials
-              endpoint: ${MINIO_ENDPOINT}"
+          # Built at the patch site below, not here: v1alpha2 requires
+          # spec.backup.bucket, the bucket is named for the cluster uuid so the
+          # MinIO cleanup step can find it, and that uuid does not exist until
+          # the cluster has been brought up a few lines further down.
+          BACKUP_SPEC=""
 
           echo "=== Bringing C2 up in ${NS_C2} through the deployment config ==="
           NAMESPACE="${NS_C2}"
@@ -1267,6 +1280,17 @@ jobs:
           # so the whole step aborted here and the pool below was never
           # applied. enableNodeAffinity and the two thresholds carry the same
           # names in v1alpha2; only backup and vault are reshaped.
+          SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
+          if [ -n "${SB_UUID}" ]; then
+            BACKUP_SPEC="  backup:
+              bucket: simplyblock-backup-${SB_UUID}
+              endpoint: ${MINIO_ENDPOINT}
+              credentialsSecretRef:
+                name: backup-credentials"
+            echo "backup bucket: simplyblock-backup-${SB_UUID}"
+          else
+            echo "::warning::no StorageCluster .status.uuid yet; leaving spec.backup unset rather than sending an invalid one"
+          fi
           cat > /tmp/cluster-extra.yaml <<EOF
           spec:
             enableNodeAffinity: true

@@ -1472,11 +1472,12 @@ jobs:
             # withCompression have no field here any more -- they are not
             # renamed, they are gone from the cluster spec -- so they are
             # dropped rather than guessed at, and the run says so.
-            echo "::warning title=backup spec reshaped::v1alpha2 StorageCluster.backup keeps only endpoint and credentialsSecretRef; localTesting, secondaryTarget, snapshotBackups and withCompression were dropped. Verify backup behaviour before trusting a backup run."
-            BACKUP_SPEC="  backup:
-              credentialsSecretRef:
-                name: backup-credentials
-              endpoint: ${MINIO_ENDPOINT}"
+            echo "::warning title=backup spec reshaped::v1alpha2 StorageCluster.backup takes bucket, endpoint, credentialsSecretRef and region; localTesting, secondaryTarget, snapshotBackups and withCompression were dropped. Verify backup behaviour before trusting a backup run."
+            # Deferred: v1alpha2 also REQUIRES spec.backup.bucket, and the bucket
+            # is named for the cluster uuid so the MinIO cleanup can find it --
+            # which does not exist until the bring-up below has run.
+            BACKUP_WANTED=1
+            BACKUP_SPEC=""
           fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
@@ -1575,6 +1576,19 @@ jobs:
           # so the whole step aborted here and the pool below was never
           # applied. enableNodeAffinity and the two thresholds carry the same
           # names in v1alpha2; only backup and vault are reshaped.
+          if [ "${BACKUP_WANTED:-0}" = "1" ]; then
+            SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
+            if [ -n "${SB_UUID}" ]; then
+              BACKUP_SPEC="  backup:
+              bucket: simplyblock-backup-${SB_UUID}
+              endpoint: ${MINIO_ENDPOINT}
+              credentialsSecretRef:
+                name: backup-credentials"
+              echo "backup bucket: simplyblock-backup-${SB_UUID}"
+            else
+              echo "::warning::no StorageCluster .status.uuid; leaving spec.backup unset rather than sending an invalid one"
+            fi
+          fi
           cat > /tmp/cluster-extra.yaml <<EOF
           spec:
             enableNodeAffinity: true
