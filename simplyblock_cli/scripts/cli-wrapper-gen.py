@@ -59,6 +59,20 @@ def escape_python_string(text):
     return text.replace('%', '%%')
 
 
+_ARGPARSE_REGISTERED_ACTIONS = {
+    "store", "store_const", "store_true", "store_false",
+    "append", "append_const", "count", "version", "extend",
+}
+
+
+def action_value(action):
+    if action in _ARGPARSE_REGISTERED_ACTIONS:
+        return "'%s'" % action
+    # Not one of argparse's registered string names (e.g. BooleanOptionalAction) -
+    # those must be passed as the class itself, not a string.
+    return f"argparse.{action}"
+
+
 def choice_value(value):
     if isinstance(value, int):
         return str(value)
@@ -206,6 +220,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["make_identifier"] = make_identifier
         environment.filters["apply_deprecated_warning"] = apply_deprecated_warning
         environment.filters["bool_value"] = bool_value
+        environment.filters["action_value"] = action_value
         environment.filters["escape_python_string"] = escape_python_string
         environment.filters["nargs"] = nargs
         environment.filters["choice_value"] = choice_value
