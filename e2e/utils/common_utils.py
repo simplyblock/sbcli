@@ -1,10 +1,11 @@
+import json
+import os
+import re
 import time
+
+import requests
 from logger_config import setup_logger
 from utils import proxmox
-import re
-import os
-import requests
-import json
 
 
 class CommonUtils:

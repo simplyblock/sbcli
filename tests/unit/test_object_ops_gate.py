@@ -15,7 +15,10 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core import cluster_ops
 from simplyblock_core.controllers import (
-    lvol_controller, ops_gate, pool_controller, snapshot_controller,
+    lvol_controller,
+    ops_gate,
+    pool_controller,
+    snapshot_controller,
 )
 from simplyblock_core.models.cluster import Cluster
 

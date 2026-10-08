@@ -1,14 +1,13 @@
 """Chain-target resolution for replicated snapshots.
 
-Root cause of the case-2 all-zeros fail-over (lab 2026-08-14, run 9):
-``snap_ref_id`` is never populated on internal replication snapshots and the
+Root cause of the case-2 all-zeros fail-over (lab 2026-08-14, run 9): the
 old lookup matched target-cluster nodes against source-cluster instances, so
 ``bdev_lvol_add_clone`` was never attempted (chain_attempts=0 across the whole
 run). Every replicated snapshot ended up a standalone blob: fail-over clones
 read only the last delta and zeros elsewhere.
 """
-from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 
 
@@ -78,13 +77,23 @@ def test_first_snapshot_has_no_predecessor(monkeypatch):
     assert sr._previous_replicated_snapshot(cur, False) is None
 
 
-def test_snap_ref_id_wins_when_set(monkeypatch):
+def test_a_replicated_sibling_wins_over_snap_ref_id(monkeypatch):
+    """snap_ref_id names a clone lineage's ORIGIN (snapshot_controller.add
+    sets it on every snapshot of a clone), not the snapshot before this one.
+    Letting it win chained every delta onto the origin (2026-10-01)."""
     ref = _mk_snap("refsnap", 50, "LV1", "N1", target="TR")
     cur = _mk_snap("cur", 300, "LV1", "N1", ref="refsnap")
     newer_cand = _mk_snap("cand", 200, "LV1", "N1", target="TC")
     _patch(monkeypatch, [ref, cur, newer_cand])
     prev = sr._previous_replicated_snapshot(cur, False)
-    assert prev.uuid == "refsnap"
+    assert prev.uuid == "cand"
+
+
+def test_snap_ref_id_is_used_only_without_a_sibling(monkeypatch):
+    ref = _mk_snap("refsnap", 50, "LV1", "N1", target="TR")
+    cur = _mk_snap("cur", 300, "LV1", "N1", ref="refsnap")
+    _patch(monkeypatch, [ref, cur])
+    assert sr._previous_replicated_snapshot(cur, False).uuid == "refsnap"
 
 
 def test_failback_uses_source_replicated_uuid(monkeypatch):

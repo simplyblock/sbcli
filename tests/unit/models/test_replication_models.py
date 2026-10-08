@@ -1,10 +1,10 @@
 """D1 unit tests for cross-cluster replication model + RPC additions."""
-from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
-from simplyblock_core.models.lvol_model import LVol, LVolReplication
-from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.rpc_client import RPCClient
-
 from pydantic import SecretStr
+
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
+from simplyblock_core.rpc_client import RPCClient
 
 
 def _make_client():
@@ -58,7 +58,7 @@ def test_job_schedule_replication_final_constant():
 def test_transfer_final_step_param_shape():
     captured: dict = {}
     client = _make_client()
-    client._request = lambda method, params: captured.update(method=method, params=params)
+    client._request3 = lambda method, **kwargs: captured.update(method=method, params=kwargs)
 
     client.bdev_lvol_transfer_final_step(
         "lvs/LVOL_1", 42, "lvs/SNAP_1", 2, "hub_bdev", operation="replicate")
@@ -77,7 +77,7 @@ def test_transfer_final_step_param_shape():
 def test_final_migration_alias_delegates_identically():
     captured: dict = {}
     client = _make_client()
-    client._request = lambda method, params: captured.update(method=method, params=params)
+    client._request3 = lambda method, **kwargs: captured.update(method=method, params=kwargs)
 
     client.bdev_lvol_transfer_final_step("lvs/LVOL_1", 42, "lvs/SNAP_1", 2, "hub_bdev", "migrate")
 

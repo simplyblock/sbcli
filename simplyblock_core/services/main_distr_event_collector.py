@@ -4,12 +4,17 @@ import time
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
-from simplyblock_core.controllers import events_controller, device_controller
+from simplyblock_core import (
+    constants,
+    db_controller,
+    distr_controller,
+    rpc_client,
+    utils,
+)
+from simplyblock_core.controllers import device_controller, events_controller
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -177,7 +182,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
         remote_bdev = f"remote_{device_obj.alceml_bdev}n1"
 
     ctrl_name = remote_bdev.removesuffix("n1")
-    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(ctrl_name)
+    ret = event_node_obj.rpc_client().bdev_nvme_controller_list(ctrl_name)
     if not ret:
         return False
 
@@ -196,7 +201,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
     if not healthy:
         return False
 
-    return bool(event_node_obj.rpc_client().get_bdevs(remote_bdev))
+    return bool(event_node_obj.rpc_client().bdev_get(remote_bdev))
 
 
 def remove_remote_device_from_node(node_id, device_id):
@@ -218,7 +223,10 @@ def process_device_event(event, logger):
 
         device_obj = None
         device_node_obj = None
-        for node in db.get_storage_nodes():
+        # `cluster_device_order` is ordered within one cluster, so the search
+        # belongs in the reporting node's cluster; it carries no index of its
+        # own, which is what keeps this a loop rather than a lookup.
+        for node in db.get_storage_nodes_by_cluster_id(event_node_obj.cluster_id):
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
                     device_obj = dev
@@ -241,16 +249,15 @@ def process_device_event(event, logger):
                 if device_obj.bdev_type == "aio":
                     # AIO devices have no nvme controller — probe the base
                     # bdev instead: bdev gone => the late event is real.
-                    ret, err = event_node_obj.rpc_client().get_bdevs_2(device_obj.nvme_bdev)
-                    controller_missing = bool(err) or not ret
+                    controller_missing = event_node_obj.rpc_client().bdev_get(device_obj.nvme_bdev) is None
                 else:
-                    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
-                    controller_missing = bool(err) and err['code'] == 22
+                    controller_missing = not event_node_obj.rpc_client().bdev_nvme_controller_list(
+                        device_obj.nvme_controller)
                 if controller_missing:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s'
                 else:
-                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, error checking controller: {err}, skipping")
+                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, controller/bdev still present, skipping")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s_skipping'
                     return
 
@@ -748,7 +755,11 @@ def ensure_collectors(nodes):
             key = f"{node_id}:{source}"
             thread = threads_maps.get(key)
             if thread is None or thread.is_alive() is False:
-                t = threading.Thread(target=target, args=(node_id,))
+                t = threading.Thread(
+                    target=target,
+                    args=(node_id,),
+                    daemon=True,  # prevents main thread failures from keeping the process alive
+                )
                 t.start()
                 threads_maps[key] = t
 

@@ -1,8 +1,9 @@
-import paramiko
-import os
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+import paramiko
 
 with open('cluster_metadata.json') as f:
     meta = json.load(f)

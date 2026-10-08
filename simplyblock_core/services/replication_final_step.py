@@ -12,9 +12,9 @@ they never share nodes, so the source/target path sets never overlap — the ANA
 choreography is the simple "no-overlap" case (target primary → optimized, other
 target paths → non_optimized, all source paths → inaccessible).
 """
-from simplyblock_core import xfer_timing
-from simplyblock_core import db_controller, utils
+from simplyblock_core import db_controller, utils, xfer_timing
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -141,7 +141,7 @@ def _transfer_hub_live(tgt_node):
         return False
     try:
         rpc_client = tgt_node.rpc_client()
-        if not rpc_client.get_bdevs(hub.bdev_name):
+        if not rpc_client.bdev_get(hub.bdev_name):
             logger.info("Transfer hublvol bdev %s missing on %s (restart wipes SPDK "
                         "state); recreating", hub.bdev_name, tgt_node.get_id())
             return False
@@ -185,7 +185,7 @@ def ensure_hub_attached(src_rpc, tgt_node):
 
     hub = tgt_node.transfer_hublvol
     # Already attached (prior iteration or crash recovery).
-    if src_rpc.get_bdevs(hub.get_remote_bdev_name()):
+    if src_rpc.bdev_get(hub.get_remote_bdev_name()):
         return hub.bdev_name, hub.get_remote_bdev_name(), None
 
     for iface in tgt_node.data_nics:
@@ -296,7 +296,13 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     for peer in _online_peers(tgt_node):
       with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
                              peer=peer.get_id()):
-        if not peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite):
+        try:
+            add_clone_ok = peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
+        except RPCException as e:
+            logger.warning(
+                f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal): {e}")
+            continue
+        if not add_clone_ok:
             logger.warning(
                 f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal)")
 

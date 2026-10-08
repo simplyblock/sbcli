@@ -30,13 +30,11 @@ import pytest
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.storage_node import StorageNode
-
 from tests.integration.ftt2.conftest import (
+    create_test_lvol,
     patch_externals,
     prepare_node_for_restart,
-    create_test_lvol,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,8 +75,6 @@ def _run_restart(env, node_idx):
     node = env['nodes'][node_idx]
     db = env['db']
     patches = patch_externals()
-    for p in patches:
-        p.start()
     try:
         snode = db.get_storage_node_by_id(node.uuid)
         snode.status = StorageNode.STATUS_RESTARTING
@@ -90,8 +86,7 @@ def _run_restart(env, node_idx):
             snode.write_to_db(db.kv_store)
         return result
     finally:
-        for p in patches:
-            p.stop()
+        patches.close()
 
 
 def _get_set_opts_roles(env, server_idx):
@@ -136,8 +131,6 @@ class TestHublvolActivate:
         # attach run synchronously (production defers it to a daemon thread), so
         # the tertiary's second path is present when the tests inspect state.
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             # Step 1: primary creates hublvol
             n0.create_hublvol(cluster_nqn=cluster.nqn)
@@ -151,8 +144,7 @@ class TestHublvolActivate:
             # Step 3b: tertiary connects with 2 paths (primary + sec_1)
             n2.connect_to_hublvol(n0, failover_node=n1, role="tertiary")
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
 
     def test_primary_hublvol_optimized_ana(self):
         """Primary's hublvol listener must use ANA state = optimized."""

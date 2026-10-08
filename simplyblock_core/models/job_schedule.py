@@ -1,11 +1,41 @@
 import datetime
+from types import MappingProxyType
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index
+
+
+class FrozenTaskError(RuntimeError):
+    """A write to a task that was handed out for reading only."""
 
 
 class JobSchedule(BaseModel):
 
     _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        # get_id() embeds cluster and date, which is what makes a per-cluster
+        # range read cheap; `uuid` is what makes a lookup by the bare task id a
+        # point read instead of a scan of the entire (never-pruned) table.
+        Index('uuid'),
+        Index(('cluster_id', 'function_name', 'status')),
+        # The snapshot_replication task that ships a given snapshot, keyed by the
+        # snapshot_id buried in function_params. A volume's replication-status
+        # read resolves its own snapshots (SnapShot.lvol_uuid) and then the task
+        # per snapshot through this index -- a handful of point reads instead of
+        # a walk of the whole never-pruned task table to find the one task that
+        # ships each (6245 tasks -> a 30s status read, live 2026-10-03). Only
+        # snapshot_replication tasks carry a snapshot_id, so nothing else is
+        # indexed; the relationship is 1:1 in steady state.
+        Index('repl_snapshot_id', arity=1, extract=lambda t: (
+            [(t.function_params['snapshot_id'],)]
+            if t.function_name == t.FN_SNAPSHOT_REPLICATION
+            and isinstance(t.function_params, dict)
+            and t.function_params.get('snapshot_id')
+            else []
+        )),
+    )
 
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
@@ -57,6 +87,33 @@ class JobSchedule(BaseModel):
     # gives a soft lease: a different host may take over only once the lease
     # goes stale (see constants.TASK_LEASE_TTL_SEC). See tasks_controller.claim_task.
     owner: str = ""
+
+    # Set only on the view handed to a task handler. Deliberately not
+    # annotated: the leading underscore keeps it out of the serialized
+    # attributes (BaseModel._annotated_attrs).
+    _frozen = False
+
+    def __setattr__(self, name, value):
+        if self._frozen:
+            raise FrozenTaskError(
+                f"{name}: this task is read-only. The driver re-reads the row "
+                f"after the handler returns, so an in-memory write here would "
+                f"be dropped; persist it with task_runner_base.checkpoint() or "
+                f"set_result()."
+            )
+        super().__setattr__(name, value)
+
+    def frozen_view(self):
+        """An independent read-only copy, for handing to a task handler.
+
+        Both the attributes and ``function_params`` reject writes, so a handler
+        that mutates what it was given fails where it stands rather than losing
+        the write silently.
+        """
+        view = JobSchedule().from_dict(self.to_dict())
+        view.function_params = MappingProxyType(view.function_params)
+        view._frozen = True
+        return view
 
     def watch_scope(self):
         return (self.cluster_id,)

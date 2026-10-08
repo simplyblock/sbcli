@@ -78,6 +78,41 @@ class TestCreateStorageNode:
         assert response.json() == TASK_ID
         assert response.headers['Location'].endswith(f'/tasks/{TASK_ID}/')
 
+    def test_returns_the_existing_task_when_an_add_is_already_in_flight(
+            self, client, db, cluster, tasks_controller):
+        # add_node_add_task's anti-race guard (tasks_controller._validate_new_
+        # task_node_add) returns False when a task for this node_addr is
+        # already running, on purpose -- a retried request creating a SECOND
+        # concurrent add-node task raced SPDK's config-slot classify-then-
+        # create logic and produced 6 nodes for a 4-slot host (2026-07-23).
+        # That is not a failure from this endpoint's point of view: a task
+        # already exists and tracking it is exactly what the caller wants, so
+        # the response must still be 201 with that task's id, not a 500 for
+        # what the operator's own retry produced.
+        tasks_controller.add_node_add_task.return_value = False
+        tasks_controller.get_active_node_add_task.return_value = TASK_ID
+
+        response = client.post(f'{BASE}/', json={
+            'node_address': '10.0.0.10:5000',
+            'interface_name': 'eth0',
+        })
+
+        assert response.status_code == 201
+        tasks_controller.get_active_node_add_task.assert_called_once_with(
+            CLUSTER_ID, '10.0.0.10:5000')
+        assert response.json() == TASK_ID
+
+    def test_raises_when_no_task_was_created_and_none_is_already_in_flight(
+            self, client, db, cluster, tasks_controller):
+        tasks_controller.add_node_add_task.return_value = False
+        tasks_controller.get_active_node_add_task.return_value = False
+
+        with pytest.raises(ValueError):
+            client.post(f'{BASE}/', json={
+                'node_address': '10.0.0.10:5000',
+                'interface_name': 'eth0',
+            })
+
     def test_expand_flag_forwarded(self, client, db, cluster, tasks_controller):
         tasks_controller.add_node_add_task.return_value = TASK_ID
 
@@ -119,6 +154,22 @@ class TestGetStorageNode:
 
         assert response.status_code == 200
         assert response.json()['status'] == status
+
+    def test_both_replica_ids_are_reported(self, client, db, storage_node):
+        """The operator's drain avoids migration targets whose replica set
+        includes the node being removed, so it needs both replica ids."""
+        storage_node.secondary_node_id = '22222222-2222-2222-2222-222222222222'
+        storage_node.tertiary_node_id = '33333333-3333-3333-3333-333333333333'
+
+        body = client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()
+
+        assert body['secondary_node_id'] == '22222222-2222-2222-2222-222222222222'
+        assert body['tertiary_node_id'] == '33333333-3333-3333-3333-333333333333'
+
+    def test_no_tertiary_is_null(self, client, db, storage_node):
+        storage_node.tertiary_node_id = ''
+
+        assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['tertiary_node_id'] is None
 
 
 class TestDeleteStorageNode:
@@ -179,12 +230,42 @@ class TestStorageNodeLifecycle:
         storage_node_ops.suspend_storage_node.assert_called_once_with(STORAGE_NODE_ID, True)
 
     def test_resume(self, client, storage_node, storage_node_ops):
+        storage_node.status = StorageNode.STATUS_SUSPENDED
         storage_node_ops.resume_storage_node.return_value = True
 
         response = client.post(f'{BASE}/{STORAGE_NODE_ID}/resume')
 
         assert response.status_code == 204
         storage_node_ops.resume_storage_node.assert_called_once_with(STORAGE_NODE_ID)
+
+    @pytest.mark.parametrize('action, status', [
+        ('suspend', StorageNode.STATUS_SUSPENDED),
+        ('resume', StorageNode.STATUS_ONLINE),
+    ])
+    def test_repeated_suspend_or_resume_is_a_noop(
+            self, client, storage_node, storage_node_ops, action, status):
+        storage_node.status = status
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/{action}')
+
+        assert response.status_code == 204
+        getattr(storage_node_ops, f'{action}_storage_node').assert_not_called()
+
+    @pytest.mark.parametrize('action', ['suspend', 'resume'])
+    @pytest.mark.parametrize('status', [
+        StorageNode.STATUS_OFFLINE,
+        StorageNode.STATUS_IN_SHUTDOWN,
+        StorageNode.STATUS_PENDING_REMOVAL,
+    ])
+    def test_suspend_or_resume_in_wrong_state_is_a_conflict(
+            self, client, storage_node, storage_node_ops, action, status):
+        storage_node.status = status
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/{action}')
+
+        assert response.status_code == 409
+        assert status in response.json()['detail']
+        getattr(storage_node_ops, f'{action}_storage_node').assert_not_called()
 
     def test_promote(self, client, storage_node, storage_node_ops):
         response = client.post(f'{BASE}/{STORAGE_NODE_ID}/promote')
@@ -265,3 +346,39 @@ class TestWatchStorageNodes:
         assert 'event: snapshot' in response.text
         assert STORAGE_NODE_ID in response.text
         storage_node_ops.watch_storage_node.assert_called_once_with(CLUSTER_ID, STORAGE_NODE_ID)
+
+
+class TestRemovalSteps:
+    """The removal's three steps as endpoints: prepare-removal (and its
+    progress), verify-drained, then the node DELETE (above)."""
+
+    def test_prepare_removal_starts_the_first_step(self, client, storage_node, monkeypatch):
+        from simplyblock_web.api.v2.cluster import storage_node as module
+        calls = []
+        monkeypatch.setattr(module.node_drain_steps, 'prepare_node_for_removal',
+                            lambda nid, force_remove=False: calls.append((nid, force_remove)) or {})
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/prepare-removal', params={'force_remove': True})
+
+        assert response.status_code == 202
+        assert calls == [(STORAGE_NODE_ID, True)]
+
+    def test_prepare_removal_progress_reports_the_node_status(self, client, storage_node, monkeypatch):
+        from simplyblock_web.api.v2.cluster import storage_node as module
+        monkeypatch.setattr(module.node_drain_steps, 'prepare_progress', lambda nid: {
+            'done': False, 'total': 3, 'completed': 1, 'failed': 0,
+            'message': '1 of 3 devices rebuilt onto peers', 'node_status': 'migrating_devices'})
+
+        body = client.get(f'{BASE}/{STORAGE_NODE_ID}/prepare-removal').json()
+
+        assert body['node_status'] == 'migrating_devices'
+        assert body['done'] is False and body['completed'] == 1
+
+    def test_verify_drained_lists_what_is_left(self, client, storage_node, monkeypatch):
+        from simplyblock_web.api.v2.cluster import storage_node as module
+        monkeypatch.setattr(module.node_drain_steps, 'verify_node_drained', lambda nid: {
+            'drained': False, 'lvols': ['lv-1'], 'snapshots': []})
+
+        body = client.post(f'{BASE}/{STORAGE_NODE_ID}/verify-drained').json()
+
+        assert body == {'drained': False, 'lvols': ['lv-1'], 'snapshots': []}

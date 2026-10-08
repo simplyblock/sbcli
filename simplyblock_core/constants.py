@@ -95,7 +95,6 @@ JM_COMPRESSION_BACKLOG_REARM_FRACTION = 0.9
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
-DEV_DISCOVERY_INTERVAL_SEC = 60
 
 # --- lblk cluster mode (Linux block devices via SPDK AIO bdevs) ---
 DEVICE_MODE_NVME = "nvme"
@@ -198,7 +197,58 @@ LVOL_MONITOR_SUBSYS_CHECK = str(
 LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC = int(
     os.getenv("LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC", "300"))
 
+# Orphan reconciliation: report lvstore objects that no FDB record claims.
+#
+# Nothing compared SPDK's inventory against the database, so every way a
+# record could be dropped while its blob survived produced a PERMANENT,
+# invisible leak — the bdev is re-registered from lvstore metadata on the next
+# node restart and there is nothing left in FDB or the cluster log pointing at
+# it. Four such volumes were found by hand in R26.3.
+#
+# DETECT ONLY. The sweep never deletes: a false positive would destroy live
+# data, and the object it cannot correlate is exactly the one whose ownership
+# it understands least. It logs and raises a cluster event so the leak is
+# visible while it is still cheap to investigate.
+#
+# Set LVOL_MONITOR_ORPHAN_CHECK=0 to disable.
+LVOL_MONITOR_ORPHAN_CHECK = str(
+    os.getenv("LVOL_MONITOR_ORPHAN_CHECK", "1")).lower() in ("1", "true", "yes")
+
+# One full lvol+snapshot read per cluster per sweep, once a day.
+LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC = int(
+    os.getenv("LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC", "86400"))
+
 TASK_EXEC_INTERVAL_SEC = 10
+
+#: Ceiling on how long a node-removal task may sit suspend-and-retrying on one
+#: of its waits (device failure-migration today; volume drain once that lands)
+#: before the removal gives up and the node goes to STATUS_REMOVED_FAILED.
+#: Expressed as wall-clock and converted to a retry count against the runner's
+#: tick, because the meaningful budget is "how long may a removal hang", not
+#: "how many passes". Deliberately generous: these waits legitimately run for
+#: hours on a node holding real data, and a ceiling that fires early would
+#: fail removals that were merely slow.
+#: NOTE: this is a whole-task backstop, not a per-step bound -- the
+#: orchestrator has no persisted step cursor yet, so it cannot attribute
+#: elapsed retries to a particular wait. Per-step budgets arrive with it.
+NODE_REMOVAL_MAX_WAIT_SEC = 6 * 3600
+NODE_REMOVAL_MAX_RETRY = NODE_REMOVAL_MAX_WAIT_SEC // TASK_EXEC_INTERVAL_SEC
+
+#: Node drain: how many times one volume-migration unit is retried against the
+#: SAME target before the drain gives up on that target and tries another.
+NODE_DRAIN_MAX_RESTARTS_PER_TARGET = 10
+#: Pacing between those attempts. The removal runner ticks every few seconds;
+#: a migration that has just failed does not succeed by being re-issued
+#: immediately, and hammering it would burn the whole per-target budget in
+#: under a minute. Matches the standalone retry-on-failure pacing.
+NODE_DRAIN_RETRY_WAIT_SEC = 300
+
+#: How long the post-shutdown condition re-check may keep failing before the
+#: removal gives up. Its own budget, not the whole-removal one: a drain may
+#: legitimately run for hours, but a peer that has not come back within this
+#: window is not coming back on the removal timescale, and waiting the full
+#: budget out holds a shut-down node hostage to it.
+NODE_REMOVAL_CONDITION_WAIT_SEC = 30 * 60
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
 # tasks are time-critical (cluster is degraded until the node is back) and
@@ -252,29 +302,15 @@ RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
 RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
-# per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
-# CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than
-# CLUSTER_ADD_LOCK_TTL_SEC is treated as abandoned (holder crashed) and may be
-# reclaimed. TTL is kept well under TASK_LEASE_TTL_SEC so a dead holder's lock
-# is reclaimed before its task lease, and is several heartbeats wide so a live
-# (but momentarily slow) holder is never falsely preempted. The slow part of
-# add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
-CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
-CLUSTER_ADD_LOCK_TTL_SEC = 120
-
-# Cluster creation concurrency: add_cluster()'s duplicate-name check
-# (does a cluster named X already exist?) is otherwise a plain read-then-write
-# with no atomicity, so concurrent/retried create calls for the same name can
-# all pass the check before any of them has committed — observed 2026-07-28:
-# a control-plane readiness flap caused the operator to retry cluster-create
-# ~6 times in a burst, producing 6 separate "simplyblock-cluster" records
-# instead of one. A ClusterCreateLock keyed by name serializes create attempts
-# for that name; no heartbeat (create is a single synchronous call, not a
-# long-lived section), just a generous TTL so a crashed holder's lock is
-# eventually reclaimable. Sized above add_cluster's worst realistic runtime
-# (the first-cluster bootstrap path retries opensearch/graylog up to ~150s
-# each, sequentially).
-CLUSTER_CREATE_LOCK_TTL_SEC = 600
+# per cluster behind a DbLock named "cluster_add/<cluster_id>". Cluster
+# creation is serialized per name behind "cluster_create/<name>", because
+# add_cluster()'s duplicate-name check is a plain read-then-write: concurrent
+# retries for one name can all pass it before any of them commits (2026-07-28:
+# an operator retry burst produced 6 "simplyblock-cluster" records).
+#
+# Neither takes a lease constant here — DbLock's LEASE_SEC covers crash
+# detection for every lock, and a live holder heartbeats for as long as its
+# section runs. Only the wait timeout below is per-call-site.
 
 # How long a queued add_node waits for the lock before failing for retry.
 # "Short" is relative: one mesh section takes minutes on a 32-node cluster,
@@ -289,6 +325,16 @@ CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 # persisting the node record (which spans the SPDK boot), so a live add never
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
+
+# add_node_add_task's dedup check (by node_addr) is itself a plain
+# read-then-write: two concurrent posts for one host can both pass it before
+# either commits, queuing two FN_NODE_ADD tasks for the same host (the
+# create-time twin of the cluster_add mesh race above). Serialized per
+# (cluster, node_addr) behind "node_add_task/<cluster_id>/<node_addr>". Short,
+# unlike CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC: the guarded section is a couple of
+# FDB round trips, not the mesh section of add_node itself, so a waiter only
+# needs to outlast the holder's own read-then-write.
+NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC = 10
 
 # Snapshot create concurrency: the primary-create + replica-register sequence of
 # a snapshot is serialized per lvstore behind an LVStoreMutationLock so that
@@ -328,6 +374,14 @@ API_OPERATION_TIMEOUT_SEC = 300
 # by lvol_monitor. Must be comfortably longer than the slowest legitimate
 # create (HA multi-node registration) so an in-progress create is never killed.
 LVOL_IN_CREATION_STALE_SEC = 600
+
+# A demoted LVol pending deletion (source torn down mid fail-over, e.g. by
+# Ramen's PVC cascade) keeps its FDB record past the point its physical data
+# is gone, since replicate_lvol_on_target_cluster still needs its fields
+# (replication_node_id, nqn/ns_id, cluster ids) to complete a pending
+# PromoteVolume addressed by this same id. lvol_monitor gives up and reaps
+# the record once a demote is older than this with no fail-over completed.
+LVOL_DEMOTE_FAILOVER_HOLD_SEC = 3600
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
@@ -435,6 +489,12 @@ MAX_NAMESPACES_PER_SUBSYSTEM = 50
 # this; internal readers of an already-stored config clamp with a warning.
 MAX_SUBSYSTEMS_PER_NODE = 75
 
+# Hard cap on open-epoch members of one consistency group. The group snapshot
+# freezes I/O across every member with one bdev_lvol_snapshot_group call, so a
+# larger group widens the frozen window and the all-or-nothing rollback surface;
+# 20 keeps the freeze bounded while covering realistic multi-volume applications.
+MAX_CONSISTENCY_GROUP_MEMBERS = 20
+
 # Cross-cluster cutover: upper bound for the iterative delta-shrink phase
 # (snapshot -> wait replicated -> snapshot -> wait) before the final freeze.
 # Two rounds normally complete within 2 replication intervals + transfer time.
@@ -498,6 +558,18 @@ REPL_CUTOVER_PROCEED_REQUIRED = True
 # convergence snapshot cannot be taken until the previous one is marked
 # replicated, so observation latency lands directly in the IO freeze.
 REPL_XFER_POLL_INTERVAL_SEC = 0.1
+# Replication node fail-over (docs/replication-node-failover.md).
+# Leadership of the TARGET lvstore must be seen on the same single member twice,
+# this far apart, before a transfer or convert is sent to it: a leadership move
+# in progress reports a leader on the old member, then none, then the new one.
+REPL_LEADER_SETTLE_SEC = 2.0
+# Source-member and target-leader switches a task may make without spending a
+# retry. A switch is not the transfer's fault (an outage moved it), but a node
+# that flaps must not keep a task alive for ever: past this, switches count.
+REPL_MAX_NODE_SWITCHES = 6
+# How long a target leader confirmed settled stays trusted without another
+# settle wait, as long as each probe still shows it as the only leader.
+REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # How long the submitting pass may wait inline for the transfer. The runner is
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
 # just falls back to being noticed on a later pass.
@@ -506,6 +578,11 @@ REPL_XFER_INLINE_WAIT_SEC = 5.0
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
 REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
+# Delay before retrying a snapshot transfer whose transfer or finish failed:
+# base * 2^retry, capped. An immediate retry repeats whatever the target did
+# with the previous attempt.
+REPL_RETRY_BACKOFF_BASE_SEC = 15
+REPL_RETRY_BACKOFF_MAX_SEC = 600
 # Pass interval for the cutover runner while any cutover is mid-round. The
 # freeze pays for every millisecond between a transfer completing and the next
 # snapshot starting, so this must stay well under a second.
@@ -709,7 +786,6 @@ TRANSPORT_RETRY=1
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
-LVOL_CLUSTER_RATIO=1
 
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
 # layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
@@ -739,7 +815,7 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
 CR_GROUP = "storage.simplyblock.io"
-CR_VERSION  = "v1alpha1"
+CR_VERSION  = "v1alpha2"
 
 # Grafana alert rules read from the cluster event log rather than from Thanos,
 # provisioned by `sbctl cluster event-alerts`. The plugin id is both the folder
@@ -831,6 +907,14 @@ LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — sk
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
 LVOL_MIG_TRANSFER_BATCH_SIZE = 256
 
+#: `sbctl volume migrate-continue --retry-on-failure`: once a migration (or
+#: batch group) reaches a terminal FAILED status (not cancelled) with
+#: retry_on_failure set, wait this long before attempting a brand-new
+#: migration (full precreate + start) for the same lvol/target, so a
+#: transient condition -- a bouncing target node, an in-flight rebalance --
+#: has time to clear before the precondition checks are retried.
+LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC = 300
+
 #: How long a deferred lvol register task tolerates a missing lvol record
 #: before treating it as obsolete. add_lvol_ha queues the task in its
 #: pre-check but writes the lvol record only at the end of the create, so
@@ -893,9 +977,37 @@ NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
 
 # S3 Backup constants
 BACKUP_POLL_INTERVAL_SEC = 5
+#: max_retry for restore and merge tasks. A plain backup upload uses its own,
+#: lower BACKUP_TASK_MAX_RETRIES instead -- see that constant for why.
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
-BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
+
+#: max_retry for the backup-upload task (FN_BACKUP) specifically. Lower than
+#: BACKUP_MAX_RETRIES because a failing upload is not the only path back to a
+#: completed backup of the same snapshot: once this ceiling gives up, the next
+#: scheduled or manual backup notices the snapshot is still unbacked and
+#: starts a fresh attempt (backup.controller.ensure_snapshot_chain_backed_up).
+#: Restore and merge have no such fallback -- a restore that gives up leaves
+#: a volume stuck, and a merge mid-delete cannot be retried at all (see
+#: tasks_runner_backup._run_merge) -- so they keep the longer ceiling.
+BACKUP_TASK_MAX_RETRIES = 5
+
+#: Longest backup chain the control plane will accept.
+#:
+#: Bounded by the data plane, not policy: bdev_lvol_s3_backup and
+#: bdev_lvol_s3_recovery refuse a longer chain (RPC_MAX_S3_IDS in
+#: vbdev_lvol_rpc.c). Raising this alone turns every backup and restore of a
+#: longer chain into an RPC error.
+#:
+#: 40 is also where the policy argument lands: a restore reads the whole chain in
+#: one operation, so its length multiplies restore time and objects fetched.
+BACKUP_MAX_CHAIN_LENGTH = 40
+
+#: Upper bound on a backup's s3_id. The data plane packs it into bits 33..62 of
+#: the synthetic bdev offset (S3_ID_BITS in spdk_internal/lvolstore.h) and masks
+#: rather than validates, so a larger value silently aliases onto another
+#: backup's object keys.
+BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---

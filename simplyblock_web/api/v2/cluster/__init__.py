@@ -4,28 +4,33 @@ from typing import Annotated, Literal, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 from sse_starlette import EventSourceResponse
 
+from simplyblock_core import cluster_ops
+from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
-from simplyblock_core import cluster_ops
-from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 
+from .. import util as util
 from .._dependencies import Cluster
+from .._dtos import (
+    BackupConfigDTO,
+    ClusterDTO,
+    ClusterLogEntryDTO,
+    UnresolvedBackupConfigDTO,
+)
+from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .alert import api as alert_api
 from .backup import api as backup_api
+from .consistency_group import api as consistency_group_api
 from .replication import api as replication_api
-from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
+from .storage_pool import api as pool_api
 from .subsystem import api as subsystem_api
 from .task import api as task_api
-from .._dtos import ClusterDTO, ClusterLogEntryDTO
-from .._sse import WATCH_RESPONSES, WatchParam, sse_response
-from .. import util as util
-
 
 api = APIRouter()
 db = DBController()
@@ -40,18 +45,6 @@ class _UpdateParams(BaseModel):
     management_image: str | None
     spdk_image: str | None
     restart: bool = Field(False)
-
-
-class BackupConfigParams(BaseModel):
-    access_key_id: SecretStr | None = None
-    secret_access_key: SecretStr | None = None
-    local_endpoint: str | None = None
-    bucket_name: str | None = None
-    snapshot_backups: bool | None = None
-    with_compression: bool | None = None
-    secondary_target: int | None = Field(default=None, ge=0)
-    local_testing: bool | None = None
-    s3_thread_pool_size: int | None = Field(default=None, ge=0)
 
 
 class HashicorpVaultSettings(BaseModel):
@@ -88,7 +81,7 @@ class ClusterParams(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
-    backup_config: BackupConfigParams | None = None
+    backup_config: UnresolvedBackupConfigDTO | None = None
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
     # max_subsys and spdk_vcpu_count are capacity decisions with real
@@ -143,6 +136,8 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
         params = parameters.model_dump(exclude_none=True)
         if "hashicorp_vault_settings" in params:
             params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
+        if parameters.backup_config is not None:
+            params["backup_config"] = parameters.backup_config.model_dump(exclude_none=True)
         cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -188,6 +183,19 @@ def update(cluster: Cluster, parameters: UpdatableClusterParameters):
         cluster_ops.set_name(cluster.get_id(), parameters.name)
 
     return Response(status_code=204)
+
+
+@instance_api.get('/backup-config', name='clusters:backup-config:get')
+def get_backup_config(cluster: Cluster) -> BackupConfigDTO:
+    """The cluster's backup configuration, with credentials masked.
+
+    The credentials are ``SecretStr``, which FastAPI's JSON serialization
+    renders as ``**********``.
+    """
+    try:
+        return cluster.get_backup_config()
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
 
 
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
@@ -298,4 +306,5 @@ instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
+instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
 api.include_router(instance_api)

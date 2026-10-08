@@ -13,11 +13,10 @@ destination's copy of the previous snapshot BEFORE the transfer, and ask for a
 delta only when that actually succeeded on every online member of the target's
 HA pair.
 """
-from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import snapshot_replication as sr
-
 
 # --------------------------------------------------------------------------
 # fakes
@@ -291,8 +290,8 @@ def _transfer_params(**kwargs):
         def __init__(self):
             self.sent: tuple = ()
 
-        def _request(self, method, params=None, request_timeout=None):
-            self.sent = (method, params)
+        def _request3(self, method, **kwargs):
+            self.sent = (method, kwargs)
             return True
 
     c = _C()

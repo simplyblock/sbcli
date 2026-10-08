@@ -155,12 +155,14 @@ FIO Corruption Analysis Script
 - Copies all results to local machine
 """
 
+import os
+import posixpath
+from pathlib import Path
+
 import paramiko
 import ssh_auth
 from scp import SCPClient
-import os
-from pathlib import Path
-import posixpath
+
 
 def create_ssh_client(host, key_path=None):
     """Connect, trying every credential rather than one named key.

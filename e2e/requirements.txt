@@ -1,5 +1,7 @@
 paramiko
-requests
+requests>=2.34.0
+urllib3>=2.7.0
 boto3
 matplotlib
 ping3
+

@@ -18,6 +18,8 @@ class _LVol:
         self.lvol_name = "vol0"
         self.node_id = "N1"
         self.replication_interval_min = interval
+        self.replication_policy_id = ""
+        self.do_replicate = True
 
     def get_id(self):
         return self.uuid
@@ -60,6 +62,11 @@ def _patch(monkeypatch, lvol, snaps, tasks):
         def get_lvols(self):
             return [lvol]
 
+        def get_lvol_by_id(self, lvol_id):
+            if lvol_id != lvol.get_id():
+                raise KeyError(f'LVol {lvol_id} not found')
+            return lvol
+
         def get_storage_node_by_id(self, uuid):
             return type("N", (), {"cluster_id": "C1"})()
 
@@ -71,6 +78,23 @@ def _patch(monkeypatch, lvol, snaps, tasks):
                 if s.uuid == uuid:
                     return s
             raise KeyError(uuid)
+
+        # Scoped reads get_replication_info now uses instead of a whole-table
+        # task scan (2026-10-03).
+        def get_snapshots_by_lvol_id(self, lvol_id):
+            return [s for s in snaps
+                    if getattr(s, "lvol", None) is not None and s.lvol.get_id() == lvol_id]
+
+        def get_replication_tasks_for_snapshot(self, snapshot_id):
+            return [t for t in tasks
+                    if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                    and t.function_params.get("snapshot_id") == snapshot_id]
+
+        def get_job_tasks_by_function(self, cluster_id, function_name):
+            return [t for t in tasks if t.function_name == function_name]
+
+        def get_lvol_replication_objects(self):
+            return []
 
     monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
 

@@ -28,14 +28,20 @@ spec:
             privileged: true
           volumeMounts:
             - name: rootfs
-              mountPath: /
-          command: ["/bin/sh", "-c"]
+              mountPath: /host
+          # The host's root at /host and the script run under chroot of it: the
+          # host's /bin/sh (dash on Ubuntu) against the host's packages, so the
+          # script must be POSIX sh. Mounting the host's / over the container's
+          # / was refused by runc ("mountpoint ... is on the top of rootfs") on
+          # k3s 2026-10 nodes: the Job never started and the storage node
+          # waited on it until the cluster's deadline.
+          command: ["chroot", "/host", "/bin/sh", "-c"]
           args:
             - |
               set -e
 
-              if [[ -f /etc/os-release ]]; then
-                  source /etc/os-release
+              if [ -f /etc/os-release ]; then
+                  . /etc/os-release
                   OS_ID=$ID
               else
                   echo "[ERROR] Unable to detect OS"
@@ -45,11 +51,20 @@ spec:
 
               case "$OS_ID" in
                   ubuntu)
-                      apt-get install -y linux-modules-extra-$(uname -r)
+                      # What is needed is the NVMe-oF module, not the package:
+                      # some kernels (Ubuntu's AWS kernels) ship nvme-tcp in
+                      # linux-modules and have no linux-modules-extra package.
+                      pkg="linux-modules-extra-$(uname -r)"
+                      if modprobe -n nvme-tcp 2>/dev/null; then
+                          echo "[INFO] nvme-tcp is available"
+                      else
+                          export DEBIAN_FRONTEND=noninteractive
+                          apt-get install -y "$pkg" || { apt-get update && apt-get install -y "$pkg"; }
+                      fi
                       ;;
                   *)
                       echo "[WARN] OS $OS_ID not supported for automatic NVMe package installation"
                       ;;
               esac
-              
+
               echo "--- Init setup complete ---"

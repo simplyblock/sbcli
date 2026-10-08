@@ -34,7 +34,6 @@ from simplyblock_core import cluster_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster, DeployConfig
 
-
 # ---------------------------------------------------------------------------
 # Fixtures — real FDB, wiped before every test for isolation.
 # ---------------------------------------------------------------------------
@@ -180,7 +179,7 @@ class TestAddClusterDuplicateName:
         # separate clusters named "simplyblock-cluster" instead of one. Fire
         # several concurrent add_cluster() calls for the same name (the
         # first-cluster bootstrap path — no pre-existing cluster/DeployConfig,
-        # matching the real incident) and assert the ClusterCreateLock lets
+        # matching the real incident) and assert the cluster_create DbLock lets
         # exactly one through.
         results = []
         errors = []

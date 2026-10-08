@@ -31,7 +31,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
-
 # ---------------------------------------------------------------------------
 # The create parameter
 # ---------------------------------------------------------------------------
@@ -43,9 +42,9 @@ class TestCreateParam(unittest.TestCase):
     def _params_for(self, **kw):
         c = RPCClient("1.2.3.4", 8080, "u", SecretStr("p"))
         captured = {}
-        with patch.object(c, "_request",
-                          side_effect=lambda m, p: captured.update(p) or True), \
-             patch.object(c, "get_bdevs", return_value=None):
+        with patch.object(c, "_request3",
+                          side_effect=lambda m, **p: captured.update(p) or True), \
+             patch.object(c, "bdev_get", return_value=None):
             c.bdev_distrib_create(
                 "distrib_1", 7001, 2, 1, 1000, 4096, ["jm1"], 4096, **kw)
         return captured
@@ -79,8 +78,8 @@ class TestRuntimeRPC(unittest.TestCase):
         c = RPCClient("1.2.3.4", 8080, "u", SecretStr("p"))
         seen = {}
         with patch.object(
-                c, "_request",
-                side_effect=lambda m, p: seen.update({"method": m, "params": p}) or True):
+                c, "_request3",
+                side_effect=lambda m, **p: seen.update({"method": m, "params": p}) or True):
             c.distr_write_protection_v2(**kw)
         return seen
 

@@ -11,12 +11,16 @@ reverts itself silently.
 """
 import uuid as uuid_module
 
-from simplyblock_core import db_controller as db_module, utils
-from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core import db_controller as db_module
+from simplyblock_core import snapshot_retention, utils
+from simplyblock_core.controllers import (
+    lvol_controller,
+    replication_recovery_points,
+    snapshot_controller,
+)
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVolReplication
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import snapshot_retention
 from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.snapshot import SnapShot
 
@@ -94,7 +98,7 @@ def remove_target(target_id):
 # --------------------------------------------------------------------------- #
 
 def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None,
-               retention_schedule=None, consistency_group=False):
+               retention_schedule=None, consistency_group=False, rpo_target_seconds=None):
     """Create a policy on *target* (id or name)."""
     db.get_cluster_by_id(cluster_id)
     try:
@@ -119,6 +123,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         # onto, so retention drops segments instead of swap-merging them.
         raise ReplicationConfigError(
             f"keep_replicated must be at least {ReplicationPolicy.MIN_KEEP_REPLICATED}")
+    if rpo_target_seconds is not None and rpo_target_seconds < 0:
+        raise ReplicationConfigError("rpo_target_seconds cannot be negative")
 
     if retention_schedule:
         # Validate at ingress: an unparseable schedule silently falling back to
@@ -142,6 +148,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         policy.keep_replicated = keep_replicated
     if retention_schedule is not None:
         policy.retention_schedule = retention_schedule
+    if rpo_target_seconds is not None:
+        policy.rpo_target_seconds = rpo_target_seconds
     policy.consistency_group = bool(consistency_group)
     policy.status = ReplicationPolicy.STATUS_ACTIVE
     policy.write_to_db(db.kv_store)
@@ -199,6 +207,65 @@ def _resolve_policy(policy):
         if candidate.policy_name == policy:
             return candidate
     raise KeyError(f'ReplicationPolicy {policy} not found')
+
+
+def start_member_replication(lvol_id, pol, target):
+    """Point one volume at *pol* and start replicating to *target*, WITHOUT
+    touching consistency-group membership.
+
+    Mirrors :func:`attach_policy`'s tail (set the policy pointer, start
+    replication, roll the pointer back on failure), but adds no group member.
+    ``attach_policy`` adds the volume to the policy's group first; the
+    group-replication path (``consistency_group_controller.attach_group_policy``)
+    calls this for members that ALREADY belong to the group, so re-adding them
+    would reset their generation epochs (``add_member_to_group`` stamps a fresh
+    ``joined_seq``) and tear the group's snapshot history.
+    """
+    lvol = db.get_lvol_by_id(lvol_id)
+    lvol.replication_policy_id = pol.get_id()
+    lvol.write_to_db()
+    ret = lvol_controller.replication_start(
+        lvol_id,
+        replication_cluster_id=target.target_cluster_id,
+        mode=pol.mode,
+        interval_min=pol.interval_min,
+        from_policy=True,
+    )
+    if not ret:
+        fresh = db.get_lvol_by_id(lvol_id)
+        fresh.replication_policy_id = ""
+        fresh.write_to_db()
+        raise ReplicationConfigError(
+            f"Could not start replication of {lvol_id} to target {target.target_name}")
+    return True
+
+
+def stop_member_replication(lvol_id):
+    """Stop one volume replicating and purge its internal replication snapshots,
+    WITHOUT touching consistency-group membership.
+
+    Mirrors :func:`detach_policy`'s tail (cutover guard, clear the policy
+    pointer, stop streaming, purge internal snapshots), but leaves the volume in
+    its group: the group-replication path (``detach_group_policy``) disables
+    replication for a group whose members stay grouped by their label. Idempotent
+    no-op when the volume follows no policy.
+    """
+    lvol = db.get_lvol_by_id(lvol_id)
+    if not lvol.replication_policy_id:
+        logger.info("Volume %s follows no replication policy; stop is a no-op", lvol_id)
+        return True
+    rep = _active_relationship(lvol_id)
+    if rep is not None and rep.state == LVolReplication.STATE_CUTOVER_PENDING:
+        raise ReplicationConfigError(
+            f"Volume {lvol_id} has a cutover in flight; wait for it to finish "
+            f"before stopping its replication")
+    lvol.replication_policy_id = ""
+    lvol.write_to_db()
+    lvol_controller.replication_stop(lvol_id, from_policy=True)
+    removed = _purge_internal_replication_snapshots(lvol_id)
+    logger.info("Volume %s replication stopped (%d internal replication "
+                "snapshot(s) removed)", lvol_id, removed)
+    return True
 
 
 def attach_policy(lvol_id, policy):
@@ -268,6 +335,14 @@ def detach_policy(lvol_id):
     """
     lvol = db.get_lvol_by_id(lvol_id)
 
+    if not lvol.replication_policy_id:
+        # Idempotent no-op: there is no policy to detach and no policy
+        # residue to clean. Returning early also keeps a detach from
+        # reaching through and stopping a LEGACY (start/stop path) replication
+        # the volume may be running, which no policy ever owned.
+        logger.info("Volume %s follows no replication policy; detach is a no-op", lvol_id)
+        return True
+
     rep = _active_relationship(lvol_id)
     if rep is not None and rep.state == LVolReplication.STATE_CUTOVER_PENDING:
         raise ReplicationConfigError(
@@ -290,6 +365,25 @@ def detach_policy(lvol_id):
     # Stops streaming and cancels the non-DONE FN_SNAPSHOT_REPLICATION tasks.
     lvol_controller.replication_stop(lvol_id, from_policy=True)
 
+    if lvol.replication_demote_state in (LVol.REPLICATION_DEMOTE_PENDING,
+                                         LVol.REPLICATION_DEMOTE_DONE):
+        # A demoted volume is a fail-over source whose successor is being
+        # (or is about to be) cloned on the other side from the newest
+        # replicated copy. That copy's data lives in its CHAIN -- every
+        # internal snapshot below it -- so none of them may go while the
+        # volume is demoted: Ramen's relocate deletes the source side's
+        # VolumeReplication right after the demote, the driver turns that
+        # into this detach, and the purge deleted the 13 ancestors of the
+        # fail-over point 13 seconds before the promote cloned from it
+        # (2026-10-01, wp-db on the real test bed). The chain goes with the
+        # volume: the promote deletes the demoted predecessor, and
+        # delete_lvol takes its snapshots along.
+        logger.info("Volume %s detached from its replication policy; it is "
+                    "demoted (%s), so its internal replication snapshots stay "
+                    "until the volume itself is deleted",
+                    lvol_id, lvol.replication_demote_state)
+        return True
+
     removed = _purge_internal_replication_snapshots(lvol_id)
     logger.info("Volume %s detached from its replication policy (%d internal "
                 "replication snapshot(s) removed)", lvol_id, removed)
@@ -297,9 +391,43 @@ def detach_policy(lvol_id):
 
 
 def _purge_internal_replication_snapshots(lvol_id):
-    """Delete the volume's internal replication snapshots, target copy first."""
+    """Delete the volume's internal replication snapshots, target copy first.
+
+    The volume's NEWEST fully replicated pair -- the source record and its
+    target copy -- survives unconditionally: it is the last recovery point,
+    and a detach cannot know whether one is about to be needed. An unplanned
+    failover reaches this purge with NO demote (nothing was reachable to
+    demote) and NO dependent clone (the promote races this very teardown),
+    because Ramen deletes the source side's VolumeReplication while flipping
+    its VRG to Secondary; with only the demote and clone guards, the purge
+    deleted the fail-over point mid-failover and the clone selector
+    409-looped forever against a dead source (confirmed live 2026-09-25).
+    Deleting the volume does not release it either: delete_lvol keeps the
+    snapshots taken OF a volume, and the pair is what a relocate back clones
+    the volume home from after the demoted source was deleted.
+
+    For a consistency-group member, every snapshot of the group's newest
+    complete generation survives as well (replication_recovery_points).
+    """
     removed = 0
     handled = set()                               # never issue a delete twice
+    demote_snapshot_id = db.get_lvol_by_id(lvol_id).replication_demote_snapshot_id
+    newest_replicated_id = ""
+    replicated = [
+        s for s in db.get_snapshots()
+        if not s.deleted and s.lvol and s.lvol.get_id() == lvol_id
+        and s.snap_type == SnapShot.TYPE_INTERNAL
+        and s.target_replicated_snap_uuid
+    ]
+    if replicated:
+        newest_replicated_id = max(replicated, key=lambda s: s.created_at).get_id()
+    # The newest complete generation of every group this volume took group
+    # snapshots for survives too, on both sides: a member's own newest pair need
+    # not be part of the group's newest COMPLETE generation (another member may
+    # not have shipped it yet), and the group restores only as one cut.
+    group_keep = replication_recovery_points.group_recovery_point_ids(
+        {getattr(s, "group_id", "") for s in db.get_snapshots()
+         if not s.deleted and s.lvol and s.lvol.get_id() == lvol_id}, db=db)
     for snap in db.get_snapshots():
         if snap.deleted or not snap.lvol or snap.lvol.get_id() != lvol_id:
             continue
@@ -313,6 +441,25 @@ def _purge_internal_replication_snapshots(lvol_id):
             if _has_dependent_clone(target_uuid):
                 logger.info("Keeping replicated snapshot %s: a volume is cloned from it",
                             target_uuid)
+            elif snap.get_id() == demote_snapshot_id:
+                # This is the exact snapshot demote_lvol fenced the volume on
+                # -- the volume is currently demoted and awaiting a pending
+                # fail-over, and this target copy is the fail-over point a
+                # PromoteVolume call may still need, even with no clone from
+                # it yet. Deleting it strands every subsequent fail-over
+                # attempt with "No replicated snapshot on target yet" for an
+                # otherwise perfectly healthy, still-demoted volume (confirmed
+                # live 2026-09-24, Ramen relocate M-02).
+                logger.info("Keeping replicated snapshot %s: volume is demoted, "
+                            "awaiting a pending fail-over", target_uuid)
+            elif snap.get_id() == newest_replicated_id:
+                # The newest fully replicated pair is the volume's last
+                # recovery point and survives every detach (see docstring).
+                logger.info("Keeping replicated snapshot %s: it is the volume's "
+                            "newest replicated recovery point", target_uuid)
+            elif target_uuid in group_keep or snap.get_id() in group_keep:
+                logger.info("Keeping replicated snapshot %s: it belongs to its "
+                            "consistency group's newest replicated generation", target_uuid)
             else:
                 try:
                     db.get_snapshot_by_id(target_uuid)
@@ -326,6 +473,30 @@ def _purge_internal_replication_snapshots(lvol_id):
         handled.add(snap.get_id())
         if _has_dependent_clone(snap.get_id()):
             logger.info("Keeping source snapshot %s: a volume is cloned from it", snap.get_id())
+            continue
+        if snap.get_id() == newest_replicated_id:
+            # The pair's source half: last_replicated_target_snapshot resolves
+            # by SOURCE snapshot id first, so the source record must survive
+            # alongside the target copy preserved above.
+            logger.info("Keeping source snapshot %s: it is the volume's "
+                        "newest replicated recovery point", snap.get_id())
+            continue
+        if snap.get_id() in group_keep:
+            logger.info("Keeping source snapshot %s: it belongs to its consistency "
+                        "group's newest replicated generation", snap.get_id())
+            continue
+        if snap.get_id() == demote_snapshot_id:
+            # last_replicated_target_snapshot resolves its candidates by
+            # SOURCE snapshot id first (each completed replication task names
+            # one in task.function_params["snapshot_id"]) and only then reads
+            # target_replicated_snap_uuid off that record. Deleting this
+            # source copy makes the whole candidate disappear before its
+            # (already-preserved, see above) target copy is ever consulted --
+            # the exact same "No replicated snapshot on target yet" stranding
+            # this function exists to prevent, just reached from the other
+            # side of the pair.
+            logger.info("Keeping source snapshot %s: volume is demoted, "
+                        "awaiting a pending fail-over", snap.get_id())
             continue
         if snapshot_controller.delete(snap.get_id()):
             removed += 1
@@ -349,25 +520,524 @@ def _has_dependent_clone(snapshot_uuid):
 # Group fail-over
 # --------------------------------------------------------------------------- #
 
+def _group_and_standalone(policy, volumes):
+    """Partition a policy's volumes into consistency-group members and volumes
+    that merely share the policy.
+
+    Membership is what makes a cut crash-consistent: a member carries its
+    group_id, and those fail over together pinned to one common group
+    generation, while volumes with no group_id fail over per volume. The legacy
+    consistency_group flag predates group_id and treats the WHOLE policy as one
+    group. Mixing the two tore a group fail-over apart: a policy shared by a
+    group and an unrelated volume demanded a group generation for the non-member
+    and refused the whole set ("generation N lacks <standalone volume>", live
+    2026-09-27). Returns (group_members, standalone)."""
+    if (getattr(policy, "consistency_group", False)
+            and not any(getattr(v, "group_id", "") for v in volumes)):
+        return list(volumes), []          # legacy policy-owned group
+    group_members = [v for v in volumes if getattr(v, "group_id", "")]
+    standalone = [v for v in volumes if not getattr(v, "group_id", "")]
+    return group_members, standalone
+
+
+def _failover_group_members(policy, group_members, label):
+    """Fail over a set of consistency-group members as ONE crash-consistent unit,
+    pinned to a common group generation. Returns per-member result dicts (all
+    ``failed`` with the reason when no common generation qualifies)."""
+    if not group_members:
+        return []
+    try:
+        _, pinned = _resolve_group_failover_generation(policy, group_members)
+    except ReplicationConfigError as e:
+        logger.error("Group fail-over of %s refused: %s", label, e)
+        return [{"lvol_id": v.get_id(), "status": "failed", "detail": str(e)}
+                for v in group_members]
+    return _failover_volumes(group_members, label, pinned=pinned)
+
+
 def failover_policy(policy_id):
     """Fail over every volume following *policy_id*. Idempotent per volume.
 
-    A consistency-group policy fails over as ONE unit: every member is pinned
-    to the same group generation (see _resolve_group_failover_generation)
-    instead of each volume's own newest replicated snapshot.
+    Consistency-group members fail over as ONE unit pinned to a common group
+    generation (see _resolve_group_failover_generation); volumes that only share
+    the policy fail over per volume. See _group_and_standalone for why the two
+    must be kept apart.
     """
     policy = db.get_replication_policy_by_id(policy_id)
     volumes = db.get_lvols_by_replication_policy(policy.get_id())
-    pinned = None
-    if getattr(policy, "consistency_group", False):
+    group_members, standalone = _group_and_standalone(policy, volumes)
+    results = _failover_group_members(policy, group_members, f"policy {policy.policy_name}")
+    if standalone:
+        results.extend(_failover_volumes(standalone, f"policy {policy.policy_name}"))
+    return results
+
+
+def _members_are_live_primary(members):
+    """True when every member is still the UNTOUCHED serving primary on its own
+    cluster: not demoted, not failed over, and its storage node online.
+
+    A promote of such members is the origin-primary / steady-state case (protect),
+    not a hand-off -- the group path's counterpart of the per-volume endpoint's
+    `planned && demote != DONE` guard, inferred from state because the driver does
+    not forward the planned/forced flag for a group (its PromoteGroup comment:
+    "the planned/forced split is the backend group failover's own concern").
+
+    The three ways a promote IS a real hand-off, each disqualifying the no-op --
+    the SAME distinctions the standalone volume fail-over draws (see the volume
+    endpoint's `failover` guard and lvol_controller.replication_source_online):
+
+      * **Demote in progress/done** -- a PLANNED relocate demotes the source first,
+        and the source stays ONLINE throughout, so source health alone cannot tell
+        a relocate from protect; the demote state can. This is the case source
+        health would otherwise misread.
+      * **Already failed over** -- a settled relationship means the copy lives on
+        the peer now; a re-promote is a resume, not steady state.
+      * **Source down** -- an UNPLANNED fail-over, where there is no demote to key
+        off because the source died first. Decided by the SAME source-health check
+        the standalone path uses (replication_source_online).
+    """
+    for m in members:
+        if getattr(m, "replication_demote_state", ""):
+            return False                       # a planned hand-off (relocate), source stays up
+        if _settled_relationship(m.get_id()) is not None:
+            return False                       # already failed over -> a resume
         try:
-            _, pinned = _resolve_group_failover_generation(policy, volumes)
-        except ReplicationConfigError as e:
-            logger.error("Group fail-over of policy %s refused: %s",
-                         policy.policy_name, e)
-            return [{"lvol_id": v.get_id(), "status": "failed", "detail": str(e)}
-                    for v in volumes]
-    return _failover_volumes(volumes, f"policy {policy.policy_name}", pinned=pinned)
+            if not lvol_controller.replication_source_online(m):
+                return False                   # source down -> unplanned fail-over
+        except KeyError:
+            return False                       # source gone -> unplanned fail-over
+    return True
+
+
+def failover_group(group):
+    """Fail over ONLY the members of consistency group *group*, as one
+    crash-consistent unit (design-csi-addons-replication.md §14.4). Volumes that
+    merely share the group's replication policy are NOT touched -- they carry
+    their own DR lifecycle (e.g. a single-PVC workload under its own DRPC). This
+    is the VGR fail-over entry point; failover_policy is the policy-wide one.
+    """
+    policy = None
+    if group.policy_id:
+        try:
+            policy = db.get_replication_policy_by_id(group.policy_id)
+        except KeyError:
+            policy = None
+    members = []
+    if policy is not None:
+        members = [v for v in db.get_lvols_by_replication_policy(policy.get_id())
+                   if getattr(v, "group_id", "") == group.get_id()]
+    if members:
+        # Origin-primary promote (protect / steady state) is NOT a fail-over.
+        # csi-addons calls PromoteGroup whenever the VGR is Primary -- including on
+        # its own origin cluster during protect -- and the group path has no
+        # equivalent of the per-volume endpoint's `planned && demote != DONE -> 409`
+        # guard. Without this check every protect-promote cloned the still-primary
+        # members to the target and stopped their replication, pre-staging hollow
+        # clones and breaking protect (live 2026-09-27). When the members are still
+        # the live primary here (their source nodes are online and none has failed
+        # over), the promote is a no-op success; only a genuine fail-over -- the
+        # source is down -- clones and completes.
+        if _members_are_live_primary(members):
+            logger.info("Promote of consistency group %s is a no-op: its %d "
+                        "member(s) are the live primary on this cluster, not a "
+                        "fail-over", group.group_name, len(members))
+            return [{"lvol_id": m.get_id(), "status": "already_primary"}
+                    for m in members]
+        # Fail-back already completed. After _failback_group clones the peer's
+        # members HOME, this group's members ARE those home clones -- each the
+        # settled TARGET of the reverse relationship. Ramen re-drives PromoteGroup
+        # every reconcile, so the re-promote must report success. _failover_group_members
+        # resolves the fail-over generation SOURCE-keyed (via _active_relationship),
+        # so it reads these target-side members as pending, finds no generation that
+        # qualifies for them, and refuses with "mixed-generation fail-over" -- leaving
+        # the relocate stuck although the data is already home (live 2026-09-28).
+        if all(_failed_home_relationship(m.get_id()) is not None for m in members):
+            logger.info("Promote of consistency group %s is a no-op: its %d "
+                        "member(s) already failed home to this cluster",
+                        group.group_name, len(members))
+            return [{"lvol_id": m.get_id(), "status": "failed_over",
+                     "target_lvol_id": m.get_id()} for m in members]
+        return _failover_group_members(policy, members,
+                                       f"consistency group {group.group_name}")
+    # The local group has no live member to drive the promote. Three cases, told
+    # apart by the peer group of the same name (the one a hand-off forms):
+    peer = _resolve_peer_group(group, policy)
+    peer_members = []
+    if peer is not None:
+        peer_members = [v for v in db.get_lvols(peer.cluster_id)
+                        if getattr(v, "group_id", "") == peer.get_id()]
+    former_policy = getattr(policy, "policy_name", "") if policy is not None else ""
+    if peer_members and _members_are_live_primary(peer_members):
+        # 1. Already promoted onto the peer: its members are the serving primary
+        #    (not demoted, not down). Ramen re-drives the promote every reconcile;
+        #    cloning them "home" here would undo the move it just made. The
+        #    re-drive also heals a promote that left the peer group replicating
+        #    nowhere (attach_reverse_replication is a no-op once attached).
+        logger.info("Promote of consistency group %s is a no-op: its peer group %s "
+                    "on %s serves it", group.group_name, peer.group_name, peer.cluster_id)
+        _attach_reverse_replication(
+            peer, group.cluster_id, former_policy)
+        return [{"lvol_id": m.get_id(), "status": "failed_over", "target_lvol_id": m.get_id()}
+                for m in peer_members]
+    if peer_members:
+        # 2. Fail-BACK. The members were failed over and now live in the peer
+        #    group, which was demoted (relocate back) or is down. Promoting the
+        #    empty local group clones nothing (the silent fail-back no-op caught
+        #    live 2026-09-27, where the workload kept writing to the peer's clones
+        #    while the promote reported success). Clone the peer's members home --
+        #    the group analog of the driver's resolveToLocalReplica.
+        results = _failback_group(group, policy, peer=peer)
+        if _any_promoted(results):
+            # Home again: replicate back toward the cluster the members came from.
+            _attach_reverse_replication(
+                group, peer.cluster_id, former_policy)
+        return results
+    # 3. Fail-over from the replicated generation. The members were demoted and
+    #    their volumes deleted -- a relocate does that, a relocate back needs it --
+    #    and the group was detached, so neither members nor policy can drive a
+    #    fail-over. The group's newest complete replicated generation survives on
+    #    the peer (2026-10-04, WordPress relocate: promote on site B refused with
+    #    "not attached to a replication policy" against the emptied source group).
+    results = _failover_group_from_target_copies(group)
+    _attach_promoted_peer(group, results, former_policy)
+    return results
+
+
+def _attach_reverse_replication(group, toward_cluster_id, former_policy):
+    """consistency_group_controller.attach_reverse_replication, imported here:
+    the two controllers import each other."""
+    from simplyblock_core.controllers import consistency_group_controller
+    try:
+        return consistency_group_controller.attach_reverse_replication(group, toward_cluster_id, former_policy)
+    except Exception as e:                          # noqa: BLE001 -- the promote stands regardless
+        logger.error("Reverse replication of consistency group %s toward %s not set up: %s",
+                     getattr(group, "group_name", group), toward_cluster_id, e)
+        return None
+
+
+def _any_promoted(results):
+    """Whether any member of a promote's per-member results came up."""
+    return any(r.get("status") in ("failed_over", "already_primary") for r in results or [])
+
+
+def _attach_promoted_peer(group, results, former_policy):
+    """After a fail-over from the replicated copy, attach the group that now
+    holds the clones (the peer group of the same name, reconstituted by the
+    hand-off) to its cluster's policy toward *group*'s cluster."""
+    if not _any_promoted(results):
+        return
+    target_ids = [r.get("target_lvol_id") for r in results if r.get("target_lvol_id")]
+    for lvol_id in target_ids:
+        try:
+            clone = db.get_lvol_by_id(lvol_id)
+        except KeyError:
+            continue
+        gid = getattr(clone, "group_id", "")
+        if not gid:
+            continue
+        try:
+            peer = db.get_consistency_group_by_id(gid)
+        except KeyError:
+            continue
+        _attach_reverse_replication(peer, group.cluster_id, former_policy)
+        return
+    logger.warning("Fail-over of consistency group %s: the clones belong to no group on "
+                   "the peer; nothing to replicate back", group.group_name)
+
+
+def _resolve_peer_group(group, policy):
+    """The group of the same name on another cluster: through the policy's
+    replication target when the group still has one, else by name on any other
+    cluster (a detached group keeps its name, and hand-offs key groups by it)."""
+    if policy is not None:
+        peer = _resolve_active_peer_group(group, policy)
+        if peer is not None:
+            return peer
+    name = getattr(group, "group_name", "")
+    if not name or not hasattr(db, "get_consistency_groups"):
+        return None
+    for other in db.get_consistency_groups():
+        if (other.get_id() != group.get_id() and other.cluster_id != group.cluster_id
+                and getattr(other, "group_name", "") == name):
+            return other
+    return None
+
+
+def _lvol_handle(lvol, cluster_id=""):
+    """``<cluster>:<pool>:<lvol>`` -- the handle a PersistentVolume carries for
+    *lvol*. *cluster_id* is used when given (a relationship records it); else it
+    is the cluster of the volume's node."""
+    if not cluster_id:
+        try:
+            cluster_id = db.get_storage_node_by_id(lvol.node_id).cluster_id
+        except KeyError:
+            cluster_id = ""
+    pool = getattr(lvol, "pool_uuid", "") or ""
+    if not (cluster_id and pool):
+        return ""
+    return f"{cluster_id}:{pool}:{lvol.get_id()}"
+
+
+def _lineage_origin(lvol_id, reps):
+    """The volume a lineage started from: follow relationships TARGET -> SOURCE
+    back to the oldest source. Returns ``(lvol_record, cluster_id)`` of that
+    origin, or ``(None, "")`` when *lvol_id* is no relationship's target (it is
+    its own origin; the caller has its record). *reps* is
+    db.get_lvol_replication_objects() (oldest first)."""
+    origin, cluster = None, ""
+    current = lvol_id
+    for _ in range(64):                           # defensive hop bound
+        step = None
+        for rep in reversed(reps):                # newest first
+            tgt = rep.target_lvol.get_id() if rep.target_lvol else ""
+            if tgt == current and rep.source_lvol is not None:
+                step = rep
+                break
+        if step is None:
+            break
+        origin, cluster = step.source_lvol, step.source_cluster_id
+        if origin.get_id() == current:
+            break
+        current = origin.get_id()
+    return origin, cluster
+
+
+def resolve_group(group):
+    """Where the data of consistency group *group* lives NOW, keyed the way
+    PersistentVolumes keep it.
+
+    A PV keeps its original volume handle across every move, and a VGR keeps its
+    original group handle. After a relocate the source group is legitimately
+    empty (its demoted members are deleted, so a relocate back is possible) and
+    the data lives in the peer group of the same name, as clones whose
+    relationships lead back to the original volumes (failover_from_replicated_copy,
+    fail-back). The CSI driver resolves the original group handle through this:
+
+    * ``active``: the group holding live members -- *group* itself while it has
+      any, else its peer group (_resolve_peer_group) when that has; None when
+      neither has (nothing serves the data).
+    * ``members``: one entry per lineage with a live volume at its end:
+      ``origin_handle`` (the handle the PV carries: the oldest volume of the
+      lineage, from the relationship record, which outlives the volume) and
+      ``active_handle`` (the volume serving the data now).
+
+    The lineages are found from the open members of both groups and from every
+    relationship whose source or target volume record names either group, so a
+    group emptied by a relocate still lists the PVs it protected."""
+    policy = None
+    if group.policy_id:
+        try:
+            policy = db.get_replication_policy_by_id(group.policy_id)
+        except KeyError:
+            policy = None
+    peer = _resolve_peer_group(group, policy)
+    group_ids = {group.get_id()} | ({peer.get_id()} if peer is not None else set())
+
+    def open_members(g):
+        if g is None:
+            return []
+        return [v for v in db.get_lvols(g.cluster_id)
+                if getattr(v, "group_id", "") == g.get_id()
+                and v.status != LVol.STATUS_IN_DELETION]
+
+    own, peer_own = open_members(group), open_members(peer)
+    active = group if own else (peer if peer_own else None)
+
+    reps = db.get_lvol_replication_objects()
+    candidates = {v.get_id(): v for v in own + peer_own}
+    for rep in reps:
+        for side in (rep.source_lvol, rep.target_lvol):
+            if side is not None and getattr(side, "group_id", "") in group_ids:
+                candidates.setdefault(side.get_id(), side)
+
+    members: dict[str, dict[str, str]] = {}
+    for lvol_id, record in candidates.items():
+        origin, origin_cluster = _lineage_origin(lvol_id, reps)
+        if origin is None:
+            origin, origin_cluster = record, ""
+        if origin.get_id() in members:
+            continue
+        active_id = _resolve_active_lvol(origin.get_id())
+        try:
+            live = db.get_lvol_by_id(active_id)
+        except KeyError:
+            continue                              # the lineage ended: nothing to resolve to
+        if live.status == LVol.STATUS_IN_DELETION:
+            continue
+        origin_handle = _lvol_handle(origin, origin_cluster)
+        active_handle = _lvol_handle(live)
+        if origin_handle and active_handle:
+            members[origin.get_id()] = {"origin_handle": origin_handle,
+                                        "active_handle": active_handle}
+    return {
+        "active_cluster_id": active.cluster_id if active is not None else "",
+        # The bare group uuid: a "cg:<cluster>:<group>" handle carries that, while
+        # get_id() is "<cluster>/<uuid>".
+        "active_group_id": active.uuid if active is not None else "",
+        "members": sorted(members.values(), key=lambda m: m["origin_handle"]),
+    }
+
+
+def _failover_group_from_target_copies(group):
+    """Fail *group* over from its newest complete replicated generation, cloning
+    every member from its copy on the peer (replication_recovery_points). The
+    template of each clone is the volume record embedded in the member's source
+    snapshot, so the clone keeps the volume's identity; when that snapshot is
+    gone too, the copy's own record stands in. Idempotent: a member whose copy
+    already has a live clone reports that clone."""
+    seq, origins, copies = replication_recovery_points.newest_group_generation(group.get_id(), db=db)
+    copies = [c for c in copies if getattr(c, "cluster_id", "") != group.cluster_id]
+    if not copies:
+        logger.error("Fail-over of consistency group %s: no complete replicated generation "
+                     "on a peer cluster to fail over from", group.group_name)
+        return []
+    peer_clusters = {getattr(c, "cluster_id", "") for c in copies}
+    if len(peer_clusters) > 1:
+        logger.error("Fail-over of consistency group %s: generation %d has copies on "
+                     "several clusters %s", group.group_name, seq, sorted(peer_clusters))
+        return [{"lvol_id": c.lvol.get_id() if c.lvol else c.get_id(), "status": "failed",
+                 "detail": "generation copies span several clusters"} for c in copies]
+    by_copy = {}
+    for o in origins:
+        partner = (getattr(o, "target_replicated_snap_uuid", "")
+                   or getattr(o, "source_replicated_snap_uuid", ""))
+        by_copy[partner] = o
+    logger.info("Failing consistency group %s over from replicated generation %d "
+                "(%d member(s)) on cluster %s", group.group_name, seq, len(copies),
+                next(iter(peer_clusters)))
+    results = []
+    for copy in copies:
+        origin = by_copy.get(copy.get_id())
+        if origin is None and getattr(copy, "source_replicated_snap_uuid", None):
+            try:
+                origin = db.get_snapshot_by_id(copy.source_replicated_snap_uuid)
+            except KeyError:
+                origin = None
+        template = origin.lvol if origin is not None and origin.lvol else copy.lvol
+        if template is None:
+            results.append({"lvol_id": copy.get_id(), "status": "failed",
+                            "detail": "replicated copy names no volume"})
+            continue
+        existing = [lv for lv in db.get_lvols(copy.cluster_id)
+                    if getattr(lv, "cloned_from_snap", "") == copy.get_id()
+                    and lv.status != LVol.STATUS_IN_DELETION]
+        if existing:
+            results.append({"lvol_id": template.get_id(), "status": "failed_over",
+                            "target_lvol_id": existing[0].get_id(), "connection_strings": []})
+            continue
+        try:
+            ret = lvol_controller.failover_from_replicated_copy(template, copy, group.cluster_id)
+        except Exception as e:                       # one member must not stop the group
+            logger.error("Fail-over of %s from copy %s failed: %s",
+                         template.get_id(), copy.get_id(), e)
+            results.append({"lvol_id": template.get_id(), "status": "failed", "detail": str(e)})
+            continue
+        results.append(_clone_result(template.get_id(), ret))
+    return results
+
+
+def _failback_group(group, policy, peer=None):
+    """Clone the members of *group* home from the peer group that holds them after
+    a fail-over. Returns per-member result dicts (empty when no peer group or peer
+    member is found; all ``failed`` when the demote cut has not finished shipping).
+    """
+    if peer is None:
+        peer = _resolve_peer_group(group, policy)
+    if peer is None:
+        logger.error("Fail-back of consistency group %s: no peer group found to "
+                     "clone home from", group.group_name)
+        return []
+    peer_members = [v for v in db.get_lvols(peer.cluster_id)
+                    if getattr(v, "group_id", "") == peer.get_id()]
+    if not peer_members:
+        logger.error("Fail-back of consistency group %s: peer group %s has no "
+                     "members to clone home", group.group_name, peer.group_name)
+        return []
+    try:
+        seq, pinned = _resolve_group_failback_generation(peer, peer_members)
+    except ReplicationConfigError as e:
+        logger.error("Fail-back of consistency group %s refused: %s",
+                     group.group_name, e)
+        return [{"lvol_id": v.get_id(), "status": "failed", "detail": str(e)}
+                for v in peer_members]
+    logger.info("Failing back consistency group %s from peer group %s "
+                "generation %d", group.group_name, peer.group_name, seq)
+    return _clone_members_home(
+        peer_members, pinned,
+        f"consistency group {group.group_name} (fail-back)")
+
+
+def _resolve_active_peer_group(group, policy):
+    """The peer group that holds *group*'s data after a fail-over -- the source of
+    a fail-back.
+
+    Keyed by name on the policy's replication-target cluster, the same key
+    reconstitute_group_after_handoff formed the peer group under, so a fail-back
+    returns to the group its members left. Returns None when the target or the
+    peer group cannot be resolved.
+    """
+    try:
+        target = db.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    peer_cluster_id = getattr(target, "target_cluster_id", "")
+    if not peer_cluster_id:
+        return None
+    return db.get_consistency_group_by_name(peer_cluster_id, group.group_name)
+
+
+def _resolve_group_failback_generation(peer_group, peer_members):
+    """The newest generation of *peer_group* every member has replicated home --
+    the demote cut the peer shipped for fail-back.
+
+    Returns ``(group_seq, {lvol_id: source_snapshot_id})`` where the source
+    snapshot lives on the peer cluster; replicate_lvol_on_target_cluster resolves
+    its home-side copy to clone from. A generation qualifies by the same rule
+    _resolve_group_failover_generation applies (task DONE, target copy present and
+    not being pruned), but this does NOT filter to unsettled members: a
+    fail-back's members are the failed-over targets, all settled, and all are what
+    we clone home. Raises ReplicationConfigError when no generation is fully
+    replicated home for every member yet (the demote cut is still shipping).
+    """
+    member_ids = {m.get_id() for m in peer_members}
+    replicated = {
+        task.function_params.get("snapshot_id")
+        for task in db.get_job_tasks(peer_group.cluster_id)
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+        and task.status == JobSchedule.STATUS_DONE
+    }
+    by_seq: dict = {}
+    for snap in db.get_snapshots():
+        if getattr(snap, "group_id", "") != peer_group.get_id():
+            continue
+        seq = getattr(snap, "group_seq", 0)
+        lvol_id = snap.lvol.get_id() if snap.lvol else ""
+        if not seq or lvol_id not in member_ids:
+            continue
+        if snap.get_id() not in replicated or not snap.target_replicated_snap_uuid:
+            continue
+        try:
+            target_copy = db.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        except KeyError:
+            continue
+        if (target_copy.status == SnapShot.STATUS_IN_DELETION
+                or getattr(target_copy, "deleted", False)):
+            continue
+        by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
+
+    for seq in sorted(by_seq, reverse=True):
+        if member_ids <= set(by_seq[seq]):
+            return seq, by_seq[seq]
+
+    missing = ""
+    if by_seq:
+        best = max(by_seq)
+        absent = sorted(member_ids - set(by_seq[best]))
+        missing = f"; generation {best} lacks {', '.join(absent)}"
+    raise ReplicationConfigError(
+        f"No generation of consistency group {peer_group.group_name} is fully "
+        f"replicated home for all {len(member_ids)} member(s); the demote cut "
+        f"has not finished shipping{missing}")
 
 
 def failover_target(target_id):
@@ -392,6 +1062,22 @@ def _settled_relationship(lvol_id):
     return None
 
 
+def _failed_home_relationship(lvol_id):
+    """The relationship in which *lvol_id* is the settled TARGET -- the clone that
+    was failed HOME to this cluster and is now the local primary -- or None.
+
+    The mirror of _settled_relationship, which is SOURCE-keyed (_active_relationship
+    follows the source end). A fail-back's members are the home-side clones, i.e.
+    the TARGET end of the reverse relationship, so the source-keyed check never sees
+    them as settled and a re-promote reads them as pending."""
+    for rep in reversed(db.get_lvol_replication_objects()):
+        if (rep.target_lvol and rep.target_lvol.get_id() == lvol_id
+                and rep.state in (LVolReplication.STATE_FAILED_OVER,
+                                  LVolReplication.STATE_CUTOVER_DONE)):
+            return rep
+    return None
+
+
 def _resolve_group_failover_generation(policy, volumes):
     """The one generation every pending member fails over to.
 
@@ -403,7 +1089,7 @@ def _resolve_group_failover_generation(policy, volumes):
 
     A generation qualifies when every member still to be failed over has a
     snapshot of it that is FULLY replicated, by the same rules
-    lvol_controller._last_replicated_target_snapshot applies per volume: the
+    lvol_controller.last_replicated_target_snapshot applies per volume: the
     replication task is DONE (a target record alone proves allocation, not
     data), and the target copy still exists and is not being deleted by
     retention.
@@ -417,11 +1103,27 @@ def _resolve_group_failover_generation(policy, volumes):
     Returns (seq, {lvol_id: source_snapshot_id}) for the pending members.
     Raises ReplicationConfigError when no generation qualifies.
     """
-    group = db.get_consistency_group_for_policy(policy.get_id())
+    # Resolve the group by membership first (a member carries its group id),
+    # falling back to the legacy policy-owned link. A policy's volumes must all
+    # sit in one group for the cut to be a single crash-consistent generation.
+    group_ids = {getattr(v, "group_id", "") for v in volumes
+                 if getattr(v, "group_id", "")}
+    if len(group_ids) > 1:
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} spans multiple consistency groups "
+            f"{sorted(group_ids)}; refusing a mixed-group fail-over")
+    group = None
+    if group_ids:
+        try:
+            group = db.get_consistency_group_by_id(next(iter(group_ids)))
+        except KeyError:
+            group = None
+    else:
+        group = db.get_consistency_group_for_policy(policy.get_id())
     if group is None:
         raise ReplicationConfigError(
-            f"Policy {policy.policy_name} declares a consistency group but "
-            f"has no group record")
+            f"Policy {policy.policy_name} volumes belong to a consistency group "
+            f"but no group record was found")
 
     pending_ids = []
     incumbent_seqs = set()
@@ -456,7 +1158,9 @@ def _resolve_group_failover_generation(policy, volumes):
     }
 
     by_seq: dict = {}
-    for snap in db.get_snapshots():
+    # `group_id` carries no index of its own; the cluster scope is what keeps
+    # this off a cluster-wide snapshot scan.
+    for snap in db.get_snapshots(group.cluster_id):
         if getattr(snap, "group_id", "") != group.get_id():
             continue
         seq = getattr(snap, "group_seq", 0)
@@ -496,6 +1200,54 @@ def _resolve_group_failover_generation(policy, volumes):
         f"mixed-generation fail-over{missing}")
 
 
+def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapShot]]:
+    """The newest consistency-group generation every current member has fully
+    replicated, as cloneable objects on the secondary.
+
+    Reuses :func:`_resolve_group_failover_generation`'s refusal rule instead
+    of its side effect: a generation qualifies only when every member has a
+    snapshot of it that reached the target and is not being pruned, so a
+    caller (the test-failover drill, design §14) never addresses a
+    mixed-generation cut. Every current member is treated as pending -- this
+    describes present-day, un-failed-over steady state, never a resumed
+    fail-over that already has clones on the peer.
+
+    Returns ``(group_seq, {lvol_id: target_snapshot})``. Raises
+    ``ReplicationConfigError`` when the policy has no consistency group or no
+    generation is fully replicated for every member yet.
+    """
+    policy = db.get_replication_policy_by_id(policy_id)
+    volumes = db.get_lvols_by_replication_policy(policy.get_id())
+    # Resolve the generation over the group's MEMBERS, not every volume on the
+    # policy. A group attached with attach_group_policy sets group.policy_id, not
+    # the legacy policy.consistency_group flag, so membership (a volume's group_id)
+    # is the only reliable signal a group exists; and a policy shared with a
+    # single-PVC workload carries a standalone volume that is not in the group's
+    # generation, which would poison the cut ("generation N lacks <standalone>").
+    # This is the same partition the fail-over path applies (_failover_group_members).
+    group_members, _standalone = _group_and_standalone(policy, volumes)
+    if not group_members:
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} has no consistency group")
+    seq, covered = _resolve_group_failover_generation(policy, group_members)
+    if not covered:
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} has no member left to resolve a "
+            f"generation for; every member has already failed over")
+
+    members = {}
+    for lvol_id, source_snap_id in covered.items():
+        source_snap = db.get_snapshot_by_id(source_snap_id)
+        # Re-fetched rather than carried from the scan above: the scan proved
+        # the target copy existed and was not being pruned at THAT instant,
+        # and this is a read with no lock, so a concurrent retention pass
+        # remains possible in the window between. Rare enough, and cheap
+        # enough to just re-raise on, that a lock is not worth taking for a
+        # status read.
+        members[lvol_id] = db.get_snapshot_by_id(source_snap.target_replicated_snap_uuid)
+    return seq, members
+
+
 def _failover_volumes(volumes, what, pinned=None):
     """Per-volume results, so a partial failure is visible instead of silent.
 
@@ -528,17 +1280,58 @@ def _failover_volumes(volumes, what, pinned=None):
             logger.error("Fail-over of %s failed: %s", lvol_id, e)
             results.append({"lvol_id": lvol_id, "status": "failed", "detail": str(e)})
             continue
-        if isinstance(ret, tuple):                   # (False, error)
-            results.append({"lvol_id": lvol_id, "status": "failed", "detail": str(ret[1])})
-        elif not ret:
-            results.append({"lvol_id": lvol_id, "status": "failed", "detail": "fail-over returned no volume"})
-        elif isinstance(ret, dict):
-            results.append({"lvol_id": lvol_id, "status": "failed_over",
-                            "target_lvol_id": ret.get("lvol_id", ""),
-                            "connection_strings": ret.get("connection_strings", []),
-                            "warnings": ret.get("warnings", [])})
-        else:
-            results.append({"lvol_id": lvol_id, "status": "failed_over", "target_lvol_id": str(ret)})
+        results.append(_clone_result(lvol_id, ret))
+    return results
+
+
+def _clone_result(lvol_id, ret):
+    """Shape a replicate_lvol_on_target_cluster return into a per-volume result
+    dict. ``ret`` is a truthy clone id / dict on success, ``(False, error)`` or a
+    falsy value on failure. Shared by the fail-over and the fail-back paths so
+    both report status identically."""
+    if isinstance(ret, tuple):                       # (False, error)
+        return {"lvol_id": lvol_id, "status": "failed", "detail": str(ret[1])}
+    if not ret:
+        return {"lvol_id": lvol_id, "status": "failed",
+                "detail": "fail-over returned no volume"}
+    if isinstance(ret, dict):
+        return {"lvol_id": lvol_id, "status": "failed_over",
+                "target_lvol_id": ret.get("lvol_id", ""),
+                "connection_strings": ret.get("connection_strings", []),
+                "warnings": ret.get("warnings", [])}
+    return {"lvol_id": lvol_id, "status": "failed_over", "target_lvol_id": str(ret)}
+
+
+def _clone_members_home(members, pinned, what):
+    """Clone each failed-over member back to its origin cluster, pinned to the
+    group's fail-back generation.
+
+    The fail-back mirror of _failover_volumes, with one deliberate difference: it
+    does NOT skip a member with a settled relationship. A fail-back's members are
+    exactly the failed-over targets -- every one carries a STATE_FAILED_OVER
+    relationship -- and they are precisely what must be cloned home. Routing them
+    through _failover_volumes would skip all of them (the silent fail-back no-op
+    caught live 2026-09-27). Each member's replication_node_id was pointed home at
+    demote, so replicate_lvol_on_target_cluster clones it to the origin cluster
+    and reconstitute_group_after_handoff rejoins it to the origin group.
+    """
+    results = []
+    logger.info("Failing back %d member(s) of %s", len(members), what)
+    for lvol in members:
+        lvol_id = lvol.get_id()
+        pin = pinned.get(lvol_id)
+        if not pin:
+            results.append({"lvol_id": lvol_id, "status": "failed",
+                            "detail": "no snapshot of the group's fail-back generation"})
+            continue
+        try:
+            ret = lvol_controller.replicate_lvol_on_target_cluster(
+                lvol_id, pin_snapshot_id=pin)
+        except Exception as e:                       # one member must not stop the group
+            logger.error("Fail-back of %s failed: %s", lvol_id, e)
+            results.append({"lvol_id": lvol_id, "status": "failed", "detail": str(e)})
+            continue
+        results.append(_clone_result(lvol_id, ret))
     return results
 
 

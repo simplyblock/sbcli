@@ -151,6 +151,36 @@ class TestAuthorizedCluster:
 
 
 # ---------------------------------------------------------------------------
+# authenticated_admin_token
+# ---------------------------------------------------------------------------
+
+class TestAuthenticatedAdminToken:
+
+    def _settings(self, tokens: list[str]) -> MagicMock:
+        s = MagicMock()
+        s.admin_tokens = [SecretStr(t) for t in tokens]
+        return s
+
+    def test_returns_true_for_matching_token(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._settings(["s3cr3t"])):
+            assert auth.authenticated_admin_token(_make_credentials("s3cr3t")) is True
+
+    def test_returns_false_for_unknown_token(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._settings(["s3cr3t"])):
+            assert auth.authenticated_admin_token(_make_credentials("wrong")) is False
+
+    def test_returns_false_when_no_tokens_configured(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._settings([])):
+            assert auth.authenticated_admin_token(_make_credentials("anything")) is False
+
+
+# ---------------------------------------------------------------------------
 # verify_api_token (orchestration)
 # ---------------------------------------------------------------------------
 
@@ -162,6 +192,41 @@ class TestVerifyApiToken:
         s = MagicMock()
         s.k8s_admin_service_accounts = admins
         return s
+
+    def test_passes_for_admin_token_without_cluster_id(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._settings([self._ADMIN_SA])):
+            auth.verify_api_token(
+                sa_name=None,
+                authorized_cluster_id=None,
+                is_admin_token=True,
+                cluster_id=None,
+            )
+
+    def test_admin_token_bypasses_cluster_id_mismatch(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._settings([self._ADMIN_SA])):
+            auth.verify_api_token(
+                sa_name=None,
+                authorized_cluster_id=uuid4(),
+                is_admin_token=True,
+                cluster_id=uuid4(),
+            )
+
+    def test_raises_401_when_admin_token_absent_and_nothing_else_matches(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._settings([self._ADMIN_SA])):
+            with pytest.raises(HTTPException) as exc_info:
+                auth.verify_api_token(
+                    sa_name=None,
+                    authorized_cluster_id=None,
+                    is_admin_token=False,
+                    cluster_id=None,
+                )
+        assert exc_info.value.status_code == 401
 
     def test_passes_for_admin_sa_without_cluster_id(self):
         import simplyblock_web.api.v2._auth as auth

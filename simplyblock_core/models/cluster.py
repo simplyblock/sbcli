@@ -1,9 +1,11 @@
 import os.path
-from typing import ClassVar
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from pydantic import SecretStr
 
 from simplyblock_core import constants
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
@@ -163,6 +165,24 @@ class Cluster(BaseModel):
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False
+    # is_re_balancing covers every data-moving task, the cluster's own volume
+    # migrations included. is_data_rebalancing covers only the device and
+    # balancing tasks -- data the cluster is moving by itself -- so a caller
+    # that drives volume migrations (a node drain) can wait for the one
+    # without waiting on its own work. active_lvol_migrations counts the rest.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
+    # A node removal is in progress: some node is between pending_removal and
+    # in_removal. A flag beside the status, not a status: the status stays the
+    # calculated one (active, degraded, ...), which leaves the removal's own
+    # node out once its data is rebuilt, so "active + shrinking" (and
+    # rebalancing) can hold at once. Recomputed from the node statuses on every
+    # monitor tick; it replaces the IN_SHRINK status, which new code never sets.
+    is_shrinking: bool = False
+    # The calculated status is DEGRADED only because of the node being removed
+    # (its devices are not all rebuilt yet); without that node it would be
+    # ACTIVE. A removal driver must not pause on that degraded state.
+    is_degraded_by_removal: bool = False
     # Suspend-recovery drain phase marker.
     #
     # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes
@@ -267,7 +287,6 @@ class Cluster(BaseModel):
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
     backup_config: dict = default_factory(dict)
-    backup_source: str = ""  # active backup source cluster_id ("" = local)
     backup_timeout_seconds: int = 14400  # 4 hours default
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
@@ -296,6 +315,10 @@ class Cluster(BaseModel):
     backup_s3_bucket: str = ""
     backup_s3_region: str = ""
     backup_s3_cred: str = ""
+    # Cluster Virtual IP, this is used for the load balancer,
+    # and it is used for gelf address in the storage nodes' containers.
+    # If not defined, then gelf address will be the first mgmt node's address
+    cluster_vip: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
@@ -312,6 +335,62 @@ class Cluster(BaseModel):
             return True
         return False
 
+    def default_backup_bucket_name(self) -> str:
+        """The bucket this cluster backs up to when its configuration names none.
+
+        A config that names no bucket gets the one the bucket name used to be
+        derived from at device-creation time, so a cluster configured before
+        ``bucket_name`` existed keeps addressing the bucket it has been writing
+        to. Callers that configure a bucket per cluster (``StorageCluster``'s
+        ``spec.backup`` has no bucket field at all) never name one, so this is
+        the normal case rather than a fallback.
+        """
+        return f"simplyblock-backup-{self.uuid}"
+
+    def _resolve_backup_config(self, config: Mapping[str, Any]) -> BackupConfig:
+        return BackupConfig.model_validate({
+            "bucket_name": self.default_backup_bucket_name(),
+            **config,
+        })
+
+    def get_backup_config(self) -> BackupConfig:
+        """Validate and return this cluster's volume-backup configuration.
+
+        ``backup_config`` stays an untyped dict on the record because
+        ``BaseModel`` cannot nest pydantic models; validating on read gives the
+        typing without an FDB migration. Stored configs are never rewritten by
+        reading them, so :meth:`default_backup_bucket_name` stays derived rather
+        than frozen into the record.
+
+        Raises:
+            ValueError: The cluster has no backup configuration, or the stored
+                one is not valid. ``ValidationError`` is a ``ValueError``, so one
+                except clause covers both.
+        """
+        if not self.backup_config:
+            raise ValueError(f"Cluster {self.get_id()} has no backup configuration")
+
+        return self._resolve_backup_config(self.backup_config)
+
+    def set_backup_config(self, config: Mapping[str, Any]) -> None:
+        """Validate a raw backup configuration and store it on this record.
+
+        The only way to put a configuration on a cluster. Validating on write as
+        well as on read is what stops a configuration no cluster could act on
+        from being accepted at cluster-create and then failing activation on
+        every node, arbitrarily long after the mistake was made and with nothing
+        in the failure pointing back at it.
+
+        What gets stored is what the caller passed, so an absent ``bucket_name``
+        stays absent and keeps resolving through
+        :meth:`default_backup_bucket_name`.
+
+        Raises:
+            ValueError: The configuration is not one this cluster could act on.
+        """
+        self._resolve_backup_config(config)
+        self.backup_config = dict(config)
+
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:
             backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/{path}?bucket={self.backup_s3_bucket}" \
@@ -321,54 +400,6 @@ class Cluster(BaseModel):
         else:
             backup_path = os.path.join(constants.KVD_DB_BACKUP_PATH, self.uuid, path)
         return backup_path
-
-
-class ClusterAddNodeLock(BaseModel):
-    """Cluster-scoped mutex held while a node-add performs its cross-node mesh
-    wiring (connect to remote devices, go ONLINE, make peers reverse-connect,
-    push the cluster map). Only this section needs serializing; the slow,
-    node-local part of add_node (SPDK boot, local device prep) runs in parallel
-    across concurrent node-add tasks.
-
-    Keyed by ``cluster_id`` so there is at most one in-flight mesh section per
-    cluster. ``heartbeat_at`` is refreshed by the holder while the section runs;
-    a lock whose heartbeat is older than ``CLUSTER_ADD_LOCK_TTL_SEC`` is
-    considered abandoned (holder crashed) and may be reclaimed.
-    """
-
-    cluster_id: str = ""
-    owner: str = ""
-    acquired_at: int = 0
-    heartbeat_at: int = 0
-
-    def get_id(self):
-        return self.cluster_id or self.uuid
-
-
-class ClusterCreateLock(BaseModel):
-    """Mutex serializing add_cluster() calls for a given cluster name.
-
-    add_cluster()'s duplicate-name check reads all clusters and raises if one
-    already carries the requested name — a plain read-then-write with no
-    atomicity, so concurrent/retried create calls for the same name can all
-    pass the check before any of them has committed (observed 2026-07-28: a
-    control-plane readiness flap made the operator retry cluster-create in a
-    burst, producing 6 separate clusters named "simplyblock-cluster" instead
-    of one).
-
-    Keyed by ``name`` so only one create can be in flight for a given name at
-    a time. No heartbeat — add_cluster() is a single synchronous call, not a
-    long-lived section like node-add's mesh wiring — just a generous TTL
-    (``CLUSTER_CREATE_LOCK_TTL_SEC``) so a crashed holder's lock is eventually
-    reclaimable by a genuine retry.
-    """
-
-    name: str = ""
-    owner: str = ""
-    acquired_at: int = 0
-
-    def get_id(self):
-        return self.name or self.uuid
 
 
 class PortReservation(BaseModel):

@@ -19,7 +19,13 @@ tasks_runner_batch_migration.py) import it directly at module level.
 import logging
 import time
 
-from tenacity import RetryError, Retrying, before_sleep_log, stop_after_attempt, wait_fixed
+from tenacity import (
+    RetryError,
+    Retrying,
+    before_sleep_log,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from simplyblock_core import utils
 
@@ -69,7 +75,7 @@ def delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_rp
     deadline = time.monotonic() + timeout_s
     while leader_rpc.bdev_lvol_get_lvol_delete_status(bdev_name) == 1:
         if time.monotonic() > deadline:
-            if not leader_rpc.get_bdevs(bdev_name):
+            if not leader_rpc.bdev_get(bdev_name):
                 logger.warning(
                     f"delete bdev {bdev_name}: poll timed out after {timeout_s}s "
                     f"but bdev is gone — treating as success")

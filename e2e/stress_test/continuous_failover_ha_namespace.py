@@ -26,19 +26,18 @@ DELETE:
 """
 
 import random
+import string
 import threading
 import time
 from collections import defaultdict
-import string
 
-from utils.common_utils import sleep_n_sec
-from utils.ssh_utils import get_parent_device
 from exceptions.custom_exception import LvolNotConnectException
-
 from stress_test.continuous_failover_ha_multi_client import (
     RandomMultiClientFailoverTest,
     generate_random_sequence,
 )
+from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 
 class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):

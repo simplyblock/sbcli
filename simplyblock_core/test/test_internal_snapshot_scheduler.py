@@ -1,6 +1,6 @@
 """D3 unit tests for the interval-driven internal-snapshot scheduler."""
-from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_monitor as sm
 
 

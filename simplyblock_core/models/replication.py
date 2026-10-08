@@ -6,10 +6,11 @@ and a volume optionally references one policy. Structurally this mirrors
 ``BackupPolicy`` / ``BackupPolicyAttachment`` in ``models/backup.py``, including
 the ``cluster_id/uuid`` composite id.
 """
-from typing import ClassVar
 import datetime
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index, Unique
 
 
 class ReplicationTarget(BaseModel):
@@ -19,6 +20,11 @@ class ReplicationTarget(BaseModel):
     could only hold one destination and was overwritten by every
     ``cluster add-replication``.
     """
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'target_name')),
+    )
 
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
@@ -47,6 +53,11 @@ class ReplicationTarget(BaseModel):
 
 class ReplicationPolicy(BaseModel):
     """Cadence, mode and retention shared by a group of volumes."""
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'policy_name')),
+    )
 
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
@@ -82,6 +93,11 @@ class ReplicationPolicy(BaseModel):
     #: (bdev_lvol_snapshot_group), and fail-over generations are resolved
     #: group-wide. Auto-creates/deletes a ConsistencyGroup record.
     consistency_group: bool = False
+    #: The declared recovery point objective, in seconds. RPO compliance is
+    #: computed against THIS figure rather than the derived lag budget, so an
+    #: operator alerts on the objective they promised, not on a heuristic.
+    #: 0 means no declared objective: the lag budget stays the derived one.
+    rpo_target_seconds: int = 0
     status: str = STATUS_ACTIVE
 
     def get_id(self):
@@ -93,10 +109,15 @@ class ReplicationPolicy(BaseModel):
 
 
 class ConsistencyGroup(BaseModel):
-    """Auto-managed group record behind a consistency-group policy.
+    """A group of volumes that snapshot as one crash-consistent generation.
 
-    Created with the policy and removed with it. ``members`` maps lvol id to
-    its membership EPOCH:
+    A group is born from its first labeled member volume and identified by a
+    ``group_name`` unique within its cluster (a PVC's
+    ``storage.simplyblock.io/consistency-group`` label on the Kubernetes path).
+    The field is deliberately NOT called ``name``: BaseModel.name is the class
+    name and the middle segment of every FDB key, so shadowing it moves the
+    record out of the class keyspace (see tests/unit/models/test_reserved_fields.py).
+    ``members`` maps lvol id to its membership EPOCH:
 
         {"joined_seq": N, "removed_seq": M}
 
@@ -105,10 +126,26 @@ class ConsistencyGroup(BaseModel):
     Late joiners deliberately do NOT inherit history: they join at
     ``last_group_seq + 1``, i.e. the first group snapshot taken AFTER the
     attach, because earlier group snapshots simply do not contain them.
+
+    ``policy_id`` is optional: it is set for the legacy path where a
+    replication policy owns the group, and empty for a standalone group. The
+    membership and generation model is identical either way.
     """
 
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'group_name')),
+        # Indexed by the bare uuid: the field holds a ReplicationPolicy
+        # get_id(), and callers resolve a policy from either half of it.
+        Index('policy_id', arity=1, extract=lambda group: (
+            [(group.policy_id.split('/')[-1],)] if group.policy_id else []
+        )),
+    )
+
     cluster_id: str = ""
-    policy_id: str = ""           # ReplicationPolicy.get_id()
+    #: group name, unique per cluster; the identity a labeled volume joins by.
+    group_name: str = ""
+    policy_id: str = ""           # ReplicationPolicy.get_id(), optional
     #: pinned placement: every member volume lives on this node / LVS. Set by
     #: the first member and enforced for all others.
     node_id: str = ""
@@ -117,6 +154,10 @@ class ConsistencyGroup(BaseModel):
     #: every member snapshot it takes with group_seq = N.
     last_group_seq: int = 0
     members: dict = default_factory(dict)
+    # The active consistency-group migration (cg_colocation design §3): the
+    # target node and one entry per subsystem of the migration scope,
+    # {"nqn", "kind": "single"|"batch", "id"}; {} when none is active.
+    migration: dict = default_factory(dict)
     status: str = "active"
 
     def get_id(self):

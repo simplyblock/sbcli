@@ -28,7 +28,6 @@ from unittest.mock import MagicMock
 
 from simplyblock_core.utils import hublvol_reconnect
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

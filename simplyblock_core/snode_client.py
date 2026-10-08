@@ -1,8 +1,7 @@
 import json
-
-import requests
 import logging
 
+import requests
 from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
@@ -113,7 +112,7 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
-    def write_key_file(self, name, content):
+    def write_key_file(self, name, content: SecretStr):
         """Write a DHCHAP key file on the storage node for SPDK keyring."""
         return self._request("POST", "write_key_file", {"name": name, "content": content})
 
@@ -253,12 +252,21 @@ class SNodeClient:
                             cpu_mask=None, isolated=None, l_cores=None,
                             distribution=None, core_to_index=None,
                             small_pool_count=None, large_pool_count=None,
-                            number_of_distribs=None):
+                            number_of_distribs=None, lblk_serials=None):
+        """Write sizing/CPU fields onto ONE of the host's node-config slots.
+
+        ``numa_node`` plus the slot's device set selects it: ``ssd_list`` (PCI
+        addresses) in nvme mode, ``lblk_serials`` in lblk mode. Pass the one
+        the host's mode populates -- an lblk node's ssd_list is always empty,
+        and empty means "no device filter", so lblk callers that send only
+        ssd_list select the socket's FIRST slot rather than their own.
+        """
         payload = {
             "max_lvol": max_lvol,
             "huge_page_memory": huge_page_memory,
             "numa_node": numa_node,
             "ssd_list": ssd_list,
+            "lblk_serials": sorted(lblk_serials) if lblk_serials else None,
         }
         if cpu_mask is not None:
             payload["cpu_mask"] = cpu_mask

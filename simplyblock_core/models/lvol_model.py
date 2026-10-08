@@ -2,11 +2,29 @@
 from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index, Unique
 
 
 class LVol(BaseModel):
 
     _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('pool_uuid'),
+        Index('node_id'),
+        # Names are unique per POOL, so the constraint below cannot answer a
+        # lookup that has only the name — which `sbctl volume get <name>` and
+        # the v1 "id or name" surfaces legitimately do.
+        Index('lvol_name'),
+        # Indexed by the bare uuid: the field holds a ReplicationPolicy
+        # get_id() ("<cluster>/<uuid>") but every caller resolves a policy from
+        # whichever half it happens to hold.
+        Index('replication_policy_id', arity=1, extract=lambda lvol: (
+            [(lvol.replication_policy_id.split('/')[-1],)]
+            if lvol.replication_policy_id else []
+        )),
+        Unique(('pool_uuid', 'lvol_name')),
+    )
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
@@ -29,6 +47,8 @@ class LVol(BaseModel):
     base_bdev: str = ""
     bdev_stack: list = default_factory(list)
     blobid: int = 0
+    #: The snapshot this volume's blob was created over, or empty when the blob
+    #: stands alone. Inflating folds every ancestor in and clears it.
     cloned_from_snap: str = ""
     comp_bdev: str = ""
     crypto_bdev: str = ""
@@ -50,7 +70,15 @@ class LVol(BaseModel):
     node_id: str = ""
     nodes: list[str] = default_factory(list)
     nqn: str = ""
-    ns_id: int = 1
+    # 0 = "not assigned yet": the PRIMARY namespace add auto-assigns the real
+    # nsid and persists it here; every replica add reuses it verbatim (see
+    # add_lvol_on_node — divergent per-node nsid maps make the client kernel
+    # reject shared namespaces, mass-create incident 2026-07-06). The default
+    # must never be a legitimate nsid: a construction site that forgets to set
+    # this field would then request that nsid as if it were dictated, which
+    # hard-fails on any shared subsystem whose slot is taken (clone incident
+    # 2026-09-10).
+    ns_id: int = 0
     # The UUID the NVMe namespace advertises on the wire when it differs from
     # the record's uuid (migration/fail-back clones inherit another volume's
     # identity so the client's multipath head keeps its paths). Empty means
@@ -118,6 +146,35 @@ class LVol(BaseModel):
     # replication service keeps reading exactly what it reads today; attaching a
     # policy derives them from policy + target.
     replication_policy_id: str = ""
+    #: consistency group this volume was created into, "" for a non-member.
+    #: Denormalized pointer set at join and cleared on detach; the group's
+    #: members map remains the authoritative generation-membership record.
+    group_id: str = ""
+
+    # Planned-swap demote state (P0-3, design-csi-addons-replication.md §5.2).
+    # Lives on the SOURCE volume directly, not on an LVolReplication record:
+    # demote runs before any target volume exists to pair one with. "" means
+    # never requested; PENDING means fenced and a final snapshot is in
+    # flight; DONE means that snapshot is confirmed replicated and the
+    # planned promote's precondition gate is satisfied.
+    REPLICATION_DEMOTE_PENDING = "pending"
+    REPLICATION_DEMOTE_DONE = "done"
+
+    replication_demote_state: str = ""
+    # The final snapshot demote is waiting on, so a re-invocation (the driver
+    # re-drives DemoteVolume until it reports done) checks THIS snapshot's
+    # replicated marker rather than triggering a new one every call.
+    replication_demote_snapshot_id: str = ""
+    def place_in_pool(self, pool) -> None:
+        """Put this volume in ``pool``.
+
+        The two fields move as one: ``pool_uuid`` is what the index and every
+        lookup key on, ``pool_name`` is what the display paths read, and a
+        record carrying one without the other shows a volume in the wrong pool
+        on exactly one of those surfaces.
+        """
+        self.pool_uuid = pool.get_id()
+        self.pool_name = pool.pool_name
 
     def watch_scope(self):
         return (self.pool_uuid,)
@@ -129,15 +186,9 @@ class LVol(BaseModel):
         super().write_to_db(kv_store)
         lvol_mini = LVolMini().from_lvol(self)
         lvol_mini.write_to_db(kv_store)
-        # Maintain the per-pool name index here so every create/update path keeps
-        # it current (used for O(1) name-uniqueness instead of scanning all lvols).
-        from simplyblock_core.db_controller import DBController
-        DBController().index_lvol_name(self)
 
     def remove(self, kv_store):
         super().remove(kv_store)
-        from simplyblock_core.db_controller import DBController
-        DBController().unindex_lvol_name(self)
         try:
             lvol_mini = LVolMini().read_from_db(kv_store, self.uuid)[0]
             lvol_mini.remove(kv_store)

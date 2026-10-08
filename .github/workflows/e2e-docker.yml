@@ -518,22 +518,8 @@ jobs:
         timeout-minutes: 120
         run: |
           cd $GITHUB_WORKSPACE/e2e
-          pip install virtualenv
-          # 3.11, not whatever the runner has. These workflows built their
-          # own venv from the system python, and on a 3.9 runner every one of
-          # them died at import:
-          #   from datetime import datetime, UTC
-          #   ImportError: cannot import name 'UTC' from 'datetime'
-          # UTC landed in 3.11 and cannot be polyfilled, so no amount of
-          # requirements pinning helps. ensure_python.sh fetches a pinned 3.11
-          # through uv and installs requirements into it.
-          #
-          # Its stdout is the interpreter path. Put that venv's bin first so
-          # the plain `python3` calls below resolve to it -- GITHUB_PATH only
-          # affects later steps, and this all runs in one.
-          E2E_PY="$(bash "$GITHUB_WORKSPACE/e2e/scripts/ensure_python.sh" --requirements "$GITHUB_WORKSPACE/e2e/requirements.txt")"
-          export PATH="$(dirname "${E2E_PY}"):${PATH}"
-          python3 -V
+          python3 -m pip install --upgrade pip uv
+          export PATH="$(python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))'):$PATH"
           echo "Running tests in namespace default"
           export CLUSTER_ID=${{ needs.deploy.outputs.cluster_id }}
           export CLUSTER_SECRET=${{ needs.deploy.outputs.cluster_secret }}
@@ -547,7 +533,7 @@ jobs:
           export SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
           TEST_CASE=${{ inputs.test_case_to_run || '' }}
           NEW_NODE_IPS="${{ github.event.inputs.new_node_ips || '' }}"
-          python3 e2e.py ${TEST_CASE:+--testname} ${TEST_CASE} \
+          PYTHONUNBUFFERED=1 ./e2e.py ${TEST_CASE:+--testname} ${TEST_CASE} \
                   ${NEW_NODE_IPS:+--new_nodes} ${NEW_NODE_IPS} \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test || true }}
         env:
@@ -1177,7 +1163,7 @@ jobs:
       - name: Upload automation and docker logs to miniio
         run: |
           cd $GITHUB_WORKSPACE/e2e/
-          python3 logs/upload_logs_to_miniio.py
+          ./logs/upload_logs_to_miniio.py
         if: always()
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}

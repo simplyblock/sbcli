@@ -17,21 +17,18 @@ Tests cover:
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core import constants
 import simplyblock_core.storage_node_ops as snode_ops
+from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import (
-
-
-    generate_psk_key,
     generate_dhchap_key,
-    validate_tls_config,
+    generate_psk_key,
     validate_sec_options,
+    validate_tls_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -298,6 +295,7 @@ class TestRpcClientSignatures(unittest.TestCase):
 
     def test_subsystem_create_allow_any_host_param(self):
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.subsystem_create)
         self.assertIn("allow_any_host", sig.parameters)
@@ -305,6 +303,7 @@ class TestRpcClientSignatures(unittest.TestCase):
 
     def test_subsystem_add_host_security_params(self):
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.subsystem_add_host)
         for p in ["psk", "dhchap_key", "dhchap_ctrlr_key"]:
@@ -318,6 +317,7 @@ class TestRpcClientSignatures(unittest.TestCase):
     def test_bdev_nvme_set_options_no_dhchap_params(self):
         """DHCHAP moved to nvmf_set_config – bdev_nvme_set_options must not accept them."""
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.bdev_nvme_set_options)
         self.assertNotIn("dhchap_digests", sig.parameters)
@@ -326,6 +326,7 @@ class TestRpcClientSignatures(unittest.TestCase):
     def test_nvmf_set_config_dhchap_params(self):
         """nvmf_set_config must accept dhchap_digests and dhchap_dhgroups."""
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.nvmf_set_config)
         self.assertIn("dhchap_digests", sig.parameters)
@@ -718,10 +719,9 @@ class TestBdevNvmeSetOptionsParams(unittest.TestCase):
         """bdev_nvme_set_options must never send dhchap params (moved to nvmf_set_config)."""
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
+        client._request3 = MagicMock(return_value=True)
         client.bdev_nvme_set_options()
-        call_args = client._request.call_args[0]
-        params = call_args[1]
+        params = client._request3.call_args.kwargs
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
 
@@ -731,13 +731,13 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
     def _client(self):
         from simplyblock_core.rpc_client import RPCClient
         c = RPCClient.__new__(RPCClient)
-        c._request = MagicMock(return_value=True)
+        c._request3 = MagicMock(return_value=True)
         return c
 
     def test_without_dhchap_only_pollers_mask_sent(self):
         client = self._client()
         client.nvmf_set_config("0x1")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["poll_groups_mask"], "0x1")
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
@@ -747,7 +747,7 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
         client.nvmf_set_config("0x3",
                                dhchap_digests=["sha256", "sha384", "sha512"],
                                dhchap_dhgroups=["ffdhe2048"])
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["poll_groups_mask"], "0x3")
         self.assertEqual(params["dhchap_digests"], ["sha256", "sha384", "sha512"])
         self.assertEqual(params["dhchap_dhgroups"], ["ffdhe2048"])
@@ -759,7 +759,7 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
         client.nvmf_set_config("0x1",
                                dhchap_digests=constants.DHCHAP_DIGESTS,
                                dhchap_dhgroups=[constants.DHCHAP_DHGROUP])
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertIn("sha256", params["dhchap_digests"])
         self.assertIn("sha384", params["dhchap_digests"])
         self.assertIn("sha512", params["dhchap_digests"])
@@ -775,17 +775,17 @@ class TestSubsystemCreateAllowAnyHost(unittest.TestCase):
     def test_default_allow_any_host_true(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
+        client._request3 = MagicMock(return_value=True)
         client.subsystem_create("nqn:test", "serial", "model")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertTrue(params["allow_any_host"])
 
     def test_allow_any_host_false(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
+        client._request3 = MagicMock(return_value=True)
         client.subsystem_create("nqn:test", "serial", "model", allow_any_host=False)
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertFalse(params["allow_any_host"])
 
 
@@ -798,13 +798,13 @@ class TestSubsystemAddHostParams(unittest.TestCase):
     def _client(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
+        client._request3 = MagicMock(return_value=True)
         return client
 
     def test_basic_no_security(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["nqn"], "nqn:sub")
         self.assertEqual(params["host"], "nqn:host")
         self.assertNotIn("psk", params)
@@ -813,14 +813,14 @@ class TestSubsystemAddHostParams(unittest.TestCase):
     def test_with_psk(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host", psk="/tmp/psk.key")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["psk"], "/tmp/psk.key")
 
     def test_with_dhchap_keys(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   dhchap_key="key1", dhchap_ctrlr_key="key2")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["dhchap_key"], "key1")
         self.assertEqual(params["dhchap_ctrlr_key"], "key2")
 
@@ -828,7 +828,7 @@ class TestSubsystemAddHostParams(unittest.TestCase):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   psk="psk_val", dhchap_key="dk", dhchap_ctrlr_key="dck")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["psk"], "psk_val")
         self.assertEqual(params["dhchap_key"], "dk")
         self.assertEqual(params["dhchap_ctrlr_key"], "dck")
@@ -837,20 +837,20 @@ class TestSubsystemAddHostParams(unittest.TestCase):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   dhchap_key="dk", dhchap_group="ffdhe2048")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["dhchap_group"], "ffdhe2048")
 
     def test_dhchap_group_null_passed(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   dhchap_key="dk", dhchap_group="null")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["dhchap_group"], "null")
 
     def test_dhchap_group_omitted_when_none(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host", dhchap_key="dk")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertNotIn("dhchap_group", params)
 
 
@@ -863,10 +863,10 @@ class TestSubsystemRemoveHost(unittest.TestCase):
     def test_remove_host_params(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
+        client._request3 = MagicMock(return_value=True)
         client.subsystem_remove_host("nqn:sub", "nqn:host")
-        client._request.assert_called_once_with("nvmf_subsystem_remove_host",
-                                                 {"nqn": "nqn:sub", "host": "nqn:host"})
+        client._request3.assert_called_once_with("nvmf_subsystem_remove_host",
+                                                  nqn="nqn:sub", host="nqn:host")
 
 
 # ---------------------------------------------------------------------------
@@ -1069,14 +1069,12 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         # The inflight-IO drain check on the leader must not time out.
         mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc_inst.jc_suspend_compression.return_value = (True, None)
-        # Post-examine verification scans get_bdevs() for each expected lvol
+        # Post-examine verification scans bdev_get() for each expected lvol
         # (by uuid or lvs/bdev alias); without this the check aborts.
-        mock_rpc_inst.get_bdevs.return_value = [
-            {"name": lvol_secured.uuid,
-             "aliases": [f"{lvol_secured.lvs_name}/{lvol_secured.lvol_bdev}"]},
-            {"name": lvol_open.uuid,
-             "aliases": [f"{lvol_open.lvs_name}/{lvol_open.lvol_bdev}"]},
-        ]
+        mock_rpc_inst.bdev_get.return_value = {
+            "name": lvol_secured.uuid,
+            "aliases": [f"{lvol_secured.lvs_name}/{lvol_secured.lvol_bdev}"],
+        }
         MockRPC.return_value = mock_rpc_inst
 
         with patch.object(sec_node, 'connect_to_hublvol'):
@@ -1131,7 +1129,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc.nvmf_subsystem_add_ns.return_value = 1
         mock_rpc.nvmf_subsystem_add_listener.return_value = (True, None)
         mock_rpc.ultra21_util_get_malloc_stats.return_value = {}
-        mock_rpc.get_bdevs.return_value = [{"uuid": "u1", "driver_specific": {}}]
+        mock_rpc.bdev_get.return_value = {"uuid": "u1", "driver_specific": {}}
 
         with patch("simplyblock_core.models.storage_node.RPCClient",
                     return_value=mock_rpc):

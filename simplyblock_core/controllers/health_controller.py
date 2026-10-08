@@ -1,14 +1,13 @@
 
-from typing import Any
 from logging import DEBUG, ERROR, INFO
+from typing import Any
 
-
-from simplyblock_core import utils, distr_controller, storage_node_ops
+from simplyblock_core import distr_controller, storage_node_ops, utils
+from simplyblock_core.controllers import device_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
 
@@ -82,6 +81,13 @@ def _restart_owns_lvs(primary_node, db_controller=None) -> bool:
     fenced. Pass ``db_controller`` to check the follower records too; a
     follower that cannot be read counts as owning, because "unknown" must
     never license lifting a fence.
+
+    With ``db_controller`` it also checks every other node in the cluster. A
+    node removal relocating a replica builds the lvstore on a node the
+    primary's record does not name yet -- ``secondary_node_id`` still points
+    at the node being removed until the move completes -- and that build
+    fences the primary's port like any follower restart (2026-10-01, run 50:
+    LVS_10 rebuilt on jj7dr while htthx still named the removed 8hhg5).
     """
     lvs = getattr(primary_node, "lvstore", None)
     if not lvs:
@@ -106,13 +112,20 @@ def _restart_owns_lvs(primary_node, db_controller=None) -> bool:
             continue
         if _owns(follower):
             return True
-    return False
+    cluster_id = getattr(primary_node, "cluster_id", None)
+    if not cluster_id:
+        return False
+    try:
+        peers = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    except Exception:
+        return True  # unreadable cluster -> assume a restart owns it
+    return any(_owns(n) for n in peers or [])
 
 
 def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
     present = (
             ((bdev_names is not None) and (name in bdev_names)) or
-            (rpc_client is not None and (rpc_client.get_bdevs(name) is not None))
+            (rpc_client is not None and (rpc_client.bdev_get(name) is not None))
     )
     logger.log(INFO if present else ERROR, f"Checking bdev: {name} ... " + ('ok' if present else 'failed'))
     return present
@@ -374,6 +387,19 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
         logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
         is_sec2 = (node.lvstore_stack_tertiary == primary_node.get_id())
+        # Mid-relocation a node can carry BOTH back-references for one
+        # primary: a cascade sets the new secondary back-reference on the
+        # old tertiary before the tertiary move clears the old one. is_sec2
+        # then reads "tertiary" for a node the relocation just built as
+        # secondary, and the repair below re-stamped that role 10 s after
+        # the relocation set the right one (run 51, 2026-10-02, LVS_11 on
+        # hbdzq). With no single role to repair towards, the repair waits.
+        role_ambiguous = (node.lvstore_stack_secondary == primary_node.get_id()
+                          and node.lvstore_stack_tertiary == primary_node.get_id())
+        if role_ambiguous:
+            logger.info("hublvol %s on %s: node carries both replica roles of %s "
+                        "(relocation in progress); not repairing this cycle",
+                        primary_node.hublvol.bdev_name, node.get_id(), primary_node.get_id())
 
         if not passed and auto_fix and primary_node.lvstore_status == "ready" \
                 and primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -442,7 +468,8 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             # hiccup -- left the peer single-pathed indefinitely. This is that
             # re-check.
             ctrlrs = ret[0].get("ctrlrs", []) if ret else []
-            if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node):
+            if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node, db_controller) \
+                    and not role_ambiguous:
                 try:
                     sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
                     if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -488,7 +515,10 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
         # flow is the exclusive author of hublvol (re)attaches during its
         # phases, and a concurrent repair here is what produced the
         # attach-during-destroy race before.
-        if passed and (auto_fix or repair_paths) and ret                 and not _restart_owns_lvs(primary_node)                 and repairs_allowed(node) and repairs_allowed(primary_node):
+        if passed and (auto_fix or repair_paths) and ret \
+                and not _restart_owns_lvs(primary_node, db_controller) \
+                and not role_ambiguous \
+                and repairs_allowed(node) and repairs_allowed(primary_node):
             # SPDK multipath reports one ctrlrs entry PER PATH, so the attached
             # set must be unioned across entries before comparing. Built per
             # entry (as this was), a healthy two-path controller looks like each
@@ -743,13 +773,13 @@ def _check_node_lvstore(
 
     nodes = {}
     devices = {}
-    for n in db_controller.get_storage_nodes():
+    for n in db_controller.get_storage_nodes_by_cluster_id(node.cluster_id):
         nodes[n.get_id()] = n
         for dev in n.nvme_devices:
             devices[dev.get_id()] = dev
 
     for distr in distribs_list:
-        if node.rpc_client().get_bdevs(distr):
+        if node.rpc_client().bdev_get(distr):
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
@@ -850,7 +880,7 @@ def _check_node_lvstore(
             logger.info(f"Checking distr bdev : {distr} ... not found")
             return False
     if raid:
-        if node.rpc_client().get_bdevs(raid):
+        if node.rpc_client().bdev_get(raid):
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
             logger.info(f"Checking raid bdev: {raid} ... not found")
@@ -1016,7 +1046,7 @@ def check_node(node_id, with_devices=True):
                     connected_jms.append(remote_device.get_id())
                     continue
 
-                bdev_info = rpc_client.get_bdevs(name)
+                bdev_info = rpc_client.bdev_get(name)
                 logger.log(INFO if bdev_info else ERROR,
                            f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
                 node_remote_devices_check &= bool(bdev_info)
@@ -1035,21 +1065,23 @@ def check_node(node_id, with_devices=True):
                         logger.info(f"IP Address: {addr}:{port}")
 
                     if bdev_info:
-                        logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+                        logger.info(f"multipath policy: {bdev_info['driver_specific']['mp_policy']}")
 
             for jm_id in snode.jm_ids:
                 logger.info(f"Checking connection to JM device {jm_id}")
                 if jm_id and jm_id not in connected_jms:
-                    for nd in db_controller.get_storage_nodes():
-                        if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                            if _peer_connections_relevant(nd):
-                                node_remote_devices_check = False
-                                logger.error(f"JM device {jm_id} is not connected")
-                            else:
-                                logger.info(
-                                    "JM device %s not connected, but owning node %s is %s "
-                                    "— expected, not failing health", jm_id, nd.get_id(), nd.status)
-                            break
+                    try:
+                        nd = db_controller.get_storage_node_by_device_id(jm_id)
+                    except KeyError:
+                        nd = None
+                    if nd is not None:
+                        if _peer_connections_relevant(nd):
+                            node_remote_devices_check = False
+                            logger.error(f"JM device {jm_id} is not connected")
+                        else:
+                            logger.info(
+                                "JM device %s not connected, but owning node %s is %s "
+                                "— expected, not failing health", jm_id, nd.get_id(), nd.status)
 
         print("*" * 100)
         if snode.lvstore_stack:
@@ -1101,12 +1133,13 @@ def check_device(device_id):
         device = db_controller.get_storage_device_by_id(device_id)
     except KeyError:
         # is jm device ?
-        for node in db_controller.get_storage_nodes():
-            if node.jm_device and node.jm_device.get_id() == device_id:
-                return check_jm_device(node.jm_device.get_id())
+        try:
+            jm_device = db_controller.get_jm_device_by_id(device_id)
+        except KeyError:
+            logger.error("device not found")
+            return False
 
-        logger.error("device not found")
-        return False
+        return check_jm_device(jm_device.get_id())
 
     try:
         snode = db_controller.get_storage_node_by_id(device.node_id)
@@ -1206,7 +1239,7 @@ def check_remote_device(device_id, target_node=None):
             logger.info(f"Checking device: {device_id}")
             rpc_client = node.rpc_client(timeout=8, retry=1)
             name = f'remote_{device.alceml_bdev}n1'
-            bdev_info = rpc_client.get_bdevs(name)
+            bdev_info = rpc_client.bdev_get(name)
             logger.log(DEBUG if bdev_info else ERROR, f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
             result &= bool(bdev_info)
             controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{device.alceml_bdev}')
@@ -1222,7 +1255,7 @@ def check_remote_device(device_id, target_node=None):
                     logger.info(f"IP Address: {addr}:{port}")
 
                 if bdev_info:
-                    logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+                    logger.info(f"multipath policy: {bdev_info['driver_specific']['mp_policy']}")
 
     return result
 
@@ -1300,11 +1333,11 @@ def check_snap(snap_id):
         return False
 
     snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
-    check_primary = snode.rpc_client().get_bdevs(snap.snap_bdev)
+    check_primary = snode.rpc_client().bdev_get(snap.snap_bdev)
     logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snap.lvol.node_id} is {bool(check_primary)}")
     if snap.lvol.ha_type != "single" and snode.secondary_node_id:
         secondary_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        check_secondary = secondary_node.rpc_client().get_bdevs(snap.snap_bdev)
+        check_secondary = secondary_node.rpc_client().bdev_get(snap.snap_bdev)
         logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snode.secondary_node_id} is {bool(check_secondary)}")
         return check_primary and check_secondary
     return check_primary

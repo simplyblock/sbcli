@@ -2,10 +2,10 @@
 import pytest
 
 from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.cluster import Cluster
 
 
 def _src_lvol():
@@ -104,7 +104,7 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(lvol_controller.snapshot_controller, "add", _fake_snap_add)
 
-    monkeypatch.setattr(lvol_controller, "_last_replicated_target_snapshot",
+    monkeypatch.setattr(lvol_controller, "last_replicated_target_snapshot",
                         lambda db, lid, cid, generation=0, pin_snapshot_id=None: _snap())
 
     create_calls = []

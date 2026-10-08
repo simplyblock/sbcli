@@ -6,6 +6,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -44,7 +45,15 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
         size_used = 0
         lvol_dict = capacity_dict
         size_total = int(lvol_dict['num_blocks']*lvol_dict['block_size'])
-        cluster_size = cluster.page_size_in_blocks*constants.LVOL_CLUSTER_RATIO
+        # Must match what create_lvstore sized the lvstore with, or every
+        # allocated cluster is converted back into the wrong number of bytes
+        # and reported usage is off by the data-chunk count.
+        #
+        # Falls back to one page when the cluster records no data-chunk count:
+        # distr_ndcs defaults to 0, and multiplying by it would report every
+        # volume as using nothing at all -- a worse answer than the single-page
+        # size this used to assume.
+        cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
         if "driver_specific" in lvol_dict and "lvol" in lvol_dict["driver_specific"]:
             num_allocated_clusters = lvol_dict["driver_specific"]["lvol"]["num_allocated_clusters"]
             size_used = int(num_allocated_clusters*cluster_size)
@@ -201,6 +210,50 @@ def add_pool_stats(pool, records):
 db = db_controller.DBController()
 
 
+def collect_lvol_record(cluster, lvol, snode, rpc_client):
+    """One lvol's stat sample: iostat and capacity from the primary node, plus
+    every online HA secondary. Returns the written record, or None when there
+    is nothing to record this cycle.
+
+    A failed stat RPC — typically a read timeout against a node busy inside a
+    group-snapshot take — costs this lvol's sample and nothing more. Letting it
+    propagate killed the whole collector, and the restarted process re-polled
+    every lvol at once against the node that was still busy."""
+    capacity_dict: dict = {}
+    stats: list = []
+    try:
+        if rpc_client is not None:
+            logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
+            ret = rpc_client.get_lvol_stats(lvol.lvol_uuid)
+            if ret:
+                stats.append(ret["bdevs"][0])
+            ret = rpc_client.bdev_get(lvol.lvol_uuid)
+            if ret:
+                capacity_dict = ret
+
+        if lvol.ha_type == "ha":
+            for sec_id in lvol.nodes[1:]:
+                try:
+                    sec_node = db.get_storage_node_by_id(sec_id)
+                except KeyError:
+                    continue
+                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                    logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
+                    sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
+                    ret = sec_rpc_client.get_lvol_stats(lvol.lvol_uuid)
+                    if ret:
+                        stats.append(ret["bdevs"][0])
+                    if not capacity_dict:
+                        ret = sec_rpc_client.bdev_get(lvol.lvol_uuid)
+                        if ret:
+                            capacity_dict = ret
+    except RPCException as e:
+        logger.warning("Stat poll for lvol %s failed (%s); skipping this sample", lvol.get_id(), e)
+        return None
+
+    return add_lvol_stats(cluster, lvol, stats, capacity_dict)
+
+
 def main():
     logger.info("Starting stats collector...")
     while True:
@@ -234,37 +287,9 @@ def main():
                     if lvol.node_id != snode.get_id():
                         continue
 
-                    capacity_dict = {}
-                    stats = []
-                    if rpc_client is not None:
-                        logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                        ret = rpc_client.get_lvol_stats(lvol.lvol_uuid)
-                        if ret:
-                            stats.append(ret["bdevs"][0])
-                        ret = rpc_client.get_bdevs(lvol.lvol_uuid)
-                        if ret:
-                            capacity_dict = ret[0]
-
-                    if lvol.ha_type == "ha":
-                        for sec_id in lvol.nodes[1:]:
-                            try:
-                                sec_node = db.get_storage_node_by_id(sec_id)
-                            except KeyError:
-                                continue
-                            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                                logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
-                                sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
-                                ret = sec_rpc_client.get_lvol_stats(lvol.lvol_uuid)
-                                if ret:
-                                    stats.append(ret["bdevs"][0])
-                                if not capacity_dict:
-                                    ret = sec_rpc_client.get_bdevs(lvol.lvol_uuid)
-                                    if ret:
-                                        capacity_dict = ret[0]
-
-                    record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
+                    record = collect_lvol_record(cluster, lvol, snode, rpc_client)
                     if record:
-                        if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
+                        if pools_lvols_stats.get(lvol.pool_uuid):
                             pools_lvols_stats[lvol.pool_uuid].append(record)
                         else:
                             pools_lvols_stats[lvol.pool_uuid] = [record]

@@ -21,6 +21,36 @@ logger.setLevel(constants.LOG_LEVEL)
 POD_PREFIX: str = "snode-spdk-pod"
 
 
+def _discard_previous_config() -> None:
+    """Remove the node configuration this run is about to replace.
+
+    Generation writes the whole document, so a run that succeeds replaces it
+    anyway. A run that fails writes nothing, and what it leaves behind is the
+    file some earlier deployment wrote: a different cluster, a different device
+    mode, a different set of disks. Nothing downstream can tell that apart from
+    a configuration this deployment produced — `node_add` reads it and refuses
+    the node for whatever the old file says, naming the device class rather
+    than the configure that never ran.
+
+    So the file is discarded at the point the decision to regenerate has been
+    made: after the pod-present check, which skips generation entirely and
+    leaves a running pod's configuration alone, and before the generation whose
+    failure is the case this exists for.
+
+    TODO: this is host-wide, and so is the file. Two storage nodes of different
+    clusters on one worker share /etc/simplyblock/sn_config_file, and today the
+    second one's generation replaces the first one's document wholesale, with
+    or without this. Whether that is supported at all is open; if it is, the
+    path has to carry the cluster and this has to discard only its own.
+    """
+    for path in (constants.NODES_CONFIG_FILE, f"{constants.NODES_CONFIG_FILE}_read_only"):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue  # A first install has none, which is the ordinary case.
+        logger.info(f"Discarded the previous node configuration {path}")
+
+
 def _is_pod_present_for_node() -> bool:
     """
     Check if a pod with the specified prefix is already running on the current node.
@@ -159,7 +189,14 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--blk-names',
-        help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk)',
+        help='Comma separated list of block devices to use (requires --lblk). An entry is a '
+             'persistent /dev/disk name '
+             '(/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0, '
+             '/dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba). A kernel name '
+             "(sdb) or kernel path (/dev/sdb) is refused: it states a position in this "
+             "boot's enumeration order, and this configure runs again at every node "
+             'restart, so it names another disk after a reboot that probes the controllers '
+             'in another order',
         type=str,
         default='',
         dest='blk_names',
@@ -167,7 +204,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--blk-names-exclude',
-        help='Comma separated list of block device names to exclude, like sda (requires --lblk)',
+        help='Comma separated list of block devices to exclude (requires --lblk), spelled '
+             'the way --blk-names takes them',
         type=str,
         default='',
         dest='blk_names_exclude',
@@ -221,7 +259,7 @@ def validate_arguments(args: argparse.Namespace) -> None:
         except ValueError as e:
             raise argparse.ArgumentError(
                 None,
-                f"Invalid value for max-lvol '{args.max_lvol}': {str(e)}"
+                f"Invalid value for max-lvol '{args.max_lvol}': {e!s}"
             )
 
         if args.pci_allowed and args.pci_blocked:
@@ -283,7 +321,7 @@ def main() -> None:
             except ValueError as e:
                 raise argparse.ArgumentError(
                     None,
-                    f"Invalid value for sockets-to-use '{args.sockets_to_use}': {str(e)}"
+                    f"Invalid value for sockets-to-use '{args.sockets_to_use}': {e!s}"
                 )
 
         nodes_per_socket: int = 1
@@ -295,7 +333,7 @@ def main() -> None:
             except ValueError as e:
                 raise argparse.ArgumentError(
                     None,
-                    f"Invalid value for nodes-per-socket '{args.nodes_per_socket}': {str(e)}"
+                    f"Invalid value for nodes-per-socket '{args.nodes_per_socket}': {e!s}"
                 )
 
         # Process PCI device filters
@@ -318,8 +356,18 @@ def main() -> None:
                 "serials": [x.strip() for x in args.blk_serials.split(',') if x.strip()] or None,
             }
 
-        # Generate the deployment configuration
-        generate_automated_deployment_config(
+        _discard_previous_config()
+
+        # Generate the deployment configuration.
+        #
+        # The result is checked because failure is how this reports "no device
+        # matched", "the sockets did not validate" and "the memory does not add
+        # up", and the caller is an init container: exiting 0 on any of them
+        # tells Kubernetes the node was configured, and the pod then starts on
+        # whatever /etc/simplyblock/sn_config_file the host already had. A
+        # previous deployment's file is the case this was written for, and
+        # nothing said so until the node_add that read it was refused.
+        configured = generate_automated_deployment_config(
             max_lvol=int(args.max_lvol),
             max_prov=utils.parse_size(args.max_prov, assume_unit='G'),
             nodes_per_socket=nodes_per_socket,
@@ -334,12 +382,22 @@ def main() -> None:
             lblk_selection=lblk_selection,
             jm_percent=int(args.jm_percent or 3)
         )
+        # The generation reports its own outcome and nothing else does: every
+        # failure path -- no device matched the filters, the sockets did not
+        # validate, the memory did not add up -- answers False and writes
+        # nothing.
+        if not configured:
+            logger.error(
+                "The node configuration could not be generated, so nothing was written; "
+                "the node is not configured and any configuration already on this host is "
+                "a previous deployment's")
+            sys.exit(1)
 
     except argparse.ArgumentError as e:
         logger.error(f"Argument error: {e}")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.exception(f"Error: {e}")
         sys.exit(1)
 
 

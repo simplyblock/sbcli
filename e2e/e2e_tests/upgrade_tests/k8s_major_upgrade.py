@@ -130,7 +130,6 @@ from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
 
-
 # Selects every node that is NOT a control-plane node.
 #
 # Do not use ``-l node-role.kubernetes.io/worker`` here: Talos does not put a
@@ -409,7 +408,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
     # ── FIO config ─────────────────────────────────────────────────────────────
 
     def _build_fio_config(
-        self, name: str, runtime: int = None,
+        self, name: str, runtime: int | None = None,
     ) -> tuple[str, str, dict]:
         """Build FIO main + warmup configs.
 
@@ -537,7 +536,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
         self.k8s_utils.create_volume_snapshot_class(name=self.SNAPSHOT_CLASS_NAME)
 
-    def _create_pvcs_with_fio(self, count: int, runtime: int = None):
+    def _create_pvcs_with_fio(self, count: int, runtime: int | None = None):
         """Create PVCs and start FIO Jobs on each."""
         for i in range(count):
             pvc_name = f"upgrade-pvc-{_rand_seq(4)}-{i}"
@@ -584,7 +583,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         self.k8s_utils.log_fio_pvc_mapping(self.pvc_details)
 
-    def _create_snapshots_and_clones(self, runtime: int = None, skip_clone_fio: bool = False):
+    def _create_snapshots_and_clones(self, runtime: int | None = None, skip_clone_fio: bool = False):
         """Create snapshots + clones, optionally with FIO on each clone."""
         for pvc_name, detail in self.pvc_details.items():
             snap_name = f"snap-{pvc_name}"

@@ -1,12 +1,18 @@
 from typing import Annotated, Any
 
-from pydantic import AfterValidator, BeforeValidator, Field, model_validator
+from pydantic import AfterValidator, BeforeValidator, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, EnvSettingsSource, SettingsConfigDict
 
 
 def _parse_str_list(v: Any) -> list[str]:
     if isinstance(v, str):
         return [item.strip() for item in v.split(',') if item.strip()]
+    return v
+
+
+def _parse_secret_str_list(v: Any) -> list[SecretStr]:
+    if isinstance(v, str):
+        return [SecretStr(item.strip()) for item in v.split(',') if item.strip()]
     return v
 
 
@@ -82,6 +88,19 @@ class Settings(BaseSettings):
             )
         ),
         BeforeValidator(_parse_str_list),
+    ] = []
+    admin_tokens: Annotated[
+        list[SecretStr],
+        Field(
+            description=(
+                "Static bearer tokens granted full admin access to the API, equivalent to "
+                "an admin service account. Comma-separated list. For callers that cannot "
+                "present a Kubernetes-issued token to this cluster's own TokenReview "
+                "endpoint, such as a remote operator managing this cluster across a "
+                "cluster boundary."
+            )
+        ),
+        BeforeValidator(_parse_secret_str_list),
     ] = []
 
     @model_validator(mode="after")

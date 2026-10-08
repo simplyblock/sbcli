@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "requests>=2.34.0",
+# ]
+# ///
 """
 Standalone test for the Graylog / OpenSearch per-container log export.
 
@@ -48,7 +54,7 @@ Usage:
 import os
 import sys
 import time
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 
 try:
     import requests

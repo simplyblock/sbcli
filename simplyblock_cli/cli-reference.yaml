@@ -90,13 +90,13 @@ commands:
             type: bool
             action: store_true
           - name: "--blk-names"
-            help: "Comma separated list of block device names to use, like sdb,sdc (requires --lblk). Requested devices must be eligible; a busy device is an error."
+            help: "Comma separated list of block devices to use (requires --lblk). Each entry is a persistent /dev/disk name, such as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 or /dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba. A kernel name (sdb) or kernel path (/dev/sdb) is refused: it states a position in this boot's enumeration order, and the selection is resolved again at every node restart, so it names another disk after a reboot that probes the controllers in another order. Use --blk-serials for a device udev published no persistent name for. Requested devices must be eligible; a busy device is an error."
             dest: blk_names
             required: false
             type: str
             default: ""
           - name: "--blk-names-exclude"
-            help: "Comma separated list of block device names to exclude, like sda (requires --lblk). All other eligible disks are used."
+            help: "Comma separated list of block devices to exclude (requires --lblk), spelled the way --blk-names takes them. All other eligible disks are used."
             dest: blk_names_exclude
             required: false
             type: str
@@ -1137,6 +1137,10 @@ commands:
               is ignored.
             dest: alerting_config_path
             type: str
+          - name: "--cluster-vip"
+            help: "Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress."
+            dest: cluster_vip
+            type: str
       - name: add
         help: "Adds a new cluster."
         arguments:
@@ -1574,6 +1578,58 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: build-indices
+        help: "Backfills the database's secondary indices."
+        usage: >
+          Walks every indexed table and fills in the index entries of records that predate their index
+          declaration, then marks each index usable by reads. Idempotent, and safe to run against a live
+          cluster: normal writes already maintain every index, and the backfill only adds entries.
+          An upgrade runs this automatically; use the command after an interrupted run, or to fill an index
+          that `sbctl cluster index-state --set building` has just put back into service.
+      - name: index-state
+        help: "Shows or switches the state of the database's secondary indices."
+        usage: >
+          Without arguments, lists every declared index with its state (`building`, `ready` or `disabled`),
+          its backfill cursor and when the state last changed. `--set disabled` takes one index out of
+          service: writes stop maintaining it and reads fall back to a full scan, which is how a
+          misbehaving index is switched off without touching the rest of its class. Its entries are
+          left in place, so readers that have not seen the change yet still get right answers, and
+          the command waits a few seconds before returning, until every process has seen it.
+          `--set building` puts it back, waiting the same way before discarding those entries, after
+          which `sbctl cluster build-indices` refills and re-enables it. An index reaches `ready`
+          only by completing a backfill, so it cannot be set here.
+        arguments:
+          - name: "index"
+            help: "The index to act on, as <Class>.<index> (e.g. LVol.node_id). Omit to list them all."
+            dest: index
+            type: str
+            nargs: '?'
+          - name: "--set"
+            help: "Switch the named index to this state."
+            dest: state
+            type: str
+            choices:
+              - building
+              - disabled
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: check-indices
+        help: "Verifies the database's secondary indices."
+        usage: >
+          Walks every index in both directions - each record's derived keys must exist, and each index key
+          must resolve to a live record that still carries the indexed value - and reports what does not
+          match. Read-only unless `--repair` is given, and takes nothing offline. Fails while anything is
+          left unresolved: every finding of a read-only run, and the one thing a repair cannot settle -
+          a unique value that two live records both carry, which has to be resolved in the data itself.
+        arguments:
+          - name: "--repair"
+            help: "Write back the entries that can be derived from the records, and clear orphaned ones, instead of only reporting them."
+            dest: repair
+            type: bool
+            action: store_true
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
         arguments:
@@ -1861,6 +1917,10 @@ commands:
             help: "Tiered retention, e.g. `15m:2h,1h:11h,1d:7d` - one snapshot every 15 minutes for the last 2 hours, then hourly for 11 hours, then daily for 7 days. Snapshots older than the total span are pruned. Empty (default) keeps the flat --keep behaviour."
             dest: retention_schedule
             type: str
+          - name: "--rpo-target-sec"
+            help: "Declared recovery point objective in seconds. RPO compliance is computed against this target instead of the derived lag budget. Unset means no declared objective."
+            dest: rpo_target_seconds
+            type: int
           - name: "--consistency-group"
             help: "All volumes attached to this policy form ONE consistency group: they must share an LVS (creation pins them to it), cadence snapshots are taken as one frozen group, and fail-over generations resolve group-wide."
             dest: consistency_group
@@ -2044,6 +2104,10 @@ commands:
           - name: "--replication-policy"
             help: "Replication policy (id or name) to assign at create time. Configures replication for this volume."
             dest: replication_policy
+            type: str
+          - name: "--consistency-group"
+            help: "Consistency group name to join at create time. The volume is pinned to the group's node/LVS; the first labeled volume pins the group."
+            dest: consistency_group
             type: str
           - name: "--replicate"
             help: "Replicate LVol snapshot"
@@ -2426,6 +2490,11 @@ commands:
             dest: batch
             type: bool
             action: store_true
+          - name: "--retry-on-failure"
+            help: "If this migration ends in failure, automatically start a brand-new migration (full precreate + start) for the same volume/target once preconditions are met again (no rebalancing, source and target both online)."
+            dest: retry_on_failure
+            type: bool
+            action: store_true
       - name: migrate-list
         help: "List volume migrations."
         arguments:
@@ -2760,6 +2829,13 @@ commands:
             dest: cluster_id
             type: str
             required: false
+          - name: "--consistency-group"
+            aliases:
+              - "-g"
+            help: "Filter snapshots to one consistency group (id or uuid)."
+            dest: consistency_group
+            type: str
+            required: false
           - name: "--with-details"
             aliases:
               - "-w"
@@ -2858,6 +2934,117 @@ commands:
             help: "The snapshot id."
             dest: snapshot_id
             type: str
+  - name: "consistency-group"
+    help: "Consistency Group Commands"
+    aliases:
+      - cg
+    weight: 620
+    subcommands:
+      - name: list
+        help: "List the cluster's consistency groups."
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: members
+        help: "List the current members of a consistency group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: delete
+        help: "Delete an EMPTY consistency group (refused while it still has a current member). Frees the name so the next fail-over/fail-back hand-off mints a fresh, correctly node-pinned group instead of reusing a stale record."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+      - name: add-member
+        help: "Join an EXISTING volume to a consistency group. The volume must live on the group's pinned node/LVS and in the members' storage pool; a volume that once left the group cannot rejoin (membership is one-way)."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "lvol_id"
+            help: "The logical volume id to join."
+            dest: lvol_id
+            type: str
+      - name: remove-member
+        help: "Detach a member from a consistency group: closes its epoch one-way, preserving its snapshots in prior generations. The volume itself is untouched."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "lvol_id"
+            help: "The logical volume id to detach."
+            dest: lvol_id
+            type: str
+      - name: snapshot-take
+        help: "Take ONE crash-consistent snapshot generation across every current member."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+      - name: snapshot-list
+        help: "List a consistency group's snapshot generations with expected-versus-present member counts."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: snapshot-delete
+        help: "Delete one generation and all its member snapshots; never the group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "seq"
+            help: "The generation number (group_seq) to delete."
+            dest: seq
+            type: int
+      - name: clone
+        help: "Clone every member snapshot of a generation into a new volume, optionally forming a new group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "seq"
+            help: "The generation number (group_seq) to clone."
+            dest: seq
+            type: int
+          - name: "--into"
+            help: "Name of the new consistency group to form from the clones. When omitted, the clones are independent volumes."
+            dest: into
+            type: str
+            required: false
   - name: "backup"
     help: "Backup Commands"
     weight: 650
@@ -2897,12 +3084,24 @@ commands:
             help: "The target storage node id."
             dest: node
             type: str
+          - name: "--access-key-id"
+            help: "Access key for the backup's bucket, when it is not this cluster's own."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the backup's bucket, when it is not this cluster's own."
+            dest: secret_access_key
+            type: secret
       - name: export
         help: "Export backup metadata to a JSON file for cross-cluster restore."
         arguments:
           - name: "--cluster-id"
             help: "The cluster id."
             dest: cluster_id
+            type: str
+          - name: "--backup-id"
+            help: "Export the chain ending at this backup and nothing else, which is the unit a restore needs."
+            dest: backup_id
             type: str
           - name: "--lvol"
             help: "Filter exports to a specific logical volume name."
@@ -2914,17 +3113,81 @@ commands:
             help: "The output file path."
             dest: output
             type: str
-      - name: import
-        help: "Import backup metadata from a JSON file."
+      - name: discover
+        help: "List the backups a bucket contains, reading its manifests. Needs no cluster."
         arguments:
-          - name: "metadata_file"
-            help: "The path to JSON metadata file."
-            dest: metadata_file
+          - name: "--bucket"
+            help: "The bucket holding the backups."
+            dest: bucket
             type: str
+            required: true
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
+      - name: import
+        help: "Register the backups held in a bucket into this cluster."
+        arguments:
           - name: "--cluster-id"
             help: "The target cluster to import into (required for cross-cluster restore)."
             dest: cluster_id
             type: str
+          - name: "--bucket"
+            help: "Import every backup in this bucket. Give this or --from-file, not both."
+            dest: bucket
+            type: str
+          - name: "--from-file"
+            help: "Import the backups in this file, from 'backup export'. It records which bucket each one lives in, so --bucket is neither needed nor accepted."
+            dest: from_file
+            type: str
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
       - name: policy-add
         help: "Create a new backup policy."
         arguments:
@@ -2997,24 +3260,6 @@ commands:
           - name: "target_id"
             help: "The target id (storage pool or logical volume id)."
             dest: target_id
-            type: str
-      - name: source-list
-        help: "List backup sources (local and imported clusters)."
-        arguments:
-          - name: "--cluster-id"
-            help: "The cluster id."
-            dest: cluster_id
-            type: str
-      - name: source-switch
-        help: "Switch the active S3 backup source to a different cluster. Use 'local' or the local cluster id to switch back."
-        arguments:
-          - name: "source_cluster_id"
-            help: "The source cluster id or 'local'."
-            dest: source_cluster_id
-            type: str
-          - name: "--cluster-id"
-            help: "The cluster id."
-            dest: cluster_id
             type: str
   - name: "qos"
     help: "QoS Commands"

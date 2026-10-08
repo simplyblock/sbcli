@@ -1,12 +1,26 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "matplotlib",
+#     "paramiko",
+#     "ping3",
+#     "requests>=2.34.0",
+#     "urllib3>=2.7.0",
+# ]
+# ///
 import argparse
 import traceback
-from logger_config import setup_logger
+
+from __init__ import get_upgrade_tests  # Assumes you have this defined somewhere
 from e2e_tests.cluster_test_base import TestClusterBase
+from exceptions.custom_exception import MultipleExceptions
+from logger_config import setup_logger
+from utils.common_utils import CommonUtils
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
-from utils.common_utils import CommonUtils
-from exceptions.custom_exception import MultipleExceptions
-from __init__ import get_upgrade_tests  # Assumes you have this defined somewhere
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run Upgrade Test Framework for simplyBlock")

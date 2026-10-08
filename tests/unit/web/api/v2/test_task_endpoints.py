@@ -1,7 +1,6 @@
 """Unit tests for /api/v2/clusters/{id}/tasks endpoints."""
 
 from simplyblock_core.models.job_schedule import JobSchedule
-
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import CLUSTER_ID, TASK_ID
 
@@ -30,6 +29,33 @@ class TestListTasks:
         response = client.get(f'{BASE}/')
 
         assert [entry['id'] for entry in response.json()] == [TASK_ID]
+
+    def test_serializes_every_task_function_name(self, client, db, cluster):
+        """Regression (2026-09-30): TaskDTO.function_name is a hand-maintained
+        Literal duplicating JobSchedule's FN_* constants, and it had drifted --
+        'lvol_sync_op', 'node_removal', 'lvol_batch_migration', 'cluster_expand',
+        'replication_final', and 'fdb_backup' were missing. A single task of a
+        missing type made the whole /tasks list 500 (pydantic literal_error),
+        which stalled the test-failover clone whose readiness poll reads /tasks.
+        Every function name the scheduler can persist must serialize."""
+        function_names = sorted(
+            v for k, v in vars(JobSchedule).items()
+            if k.startswith('FN_') and isinstance(v, str)
+        )
+        # FN_DEV_MIG is filtered out of the list response, so assert it through
+        # the detail endpoint instead; every other type must survive the list.
+        db.get_job_tasks.return_value = [
+            factories.make_task(uuid=f'77777777-7777-7777-7777-0000000000{i:02d}',
+                                function_name=fn)
+            for i, fn in enumerate(function_names)
+            if fn != JobSchedule.FN_DEV_MIG
+        ]
+
+        response = client.get(f'{BASE}/')
+
+        assert response.status_code == 200, response.text
+        returned = {entry['function_name'] for entry in response.json()}
+        assert returned == set(function_names) - {JobSchedule.FN_DEV_MIG}
 
 
 class TestGetTask:

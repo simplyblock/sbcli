@@ -21,18 +21,14 @@ All external dependencies (FDB, RPC, SPDK) are mocked.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.hublvol import HubLVol
-from tests._mocks import unique_ip
-
 # Ensure the module is importable for patch() resolution
 import simplyblock_core.storage_node_ops  # noqa: F401
-
-
-
+from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.hublvol import HubLVol
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.storage_node import StorageNode
+from tests._mocks import unique_ip
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -122,7 +118,7 @@ def _mock_rpc():
     rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
     # Include the standard _lvol()'s base bdev so the post-examine
     # lvol-presence check in recreate_lvstore_on_non_leader passes.
-    rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
+    rpc.bdev_get.return_value = {"name": "LVS_100/bdev_test", "aliases": []}
     rpc.bdev_lvol_set_lvs_opts.return_value = True
     rpc.bdev_lvol_set_leader.return_value = True
     rpc.bdev_lvol_get_leader.return_value = True
@@ -1153,9 +1149,9 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
 
         rpc = _mock_rpc()
         if present_bdevs is not None:
-            rpc.get_bdevs.return_value = [
-                {"name": n, "aliases": []} for n in present_bdevs
-            ]
+            rpc.bdev_get.return_value = (
+                {"name": present_bdevs[0], "aliases": []} if present_bdevs else None
+            )
         mock_rpc_cls.return_value = rpc
         mock_create_bdev.return_value = (True, None)
 
@@ -1364,7 +1360,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
             fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
         )
         # Include expected lvol so the later lvol-registration check passes
-        _rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
+        _rpc.bdev_get.return_value = {"name": "LVS_100/bdev_test", "aliases": []}
 
         from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
         result = recreate_lvstore_on_non_leader(
@@ -1401,7 +1397,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
                 None, None, None,  # 3rd = block-ok; 4th = unblock-ok; extra for safety
             ],
         )
-        _rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
+        _rpc.bdev_get.return_value = {"name": "LVS_100/bdev_test", "aliases": []}
 
         from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
         result = recreate_lvstore_on_non_leader(

@@ -25,7 +25,6 @@ import pytest
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
-
 LVOL_ID = "LV1"
 
 
@@ -72,6 +71,8 @@ class _Lvol:
     lvol_name = "replvol0"
     node_id = "N1"
     replication_interval_min = 1
+    replication_policy_id = ""
+    do_replicate = True
 
     def get_id(self):
         return LVOL_ID
@@ -89,6 +90,12 @@ class _FakeDB:
     def get_lvols(self, cluster_id=None):
         return [_Lvol()]
 
+    def get_lvol_by_id(self, lvol_id):
+        lvol = _Lvol()
+        if lvol_id != lvol.get_id():
+            raise KeyError(f'LVol {lvol_id} not found')
+        return lvol
+
     def get_storage_node_by_id(self, nid):
         return _Node()
 
@@ -97,6 +104,23 @@ class _FakeDB:
 
     def get_snapshot_by_id(self, uuid):
         return self._snaps[uuid]
+
+    # Scoped reads get_replication_info now uses instead of a whole-table task
+    # scan (2026-10-03).
+    def get_snapshots_by_lvol_id(self, lvol_id):
+        return [s for s in self._snaps.values()
+                if getattr(s, "lvol", None) is not None and s.lvol.get_id() == lvol_id]
+
+    def get_replication_tasks_for_snapshot(self, snapshot_id):
+        return [t for t in self._tasks
+                if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                and t.function_params.get("snapshot_id") == snapshot_id]
+
+    def get_job_tasks_by_function(self, cluster_id, function_name):
+        return [t for t in self._tasks if t.function_name == function_name]
+
+    def get_lvol_replication_objects(self):
+        return []
 
 
 @pytest.fixture

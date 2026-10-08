@@ -4,7 +4,6 @@ import time
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import (
     ClusterStatObject,
     CpuStats,
@@ -13,6 +12,7 @@ from simplyblock_core.models.stats import (
     ReactorStats,
     ThreadStats,
 )
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.utils import capacity
 
@@ -398,7 +398,11 @@ def main():
                     except Exception as e:
                         logger.error(e)
                         continue
-                    ret = rpc_client.get_lvol_stats(device.nvme_bdev)
+                    try:
+                        ret = rpc_client.get_lvol_stats(device.nvme_bdev)
+                    except RPCException as e:
+                        logger.error("Failed to get iostat for device %s: %s", device.get_id(), e)
+                        continue
                     if ret:
                         stats_dict = ret['bdevs'][0]
                         record = add_device_stats(cl, device, capacity_dict, stats_dict)

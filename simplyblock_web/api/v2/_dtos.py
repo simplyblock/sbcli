@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 from typing import Literal, cast
 from uuid import UUID
@@ -7,27 +7,35 @@ from fastapi import Request
 from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
+from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.utils import hexa_to_cpu_list
+from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup_config import (
+    BackupConfig,
+    BackupLocation,
+    UnresolvedBackupConfig,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.utils.nvme import NvmeConnectEntry
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replication import (
-    ConsistencyGroup, ReplicationPolicy, ReplicationTarget)
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.models.stats import StatsObject
-from simplyblock_core.models.lvol_migration import LVolMigration
-from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils import hexa_to_cpu_list
+from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 from . import util
-
 
 AlertSeverity = Literal[
     "critical",
@@ -50,6 +58,7 @@ ClusterStatus = Literal[
     "unready",
     "in_activation",
     "in_expansion",
+    "in_shrink",
 ]
 
 StoragePoolStatus = Literal["active", "inactive"]
@@ -67,6 +76,9 @@ StorageNodeStatus = Literal[
     "down",
     "in_removal",
     "pending_removal",
+    "migrating_devices",
+    "migrating_lvols",
+    "removed_failed",
 ]
 
 TaskStatus = Literal["new", "running", "suspended", "done"]
@@ -83,6 +95,19 @@ ReplicationState = Literal["replicating", "cutover_pending", "cutover_done", "fa
 
 ReplicationDirection = Literal["to_target", "to_source"]
 
+#: Which end of the relationship this volume is, seen from its own cluster.
+ReplicationRole = Literal["source", "secondary", "failed_over", "none"]
+
+#: The steady-state health verdict ``get_replication_info`` derives.
+ReplicationHealthState = Literal[
+    "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
+]
+
+# Every value of JobSchedule's FN_* constants: the /tasks endpoints serialize a
+# task of any type the scheduler can persist, so an omission here is not a
+# narrower API -- it is a 500 (pydantic literal_error) the moment such a task
+# exists. Keep in lockstep with simplyblock_core.models.job_schedule.JobSchedule;
+# test_task_endpoints.test_serializes_every_task_function_name pins the two together.
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -90,6 +115,7 @@ TaskFunctionName = Literal[
     "failed_device_migration",
     "new_device_migration",
     "node_add",
+    "node_removal",
     "port_allow",
     "balancing_on_restart",
     "balancing_on_dev_rem",
@@ -97,10 +123,15 @@ TaskFunctionName = Literal[
     "jc_comp_resume",
     "snapshot_replication",
     "lvol_sync_del",
+    "lvol_sync_op",
     "lvol_migration",
+    "lvol_batch_migration",
     "s3_backup",
     "s3_backup_restore",
     "s3_backup_merge",
+    "cluster_expand",
+    "replication_final",
+    "fdb_backup",
 ]
 
 
@@ -130,6 +161,14 @@ class ClusterDTO(BaseModel):
     nqn: str
     status: ClusterStatus
     is_re_balancing: bool
+    # Device/balancing tasks only; is_re_balancing also counts volume migrations.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
+    # A node removal is in progress; the status beside it is the calculated
+    # one (in_shrink is no longer set as a status).
+    is_shrinking: bool = False
+    # The status is degraded only because of the node being removed.
+    is_degraded_by_removal: bool = False
     block_size: util.Unsigned
     distr_ndcs: int
     distr_npcs: int
@@ -162,6 +201,10 @@ class ClusterDTO(BaseModel):
             nqn=model.nqn,
             status=cast(ClusterStatus, model.status),
             is_re_balancing=model.is_re_balancing,
+            is_data_rebalancing=model.is_data_rebalancing,
+            active_lvol_migrations=model.active_lvol_migrations,
+            is_shrinking=model.is_shrinking,
+            is_degraded_by_removal=model.is_degraded_by_removal,
             block_size=model.blk_size,
             distr_ndcs=model.distr_ndcs,
             distr_npcs=model.distr_npcs,
@@ -194,17 +237,16 @@ class ClusterLogEntryDTO(BaseModel):
     event: str
     level: str
     message: str
-    storage_id: int | None
+    storage_id: util.OptionalIndex
     vuid: int | None
     status: str
 
     @staticmethod
     def from_model(model: EventObj):
-        storage_id = None
-        if model.storage_id >= 0:
-            storage_id = model.storage_id
-        elif 'cluster_device_order' in model.object_dict:
-            storage_id = model.object_dict['cluster_device_order']
+        storage_id = (
+            model.storage_id if model.storage_id >= 0
+            else model.object_dict.get('cluster_device_order')
+        )
 
         message = model.message
         if model.event in ("device_status", "node_status"):
@@ -239,7 +281,8 @@ class DeviceDTO(BaseModel):
     health_check: bool | None
     retries_exhausted: bool
     size: int
-    cluster_device_order: util.Unsigned
+    # None until the device joins the cluster map (i.e. while it is `new`)
+    cluster_device_order: util.OptionalIndex
     io_error: bool
     is_partition: bool
     nvmf_ips: list[IPv4Address]
@@ -266,7 +309,8 @@ class DeviceDTO(BaseModel):
             cluster_device_order=model.cluster_device_order,
             io_error=model.io_error,
             is_partition=model.is_partition,
-            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",")],
+            # Empty until the device stack is created, so a `new` device has none
+            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",") if ip],
             nvmf_nqn=model.nvmf_nqn,
             nvmf_port=model.nvmf_port,
             capacity=CapacityStatDTO.from_model(
@@ -304,7 +348,7 @@ class StoragePoolDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO | None
     dhchap: bool = False
-    allowed_hosts: list[str] = []
+    allowed_hosts: list[util.NQN] = []
 
     @staticmethod
     def from_model(model: Pool, stat_obj: StatsObject | None = None):
@@ -335,6 +379,8 @@ class SnapshotDTO(BaseModel):
     migrating: bool
     lvol: util.UrlPath | None
     created_at: datetime
+    group_id: str
+    group_seq: int
 
 
     @staticmethod
@@ -357,6 +403,8 @@ class SnapshotDTO(BaseModel):
             used_size=model.used_size,
             migrating=is_migrating,
             created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
             lvol=str(
                 request.url_for(
                     #"clusters:pools:volumes:detail",
@@ -375,6 +423,9 @@ class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
     secondary_node_id: UUID | None
+    # The node's second HA replica. A drain prefers migration targets whose
+    # replica set does not include the node being removed.
+    tertiary_node_id: UUID | None = None
     status: StorageNodeStatus
     uptime: timedelta | None
     hostname: str
@@ -406,6 +457,7 @@ class StorageNodeDTO(BaseModel):
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
             secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
+            tertiary_node_id=UUID(model.tertiary_node_id) if model.tertiary_node_id else None,
             status=cast(StorageNodeStatus, model.status),
             uptime=model.uptime(),
             hostname=model.hostname,
@@ -499,11 +551,13 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: list[str]
+    allowed_hosts: list[util.NQN]
     policy: str
     capacity: CapacityStatDTO
     rep_info: dict | None = None
     from_source: bool = True
+    group_id: str = ""
+    group_seq: int = 0
 
     @staticmethod
     def from_model(
@@ -516,6 +570,18 @@ class VolumeDTO(BaseModel):
         active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
         _db = DBController()
         eff_policy = _db.get_policy_for_lvol(model)
+        # Surface consistency-group membership (design §10): the migration
+        # webhook (§9.5) reads group_id to decide whether a volume is a member.
+        # group_id is the denormalized field on the volume; group_seq is the
+        # group's latest generation, resolved only for an actual member.
+        _grp_seq = 0
+        if model.group_id:
+            try:
+                _grp_seq = _db.get_consistency_group_by_id(model.group_id).last_group_seq
+            except KeyError:
+                # Missing/deleted consistency-group record is tolerated here;
+                # keep default group_seq=0 for non-resolvable membership.
+                _grp_seq = 0
         return VolumeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(cluster_id),
@@ -574,42 +640,84 @@ class VolumeDTO(BaseModel):
             ),
             rep_info=rep_info,
             from_source=model.from_source,
+            group_id=model.group_id,
+            group_seq=_grp_seq,
         )
+
+
+#: A resolved backup configuration as the API exchanges it, in both directions:
+#: the response body of the backup-config GET, and the request body of discover.
+#: Both name a bucket -- one reads back what a cluster resolved, and the other
+#: points at somebody else's bucket, which only the caller can name.
+#:
+#: An alias rather than a hand-copied duplicate, because the two shapes are
+#: identical today and a copy would only drift. It is still a name of its own, so
+#: the wire format can diverge from ``BackupConfig`` later by turning this into a
+#: real class, without touching a single route signature.
+BackupConfigDTO = BackupConfig
+
+#: The same configuration as the cluster-create request body takes it, where the
+#: bucket is the one field a caller cannot supply: it is derived from the id of
+#: the cluster the request is asking to create. ``Cluster.set_backup_config``
+#: resolves it, so this shape reaches nothing beyond that call.
+UnresolvedBackupConfigDTO = UnresolvedBackupConfig
+
+#: Where a set of backups lives, without the credentials to reach it. Carried
+#: inside an export rather than named beside one: the manifests describe objects
+#: and not where they are, so the document that collects them says instead.
+BackupLocationDTO = BackupLocation
+
+#: A backup's manifest as the API exchanges it: the response body of
+#: export/discover and the entries of an inline import.
+#:
+#: An alias for the same reason ``BackupConfigDTO`` is one -- except that here the
+#: shapes have a reason to stay locked together, since the wire form of a manifest
+#: is also its form in the bucket. Naming it separately still lets the API grow a
+#: field the stored document does not have.
+BackupManifestDTO = BackupManifest
+
+#: Backups as export and inline import exchange them: manifests grouped by the
+#: bucket they live in. Grouped because one cluster can hold backups in several
+#: -- its own and any it imported -- so a single location cannot describe them.
+BackupExportDTO = BackupExport
 
 
 class BackupDTO(BaseModel):
     id: UUID
     s3_id: int
-    lvol_id: str
+    lvol_id: UUID
     lvol_name: str
-    snapshot_id: str
+    snapshot_id: UUID
     snapshot_name: str
-    node_id: str
+    node_id: UUID
     status: str
-    prev_backup_id: str
+
+    #: Absent for a full backup, which is the root of its chain. The record
+    #: spells that "", as it does every unset id; the wire says null, the way
+    #: ``DeviceDTO`` and ``LVolDTO`` already do for theirs.
+    prev_backup_id: UUID | None = None
+
     size: int
-    allowed_hosts: list[dict]
     created_at: int
     completed_at: int
-    source_cluster_id: str
+    encrypted: bool
 
     @staticmethod
     def from_model(model: Backup):
         return BackupDTO(
             id=UUID(model.uuid),
             s3_id=model.s3_id,
-            lvol_id=model.lvol_id,
+            lvol_id=UUID(model.lvol_id),
             lvol_name=model.lvol_name,
-            snapshot_id=model.snapshot_id,
+            snapshot_id=UUID(model.snapshot_id),
             snapshot_name=model.snapshot_name,
-            node_id=model.node_id,
+            node_id=UUID(model.node_id),
             status=model.status,
-            prev_backup_id=model.prev_backup_id,
+            prev_backup_id=UUID(model.prev_backup_id) if model.prev_backup_id else None,
             size=model.size,
-            allowed_hosts=model.allowed_hosts or [],
             created_at=model.created_at,
             completed_at=model.completed_at,
-            source_cluster_id=model.source_cluster_id or "",
+            encrypted=model.encrypted,
         )
 
 
@@ -669,6 +777,9 @@ class ReplicationPolicyDTO(BaseModel):
     mode: ReplicationMode
     keep_replicated: int
     status: ReplicationPolicyStatus
+    #: The declared RPO objective, in seconds; null when the operator
+    #: declared none, in which case the derived lag budget applies.
+    rpo_target_seconds: util.OptionalUnsigned = None
     consistency_group: bool = False
     #: Pinned placement of the policy's consistency group, set by its first
     #: member: every further member volume must be created on this node/LVS.
@@ -689,11 +800,110 @@ class ReplicationPolicyDTO(BaseModel):
             mode=cast(ReplicationMode, model.mode),
             keep_replicated=model.keep_replicated,
             status=cast(ReplicationPolicyStatus, model.status),
+            rpo_target_seconds=getattr(model, 'rpo_target_seconds', 0) or None,
             consistency_group=bool(getattr(model, 'consistency_group', False)),
             group_node_id=UUID(group.node_id) if group is not None and group.node_id else None,
             group_lvs_name=group.lvs_name if group is not None else "",
             group_last_seq=group.last_group_seq if group is not None else 0,
         )
+
+
+class ConsistencyGroupDTO(BaseModel):
+    """A standalone consistency group summary (design §10)."""
+    id: UUID
+    cluster_id: UUID
+    name: str
+    node_id: util.OptionalUUID = None
+    lvs_name: str = ""
+    policy_id: util.OptionalUUID = None
+    member_count: int
+    last_group_seq: int
+
+    @staticmethod
+    def from_model(model: ConsistencyGroup):
+        current = sum(1 for m in (model.members or {}).values()
+                      if m.get("removed_seq", 0) == 0)
+        return ConsistencyGroupDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            name=model.group_name,
+            node_id=UUID(model.node_id) if model.node_id else None,
+            lvs_name=model.lvs_name,
+            # The group carries its replication policy (attach_group_policy sets
+            # group.policy_id); expose it so a client can find the group's policy
+            # without the placement/flag heuristic, which a group-first attach
+            # leaves empty.
+            policy_id=UUID(model.policy_id.split('/')[-1]) if model.policy_id else None,
+            member_count=current,
+            last_group_seq=model.last_group_seq,
+        )
+
+
+class ConsistencyGroupMemberDTO(BaseModel):
+    """One current member of a consistency group (design §10 /members)."""
+    lvol_id: str
+    joined_seq: int
+    removed_seq: int
+    node_id: str
+    lvs_name: str
+    online: bool
+
+
+class ConsistencyGroupMemberJoinDTO(BaseModel):
+    """Request body for the late join of an existing volume (design §4.5)."""
+    lvol_id: str
+
+
+class ConsistencyGroupJoinPlanDTO(BaseModel):
+    """The steps a late join of an existing volume takes (co-location design
+    §5): ``migrate`` (live-migrate ``migrate_lvol_ids`` to ``target_node_id``
+    first), ``join``, ``colocate`` (move into ``target_nqn``)."""
+    steps: list[str]
+    target_node_id: str = ""
+    migrate_lvol_ids: list[str] = []
+    target_nqn: str = ""
+
+
+class ConsistencyGroupColocateDTO(BaseModel):
+    """Request body for moving a member into its group's subsystem."""
+    client_swap_ready: bool = False
+
+
+class ConsistencyGroupMigrationCreateDTO(BaseModel):
+    """Request body for a consistency-group migration: the group's scope (its
+    members, every subsystem sibling, transitively) moves to the node."""
+    target_node_id: str
+    host_nqn: str | None = None
+
+
+class ConsistencyGroupMigrationItemDTO(BaseModel):
+    nqn: str
+    kind: str
+    id: str
+    lvol_ids: list[str]
+    connect_strings: list[dict] = []
+
+
+class ConsistencyGroupMigrationDTO(BaseModel):
+    target_node_id: str = ""
+    status: str = "none"
+    items: list[ConsistencyGroupMigrationItemDTO] = []
+
+
+class ConsistencyGroupGenerationMemberDTO(BaseModel):
+    lvol_id: str
+    snapshot_id: str
+    ready: bool
+
+
+class ConsistencyGroupGenerationDTO(BaseModel):
+    """One generation of a consistency group (design §6.3)."""
+    group_seq: int
+    created_at: int
+    expected: int
+    present: int
+    complete: bool
+    members: list[ConsistencyGroupGenerationMemberDTO]
 
 
 class ReplicationRelationshipDTO(BaseModel):
@@ -713,6 +923,159 @@ class ReplicationRelationshipDTO(BaseModel):
     active_lvol_id: util.OptionalUUID = None
 
 
+class ReplicationStatusDTO(BaseModel):
+    """The typed steady-state replication status of one volume.
+
+    Serves what ``lvol_controller.get_replication_info`` computes, for the
+    volume's WHOLE replicated life — unlike ``ReplicationRelationshipDTO``,
+    which only exists once a cutover or fail-over has created a relationship
+    record. ``state: not_replicating, role: none`` is a valid answer, never a
+    404, because the csi-addons adapter polls this on every reconcile.
+    """
+    role: ReplicationRole
+    state: ReplicationHealthState
+    #: Creation time of the newest fully replicated snapshot; null until the
+    #: first snapshot lands on the peer.
+    last_replicated_at: datetime | None = None
+    lag_seconds: util.OptionalUnsigned = None
+    lag_budget_seconds: util.OptionalUnsigned = None
+    outstanding_count: util.Unsigned = 0
+    outstanding_bytes: util.Unsigned = 0
+    #: Shipping tasks currently suspended on errors.
+    failing_count: util.Unsigned = 0
+    #: Whether any shipping task exhausted its retries and gave up.
+    max_retry_reached: bool = False
+    #: Size and duration of the last completed shipping cycle.
+    last_cycle_bytes: util.OptionalUnsigned = None
+    last_cycle_seconds: util.OptionalUnsigned = None
+    #: A divergence catch-up (fail-back reversal or final cutover) in flight.
+    resyncing: bool = False
+
+    @staticmethod
+    def from_info(info: dict) -> 'ReplicationStatusDTO':
+        last_replicated_at = info.get('last_replicated_at')
+        return ReplicationStatusDTO(
+            role=info.get('role', 'none'),
+            state=info.get('state', 'not_replicating'),
+            last_replicated_at=(datetime.fromtimestamp(last_replicated_at, tz=UTC)
+                                if last_replicated_at is not None else None),
+            lag_seconds=info.get('lag_seconds'),
+            lag_budget_seconds=info.get('lag_budget_seconds'),
+            outstanding_count=info.get('outstanding_count', 0),
+            outstanding_bytes=info.get('outstanding_bytes', 0),
+            failing_count=info.get('failing_count', 0),
+            max_retry_reached=bool(info.get('max_retry_reached', 0)),
+            last_cycle_bytes=info.get('last_cycle_bytes'),
+            last_cycle_seconds=info.get('last_cycle_seconds'),
+            resyncing=bool(info.get('resyncing', False)),
+        )
+
+
+class ConsistencyGroupReplicationIntentDTO(BaseModel):
+    """Request body to enable or disable group replication (design §14.4).
+
+    A UUID attaches the whole consistency group to that group replication policy;
+    an explicit ``null`` detaches it (the group and its members stay grouped by
+    label, only replication stops). The field is required, so omitting it is a
+    422 rather than an ambiguous no-op.
+    """
+    replication_policy_id: UUID | None
+
+
+class ConsistencyGroupLineageMemberDTO(BaseModel):
+    """One protected volume of a consistency group: the handle its
+    PersistentVolume carries and the volume serving its data now."""
+    origin_handle: str
+    active_handle: str
+
+
+class ConsistencyGroupResolutionDTO(BaseModel):
+    """Where a consistency group's data lives now (replication_policy_controller.
+    resolve_group). ``active_*`` are empty when no group holds a live member."""
+    cluster_id: str
+    group_id: str
+    active_cluster_id: str = ""
+    active_group_id: str = ""
+    members: list[ConsistencyGroupLineageMemberDTO] = []
+
+
+class ConsistencyGroupReplicationStatusDTO(BaseModel):
+    """The replication status of a consistency group as one unit.
+
+    A group's recovery point is its OLDEST member's, its lag and health its
+    WORST member's, and its backlog the sum, because a group is only as
+    protected as its slowest, sickest member. Never a 404, matching the
+    per-volume ``ReplicationStatusDTO`` (design-csi-addons-replication.md
+    §14.4/§14.6).
+    """
+    role: ReplicationRole
+    state: ReplicationHealthState
+    member_count: util.Unsigned = 0
+    #: Oldest member's newest-replicated time; null until every member has a
+    #: recovery point.
+    last_replicated_at: datetime | None = None
+    #: Worst (largest) member lag; null when the group has no recovery point.
+    lag_seconds: util.OptionalUnsigned = None
+    outstanding_count: util.Unsigned = 0
+    outstanding_bytes: util.Unsigned = 0
+    #: A divergence catch-up in flight on any member.
+    resyncing: bool = False
+
+    @staticmethod
+    def from_info(info: dict) -> 'ConsistencyGroupReplicationStatusDTO':
+        last_replicated_at = info.get('last_replicated_at')
+        return ConsistencyGroupReplicationStatusDTO(
+            role=info.get('role', 'none'),
+            state=info.get('state', 'not_replicating'),
+            member_count=info.get('member_count', 0),
+            last_replicated_at=(datetime.fromtimestamp(last_replicated_at, tz=UTC)
+                                if last_replicated_at is not None else None),
+            lag_seconds=info.get('lag_seconds'),
+            outstanding_count=info.get('outstanding_count', 0),
+            outstanding_bytes=info.get('outstanding_bytes', 0),
+            resyncing=bool(info.get('resyncing', False)),
+        )
+
+
+class ReplicatedSnapshotDTO(BaseModel):
+    """A fully replicated snapshot on the secondary, addressed as a cloneable
+    object. ``lvol_id`` is the volume the snapshot belongs to on the
+    SECONDARY cluster, not the source volume the caller asked about, because
+    that is the identity the ordinary CSI clone path resolves a
+    ``dataSource`` against.
+    """
+    snapshot_id: UUID
+    cluster_id: UUID
+    pool_id: util.OptionalUUID = None
+    lvol_id: util.OptionalUUID = None
+    size: util.Unsigned
+    used_size: util.Unsigned
+    created_at: datetime
+    group_id: str = ""
+    group_seq: util.Unsigned = 0
+
+    @staticmethod
+    def from_model(model: SnapShot) -> 'ReplicatedSnapshotDTO':
+        return ReplicatedSnapshotDTO(
+            snapshot_id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            pool_id=UUID(model.pool_uuid) if model.pool_uuid else None,
+            lvol_id=UUID(model.lvol.get_id()) if model.lvol else None,
+            size=model.size,
+            used_size=model.used_size,
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
+        )
+
+
+class ReplicatedGenerationDTO(BaseModel):
+    """One complete, fully replicated consistency-group generation, every
+    member addressed as a cloneable object on the secondary."""
+    group_seq: util.Unsigned
+    members: list[ReplicatedSnapshotDTO]
+
+
 class FailoverResultDTO(BaseModel):
     lvol_id: UUID
     status: FailoverStatus
@@ -725,6 +1088,7 @@ class MigrationDTO(BaseModel):
     id: UUID
     lvol_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     phase: str
     status: str
@@ -745,6 +1109,7 @@ class MigrationDTO(BaseModel):
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             phase=model.phase,
             status=model.status,
@@ -765,6 +1130,7 @@ class BatchMigrationDTO(BaseModel):
     id: UUID
     cluster_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     target_nqn: str
     phase: str
@@ -779,6 +1145,7 @@ class BatchMigrationDTO(BaseModel):
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             target_nqn=model.target_nqn,
             phase=model.phase,

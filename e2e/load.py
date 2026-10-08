@@ -1,16 +1,29 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "matplotlib",
+#     "paramiko",
+#     "ping3",
+#     "requests>=2.34.0",
+#     "urllib3>=2.7.0",
+# ]
+# ///
 ### simplyblock Load test framework
 import argparse
-import traceback
 import os
 import subprocess
 import time
+import traceback
+
 from __init__ import get_load_tests
-from logger_config import setup_logger
-from exceptions.custom_exception import TestNotFoundException, MultipleExceptions
 from e2e_tests.cluster_test_base import TestClusterBase
+from exceptions.custom_exception import MultipleExceptions, TestNotFoundException
+from logger_config import setup_logger
+from utils.common_utils import CommonUtils
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
-from utils.common_utils import CommonUtils
 
 logger = setup_logger(__name__)
 

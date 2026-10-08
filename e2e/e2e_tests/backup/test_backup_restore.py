@@ -16,7 +16,7 @@ Backup CRUD:
   sbcli backup list [--cluster-id]
   sbcli backup delete <lvol_id>               # deletes ALL backups for that lvol
   sbcli backup restore <backup_id> [--lvol NAME] [--pool POOL]
-  sbcli backup import <metadata.json>
+  sbcli backup import (--from-file <metadata.json> | --bucket NAME) [--cluster-id]
 
 Policy management:
   sbcli backup policy-add <cluster_id> <name> [--versions N] [--age 1d] [--schedule ...]
@@ -75,8 +75,8 @@ Test class map
 """
 
 import os
-import re
 import random
+import re
 import string
 import threading
 import time
@@ -87,7 +87,6 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 from utils.ssh_utils import get_parent_device
-
 
 # ─────────────────────────────────────── helpers ──────────────────────────────
 
@@ -438,13 +437,13 @@ class BackupTestBase(TestClusterBase):
 
     # ── CLI helpers ───────────────────────────────────────────────────────────
 
-    def _run(self, cmd: str, node: str = None) -> tuple[str, str]:
+    def _run(self, cmd: str, node: str | None = None) -> tuple[str, str]:
         node = node or self.mgmt_nodes[0]
         out, err = self.ssh_obj.exec_command(node=node, command=cmd)
         self.logger.debug(f"CMD: {cmd}\nOUT: {out}\nERR: {err}")
         return out, err
 
-    def _sbcli(self, subcmd: str, node: str = None) -> tuple[str, str]:
+    def _sbcli(self, subcmd: str, node: str | None = None) -> tuple[str, str]:
         if self.k8s_test and node is None:
             # In k8s-native mode, route sbcli commands through kubectl exec
             # into the admin pod via K8sUtils.exec_sbcli().
@@ -664,8 +663,8 @@ class BackupTestBase(TestClusterBase):
         raise TimeoutError(
             f"No completed backup for snapshot {snap_name} within {timeout}s")
 
-    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None,
-                         restore_size: str = None) -> str:
+    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str | None = None,
+                         restore_size: str | None = None) -> str:
         """Restore a backup to a new lvol; return the new lvol name.
 
         In k8s mode: creates a BackupRestore CRD that provisions a new PVC
@@ -898,8 +897,8 @@ class BackupTestBase(TestClusterBase):
             f"within {timeout}s — failing test."
         )
 
-    def _validate_backup_fields(self, backup: dict, lvol_name: str = None,
-                                 snap_name: str = None) -> None:
+    def _validate_backup_fields(self, backup: dict, lvol_name: str | None = None,
+                                 snap_name: str | None = None) -> None:
         """Assert that *backup* entry references the expected lvol name and/or snapshot name.
 
         Searches all field values in the backup dict so it is resilient to
@@ -925,7 +924,7 @@ class BackupTestBase(TestClusterBase):
         return bk_id
 
     def _get_backup_for_snapshot(self, snap_name: str,
-                                  backups: list = None) -> dict:
+                                  backups: list | None = None) -> dict:
         """Return the backup entry that references *snap_name*, or None.
 
         Matching is case-insensitive and normalizes underscores to hyphens
@@ -1108,11 +1107,13 @@ class BackupTestBase(TestClusterBase):
         d = details[0] if isinstance(details, list) else details
         assert isinstance(d, dict), (
             f"{label}: expected dict for lvol details but got {type(d).__name__}: {d!r}")
-        crypto_val = d.get("crypto_bdev") or d.get("crypto") or d.get("encryption")
-        self.logger.info(f"{label}: lvol {mgmt_id} crypto_bdev={crypto_val}")
+        crypto_val = ("crypto" in d.get("lvol_type", "").split(",")
+                      or bool(d.get("crypto_bdev")))
+        self.logger.info(f"{label}: lvol {mgmt_id} crypto={crypto_val}")
         assert crypto_val, (
-            f"{label}: restored lvol {mgmt_id} expected crypto_bdev to be set, "
-            f"got {crypto_val!r}. Full details: {d}")
+            f"{label}: restored lvol {mgmt_id} expected crypto=True, but "
+            f"lvol_type={d.get('lvol_type')!r} and "
+            f"crypto_bdev={d.get('crypto_bdev')!r}. Full details: {d}")
         return d
 
     def _verify_lvol_dhchap(self, lvol_id: str, label: str = ""):
@@ -1136,8 +1137,8 @@ class BackupTestBase(TestClusterBase):
 
     # ── lvol / mount helpers ──────────────────────────────────────────────────
 
-    def _create_lvol(self, name: str = None, size: str = None,
-                     crypto: bool = False, ndcs: int = None, npcs: int = None) -> str:
+    def _create_lvol(self, name: str | None = None, size: str | None = None,
+                     crypto: bool = False, ndcs: int | None = None, npcs: int | None = None) -> str:
         """Create an lvol and return (name, lvol_id).
 
         In docker mode: creates via sbcli.
@@ -1189,7 +1190,7 @@ class BackupTestBase(TestClusterBase):
         return name, lvol_id
 
     def _connect_and_mount(self, lvol_name: str, lvol_id: str,
-                            mount: str = None,
+                            mount: str | None = None,
                             format_disk: bool = True) -> tuple[str, str]:
         """Connect lvol via NVMe and mount; return (device, mount_point).
 
@@ -1225,8 +1226,8 @@ class BackupTestBase(TestClusterBase):
         self.connected.append(lvol_id)
         return device, mount
 
-    def _run_fio(self, name_or_mount: str, mount: str = None,
-                  log_file: str = None, size: str = None,
+    def _run_fio(self, name_or_mount: str, mount: str | None = None,
+                  log_file: str | None = None, size: str | None = None,
                   runtime: int = 60, **kwargs):
         """Run FIO on mount point, wait for it to finish, and validate log.
 
@@ -2200,8 +2201,8 @@ class TestBackupNegative(BackupTestBase):
       - policy-attach invalid target_type → CLI error
       - policy-remove non-existent policy_id → error
       - backup list after all lvols deleted → empty or graceful
-      - backup import with valid metadata file
-      - backup import with malformed JSON → error
+      - backup import --from-file with a valid (empty) export document
+      - backup import --from-file with malformed JSON → error
       - Duplicate snapshot backup → handled (no crash, idempotent or error)
     """
 
@@ -2275,11 +2276,16 @@ class TestBackupNegative(BackupTestBase):
             good_json = "/tmp/good_backup.json"
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
-                f"echo '[]' > {good_json}")
+                f"""echo '{{"schema_version": 1, "groups": []}}' > {good_json}""")
             out, err = self._sbcli(f"backup import --from-file {good_json}")
-            # Empty list → 0 imported; should not error
+            # exec_command synthesises err from a non-zero exit when stderr is
+            # empty, so this rejects a refused command line too, not just a
+            # reported failure.
+            assert not err, \
+                f"TC-BCK-036: empty export import failed: {err}"
+            # Empty export → 0 imported; should not error
             assert "error" not in out.lower() or "0" in out, \
-                f"TC-BCK-036: unexpected error for empty-list import: {err}"
+                f"TC-BCK-036: unexpected error for empty export import: {out}"
             self.logger.info("TC-BCK-036: import handled ✓")
         else:
             self.logger.info("TC-BCK-035/036: skipped (backup import is CLI-only)")
@@ -3092,7 +3098,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     --------
     1. On Cluster-1: create lvol → write data → snapshot + S3 backup → wait for done.
     2. Export backup metadata from Cluster-1 via `backup list` → JSON file.
-    3. On Cluster-2: `backup import <metadata.json>` to register the chain.
+    3. On Cluster-2: `backup import --from-file <metadata.json>` to register the chain.
     4. On Cluster-2: `backup restore <backup_id>` to restore from Cluster-1's S3.
        (Backups self-describe their S3 bucket — no source-switch needed.)
     5. Verify checksums match the data written on Cluster-1.
@@ -5783,7 +5789,7 @@ def get_backup_extra_tests():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TC-BCK-150..154 – Backup / restore of a DHCHAP + crypto lvol
+#  TC-BCK-150..154 – Backup / restore of a crypto lvol
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBackupSecurityLvol(BackupTestBase):
@@ -5907,8 +5913,8 @@ class TestBackupSecurityLvol(BackupTestBase):
         self.logger.info(
             f"Registered host {self._host_nqn} to pool {pool_id}")
 
-        # TC-BCK-150: create DHCHAP+crypto lvol and write data
-        self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
+        # TC-BCK-150: create crypto lvol and write data
+        self.logger.info("TC-BCK-150: Creating crypto lvol …")
         lvol_name, lvol_id = self._create_lvol(crypto=True)
         device, mount = self._connect_and_mount_dhchap(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"

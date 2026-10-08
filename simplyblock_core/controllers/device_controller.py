@@ -1,16 +1,17 @@
 import json
+import logging
 import threading
 import time
-import logging
 import uuid
 
-from simplyblock_core import constants, distr_controller, utils, storage_node_ops
+from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
 # online→not-online transitions within this many seconds are treated as
@@ -18,6 +19,10 @@ from simplyblock_core.prom_client import PromClient
 # longer than the typical SPDK timeout/reset cycle is sufficient — 10 s
 # comfortably exceeds the 4 s timeout_us + reset round-trip.
 DEVICE_FLAP_DEBOUNCE_SEC = 10.0
+
+# Appended to a failed device's serial number once it has been replaced by a
+# fresh device record, marking the original as spent.
+FAILED_SERIAL_SUFFIX = "_failed"
 
 logger = logging.getLogger()
 
@@ -56,20 +61,19 @@ async def watch_device(cluster_id, node_id, device_id):
 
 
 def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:
-    try:
-        return next(
-            node
-            for node in db_controller.get_storage_nodes()
-            if node.jm_device.get_id() == id
-        )
-    except StopIteration:
+    """The node whose *journal* device this is.
+
+    Every caller goes on to act on ``snode.jm_device``, so resolving an NVMe id
+    here would silently operate on a different device — `sn remove-jm-device`
+    with a mistyped id would tear down the node's journal. Hence the kind is
+    part of the lookup, not a filter callers are trusted to remember.
+    """
+    node = single_or_none(db_controller.query(
+        StorageNode, 'device_id', id, StorageNode.DEVICE_KIND_JM))
+    if (node is None) or (node.jm_device is None):
         raise KeyError(f'No storage node with JM device {id}')
+    return node
 
-
-# Maximum number of `online → not-online` transitions caused by a local IO
-# error report from the device's home node before the device is force-failed.
-# Counter is per-device and resets only on explicit device restart.
-DEVICE_FLAP_LIMIT = 2
 
 # Allowed values for the `cause` argument of device_set_state.
 #
@@ -262,68 +266,8 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
             )
             return False
 
-    # Per-device flap counter. Increment ONLY when the device's home node
-    # spontaneously reported an unsolicited failure event against its own
-    # device — IO error or REMOVE/error_open. Anything else (remote-node
-    # observations, node cascades, operator-driven CLI commands, restarts)
-    # uses a different `cause` and is not counted. Belt-and-braces: also
-    # require the home node to currently be online; if the parent node is
-    # already in some non-online state then we are in a node-cascade window
-    # by definition and any device transition is collateral.
-    force_fail = False
-    countable = (
-        device.status == NVMeDevice.STATUS_ONLINE
-        and state not in (
-            NVMeDevice.STATUS_ONLINE,
-            NVMeDevice.STATUS_FAILED,
-            NVMeDevice.STATUS_FAILED_AND_MIGRATED,
-        )
-        and cause == CAUSE_LOCAL_FAILURE
-        and snode.status == StorageNode.STATUS_ONLINE
-    )
-    if countable:
-        # Debounce: error storms fire many error events in quick succession
-        # against a single underlying device problem. We only advance the
-        # counter for transitions that are at least DEVICE_FLAP_DEBOUNCE_SEC
-        # apart, so a single hung-device incident (potentially hundreds of
-        # error_write events) only burns one slot of the budget.
-        now = time.time()
-        if device.last_flap_tsc and (now - device.last_flap_tsc) < DEVICE_FLAP_DEBOUNCE_SEC:
-            logger.info(
-                f"Device {device_id} flap dedup: "
-                f"only {now - device.last_flap_tsc:.1f}s since last flap "
-                f"(< {DEVICE_FLAP_DEBOUNCE_SEC}s window); not counting"
-            )
-        else:
-            next_count = device.flap_count + 1
-            device.last_flap_tsc = now
-            if next_count > DEVICE_FLAP_LIMIT:
-                logger.warning(
-                    f"Device {device_id} exceeded flap limit "
-                    f"({next_count} > {DEVICE_FLAP_LIMIT}); forcing to failed "
-                    f"instead of {state}. Use device-restart to recover."
-                )
-                state = NVMeDevice.STATUS_FAILED
-                force_fail = True
-            else:
-                device.flap_count = next_count
-                logger.info(
-                    f"Device {device_id} flap_count={device.flap_count}/"
-                    f"{DEVICE_FLAP_LIMIT} (online→{state})"
-                )
-
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
-        if cause == CAUSE_DEVICE_RESTART:
-            # Explicit operator-initiated restart is the only path that
-            # forgives prior flapping. Both the counter and the debounce
-            # timestamp are wiped — the device gets a fresh budget.
-            if device.flap_count != 0:
-                logger.info(
-                    f"Device {device_id} flap_count reset on device-restart"
-                )
-            device.flap_count = 0
-            device.last_flap_tsc = 0.0
 
     if state == NVMeDevice.STATUS_REMOVED:
         device.deleted = True
@@ -365,8 +309,6 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
         new_fields = {
             "status": device.status,
             "previous_status": device.previous_status,
-            "flap_count": device.flap_count,
-            "last_flap_tsc": device.last_flap_tsc,
             "retries_exhausted": device.retries_exhausted,
             "repair_attempts": device.repair_attempts,
             "last_repair_tsc": device.last_repair_tsc,
@@ -386,21 +328,6 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
         connect_peers_to_node_devices(snode)
 
     distr_controller.send_dev_status_event(device, device.status)
-
-    if force_fail:
-        # Mirror the post-failed bookkeeping that device_set_failed() does:
-        # remove this device's storage_id from peer cluster maps and queue a
-        # failure-migration task. Wrapped in try/except so a partial cluster
-        # outage doesn't keep the device stuck mid-failure.
-        try:
-            for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-                if node.status == StorageNode.STATUS_ONLINE:
-                    node.rpc_client().distr_replace_id_in_map_prob(
-                        device.cluster_device_order, -1)
-            tasks_controller.add_device_failed_mig_task(device_id)
-        except Exception:
-            logger.exception(
-                f"Post-failed bookkeeping for {device_id} hit an error")
 
     return True
 
@@ -478,8 +405,8 @@ def probe_device_stack(device_obj, snode, rpc_client=None):
     _safe("nvme_controller",
           lambda: rpc_client.bdev_nvme_controller_list(device_obj.nvme_controller))
     if device_obj.alceml_bdev:
-        _safe("alceml", lambda: rpc_client.get_bdevs(device_obj.alceml_bdev))
-        _safe("pt", lambda: rpc_client.get_bdevs(f"{device_obj.alceml_bdev}_PT"))
+        _safe("alceml", lambda: rpc_client.bdev_get(device_obj.alceml_bdev))
+        _safe("pt", lambda: rpc_client.bdev_get(f"{device_obj.alceml_bdev}_PT"))
     if device_obj.nvmf_nqn:
         subsys: list = []
 
@@ -660,7 +587,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     nvme_bdev = device_obj.nvme_bdev
     if snode.enable_test_device:
         test_name = f"{device_obj.nvme_bdev}_test"
-        if not rpc_client.get_bdevs(test_name):
+        if not rpc_client.bdev_get(test_name):
             # create testing bdev
             ret = rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
             if not ret:
@@ -679,7 +606,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         # device can be made to "hang" on demand (chaos testing). Created with zero
         # latency; arm via device_controller.set_device_hang / bdev_delay_update_latency.
         hang_name = f"{device_obj.nvme_bdev}_hang"
-        if not rpc_client.get_bdevs(hang_name):
+        if not rpc_client.bdev_get(hang_name):
             ret = rpc_client.bdev_delay_create(hang_name, nvme_bdev)
             if not ret:
                 logger.error(f"Failed to create hang bdev: {hang_name}")
@@ -692,7 +619,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
-    if not rpc_client.get_bdevs(alceml_name):
+    if not rpc_client.bdev_get(alceml_name):
         checksum_method, cache_size, cache_eviction_threshold = utils.alceml_checksum_params(cluster, device_obj)
         if cluster.inline_checksum and not device_obj.md_supported:
             logger.warning(
@@ -719,7 +646,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
-    if not rpc_client.get_bdevs(pt_name):
+    if not rpc_client.bdev_get(pt_name):
         ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
@@ -851,7 +778,7 @@ def restart_device(device_id, force=False):
     if device_obj.bdev_type == "aio":
         # lblk mode: the base bdev is an AIO bdev over a kernel block device.
         # Re-resolve serial-first (kernel names shift), recreate if gone.
-        if not snode.rpc_client().get_bdevs(device_obj.nvme_bdev):
+        if not snode.rpc_client().bdev_get(device_obj.nvme_bdev):
             try:
                 filename = device_obj.by_id_path or device_obj.device_path
                 try:
@@ -907,11 +834,11 @@ def restart_device(device_id, force=False):
             # looking for jm partition
             rpc_client = snode.rpc_client()
             jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
-            ret = rpc_client.get_bdevs(jm_dev_part)
+            ret = rpc_client.bdev_get(jm_dev_part)
             if ret:
                 logger.info(f"JM part found: {jm_dev_part}")
                 if snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]:
-                    if snode.rpc_client().get_bdevs(snode.jm_device.raid_bdev):
+                    if snode.rpc_client().bdev_get(snode.jm_device.raid_bdev):
                         logger.info("Raid found, setting jm device online")
                         ret = snode.rpc_client().bdev_raid_get_bdevs()
                         has_bdev = any(
@@ -1092,7 +1019,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(f"{device.alceml_bdev}_PT") or force:
+    if  rpc_client.bdev_get(f"{device.alceml_bdev}_PT") or force:
         logger.info("Removing device PT")
         ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
         if not ret:
@@ -1100,21 +1027,21 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(device.alceml_bdev ) or force:
+    if  rpc_client.bdev_get(device.alceml_bdev ) or force:
         ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(device.qos_bdev) or force:
+    if  rpc_client.bdev_get(device.qos_bdev) or force:
         ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.qos_bdev}")
             if not force:
                 return False
 
-    if snode.enable_test_device and (rpc_client.get_bdevs(device.testing_bdev) or force):
+    if snode.enable_test_device and (rpc_client.bdev_get(device.testing_bdev) or force):
         ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.testing_bdev}")
@@ -1323,7 +1250,7 @@ def reset_storage_device(dev_id):
         # error state below (device_set_online also forgives flaps);
         # bdev gone => fail so the tasks framework escalates to
         # restart_device, whose full stack rebuild is the real recovery.
-        if not rpc_client.get_bdevs(device.nvme_bdev):
+        if not rpc_client.bdev_get(device.nvme_bdev):
             logger.error(f"AIO bdev {device.nvme_bdev} is gone; reset cannot "
                          f"recover it — restart the device instead")
             return False
@@ -1578,7 +1505,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
                     continue
                 dev_part = f"{dev.nvme_bdev[:-2]}p1"
-                if rpc_client.get_bdevs(dev_part):
+                if rpc_client.bdev_get(dev_part):
                     if dev_part not in jm_nvme_bdevs:
                         jm_nvme_bdevs.append(dev_part)
 
@@ -1653,35 +1580,30 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
 
 def new_device_from_failed(device_id):
     db_controller = DBController()
-    device = None
-    device_node = None
-    for node in db_controller.get_storage_nodes():
-        for dev in node.nvme_devices:
-            if dev.get_id() == device_id:
-                device = dev
-                device_node = node
-                break
-
-    if not device:
-        logger.info(f"Device not found: {device_id}")
+    try:
+        device_node = db_controller.get_storage_node_by_device_id(device_id)
+    except KeyError:
+        logger.info("node not found")
         return False
 
-    if not device_node:
-        logger.info("node not found")
+    device = next(
+        (dev for dev in device_node.nvme_devices if dev.get_id() == device_id), None)
+    if not device:
+        logger.info(f"Device not found: {device_id}")
         return False
 
     if device.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED:
         logger.error(f"Device status: {device.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
         return False
 
-    if device.serial_number.endswith("_failed"):
+    if device.serial_number.endswith(FAILED_SERIAL_SUFFIX):
         logger.error("Device is already added back from failed")
         return False
 
     if device.bdev_type == "aio":
         # lblk mode: ensure the AIO bdev exists again (serial-first
         # re-resolution against the live host; stored path as fallback).
-        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+        if not device_node.rpc_client().bdev_get(device.nvme_bdev):
             try:
                 filename = device.by_id_path or device.device_path
                 try:
@@ -1703,7 +1625,7 @@ def new_device_from_failed(device_id):
             except Exception as e:
                 logger.error(e)
                 return False
-        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+        if not device_node.rpc_client().bdev_get(device.nvme_bdev):
             logger.error(f"Failed to find AIO bdev {device.nvme_bdev}")
             return False
     else:
@@ -1733,7 +1655,7 @@ def new_device_from_failed(device_id):
     def _mut(n, nd=new_device, old_id=device_id):
         for d in n.nvme_devices:
             if d.get_id() == old_id:
-                d.serial_number = f"{d.serial_number}_failed"
+                d.serial_number = f"{d.serial_number}{FAILED_SERIAL_SUFFIX}"
                 break
         n.nvme_devices.append(nd)
         return True

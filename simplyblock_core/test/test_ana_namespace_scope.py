@@ -22,7 +22,7 @@ class _Recorder:
     def __init__(self):
         self.requests = []
 
-    def __call__(self, method, params):
+    def __call__(self, method, **params):
         self.requests.append((method, params))
         return ["ok"]
 
@@ -30,7 +30,7 @@ class _Recorder:
 def _client(monkeypatch):
     client = rpc_client_instance()
     recorder = _Recorder()
-    monkeypatch.setattr(client, "_request", recorder)
+    monkeypatch.setattr(client, "_request3", recorder)
     return client, recorder
 
 

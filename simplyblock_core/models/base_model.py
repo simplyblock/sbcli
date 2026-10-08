@@ -1,14 +1,13 @@
 import json
 from collections import ChainMap
 from collections.abc import Callable, Mapping
-from inspect import get_annotations, ismethod, isfunction
+from inspect import get_annotations, isfunction, ismethod
 from types import UnionType
 from typing import ClassVar, TypeVar, Union, cast, get_args, get_origin
 
 from pydantic import SecretBytes, SecretStr
 
-from simplyblock_core import watches
-
+from simplyblock_core.models import indices, watches
 
 _T = TypeVar('_T')
 
@@ -43,6 +42,28 @@ def default_factory(factory: Callable[[], _T]) -> _T:
     return cast(_T, _DefaultFactory(factory))
 
 
+def _is_fdb_store(kv_store) -> bool:
+    """True when ``kv_store`` is a live FoundationDB handle.
+
+    Index maintenance has to READ the record it is replacing, to move the
+    entries that record owns; unlike a plain single-key write it cannot run
+    against a store that only records what it is told. So a caller that hands a
+    model a mock store — several controller tests patch ``DBController`` inside
+    the module under test — gets the plain write, exactly as before.
+
+    The names are looked up at call time: the ``fdb`` binding injects its API at
+    ``fdb.api_version()`` time, and the unit tier's stub defines neither, which
+    is the same "no indices here" answer.
+    """
+    import fdb
+    handles = tuple(
+        handle for handle
+        in (getattr(fdb, 'Database', None), getattr(fdb, 'Transaction', None))
+        if isinstance(handle, type)
+    )
+    return bool(handles) and isinstance(kv_store, handles)
+
+
 def _detached(value: _T) -> _T:
     """A copy of ``value`` that shares no mutable structure with it.
 
@@ -75,6 +96,14 @@ class BaseModel:
     # same FDB transaction so watchers (SSE API) wake up. Plain class attribute,
     # not an annotation: must stay out of get_attrs_map()/to_dict().
     _WATCHED = False
+
+    # Declared secondary indices (see models/indices.py).
+    # write_to_db()/remove()/DBController.atomic_update() maintain every entry
+    # in the SAME FDB transaction as the entity mutation, so an index can never
+    # be left describing a record that was never written. Plain class
+    # attribute like _WATCHED, not an annotation, so it stays out of
+    # get_attrs_map()/to_dict() and is never serialized.
+    _INDEXES: ClassVar[tuple] = ()
 
     id: str = ""
     uuid: str = ""
@@ -307,6 +336,18 @@ class BaseModel:
     # snapshot semantics (and its 5s budget) unchanged.
     _READ_CHUNK_SIZE = 2000
 
+    @classmethod
+    def keyspace_prefix(cls) -> bytes:
+        """``<object_type>/<ClassName>/`` — the key range one class occupies.
+
+        NOT ``get_db_id()`` of a fresh instance: a class whose ``get_id()``
+        composes a parent id renders an empty record as ``object/Class//``,
+        which matches nothing. The equivalent spelling at existing call sites
+        is ``read_from_db(id=" ")``.
+        """
+        prototype = cls()
+        return f'{prototype.object_type}/{prototype.name}/'.encode()
+
     @staticmethod
     def _next_prefix(prefix: bytes) -> bytes:
         """Smallest key strictly greater than every key starting with
@@ -382,17 +423,109 @@ class BaseModel:
         """
         return ()
 
-    @staticmethod
-    def _write_tx(tr, key, value, rollup_key, version_key):
-        tr.set(key, value)
-        tr.add(rollup_key, watches.ONE_LE64)
-        tr.add(version_key, watches.ONE_LE64)
+    @classmethod
+    def active_indexes(cls, kv_store):
+        """The indices this process maintains on a write to ``kv_store``.
+
+        Resolving an index's state is a DB read (``index_meta/<Class>/<name>``,
+        TTL-cached per class), so a class with no declarations never pays for
+        one, and neither does a write to a store that cannot maintain an index
+        at all (see :func:`_is_fdb_store`).
+        """
+        declared = indices.indexes_of(cls)
+        if not declared or not _is_fdb_store(kv_store):
+            return ()
+        from simplyblock_core.db_controller import DBController
+        db = DBController()
+        return tuple(
+            index for index in declared
+            if db.index_state(cls, index) != indices.STATE_DISABLED
+        )
 
     @staticmethod
-    def _remove_tx(tr, key, rollup_key, version_key):
+    def _read_record(tr, key, model_cls):
+        """The record currently stored at ``key``, or ``None``."""
+        raw = tr.get(key).wait()
+        if raw is None or not raw.present():
+            return None
+        return model_cls().from_dict(json.loads(bytes(raw)))
+
+    @staticmethod
+    def index_keys(model_cls, index_list, obj) -> dict:
+        """``{index name: keys}`` for one record — the "before" of a write diff."""
+        return {index.name: index.keys(model_cls, obj) for index in index_list}
+
+    @staticmethod
+    def _apply_index_diff(tr, model_cls, index_list, old_keys, obj, *,
+                          on_violation=None):
+        """Move every index entry named by ``old_keys`` onto ``obj``.
+
+        ``old_keys`` comes from the record read inside this same transaction (or
+        from the object before the caller mutated it), so the diff is computed
+        against what is actually stored rather than against whatever the caller
+        last saw.
+
+        A unique value another live record holds aborts the write, which is what
+        every caller on the write path wants: the record does not exist yet, and
+        a create that half-happened is worse than one that did not. The backfill
+        is the exception — its records already exist, and pre-constraint data can
+        carry duplicates it must not let cost a record its entries in the OTHER
+        indices — so it passes ``on_violation`` and gets the offending key
+        skipped and reported instead of the whole transaction lost.
+        """
+        entity_id = str(obj.get_id())
+        for index in index_list:
+            old = old_keys.get(index.name, set())
+            new = index.keys(model_cls, obj)
+            if index.unique:
+                for values in index.tuples(obj):
+                    key = index.key(model_cls, values, entity_id)
+                    if key in old:
+                        continue
+                    held = tr.get(key).wait()
+                    if held is not None and held.present():
+                        holder = index.entry_id(model_cls, key, bytes(held))
+                        if holder != entity_id:
+                            violation = indices.UniqueIndexViolation(
+                                model_cls.__name__, index.name, values,
+                                holder, entity_id)
+                            if on_violation is None:
+                                raise violation
+                            on_violation(violation)
+                            new.discard(key)
+            for key in old - new:
+                tr.clear(key)
+            for key in new:
+                tr[key] = index.entry_value(entity_id)
+
+    @staticmethod
+    def _write_tx(tr, key, value, model_cls, obj, index_list, rollup_key, version_key):
+        if index_list:
+            BaseModel._apply_index_diff(
+                tr, model_cls, index_list,
+                BaseModel.index_keys(
+                    model_cls, index_list,
+                    BaseModel._read_record(tr, key, model_cls)),
+                obj)
+        tr.set(key, value)
+        if rollup_key is not None:
+            tr.add(rollup_key, watches.ONE_LE64)
+            tr.add(version_key, watches.ONE_LE64)
+
+    @staticmethod
+    def _remove_tx(tr, key, model_cls, obj, index_list, rollup_key, version_key):
+        if index_list:
+            # Clear the keys of the record that is actually stored: the caller's
+            # copy may be stale, and for a unique index a stale value could name
+            # a key another entity has since taken over.
+            stored = BaseModel._read_record(tr, key, model_cls) or obj
+            for index in index_list:
+                for index_key in index.keys(model_cls, stored):
+                    tr.clear(index_key)
         tr.clear(key)
-        tr.add(rollup_key, watches.ONE_LE64)
-        tr.clear(version_key)
+        if rollup_key is not None:
+            tr.add(rollup_key, watches.ONE_LE64)
+            tr.clear(version_key)
 
     def write_to_db(self, kv_store=None):
         if not kv_store:
@@ -411,6 +544,7 @@ class BaseModel:
                 # atomic_update for ANY new node-record mutation.
                 import os.path
                 import traceback
+
                 from simplyblock_core import utils
                 frames = [
                     f"{os.path.basename(fs.filename)}:{fs.lineno}:{fs.name}"
@@ -422,31 +556,48 @@ class BaseModel:
                     " <- ".join(reversed(frames)))
             key = self.get_db_id().encode()
             value = json.dumps(self.to_dict(unwrap_secrets=True)).encode()
-            if self._WATCHED:
+            index_list = self.active_indexes(kv_store)
+            if self._WATCHED or index_list:
                 import fdb
-                scope = self.watch_scope()
                 fdb.transactional(BaseModel._write_tx)(
-                    kv_store, key, value,
-                    watches.watch_index_rollup_key(type(self), scope),
-                    watches.watch_index_version_key(type(self), scope, self.get_id()))
+                    kv_store, key, value, type(self), self, index_list,
+                    *self._watch_keys())
             else:
                 kv_store.set(key, value)
             return True
+        except indices.UniqueIndexViolation:
+            # An invariant breach, not a write failure: the pre-check that
+            # produces the clean "name already exists" error either did not run
+            # or the data is already inconsistent. It propagates (to a 500 and
+            # the cluster's error log) rather than being swallowed like a
+            # transport error — and rather than taking the process down.
+            from simplyblock_core import utils
+            utils.get_logger(__name__).exception(
+                "Unique index violation writing %s", self.get_db_id())
+            raise
         except Exception:
             from simplyblock_core import utils
             utils.get_logger(__name__).exception("Error writing to FDB")
             exit(1)
 
+    def _watch_keys(self):
+        """``(rollup_key, version_key)`` for a watched class, else ``(None, None)``."""
+        if not self._WATCHED:
+            return (None, None)
+        scope = self.watch_scope()
+        return (
+            watches.watch_index_rollup_key(type(self), scope),
+            watches.watch_index_version_key(type(self), scope, self.get_id()),
+        )
+
     def remove(self, kv_store):
         key = self.get_db_id().encode()
-        if not self._WATCHED:
+        index_list = self.active_indexes(kv_store)
+        if not (self._WATCHED or index_list):
             return kv_store.clear(key)
         import fdb
-        scope = self.watch_scope()
         return fdb.transactional(BaseModel._remove_tx)(
-            kv_store, key,
-            watches.watch_index_rollup_key(type(self), scope),
-            watches.watch_index_version_key(type(self), scope, self.get_id()))
+            kv_store, key, type(self), self, index_list, *self._watch_keys())
 
     def keys(self):
         return self.get_attrs_map().keys()
@@ -488,6 +639,112 @@ class BaseNodeObject(BaseModel):
     STATUS_DOWN = 'down'
     STATUS_IN_REMOVAL = 'in_removal'
     STATUS_PENDING_REMOVAL = 'pending_removal'
+    #: A removal is rebuilding the node's devices onto its peers. The node is
+    #: already shut down -- every removal shuts it down first -- so its volumes
+    #: are being served by their replicas throughout.
+    STATUS_MIGRATING_DEVICES = 'migrating_devices'
+    #: A removal is migrating the node's volumes to other nodes, the step after
+    #: MIGRATING_DEVICES. Still before IN_REMOVAL: nothing has been torn down
+    #: yet, so a removal that gives up here leaves the node intact.
+    STATUS_MIGRATING_LVOLS = 'migrating_lvols'
+    #: Terminal state for a removal that gave up. The node is shut down and
+    #: may still own data that could not be migrated off it, so it is neither
+    #: ONLINE nor REMOVED. An operator re-drives the removal from the start.
+    STATUS_REMOVED_FAILED = 'removed_failed'
+
+    #: Removal statuses in which the node's SPDK has already been stopped.
+    #: Anything deciding "skip it, it cannot answer" -- peer routing, JM
+    #: replacement, cluster shutdown -- asks this set, not DEPARTING_STATUSES
+    #: below. The two differ by exactly PENDING_REMOVAL, which is stamped when
+    #: a removal is *requested*, before the orchestrator's shutdown step runs:
+    #: a node carrying it may still be up and serving, and treating a live peer
+    #: as gone would skip the port-block that keeps it from writing.
+    REMOVAL_SHUT_DOWN_STATUSES: ClassVar[tuple] = (
+        STATUS_MIGRATING_DEVICES,
+        STATUS_MIGRATING_LVOLS,
+        STATUS_IN_REMOVAL,
+        STATUS_REMOVED,
+        STATUS_REMOVED_FAILED,
+    )
+
+    #: The removal's own statuses, in the order a removal walks them. It only
+    #: ever moves forward along this: a node at MIGRATING_LVOLS is never
+    #: stamped MIGRATING_DEVICES again, however many times the orchestrator
+    #: re-enters, and a node the drain hands over mid-way keeps its place.
+    #: Every status not listed here -- ONLINE, SUSPENDED, OFFLINE, and
+    #: REMOVED_FAILED, which a re-driven removal starts over from -- counts as
+    #: before the start. See storage_node_ops.advance_removal_status.
+    REMOVAL_STATUS_ORDER: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL,
+        STATUS_MIGRATING_DEVICES,
+        STATUS_MIGRATING_LVOLS,
+        STATUS_IN_REMOVAL,
+        STATUS_REMOVED,
+    )
+
+    #: A node that is on its way out but whose SPDK is still up and serving.
+    #:
+    #: The removal flow leaves a node serving for its whole drain -- the device
+    #: rebuild and the volume migration both read through it -- and several
+    #: checks have to let that work proceed rather than treat the node as gone.
+    #: Those checks predate this set and each spelled the condition out as
+    #: ``== STATUS_SUSPENDED``, which was the only draining status when they
+    #: were written. Every status added since (PENDING_REMOVAL, stamped by the
+    #: Kubernetes drain; MIGRATING_LVOLS, by the removal itself) silently failed
+    #: them, and each one stalled a drain until it was found.
+    #:
+    #: Not the inverse of DEPARTING_STATUSES, and deliberately disjoint from
+    #: REMOVAL_SHUT_DOWN_STATUSES: MIGRATING_LVOLS, IN_REMOVAL, REMOVED and
+    #: REMOVED_FAILED are departing too, but the removal has already stopped
+    #: their SPDK, so they can neither serve nor be read from and must never
+    #: appear here. MIGRATING_LVOLS in particular looks like it belongs -- the
+    #: name says work is in flight -- but the CLI removal shuts the node down
+    #: before stamping it.
+    DRAINING_STATUSES: ClassVar[tuple] = (
+        STATUS_SUSPENDED,
+        STATUS_PENDING_REMOVAL,
+    )
+
+    #: Statuses in which a node can still act as the *source* of a live volume
+    #: migration -- i.e. its SPDK is up and can be read from.
+    #:
+    #: Deliberately not the inverse of DEPARTING_STATUSES: a node on its way out
+    #: is a perfectly good source right up until its SPDK stops, and the
+    #: Kubernetes drain depends on exactly that. It stamps PENDING_REMOVAL
+    #: before failing the node's devices (otherwise the rebuild tasks queue on
+    #: the departing node itself and never run), and only then migrates the
+    #: volumes off -- which it cannot do if the stamp disqualifies the source.
+    #:
+    #: Lives on the model because two callers need it -- the API guard in
+    #: migration_controller.start_migration and the per-phase re-check in
+    #: tasks_runner_lvol_migration -- and they were previously two hand-written
+    #: copies of the same tuple. Fixing one and not the other cost a live drain:
+    #: the API accepted the migration and the runner then suspended it.
+    #: Derived from DRAINING_STATUSES rather than listed, so a draining status
+    #: added later cannot be a valid drain state and an invalid migration
+    #: source at the same time.
+    MIGRATION_SOURCE_STATUSES: ClassVar[tuple] = (STATUS_ONLINE,) + DRAINING_STATUSES
+    #: Statuses meaning "this node is on its way out of the cluster" -- it will
+    #: not serve again under this identity, so work that has to execute ON it
+    #: must not be queued against it.
+    #:
+    #: Listed once and derived everywhere, including from the set above: every
+    #: consumer asking "is this node leaving?" reads one of these two rather
+    #: than spelling statuses out. Six such lists existed by hand and five
+    #: still named only IN_REMOVAL when MIGRATING_LVOLS and REMOVED_FAILED were
+    #: added, which is how a removal ended up RPC-ing a node whose pod was
+    #: already gone, and shipping a status string the data plane could not
+    #: decode (cluster a6e7569d, 2026-09-15).
+    DEPARTING_STATUSES: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL,) + REMOVAL_SHUT_DOWN_STATUSES
+
+    #: A removal is running on the node: from the trigger (pending_removal)
+    #: until it is removed, or has given up (removed_failed). Any node here
+    #: makes the cluster "shrinking" (Cluster.is_shrinking).
+    REMOVAL_IN_PROGRESS_STATUSES: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL, STATUS_MIGRATING_DEVICES,
+        STATUS_MIGRATING_LVOLS, STATUS_IN_REMOVAL)
+
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
@@ -502,4 +759,7 @@ class BaseNodeObject(BaseModel):
         STATUS_DOWN: 40,
         STATUS_IN_REMOVAL: 41,
         STATUS_PENDING_REMOVAL: 42,
+        STATUS_MIGRATING_LVOLS: 43,
+        STATUS_REMOVED_FAILED: 44,
+        STATUS_MIGRATING_DEVICES: 45,
     }

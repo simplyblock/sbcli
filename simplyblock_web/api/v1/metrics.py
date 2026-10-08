@@ -1,15 +1,12 @@
 import logging
 
-from flask import Blueprint
+from flask import Blueprint, Response
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
+
+from simplyblock_core import db_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core import db_controller
-
-
-from prometheus_client import generate_latest
-from flask import Response
-from prometheus_client import Gauge, CollectorRegistry
-
+from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger(__name__)
 
@@ -147,10 +144,21 @@ def get_data():
             
             rpc_client = node.rpc_client(timeout=3*60, retry=10)
 
-            reactor_data = rpc_client.framework_get_reactors()
-            thread_data = rpc_client.thread_get_stats()
+            # A scrape must not fail wholesale over one node's reactor stats:
+            # degrade to missing reactor metrics for this node rather than a
+            # 500 for the whole cluster.
+            try:
+                reactor_data = rpc_client.framework_get_reactors()
+            except RPCException as e:
+                logger.error("Failed to get reactor stats for node %s: %s", node.get_id(), e)
+                reactor_data = None
+            try:
+                thread_data = rpc_client.thread_get_stats()
+            except RPCException as e:
+                logger.error("Failed to get thread stats for node %s: %s", node.get_id(), e)
+                thread_data = {}
 
-            thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}    
+            thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}
 
             node_records = db.get_node_stats(node, 1)
             if node_records:
@@ -219,7 +227,7 @@ def get_data():
                                 hc)
 
 
-        for pool in db.get_pools():
+        for pool in db.get_pools(cl.get_id()):
 
             pool_records = db.get_pool_stats(pool, 1)
             if pool_records:

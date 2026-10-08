@@ -1,5 +1,7 @@
 import json
 
+from pydantic import SecretStr
+
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.utils import generate_hex_string
@@ -21,18 +23,26 @@ class LocalKMS(KMS):
 
     def create_data_encryption_keys(self, path: str, kek_name: str) -> None:
         self.import_data_encryption_keys(
-            path, kek_name, (generate_hex_string(32), generate_hex_string(32)),
+            path, kek_name,
+            (SecretStr(generate_hex_string(32)), SecretStr(generate_hex_string(32))),
         )
 
-    def import_data_encryption_keys(self, path: str, kek_name: str, keys: tuple[str, str]) -> None:
-        self._kv_store.set(self._key(path), json.dumps(list(keys)).encode())
+    def import_data_encryption_keys(
+        self, path: str, kek_name: str, keys: tuple[SecretStr, SecretStr],
+    ) -> None:
+        # The persistence boundary, where plaintext is the stored form —
+        # the same exception ``BaseModel.write_to_db`` makes.
+        self._kv_store.set(
+            self._key(path),
+            json.dumps([key.get_secret_value() for key in keys]).encode(),
+        )
 
-    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[str, str]:
+    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[SecretStr, SecretStr]:
         raw = self._kv_store.get(self._key(path))
         if not raw:
             raise KMSException(f"No keys found at {path}")
         key1, key2 = json.loads(raw)
-        return key1, key2
+        return SecretStr(key1), SecretStr(key2)
 
     def delete_data_encryption_keys(self, path: str) -> None:
         self._kv_store.clear(self._key(path))

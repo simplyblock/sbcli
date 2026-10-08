@@ -15,12 +15,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
-
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.storage_node import StorageNode
 from tests._mocks import assert_hublvol_wired, unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Helpers (shared with test_dual_ft_secondary_fixes.py)
@@ -94,81 +92,75 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
 class TestRpcClientRoleParam(unittest.TestCase):
     """bdev_lvol_set_lvs_opts should send the role string directly."""
 
-    @patch("simplyblock_core.rpc_client.RPCClient._request")
+    @patch("simplyblock_core.rpc_client.RPCClient._request3")
     @patch("simplyblock_core.rpc_client.RPCClient.__init__", return_value=None)
     def test_role_primary(self, mock_init, mock_request):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = mock_request
+        client._request3 = mock_request
         mock_request.return_value = True
 
         client.bdev_lvol_set_lvs_opts("LVS_100", groupid=42, subsystem_port=4420, role="primary")
-        mock_request.assert_called_once_with('bdev_lvol_set_lvs_opts', {
-            "lvs_name": "LVS_100",
-            "groupid": 42,
-            "subsystem_port": 4420,
-            "hublvol_port": 0,
-            "role": "primary",
-        })
+        mock_request.assert_called_once_with(
+            'bdev_lvol_set_lvs_opts',
+            lvs_name="LVS_100", groupid=42, subsystem_port=4420,
+            hublvol_port=0, role="primary",
+        )
 
-    @patch("simplyblock_core.rpc_client.RPCClient._request")
+    @patch("simplyblock_core.rpc_client.RPCClient._request3")
     @patch("simplyblock_core.rpc_client.RPCClient.__init__", return_value=None)
     def test_role_secondary(self, mock_init, mock_request):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = mock_request
+        client._request3 = mock_request
         mock_request.return_value = True
 
         client.bdev_lvol_set_lvs_opts("LVS_100", groupid=42, subsystem_port=4420, role="secondary")
-        mock_request.assert_called_once_with('bdev_lvol_set_lvs_opts', {
-            "lvs_name": "LVS_100",
-            "groupid": 42,
-            "subsystem_port": 4420,
-            "hublvol_port": 0,
-            "role": "secondary",
-        })
+        mock_request.assert_called_once_with(
+            'bdev_lvol_set_lvs_opts',
+            lvs_name="LVS_100", groupid=42, subsystem_port=4420,
+            hublvol_port=0, role="secondary",
+        )
 
-    @patch("simplyblock_core.rpc_client.RPCClient._request")
+    @patch("simplyblock_core.rpc_client.RPCClient._request3")
     @patch("simplyblock_core.rpc_client.RPCClient.__init__", return_value=None)
     def test_role_tertiary(self, mock_init, mock_request):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = mock_request
+        client._request3 = mock_request
         mock_request.return_value = True
 
         client.bdev_lvol_set_lvs_opts("LVS_100", groupid=42, subsystem_port=4420, role="tertiary")
-        mock_request.assert_called_once_with('bdev_lvol_set_lvs_opts', {
-            "lvs_name": "LVS_100",
-            "groupid": 42,
-            "subsystem_port": 4420,
-            "hublvol_port": 0,
-            "role": "tertiary",
-        })
+        mock_request.assert_called_once_with(
+            'bdev_lvol_set_lvs_opts',
+            lvs_name="LVS_100", groupid=42, subsystem_port=4420,
+            hublvol_port=0, role="tertiary",
+        )
 
-    @patch("simplyblock_core.rpc_client.RPCClient._request")
+    @patch("simplyblock_core.rpc_client.RPCClient._request3")
     @patch("simplyblock_core.rpc_client.RPCClient.__init__", return_value=None)
     def test_role_default_is_primary(self, mock_init, mock_request):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = mock_request
+        client._request3 = mock_request
         mock_request.return_value = True
 
         client.bdev_lvol_set_lvs_opts("LVS_100", groupid=42, subsystem_port=4420)
-        args = mock_request.call_args[0][1]
+        args = mock_request.call_args.kwargs
         self.assertEqual(args["role"], "primary")
 
-    @patch("simplyblock_core.rpc_client.RPCClient._request")
+    @patch("simplyblock_core.rpc_client.RPCClient._request3")
     @patch("simplyblock_core.rpc_client.RPCClient.__init__", return_value=None)
     def test_uuid_routing(self, mock_init, mock_request):
         """When lvs is a UUID, the key should be 'uuid' not 'lvs_name'."""
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = mock_request
+        client._request3 = mock_request
         mock_request.return_value = True
 
         uuid_str = "12345678-1234-1234-1234-123456789abc"
         client.bdev_lvol_set_lvs_opts(uuid_str, groupid=42, subsystem_port=4420, role="tertiary")
-        args = mock_request.call_args[0][1]
+        args = mock_request.call_args.kwargs
         self.assertIn("uuid", args)
         self.assertNotIn("lvs_name", args)
         self.assertEqual(args["role"], "tertiary")
@@ -193,7 +185,7 @@ class TestConnectToHublvolRole(unittest.TestCase):
         """Install mocks so connect_to_hublvol completes all three steps.
 
         connect_to_hublvol uses TWO RPC clients:
-          - sec.rpc_client() for get_bdevs / set_lvs_opts / connect_hublvol
+          - sec.rpc_client() for bdev_get / set_lvs_opts / connect_hublvol
           - an attach-only RPCClient constructed inline for
             bdev_nvme_attach_controller (hard-capped 1s timeout, no retries)
 
@@ -202,7 +194,7 @@ class TestConnectToHublvolRole(unittest.TestCase):
         is ever reached.
         """
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = []  # trigger attach
+        rpc.bdev_get.return_value = None  # trigger attach
         rpc.bdev_nvme_attach_controller.return_value = True
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_connect_hublvol.return_value = True
@@ -306,7 +298,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
 
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True
@@ -375,7 +367,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
 
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True
@@ -454,7 +446,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
 
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True

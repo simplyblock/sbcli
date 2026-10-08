@@ -3,13 +3,16 @@ import threading
 import time
 from datetime import datetime
 
-from simplyblock_core import utils
-from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller
+from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import (
+    device_events,
+    health_controller,
+    storage_events,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core import constants, db_controller, storage_node_ops
-
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -389,7 +392,7 @@ def check_node(snode):
             if snode.jm_device and snode.jm_device.get_id():
                 jm_device = snode.jm_device
                 logger.info(f"Node JM: {jm_device.get_id()}")
-                if rpc_client.get_bdevs(jm_device.jm_bdev):
+                if rpc_client.bdev_get(jm_device.jm_bdev):
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     connected_jms.append(jm_device.get_id())
                 else:
@@ -466,15 +469,16 @@ def check_node(snode):
 
                 for jm_id in expected_jm_ids:
                     if jm_id not in connected_jms:
-                        for nd in db.get_storage_nodes():
-                            if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                                if health_controller._peer_connections_relevant(nd):
-                                    node_remote_devices_check = False
-                                else:
-                                    logger.info(
-                                        "JM device %s not connected, but owning node %s is %s — expected",
-                                        jm_id, nd.get_id(), nd.status)
-                                break
+                        try:
+                            nd = db.get_storage_node_by_device_id(jm_id)
+                        except KeyError:
+                            continue
+                        if health_controller._peer_connections_relevant(nd):
+                            node_remote_devices_check = False
+                        else:
+                            logger.info(
+                                "JM device %s not connected, but owning node %s is %s — expected",
+                                jm_id, nd.get_id(), nd.status)
 
                 if not node_remote_devices_check and cluster is not None and cluster.status in [
                     Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
@@ -549,7 +553,7 @@ def check_node(snode):
                                     ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
                                     if ret:
                                         lvs_info = ret[0]
-                                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                        if lvs_info.get('lvs leadership'):
                                             jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
                                                 snode.jm_vuid)
                                             if not jc_compression_is_active:
@@ -649,7 +653,11 @@ def main():
             for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t = threading.Thread(
+                        target=loop_for_node,
+                        args=(node,),
+                        daemon=True,  # prevents main thread failures from keeping the process alive
+                    )
                     t.start()
                     threads_maps[node_id] = t
 

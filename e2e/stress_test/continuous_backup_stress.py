@@ -2187,8 +2187,8 @@ class BackupStressComprehensive(BackupStressBase):
 
         return {label: bk_id for label, (bk_id, _) in results.items()}
 
-    def _cleanup_restore_lvol(self, rst_name: str, rst_mount: str = None,
-                              rst_id: str = None):
+    def _cleanup_restore_lvol(self, rst_name: str, rst_mount: str | None = None,
+                              rst_id: str | None = None):
         """Unmount, disconnect, and delete a restore lvol to free
         subsystem slots.  Best-effort — errors are logged but swallowed.
         """

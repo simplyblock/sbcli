@@ -30,7 +30,7 @@ class _PoolLookups:
             raise KeyError(f'Pool {id} not found')
         return self._pool
 
-    def get_pool_by_name(self, name):
+    def get_pool_by_name(self, name, cluster_id=None):
         self.by_name_calls.append(name)
         if name != self._pool.pool_name:
             raise KeyError(f'Pool {name} not found')
@@ -88,10 +88,10 @@ class _FakeDB(_PoolLookups):
             raise KeyError(f'Pool {id} not found')
         return super().get_pool_by_id(id)
 
-    def get_pool_by_name(self, name):
+    def get_pool_by_name(self, name, cluster_id=None):
         if self._pool is None:
             raise KeyError(f'Pool {name} not found')
-        return super().get_pool_by_name(name)
+        return super().get_pool_by_name(name, cluster_id)
 
     def get_cluster_by_id(self, cluster_id):
         if cluster_id not in self._clusters:
