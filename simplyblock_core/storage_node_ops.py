@@ -13680,9 +13680,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, snode, rpc_client)
 
-    # ANA failback only when the original primary is coming back (not takeover)
+    # ANA failback only when the original primary is coming back (not takeover).
+    # Housekeeping, never a reason to abort the recreate: the listener flips
+    # themselves tolerate a peer that cannot serve a volume (_set_lvol_ana_on_node),
+    # and anything else that goes wrong here -- a DB lookup, the peer's RPC
+    # client, a port derivation -- is logged with its traceback and left to the
+    # registration repair, which is how the restart path
+    # (trigger_ana_failback_for_node) has always treated it. Incident
+    # 2026-10-08 run 62: this call aborting the recreate thread made
+    # cluster_activate fail 100+ times in a row and the cluster could not
+    # leave suspended.
     if not is_takeover and lvs_node.secondary_node_id and lvol_list:
-        _failback_primary_ana(snode)
+        try:
+            _failback_primary_ana(snode)
+        except Exception:
+            logger.exception("ANA failback for primary %s skipped", snode.get_id())
 
     snode_lvs_port = lvs_node.get_lvol_subsys_port(lvs_name)
 
