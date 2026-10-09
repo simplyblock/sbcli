@@ -1550,6 +1550,7 @@ commands:
             dest: mgmt_only
             type: bool
             default: false
+            action: BooleanOptionalAction
           - name: "--spdk-image"
             help: "Restart the storage nodes using the provided image."
             dest: spdk_image
@@ -2076,6 +2077,7 @@ commands:
             dest: namespaced
             type: bool
             default: false
+            action: BooleanOptionalAction
           - name: "--uid"
             help: "Set logical volume id."
             dest: uid
@@ -2253,6 +2255,7 @@ commands:
             dest: namespaced
             type: bool
             default: true
+            action: BooleanOptionalAction
       - name: move
         help: "Moves a full copy of the logical volume between nodes."
         private: true
@@ -2886,10 +2889,11 @@ commands:
             type: size
             default: "0"
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`."
+            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`."
             dest: namespaced
             type: bool
             default: true
+            action: BooleanOptionalAction
       - name: replication-status
         help: "Lists snapshots replication status"
         arguments:

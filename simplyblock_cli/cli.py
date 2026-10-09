@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import argparse
 import logging
 import sys
 import traceback
@@ -588,7 +589,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__update(self, subparser):
         subcommand = self.add_sub_command(subparser, 'update', 'Updates a cluster to new version.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
-        subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', type=bool, default=False, dest='mgmt_only')
+        subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', default=False, dest='mgmt_only', action=argparse.BooleanOptionalAction)
         subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image.', type=str, dest='spdk_image')
         subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image.', type=str, dest='mgmt_image')
         subcommand.add_argument('--max-subsys', help='Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs.', type=int, dest='max_subsys')
@@ -793,7 +794,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type. Default: `default`.', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
         subcommand.add_argument('--fabric', help='The transport fabric type (tcp or rdma). The cluster must support the chosen fabric. Default: `tcp`.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         subcommand.add_argument('--lvol-priority-class', help='The logical volume priority class. Default: `0`.', type=int, default=0, dest='lvol_priority_class')
-        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`.', type=bool, default=False, dest='namespaced')
+        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`.', default=False, dest='namespaced', action=argparse.BooleanOptionalAction)
         if self.developer_mode:
             subcommand.add_argument('--uid', help='Set logical volume id.', type=str, dest='uid')
         subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
@@ -850,7 +851,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
         subcommand.add_argument('clone_name', help='The clone name.', type=str)
         subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`.', type=size_type(), default='0', dest='resize')
-        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`.', type=bool, default=True, dest='namespaced')
+        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`.', default=True, dest='namespaced', action=argparse.BooleanOptionalAction)
 
     def init_volume__move(self, subparser):
         subcommand = self.add_sub_command(subparser, 'move', 'Moves a full copy of the logical volume between nodes.')
@@ -1125,7 +1126,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
         subcommand.add_argument('lvol_name', help='The logical volume name.', type=str)
         subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`.', type=size_type(), default='0', dest='resize')
-        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`.', type=bool, default=True, dest='namespaced')
+        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`.', default=True, dest='namespaced', action=argparse.BooleanOptionalAction)
 
     def init_snapshot__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists snapshots replication status')
