@@ -65,3 +65,23 @@ class ClusterArbitration(BaseModel):
         if not lease.get("granted_at"):
             return 0
         return int(lease["granted_at"]) + int(lease.get("ttl_ms", 0))
+
+
+class ArbitrationEvent(BaseModel):
+    """One HA event from a node, queued by the Go collector for the arbiter.
+
+    Key ``{cluster_id}/{node_id}/{instance}/{seq:020d}``: a prefix read per
+    cluster returns them in order per node, and a redelivered event (at-least-
+    once, contract section 3.7) overwrites its own key, so the queue never
+    holds duplicates. The arbiter removes an event once it has applied it.
+    ``ha_resync`` events carry the node's full ``jc_ha_status`` in ``payload``.
+    """
+    cluster_id: str = ""
+    node_id: str = ""
+    instance: str = ""
+    seq: int = 0
+    received_at: int = 0
+    payload: dict = default_factory(dict)
+
+    def get_id(self):
+        return "%s/%s/%s/%020d" % (self.cluster_id, self.node_id, self.instance, int(self.seq))
