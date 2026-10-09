@@ -52,3 +52,24 @@ def test_self_fence_and_unfence():
     assert s.lvs_state[3] == LVS_FENCED
     ev.apply(s, e(2, "ha_unfenced"))
     assert s.lvs_state[3] == LVS_NORMAL
+
+
+class _Cluster:
+    def __init__(self, flag):
+        self.two_node_arbitration = flag
+
+    def get_id(self):
+        return "cl"
+
+
+def test_legacy_remote_jm_events_are_queued_only_with_the_flag(monkeypatch):
+    queued = []
+    monkeypatch.setattr(ev, "queue_event", lambda db, cid, nid, inst, seq, payload, at:
+                        queued.append((cid, nid, inst, payload["status"])))
+    e1 = {"event_type": "device_status", "status": "remote_jm_unhealthy", "jm_vuid": 3}
+    assert ev.forward_legacy_jm_event(None, _Cluster(True), "n1", e1)
+    assert queued == [("cl", "n1", "legacy", "remote_jm_unhealthy")]
+    assert ev.forward_legacy_jm_event(None, _Cluster(False), "n1", e1)
+    assert len(queued) == 1
+    other = {"event_type": "device_status", "status": "unavailable", "storage_ID": 4}
+    assert not ev.forward_legacy_jm_event(None, _Cluster(True), "n1", other)

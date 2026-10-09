@@ -86,3 +86,37 @@ def apply(sig: NodeSignals, event: dict) -> bool:
     if event.get("epoch"):
         sig.epoch_seen = max(sig.epoch_seen, int(event["epoch"]))
     return True
+
+
+#: Statuses of the JC's remote-JM events (``dst_to_string`` in ultra).
+LEGACY_JM_STATUSES = (ST_UNHEALTHY, ST_HEALTHY)
+
+
+def queue_event(db, cluster_id: str, node_id: str, instance: str, seq: int,
+                payload: dict, received_at_ms: int) -> None:
+    """Append one event to the arbiter's FDB queue (``ArbitrationEvent``)."""
+    from simplyblock_core.models.arbitration import ArbitrationEvent
+    item = ArbitrationEvent()
+    item.cluster_id, item.node_id = cluster_id, node_id
+    item.instance, item.seq, item.received_at = instance, int(seq), int(received_at_ms)
+    item.payload = dict(payload)
+    item.write_to_db(db.kv_store)
+
+
+def forward_legacy_jm_event(db, cluster, node_id: str, event_dict: dict) -> bool:
+    """For nodes without ``jc_wait_events``: hand a ``remote_jm_*`` event read by
+    the Python distr collector to the arbiter.
+
+    The distr event queue is consumed destructively by that collector
+    (``distr_status_events_discard_then_get``), so the Go collector must not
+    read it as well; this is the fallback path instead. The events carry no
+    sequence, so the receive time in ns orders and identifies them.
+    Returns True when the event was a remote-JM event (handled here).
+    """
+    import time
+    if event_dict.get("status") not in LEGACY_JM_STATUSES or "jm_vuid" not in event_dict:
+        return False
+    if getattr(cluster, "two_node_arbitration", False):
+        now_ns = time.time_ns()
+        queue_event(db, cluster.get_id(), node_id, "legacy", now_ns, event_dict, now_ns // 1_000_000)
+    return True
