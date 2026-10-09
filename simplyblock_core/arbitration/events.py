@@ -16,6 +16,9 @@ from simplyblock_core.models.arbitration import (
 )
 
 ST_UNHEALTHY = "remote_jm_unhealthy"
+#: Instance of events forwarded by the Python distr collector for nodes without
+#: jc_wait_events: they carry no node sequence (see forward_legacy_jm_event).
+LEGACY_INSTANCE = "legacy"
 ST_HEALTHY = "remote_jm_healthy"
 ST_RESYNC = "ha_resync"
 
@@ -69,6 +72,10 @@ def apply(sig: NodeSignals, event: dict) -> bool:
             sig.peer_unhealthy[vuid] = health != "healthy"
         return True
 
+    if instance == LEGACY_INSTANCE:
+        # No node sequence: never touches the instance/seq tracking of the
+        # jc_wait_events stream; the state change itself is idempotent.
+        instance, seq = "", 0
     if instance and instance != sig.instance:
         sig.instance, sig.last_seq = instance, 0
     if seq and seq <= sig.last_seq:
@@ -123,5 +130,5 @@ def forward_legacy_jm_event(db, cluster, node_id: str, event_dict: dict) -> bool
         return False
     if getattr(cluster, "two_node_arbitration", False):
         now_ns = time.time_ns()
-        queue_event(db, cluster.get_id(), node_id, "legacy", now_ns, event_dict, now_ns // 1_000_000)
+        queue_event(db, cluster.get_id(), node_id, LEGACY_INSTANCE, now_ns, event_dict, now_ns // 1_000_000)
     return True
