@@ -17,7 +17,7 @@ from simplyblock_core.models.backup import (
     BackupPolicy,
     BackupPolicyAttachment,
 )
-from simplyblock_core.models.arbitration import ClusterArbitration
+from simplyblock_core.models.arbitration import ArbitrationEvent, ClusterArbitration
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
 from simplyblock_core.models.events import EventObj
@@ -661,6 +661,12 @@ class DBController(metaclass=Singleton):
         if not cluster_id:
             return None
         return single_or_none(ClusterArbitration().read_from_db(self.kv_store, id=cluster_id))
+
+    def get_arbitration_events(self, cluster_id: str, limit: int = 0) -> list[ArbitrationEvent]:
+        """Queued HA events of a cluster, oldest first per node."""
+        if not cluster_id:
+            return []
+        return ArbitrationEvent().read_from_db(self.kv_store, id="%s/" % cluster_id, limit=limit)
 
     def get_cluster_by_id(self, cluster_id: str) -> Cluster:
         if not cluster_id:

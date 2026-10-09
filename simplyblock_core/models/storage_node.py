@@ -169,6 +169,11 @@ class StorageNode(BaseNodeObject):
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
+    # Two-node arbitration: positive fencing evidence for this node from the
+    # edge operator (BMC fence done, or the out-of-service taint present).
+    # Lets the arbiter grant the peer solo operation even when THIS node is the
+    # preferred one (docs/design/two-node-arbitration.md, invariant 3).
+    remediation_fenced: bool = False
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: list[str] = default_factory(list)
