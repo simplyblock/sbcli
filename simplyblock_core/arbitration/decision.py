@@ -9,8 +9,14 @@ whole matrix is covered by table tests with an injected clock.
 from dataclasses import dataclass, field
 
 from simplyblock_core.models.arbitration import (
-    ARB_DECIDING, ARB_DEGRADED, ARB_HEALING, ARB_PARTITIONED, ARB_STEADY,
-    LVS_FENCED, LVS_HOLDING, LVS_SOLO,
+    ARB_DECIDING,
+    ARB_DEGRADED,
+    ARB_HEALING,
+    ARB_PARTITIONED,
+    ARB_STEADY,
+    LVS_FENCED,
+    LVS_HOLDING,
+    LVS_SOLO,
 )
 
 #: Verdict kinds.

@@ -8,7 +8,12 @@ replaces the node's view outright. Pure: no I/O.
 
 from dataclasses import dataclass, field
 
-from simplyblock_core.models.arbitration import LVS_FENCED, LVS_HOLDING, LVS_NORMAL, LVS_SOLO
+from simplyblock_core.models.arbitration import (
+    LVS_FENCED,
+    LVS_HOLDING,
+    LVS_NORMAL,
+    LVS_SOLO,
+)
 
 ST_UNHEALTHY = "remote_jm_unhealthy"
 ST_HEALTHY = "remote_jm_healthy"
@@ -71,10 +76,10 @@ def apply(sig: NodeSignals, event: dict) -> bool:
     if seq:
         sig.last_seq = seq
 
-    vuid = event.get("jm_vuid")
-    if vuid is None:
+    raw_vuid = event.get("jm_vuid")
+    if raw_vuid is None:
         return True
-    vuid = int(vuid)
+    vuid = int(raw_vuid)
     if status == ST_UNHEALTHY:
         sig.peer_unhealthy[vuid] = True
     elif status == ST_HEALTHY:

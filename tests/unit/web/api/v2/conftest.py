@@ -27,6 +27,7 @@ import simplyblock_web.api.v2._dependencies as dependencies_module
 import simplyblock_web.api.v2._dtos as dtos_module
 import simplyblock_web.api.v2.cluster as cluster_module
 import simplyblock_web.api.v2.cluster.alert as alert_module
+import simplyblock_web.api.v2.cluster.arbitration as arbitration_module
 import simplyblock_web.api.v2.cluster.backup as backup_module
 import simplyblock_web.api.v2.cluster.consistency_group as consistency_group_module
 import simplyblock_web.api.v2.cluster.replication as replication_module
@@ -88,6 +89,7 @@ def db(monkeypatch):
         volume_module,
         task_module,
         alert_module,
+        arbitration_module,
         management_node_module,
         metrics_module,
     ):

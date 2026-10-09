@@ -211,3 +211,24 @@ def test_not_arbitrated_without_the_flag_or_with_three_nodes(env):
         Cluster.two_node_arbitration = True
     nodes["node-c"] = Node("node-c", 5)
     assert a.eligible(Cluster()) is None
+
+
+def test_override_grants_the_named_winner_even_if_the_fence_fails(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    db.atomic_update(db.rec, lambda f: setattr(f, "override", {"winner": A, "reason": "BMC confirmed B off"}))
+    nodes[B].down = True
+    v = a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert v.kind == "degraded" and v.winner == A
+    assert calls(nodes[A], "jc_grant_solo")
+    assert db.rec.override == {}
+    assert "operator override" in db.rec.verdicts[-1].get("reason", "")
+
+
+def test_override_naming_a_non_member_is_dropped(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    db.atomic_update(db.rec, lambda f: setattr(f, "override", {"winner": "node-x", "reason": "typo in the request"}))
+    v = a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert v.kind == "none" and db.rec.override == {}
+    assert not calls(nodes[A], "jc_grant_solo") and not calls(nodes[B], "jc_grant_solo")

@@ -19,7 +19,11 @@ from simplyblock_core import constants
 from simplyblock_core.arbitration import decision as dec
 from simplyblock_core.arbitration import events as ev
 from simplyblock_core.models.arbitration import (
-    ARB_HEALING, ARB_STEADY, LVS_FENCED, LVS_NORMAL, ClusterArbitration,
+    ARB_HEALING,
+    ARB_STEADY,
+    LVS_FENCED,
+    LVS_NORMAL,
+    ClusterArbitration,
 )
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCRemoteError
@@ -342,6 +346,9 @@ class Arbiter:
             self.resume(rec, nodes)
             rec = self.db.get_cluster_arbitration(cluster_id)
 
+        if rec.override:
+            return self.apply_override(rec, nodes)
+
         # A verdict whose RPCs did not all land is re-sent every tick.
         pending = self.undelivered.get(cluster_id)
         if pending is not None:
@@ -372,6 +379,40 @@ class Arbiter:
         if rec.state == ARB_HEALING:
             self.heal(rec, nodes)
         self.persist_leases(rec)
+        return verdict
+
+    def apply_override(self, rec: ClusterArbitration, nodes: list) -> dec.Verdict:
+        """The operator decided (section 7.4): the named node leads every LVS.
+
+        The operator's decision counts as positive fencing of the other node
+        (invariant 3), so the grant is sent even if the fence cannot reach it.
+        """
+        winner = rec.override.get("winner", "")
+        ids = [n.get_id() for n in nodes]
+        if winner not in ids:
+            logger.error("Override names %s, not a member of %s; dropped", winner, rec.cluster_id)
+            self.db.atomic_update(rec, lambda f: setattr(f, "override", {}))
+            return dec.Verdict(dec.V_NONE, rec.state, reason="invalid override")
+        loser = ids[1] if winner == ids[0] else ids[0]
+        snap = self.snapshot(rec, nodes)
+        vuids = sorted(set(self.leaders(rec, nodes)))
+        verdict = dec.Verdict(dec.V_DEGRADED, "degraded", raise_epoch=True, winner=winner,
+                              loser=loser, grant={v: winner for v in vuids},
+                              fence={v: loser for v in vuids},
+                              reason="operator override: " + rec.override.get("reason", ""))
+
+        def clear(fresh):
+            fresh.override = {}
+        rec = self.commit(rec, verdict, snap)
+        rec = self.db.atomic_update(rec, clear)
+        by_id = {n.get_id(): n for n in nodes}
+        try:
+            by_id[loser].rpc_client(timeout=5, retry=0).jc_fence(rec.epoch, vuids)
+        except Exception as e:                      # noqa: BLE001 - operator-asserted
+            logger.warning("Override: fence of %s failed (%s); granting anyway", loser, e)
+        grant_only = dec.Verdict(verdict.kind, verdict.new_state, grant=verdict.grant)
+        if not self.send(rec, grant_only, nodes):
+            self.undelivered[rec.cluster_id] = grant_only
         return verdict
 
     def resume(self, rec: ClusterArbitration, nodes: list) -> None:

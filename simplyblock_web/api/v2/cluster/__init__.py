@@ -24,6 +24,7 @@ from .._dtos import (
 )
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .alert import api as alert_api
+from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
 from .replication import api as replication_api
@@ -175,12 +176,17 @@ def get(cluster: Cluster, watch: WatchParam = False) -> Union[ClusterDTO, EventS
 
 class UpdatableClusterParameters(BaseModel):
     name: str | None = None
+    #: Two-node arbitration (docs/design/two-node-arbitration.md); off by default.
+    two_node_arbitration: bool | None = None
 
 
 @instance_api.put('/', name='clusters:update')
 def update(cluster: Cluster, parameters: UpdatableClusterParameters):
     if parameters.name is not None:
         cluster_ops.set_name(cluster.get_id(), parameters.name)
+    if parameters.two_node_arbitration is not None:
+        flag = parameters.two_node_arbitration
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_arbitration", flag))
 
     return Response(status_code=204)
 
@@ -300,6 +306,7 @@ def rebalance_cluster( cluster: Cluster) -> Response:
 
 
 instance_api.include_router(alert_api, prefix='/alerts')
+instance_api.include_router(arbitration_api, prefix='/arbitration')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
