@@ -63,8 +63,19 @@ def parse_cli(path):
             if re.match(r"\s*def ", line):
                 cur = None
                 continue
-            for f in re.findall(r"""['"](--[a-z0-9-]+)['"]""", line):
+            flags = re.findall(r"""['"](--[a-z0-9-]+)['"]""", line)
+            for f in flags:
                 spec[cur].add(f)
+            # BooleanOptionalAction declares one flag and argparse silently
+            # creates its negation too, so `--namespaced` also gives you
+            # `--no-namespaced`. Only the declared name appears in the source,
+            # so without this a test using the negation is reported as an
+            # invented flag. PR #1450 moves four flags to this action, which
+            # is what made it matter.
+            if "BooleanOptionalAction" in line:
+                for f in flags:
+                    if not f.startswith("--no-"):
+                        spec[cur].add("--no-" + f[2:])
     return spec
 
 
