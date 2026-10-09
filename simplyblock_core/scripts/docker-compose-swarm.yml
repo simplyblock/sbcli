@@ -192,6 +192,34 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
+  TwoNodeArbiter:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_core/services/two_node_arbiter.py"
+    networks:
+      - hostnet
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  TwoNodeEventCollector:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "/usr/local/bin/sb-event-collector"
+    networks:
+      - hostnet
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
   HAProxy:
     image: haproxytech/haproxy-debian:latest
     deploy:

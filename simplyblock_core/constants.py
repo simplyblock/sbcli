@@ -1038,6 +1038,8 @@ TWO_NODE_LEASE_MARGIN_MS = 500
 TWO_NODE_STABLE_FOR_S = 30
 TWO_NODE_WAIT_TIMEOUT_MS = 20000
 TWO_NODE_VERDICT_HISTORY = 50
+#: Arbiter decision loop period (events are folded and decided every tick).
+TWO_NODE_DECISION_TICK_MS = 100
 #: The node RPCs a storage node must expose before the arbiter drives it.
 TWO_NODE_ARBITRATION_RPCS = (
     "jc_wait_events", "jc_ha_status", "jc_lease_renew",
