@@ -3,6 +3,8 @@
 ARG UBI_VERSION=10.2
 ARG FDB_VERSION=7.3.69
 ARG UV_VERSION=0.12.22
+# Toolchain of the two-node HA event collector (tools/event-collector).
+ARG GO_VERSION=1.24.4
 
 # The application interpreter, free-threaded ("t" suffix). Managed by uv rather
 # than dnf: UBI carries no free-threaded build, and tying the runtime to the
@@ -183,11 +185,33 @@ COPY . .
 RUN uv sync --locked --no-default-groups --python "${PYTHON_VERSION}t"
 
 
+# The two-node HA event collector (tools/event-collector, docs/design/two-node-
+# arbitration.md section 4): a Go binary linked against the FoundationDB client
+# library the base stage installs, so cgo and not static. Its own stage keeps
+# the compiler and the Go toolchain out of the runtime image.
+FROM base AS event-collector
+
+ARG TARGETARCH
+ARG GO_VERSION
+
+RUN set -eux; \
+    dnf install -y gcc && dnf clean all; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" | tar -C /usr/local -xz
+
+WORKDIR /src
+COPY tools/event-collector/go.mod tools/event-collector/go.sum ./
+RUN /usr/local/go/bin/go mod download
+COPY tools/event-collector/ ./
+RUN CGO_ENABLED=1 /usr/local/go/bin/go build -tags fdb -trimpath -ldflags="-s -w" \
+        -o /out/sb-event-collector .
+
+
 FROM base AS runtime
 
 COPY --from=builder /opt/python /opt/python
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=simplyblock:simplyblock . /app
+COPY --from=event-collector /out/sb-event-collector /usr/local/bin/sb-event-collector
 
 # The services log through the container's gelf log driver, and a buffered
 # stdout loses the tail of the log when a process dies.
