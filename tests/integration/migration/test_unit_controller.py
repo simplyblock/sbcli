@@ -539,6 +539,80 @@ class TestApplyMigrationToDb(unittest.TestCase):
         assert snap.lvol.node_id == "node-tgt"
         assert snap.snap_bdev == "lvs_tgt/s1m"  # migration suffix 'm' is appended on target
 
+    def test_snapshot_moves_when_sibling_is_group_member(self):
+        """Regression for the bug where an owned snapshot's own snap_bdev/
+        lvol.node_id update was silently dropped whenever ANY other lvol
+        still cloned from it, including a sibling that is ITSELF a member
+        of the same batch migration group (migrating to the exact same
+        target right now) -- nothing is left behind needing the
+        pre-migration copy in that case, so the primary record must still
+        move, exactly like the no-sibling case. A migrated-back snapshot
+        that never moved kept pointing at its pre-migration bdev/lvstore
+        forever, and the next migration then failed looking for a bdev
+        that no longer existed there ("No such device").
+        """
+        lvol = _lvol("lvol-1", "node-src")
+        snap = _snap("s1", "lvol-1", "node-src")
+        sibling_clone = _lvol("lvol-clone", "node-src", cloned_from_snap="s1")
+
+        mig = _migration(lvol_id="lvol-1", source_node="node-src",
+                         target_node="node-tgt", snaps_migrated=["s1"])
+        mig.migration_group_id = "group-1"
+
+        sibling_mig = _migration(lvol_id="lvol-clone", source_node="node-src",
+                                 target_node="node-tgt")
+        group = MagicMock()
+        group.members = [{"migration_id": "sibling-mig-uuid"}]
+
+        mock_db = self._mock_db(lvol, snap)
+        mock_db.get_mini_lvols.return_value = [sibling_clone]
+        mock_db.get_migration_group_by_id.return_value = group
+        mock_db.get_migration_by_id.return_value = sibling_mig
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
+
+        assert result is True
+        assert snap.lvol.node_id == "node-tgt"
+        assert snap.snap_bdev == "lvs_tgt/s1m"
+        assert snap.instances == []  # nothing left behind -- no instance needed
+
+    def test_snapshot_primary_preserved_when_externally_referenced(self):
+        """When a migrating lvol's owned snapshot still has a clone sibling
+        that is NOT part of the same migration group (a genuinely separate
+        lvol staying at its current node), the snapshot's own primary
+        record (snap_bdev / lvol.node_id) must stay representing the
+        surviving copy that sibling still needs -- only an "instances"
+        entry records the migrating lvol's own new copy. Guards against the
+        group-sibling fix above going too far and moving snapshots that are
+        still needed elsewhere.
+        """
+        lvol = _lvol("lvol-1", "node-src")
+        sibling_clone = _lvol("lvol-clone", "node-src", cloned_from_snap="s1")
+
+        mig = _migration(lvol_id="lvol-1", source_node="node-src",
+                         target_node="node-tgt", snaps_migrated=["s1"])
+
+        # get_snapshot_by_id for "s1" is called twice in the owned branch:
+        # once at the top of the per-snapshot loop (mutated in memory only,
+        # to compute what our own new instance entry should say) and once
+        # more to fetch the record that actually gets persisted -- a fresh
+        # copy each time, exactly like two separate reads of the same
+        # still-pre-migration underlying DB bytes.
+        fetches = [_snap("s1", "lvol-1", "node-src") for _ in range(2)]
+        fetch_iter = iter(fetches)
+        mock_db = self._mock_db(lvol)
+        mock_db.get_snapshot_by_id.side_effect = lambda sid: next(fetch_iter)
+        mock_db.get_mini_lvols.return_value = [sibling_clone]
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
+
+        assert result is True
+        persisted = fetches[1]  # the one write_to_db() was actually called on
+        assert persisted.lvol.node_id == "node-src"   # primary left alone
+        assert persisted.snap_bdev == "lvs/s1"        # primary left alone
+        assert len(persisted.instances) == 1
+        assert persisted.instances[0]["lvol"]["node_id"] == "node-tgt"
+
     def test_missing_lvol_returns_false(self):
         mig = _migration(lvol_id="lvol-gone")
 
