@@ -4,8 +4,15 @@ import pytest
 
 from simplyblock_core.arbitration import decision as d
 from simplyblock_core.models.arbitration import (
-    ARB_DECIDING, ARB_DEGRADED, ARB_HEALING, ARB_PARTITIONED, ARB_STEADY,
-    LVS_FENCED, LVS_HOLDING, LVS_NORMAL, LVS_SOLO,
+    ARB_DECIDING,
+    ARB_DEGRADED,
+    ARB_HEALING,
+    ARB_PARTITIONED,
+    ARB_STEADY,
+    LVS_FENCED,
+    LVS_HOLDING,
+    LVS_NORMAL,
+    LVS_SOLO,
 )
 
 NOW = 1_000_000

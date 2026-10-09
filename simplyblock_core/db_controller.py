@@ -11,13 +11,13 @@ import fdb
 
 from simplyblock_core import constants, index_ops, utils
 from simplyblock_core.models import indices, watches
+from simplyblock_core.models.arbitration import ArbitrationEvent, ClusterArbitration
 from simplyblock_core.models.backup import (
     Backup,
     BackupChainLock,
     BackupPolicy,
     BackupPolicyAttachment,
 )
-from simplyblock_core.models.arbitration import ArbitrationEvent, ClusterArbitration
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
 from simplyblock_core.models.events import EventObj
