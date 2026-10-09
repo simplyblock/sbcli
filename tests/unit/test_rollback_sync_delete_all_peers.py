@@ -16,12 +16,18 @@ from unittest.mock import MagicMock, call, patch
 
 from simplyblock_core.controllers import snapshot_controller
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 
 
 def _mk_node(node_id, status=StorageNode.STATUS_ONLINE,
              sync_ret=(True, None)):
     rpc = MagicMock()
-    rpc.delete_lvol.return_value = sync_ret
+    ok, err = sync_ret
+    if ok:
+        rpc.delete_lvol.return_value = True
+    else:
+        rpc.delete_lvol.side_effect = RPCRemoteError(
+            "boom", (err or {}).get("code", -1))
     rpc.bdev_lvol_get_lvol_delete_status.return_value = 0
     return types.SimpleNamespace(
         get_id=lambda: node_id, status=status, cluster_id="c1",

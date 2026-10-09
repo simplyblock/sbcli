@@ -16,6 +16,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.rpc_client import RPCException
 
 
 def _task(**params):
@@ -131,7 +132,7 @@ def jc_comp(monkeypatch):
 def test_jc_comp_resumes_compression(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (True, None)
+    node.rpc_client.return_value.jc_suspend_compression.return_value = True
     task = _task()
 
     assert jc_comp.SPEC.handler(task) is None
@@ -143,7 +144,7 @@ def test_jc_comp_resumes_compression(jc_comp):
 def test_jc_comp_prefers_the_task_jm_vuid(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (True, None)
+    node.rpc_client.return_value.jc_suspend_compression.return_value = True
 
     jc_comp.SPEC.handler(_task(jm_vuid=42))
     node.rpc_client.return_value.jc_suspend_compression.assert_called_once_with(
@@ -196,7 +197,7 @@ def test_jc_comp_defers_unless_every_cluster_node_is_online(jc_comp):
 def test_jc_comp_aborts_when_compression_is_not_needed(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (False, "not needed")
+    node.rpc_client.return_value.jc_suspend_compression.return_value = False
 
     with pytest.raises(trb.TaskAbort):
         jc_comp.SPEC.handler(_task())
@@ -205,7 +206,7 @@ def test_jc_comp_aborts_when_compression_is_not_needed(jc_comp):
 def test_jc_comp_retries_when_resume_fails(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (False, None)
+    node.rpc_client.return_value.jc_suspend_compression.side_effect = RPCException("connection error")
 
     with pytest.raises(trb.TaskRetry):
         jc_comp.SPEC.handler(_task())

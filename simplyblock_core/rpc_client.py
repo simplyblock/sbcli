@@ -236,7 +236,7 @@ class RPCSessionPool:
     ``retry`` is included because it's baked into the mounted ``Retry`` at
     ``Session``-construction time; ``timeout`` is deliberately excluded
     because it's already applied per-call (``effective_timeout`` in
-    ``_request2``/``_request``) and never touches the ``Session`` itself.
+    ``_request``) and never touches the ``Session`` itself.
 
     Bounded LRU rather than unbounded, in case a node's identity churns
     (IP failover, credential rotation) faster than ``evict()`` is called.
@@ -328,59 +328,6 @@ class RPCClient:
         self.retry = retry
         self.session = _session_pool.get(host, port, username, password, retry, settings)
 
-    def _request2(self, method, params=None, request_timeout=None):
-        payload: dict = {'id': 1, 'method': method}
-        if params:
-            payload['params'] = params
-        # Per-call override of the client-level HTTP timeout. Used by callers
-        # that must bound a single SPDK RPC tighter than ``self.timeout``
-        # (e.g. ``bdev_nvme_attach_controller`` inside the LVS rejoin freeze
-        # window, where a single attach has to land within hundreds of ms).
-        effective_timeout = request_timeout if request_timeout is not None else self.timeout
-        try:
-            logger.debug("From: %s, Requesting method: %s, params: %s",
-                         self.host, method, redact_rpc_params(params))
-            # Tell the SPDK proxy how long we are willing to wait, so it bounds
-            # its own SPDK round-trip (and the semaphore slot it holds) to this
-            # instead of the proxy-global timeout. Prevents an abandoned/stuck
-            # RPC from squatting a proxy slot for minutes and starving other RPCs.
-            wire_payload = unwrap_secrets_for_send(payload)
-            response = self.session.post(
-                self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
-                headers={"X-RPC-Timeout": str(effective_timeout)})
-        except Exception:
-            raise RPCException("connection error")
-
-        ret_code = response.status_code
-        ret_content = response.content
-        logger.debug("Response: status_code: %s", ret_code)
-
-        result = None
-        error = None
-        if ret_code == 200:
-            try:
-                data = response.json()
-                if method not in self.RPC_NO_PRINT_OUTPUT and Settings().log_response_bodies:
-                    logger.debug("Response json: %s", utils.dump_json(data))
-            except Exception:
-                if Settings().log_response_bodies:
-                    logger.debug("Response ret_content: %s", ret_content)
-                return ret_content, None
-
-            if 'result' in data:
-                result = data['result']
-            if 'error' in data:
-                error = data['error']
-            if result is not None or error is not None:
-                return result, error
-            else:
-                return data, None
-
-        else:
-            logger.error("Invalid http status : %s", ret_code)
-
-        return None, None
-
     def _request(self, method: str, *, request_timeout=None, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
         payload: dict = {'id': 1, 'method': method}
@@ -390,8 +337,8 @@ class RPCClient:
         if kwargs:
             payload['params'] = kwargs
         wire_payload = unwrap_secrets_for_send(payload)
-        # Per-call override of the client-level HTTP timeout, same as _request2 --
-        # see bdev_nvme_attach_controller for why this exists (the LVS rejoin
+        # Per-call override of the client-level HTTP timeout -- see
+        # bdev_nvme_attach_controller for why this exists (the LVS rejoin
         # freeze window). Keyword-only so it can never collide with an RPC
         # param of the same name landing in **kwargs.
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
@@ -402,6 +349,8 @@ class RPCClient:
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
+            if method not in self.RPC_NO_PRINT_OUTPUT and Settings().log_response_bodies:
+                logger.debug("Response json: %s", utils.dump_json(data))
         except ConnectionError as e:
             raise RPCConnectionError("Could not reach remote") from e
         except ReadTimeout as e:
@@ -594,7 +543,7 @@ class RPCClient:
 
     def alloc_bdev_controller_attach(self, name, pci_addr):
         params = {"traddr": pci_addr, "ns_id": 1, "label": name}
-        return self._request2("ultra21_alloc_ns_mount", params)
+        return self._request("ultra21_alloc_ns_mount", **params)
 
     def bdev_nvme_detach_controller(self, name, traddr=None, trsvcid=None,
                                     trtype="TCP", adrfam="ipv4"):
@@ -614,7 +563,7 @@ class RPCClient:
             params.update({"traddr": traddr, "trtype": trtype, "adrfam": adrfam})
             if trsvcid:
                 params["trsvcid"] = str(trsvcid)
-        return self._request2("bdev_nvme_detach_controller", params)
+        return self._request("bdev_nvme_detach_controller", **params)
 
     def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
         """Remove a single transport path from an NVMe controller without
@@ -637,11 +586,17 @@ class RPCClient:
             "desc": "A volume to keep OpenVMS/VAX/Alpha/IA64/x86 operation system data",
             "pagesz": 16384
         }
-        return self._request2("ultra21_alloc_ns_init", params)
+        return self._request("ultra21_alloc_ns_init", **params)
 
     def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None, idempotent=True):
-        ret, err = self.nvmf_subsystem_add_ns2(nqn, dev_name, uuid, nguid, nsid, eui64, idempotent)
-        return ret
+        """Convenience wrapper over :meth:`nvmf_subsystem_add_ns2` for callers
+        that only need success/failure, not the error detail: swallows
+        ``RPCRemoteError`` and returns ``None``, same as the old tuple-return
+        contract's discarded ``err``."""
+        try:
+            return self.nvmf_subsystem_add_ns2(nqn, dev_name, uuid, nguid, nsid, eui64, idempotent)
+        except RPCRemoteError:
+            return None
 
     def nvmf_subsystem_add_ns2(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
                               idempotent=True):
@@ -660,7 +615,9 @@ class RPCClient:
         (e.g. tests asserting on RPC traffic) can pass ``idempotent=False``.
 
         Returns the nsid as the SPDK RPC would, or the existing nsid when
-        the no-op branch fires.
+        the no-op branch fires. Raises ``RPCRemoteError`` (the original
+        failure, not the idempotency probe's) when the add fails and no
+        matching namespace is found.
         """
         params = {
             "nqn": nqn,
@@ -690,25 +647,27 @@ class RPCClient:
         if ptpl_id:
             params['namespace']['ptpl_file'] = f"/mnt/ns_resv{str(ptpl_id).replace('-', '')}.json"
 
-        ret, err = self._request2("nvmf_subsystem_add_ns", params)
-        if err and idempotent:
-            try:
-                for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
-                    if not namespace_matches(ns, dev_name=dev_name, nsid=nsid,
-                                             uuid=uuid):
-                        continue
-                    existing_nsid = ns.get("nsid")
-                    logger.info(
-                        "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
-                        "treating rejected duplicate add as success",
-                        nqn, dev_name, existing_nsid)
-                    return existing_nsid, None
-            except Exception as e:
-                # Don't let the idempotency probe mask the original error.
-                logger.debug(
-                    "nvmf_subsystem_add_ns idempotency probe failed for %s: %s — "
-                    "returning original error", nqn, e)
-        return ret, err
+        try:
+            return self._request("nvmf_subsystem_add_ns", **params)
+        except RPCRemoteError:
+            if idempotent:
+                try:
+                    for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
+                        if not namespace_matches(ns, dev_name=dev_name, nsid=nsid,
+                                                 uuid=uuid):
+                            continue
+                        existing_nsid = ns.get("nsid")
+                        logger.info(
+                            "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
+                            "treating rejected duplicate add as success",
+                            nqn, dev_name, existing_nsid)
+                        return existing_nsid
+                except Exception as e:
+                    # Don't let the idempotency probe mask the original error.
+                    logger.debug(
+                        "nvmf_subsystem_add_ns idempotency probe failed for %s: %s — "
+                        "returning original error", nqn, e)
+            raise
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
         return self._request("nvmf_subsystem_remove_ns", nqn=nqn, nsid=nsid)
@@ -807,7 +766,7 @@ class RPCClient:
             "sync": sync,
             "special_delete": special_delete,
         }
-        return self._request2("bdev_lvol_delete", params)
+        return self._request("bdev_lvol_delete", **params)
 
     def bdev_list(self) -> list[dict]:
         """Every bdev on the SPDK app thread. Scales with lvol+snapshot
@@ -843,14 +802,20 @@ class RPCClient:
         return self._request("bdev_lvol_set_read_only", name=name)
 
     def lvol_create_snapshot(self, lvol_id, snapshot_name):
-        ret, _ = self.lvol_create_snapshot2(lvol_id, snapshot_name)
-        return ret
+        """Convenience wrapper over :meth:`lvol_create_snapshot2` for callers
+        that only need success/failure: swallows ``RPCRemoteError`` and
+        returns ``None``, same as the old tuple-return contract's discarded
+        ``err``."""
+        try:
+            return self.lvol_create_snapshot2(lvol_id, snapshot_name)
+        except RPCRemoteError:
+            return None
 
     def lvol_create_snapshot2(self, lvol_id, snapshot_name):
         params = {
             "lvol_name": lvol_id,
             "snapshot_name": snapshot_name}
-        return self._request2("bdev_lvol_snapshot", params)
+        return self._request("bdev_lvol_snapshot", **params)
 
     def lvol_clone(self, snapshot_name, clone_name):
         return self._request("bdev_lvol_clone",
@@ -880,11 +845,10 @@ class RPCClient:
             "vuid": vuid,
             "pt_bdev": pt_name
         }
-        return self._request2("ultra21_bdev_pass_create", params)
+        return self._request("ultra21_bdev_pass_create", **params)
 
     def ultra21_bdev_pass_delete(self, name):
-        params = {"name": name}
-        return self._request2("ultra21_bdev_pass_delete", params)
+        return self._request("ultra21_bdev_pass_delete", name=name)
 
     def qos_vbdev_create(self, qos_bdev, base_bdev_name, inflight_io_threshold):
         params = {
@@ -899,8 +863,7 @@ class RPCClient:
         return self._request("qos_vbdev_create", **params)
 
     def qos_vbdev_delete(self, name):
-        params = {"name": name}
-        return self._request2("qos_vbdev_delete", params)
+        return self._request("qos_vbdev_delete", name=name)
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
@@ -1070,16 +1033,13 @@ class RPCClient:
         return self._request("jm_set_shared_placement", name=name, enable=bool(enable))
 
     def bdev_lvol_delete_lvstore(self, name):
-        params = {"lvs_name": name}
-        return self._request2("bdev_lvol_delete_lvstore", params)
+        return self._request("bdev_lvol_delete_lvstore", lvs_name=name)
 
     def bdev_distrib_delete(self, name):
-        params = {"name": name}
-        return self._request2("bdev_distrib_delete", params)
+        return self._request("bdev_distrib_delete", name=name)
 
     def bdev_alceml_delete(self, name):
-        params = {"name": name}
-        return self._request2("bdev_alceml_delete", params)
+        return self._request("bdev_alceml_delete", name=name)
 
     def get_lvol_stats(self, name=""):
         kwargs = {"name": name} if name else {}
@@ -1200,19 +1160,17 @@ class RPCClient:
         # recreate_lvstore failed and the node oscillated offline <-> in_restart
         # indefinitely (multipath soak 2026-08-19 iteration 4). Report success
         # as True and keep the name list when SPDK actually created bdevs.
-        result, error = self._request2("bdev_nvme_attach_controller", params,
-                                       request_timeout=request_timeout)
-        if error:
-            code = error.get("code") if isinstance(error, dict) else None
-            message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
-            if code == -errno.EALREADY or "already exists with the specified network path" in message:
+        try:
+            result = self._request("bdev_nvme_attach_controller", request_timeout=request_timeout, **params)
+        except RPCRemoteError as e:
+            if e.code == -errno.EALREADY or "already exists with the specified network path" in str(e):
                 logger.info(
                     "bdev_nvme_attach_controller: %s already has path %s:%s — "
                     "treating as attached", name, traddr, trsvcid)
                 return True
             logger.error(
                 "bdev_nvme_attach_controller failed for %s %s:%s: %s",
-                name, traddr, trsvcid, error)
+                name, traddr, trsvcid, e)
             return None
         # Empty list == path added to an existing controller (no new bdev).
         return result if result else True
@@ -1781,7 +1739,7 @@ class RPCClient:
         outage" / core dump, every client path gone, XFS shut down).
         The fork implements the tolerance; nothing ever switched it on.
         """
-        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+        return self._request("jc_set_dual_node", enable=bool(enable))
 
     def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
         """One crash-consistent snapshot per consistency-group member.
@@ -1791,33 +1749,31 @@ class RPCClient:
         IO on every member is frozen before the first snapshot and released
         after the last; a mid-sequence failure unfreezes first and then
         garbage-collects the snapshots already taken (SPDK side).
-        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...] or False.
+        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...]; raises on error.
         """
-        return self._request2("bdev_lvol_snapshot_group", {
-            "lvs_name": lvs_name,
-            "snapshots": snapshots,
-        })
+        return self._request("bdev_lvol_snapshot_group",
+                              lvs_name=lvs_name, snapshots=snapshots)
 
     def jc_suspend_compression(self, jm_vuid, suspend=False):
-        params = {
-            "jm_vuid": jm_vuid,
-            "suspend": suspend,
-        }
-        return self._request2("jc_suspend_compression", params)
+        """Suspend or resume JC compression on ``jm_vuid``.
 
-    def nvmf_subsystem_add_listener(self, nqn, trtype, traddr, trsvcid, ana_state=None):
-        params = {
-            "nqn": nqn,
-            "listen_address": {
-                "trtype": trtype,
-                "adrfam": "IPv4",
-                "traddr": traddr,
-                "trsvcid": str(trsvcid)
-            }
-        }
-        if ana_state:
-            params["ana_state"] = ana_state
-        return self._request2("nvmf_subsystem_add_listener", params)
+        Returns True on success. The data plane
+        (alg_journal.cpp:_s_jc_suspend_compression) has exactly one failure
+        mode -- ``jm_vuid`` is not in JC's compression tracking map -- and
+        always answers plain ``true`` on success; it has no concept of
+        "already in that state" (setting the flag to its current value is
+        itself a success). So that one failure is not a real error, just
+        "nothing to suspend/resume here": returns False for it instead of
+        raising, which is what every caller in this codebase already did by
+        hand. A connection-level failure
+        (``RPCConnectionError``/``RPCHTTPError``/``RPCProtocolError``) still
+        raises -- that one IS a real failure, since it means the outcome is
+        unknown.
+        """
+        try:
+            return self._request("jc_suspend_compression", jm_vuid=jm_vuid, suspend=suspend)
+        except RPCRemoteError:
+            return False
 
     def bdev_nvme_set_multipath_policy(self, name, policy, selector=None,
                                        rr_min_io=None, request_timeout=None):
@@ -1907,11 +1863,12 @@ class RPCClient:
         The sentinel matters: without it, a cluster running an SPDK build from
         before this RPC existed would log a JSON-RPC error every poll forever.
         """
-        result, error = self._request2("jm_get_events")
-        if error:
-            if error.get("code") == RPC_METHOD_NOT_FOUND:
+        try:
+            result = self._request("jm_get_events")
+        except RPCRemoteError as e:
+            if e.code == RPC_METHOD_NOT_FOUND:
                 return RPC_UNSUPPORTED
-            logger.error(f"jm_get_events failed: {error}")
+            logger.error(f"jm_get_events failed: {e}")
             return None
         return result or []
 
@@ -1951,14 +1908,12 @@ class RPCClient:
         appears in no `decisions` map and under no back-reference). Treat it as
         "do not delete this bdev", never as a transient failure.
         """
-        result, error = self._request2("jc_remove_jm", {"name": name})
-        if error:
-            if error.get("code") == RPC_METHOD_NOT_FOUND:
+        try:
+            return self._request("jc_remove_jm", name=name)
+        except RPCRemoteError as e:
+            if e.code == RPC_METHOD_NOT_FOUND:
                 return RPC_UNSUPPORTED
-            raise RPCRemoteError(
-                f"jc_remove_jm({name}) failed: {error.get('message')}",
-                error.get("code", 0), error.get("data"))
-        return result
+            raise
 
     def jc_compression_get_status(self, jm_vuid):
         """
@@ -1971,10 +1926,7 @@ class RPCClient:
         return self._request("jc_compression", jm_vuid=jm_vuid, get_status=True)
 
     def jc_compression_start(self, jm_vuid):
-        params = {
-            "jm_vuid": jm_vuid
-        }
-        return self._request2("jc_compression", params)
+        return self._request("jc_compression", jm_vuid=jm_vuid)
 
     def nvmf_port_block(self, port, is_reject=False):
         params = {"port": port}

@@ -130,7 +130,7 @@ def _mock_rpc():
     rpc.bdev_distrib_check_inflight_io.return_value = False
     rpc.subsystem_create.return_value = True
     rpc.nvmf_subsystem_listener_set_ana_state.return_value = True
-    rpc.jc_suspend_compression.return_value = (True, None)
+    rpc.jc_suspend_compression.return_value = True
     return rpc
 
 

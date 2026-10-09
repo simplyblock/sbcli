@@ -12213,8 +12213,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(snode.cluster_id)):
         logger.info("JC compression resume held: cluster upgrade in progress")
     else:
-        ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
-        if not ret:
+        if not snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False):
             logger.info("Failed to resume JC compression adding task...")
             tasks_controller.add_jc_comp_resume_task(
                 snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
@@ -15340,8 +15339,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(sec_node.cluster_id)):
             logger.info("JC compression resume held: cluster upgrade in progress")
         else:
-            ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
-            if not ret:
+            if not sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False):
                 logger.info("Failed to resume JC compression adding task...")
                 tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
 
@@ -15596,7 +15594,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
         type = bdev['type']
         name = bdev['name']
         if type == "bdev_distr":
-            ret = rpc_client.bdev_distrib_delete(name)
+            try:
+                ret = rpc_client.bdev_distrib_delete(name)
+            except RPCRemoteError:
+                ret = None
         elif type == "bdev_raid":
             ret = rpc_client.bdev_raid_delete(name)
         elif type == "bdev_lvstore":
@@ -15606,7 +15607,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
                 # for every replica. Deleting the raid below hot-removes the
                 # examined lvstore bdev from this node without touching disk.
                 continue
-            ret = rpc_client.bdev_lvol_delete_lvstore(name)
+            try:
+                ret = rpc_client.bdev_lvol_delete_lvstore(name)
+            except RPCRemoteError:
+                ret = None
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_delete(name)
         else:
@@ -16075,9 +16079,10 @@ def safe_delete_bdev(name, node_id):
                            f"has no record; skipping its delete leg")
     bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
-    ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
-    if not ret:
-        logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}")
+    try:
+        primary_node.rpc_client().delete_lvol(bdev_name)
+    except RPCRemoteError as e:
+        logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}: {e}")
         return False
 
     time.sleep(1)
@@ -16094,9 +16099,10 @@ def safe_delete_bdev(name, node_id):
             time.sleep(1)
 
         elif ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-            ret, _ = primary_node.rpc_client().delete_lvol(bdev_name, sync=True)
-            if not ret:
-                logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}")
+            try:
+                primary_node.rpc_client().delete_lvol(bdev_name, sync=True)
+            except RPCRemoteError as e:
+                logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}: {e}")
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
@@ -16114,9 +16120,10 @@ def safe_delete_bdev(name, node_id):
             all_deleted = True
             for peer in peer_nodes:
                 logger.info(f"deleting from peer {peer.get_id()}: {bdev_name}")
-                ret, _ = peer.rpc_client().delete_lvol(bdev_name, sync=True)
-                if not ret:
-                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}")
+                try:
+                    peer.rpc_client().delete_lvol(bdev_name, sync=True)
+                except RPCRemoteError as e:
+                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}: {e}")
                     all_deleted = False
                 else:
                     logger.info(f"deletion completed on peer {peer.get_id()}: {bdev_name}")

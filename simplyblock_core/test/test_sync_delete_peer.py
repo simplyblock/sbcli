@@ -12,6 +12,7 @@ because the object's record is already deleted.
 """
 from simplyblock_core.controllers import snapshot_controller as sc
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 
 
 class _RPC:
@@ -23,7 +24,10 @@ class _RPC:
         self.calls.append((name, sync, special_delete))
         if isinstance(self.result, Exception):
             raise self.result
-        return self.result
+        ret, err = self.result
+        if err:
+            raise RPCRemoteError(err.get("message", ""), err.get("code", 0))
+        return ret
 
 
 class _Node:

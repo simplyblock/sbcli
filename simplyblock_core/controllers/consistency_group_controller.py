@@ -41,7 +41,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -1025,12 +1025,17 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                     primary_node.get_id()[:8], group.lvs_name)
 
         # ONE lvstore mutation: the whole frozen window is a single RPC.
-        with lvstore_op_lock(pool.cluster_id, group.lvs_name,
-                             node_id=primary_node.get_id(), enabled=lock):
-            ret = rpc_client.bdev_lvol_snapshot_group(
-                group.lvs_name,
-                [{"lvol_name": f"{p['lvol'].lvs_name}/{p['lvol'].lvol_bdev}",
-                  "snapshot_name": p["snap_bdev_name"]} for p in plan])
+        try:
+            with lvstore_op_lock(pool.cluster_id, group.lvs_name,
+                                 node_id=primary_node.get_id(), enabled=lock):
+                ret = rpc_client.bdev_lvol_snapshot_group(
+                    group.lvs_name,
+                    [{"lvol_name": f"{p['lvol'].lvs_name}/{p['lvol'].lvol_bdev}",
+                      "snapshot_name": p["snap_bdev_name"]} for p in plan])
+        except RPCRemoteError as e:
+            # SPDK unfroze first and garbage-collected the partial snapshots.
+            return None, (f"Group snapshot RPC failed on {primary_node.get_id()}: {e}; "
+                          f"SPDK rolled the partial group back")
         if not ret:
             # SPDK unfroze first and garbage-collected the partial snapshots.
             return None, (f"Group snapshot RPC failed on {primary_node.get_id()}; "

@@ -1070,7 +1070,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc_inst.subsystem_get.return_value = None
         # The inflight-IO drain check on the leader must not time out.
         mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
-        mock_rpc_inst.jc_suspend_compression.return_value = (True, None)
+        mock_rpc_inst.jc_suspend_compression.return_value = True
         # Post-examine verification scans bdev_get() for each expected lvol
         # (by uuid or lvs/bdev alias); without this the check aborts.
         mock_rpc_inst.bdev_get.return_value = {

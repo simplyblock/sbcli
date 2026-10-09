@@ -335,7 +335,7 @@ class RpcServerSim:
         return False
 
     def jc_suspend_compression(self, jm_vuid=None, suspend=False, **_):
-        return (True, None)
+        return True
 
     def keyring_file_add_key(self, *_, **__):
         return True

@@ -855,7 +855,7 @@ class _RollbackRPC:
 
     def delete_lvol(self, name, sync=False):
         self.deletes.append((name, sync))
-        return True, None
+        return True
 
 
 def test_replica_rollback_clears_its_namespace_and_syncs_the_delete():
