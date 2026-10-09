@@ -39,6 +39,9 @@ class ClusterArbitration(BaseModel):
     taint_requests: list[str] = default_factory(list)
     #: When both nodes were last seen healthy again (ms); 0 while not healthy.
     healthy_since: int = 0
+    #: Operator decision waiting to be applied: {"winner", "reason", "by", "at"}
+    #: (CP API ``POST .../arbitration/override``; audited in the cluster log).
+    override: dict = default_factory(dict)
 
     def get_id(self):
         return self.cluster_id
