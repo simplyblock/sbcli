@@ -17,6 +17,7 @@ from simplyblock_core.models.backup import (
     BackupPolicy,
     BackupPolicyAttachment,
 )
+from simplyblock_core.models.arbitration import ClusterArbitration
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
 from simplyblock_core.models.events import EventObj
@@ -654,6 +655,12 @@ class DBController(metaclass=Singleton):
         if not ret:
             raise KeyError("No deploy config found")
         return ret[0]
+
+    def get_cluster_arbitration(self, cluster_id: str) -> ClusterArbitration | None:
+        """The two-node arbitration record of a cluster, or None if never written."""
+        if not cluster_id:
+            return None
+        return single_or_none(ClusterArbitration().read_from_db(self.kv_store, id=cluster_id))
 
     def get_cluster_by_id(self, cluster_id: str) -> Cluster:
         if not cluster_id:

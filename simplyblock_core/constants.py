@@ -1028,3 +1028,20 @@ REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
 # successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
 # clone-entry/blob-id-reuse defect is fixed.
 REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False
+
+# ---- Two-node arbitration (docs/design/two-node-arbitration.md, section 10) ----
+# Hold deadline on the node; must stay below the hosts' KATO.
+TWO_NODE_HOLD_MS = 2500
+TWO_NODE_LEASE_TTL_MS = 1500
+TWO_NODE_LEASE_RENEW_MS = 250
+TWO_NODE_LEASE_MARGIN_MS = 500
+TWO_NODE_STABLE_FOR_S = 30
+TWO_NODE_WAIT_TIMEOUT_MS = 20000
+TWO_NODE_VERDICT_HISTORY = 50
+#: The node RPCs a storage node must expose before the arbiter drives it.
+TWO_NODE_ARBITRATION_RPCS = (
+    "jc_wait_events", "jc_ha_status", "jc_lease_renew",
+    "jc_grant_solo", "jc_fence", "jc_unfence",
+)
+#: Taint the edge operator applies to the Kubernetes node of a fenced storage node.
+TWO_NODE_FENCED_TAINT = "storage.simplyblock.io/fenced"
