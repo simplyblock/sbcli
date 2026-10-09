@@ -23,6 +23,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.utils import (
     generate_dhchap_key,
     generate_psk_key,
@@ -630,7 +631,8 @@ class TestRemoveHostFromLvol(unittest.TestCase):
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
-        mock_rpc_inst.subsystem_remove_host.return_value = False
+        mock_rpc_inst.subsystem_remove_host.side_effect = RPCRemoteError(
+            "Invalid parameters", code=-32602)
         MockRPC.return_value = mock_rpc_inst
 
         result, err = remove_host_from_lvol("lvol-1", "nqn:host1")
@@ -1207,7 +1209,8 @@ class TestRemoveHostKeyringCleanup(unittest.TestCase):
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
-        mock_rpc_inst.subsystem_remove_host.return_value = False  # SPDK error
+        mock_rpc_inst.subsystem_remove_host.side_effect = RPCRemoteError(
+            "Invalid parameters", code=-32602)  # SPDK error
         MockRPC.return_value = mock_rpc_inst
 
         result, err = remove_host_from_lvol("lvol-1", "nqn:host1")

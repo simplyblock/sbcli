@@ -447,11 +447,13 @@ def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
             # Scope the flip to this volume's ANA group (group id == namespace
             # id): a subsystem can carry several namespaces whose volumes are
             # migrated, suspended or failed over independently.
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
-                anagrpid=lvol.ns_id)
-            if not ret:
-                logger.warning("Failed to set ANA state %s for %s on %s", ana_state, lvol.nqn, node.get_id())
+            try:
+                rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
+                    anagrpid=lvol.ns_id)
+            except RPCException as e:
+                logger.warning("Failed to set ANA state %s for %s on %s: %s",
+                               ana_state, lvol.nqn, node.get_id(), e)
             else:
                 logger.info("ANA: %s ns %s on %s (%s) → %s", lvol.nqn, lvol.ns_id,
                             node.get_id(), iface.ip4_address, ana_state)
@@ -4210,9 +4212,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         snode.write_to_db(kv_store)
 
-        ret = rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
-        if not ret:
-            logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
+        try:
+            rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
+        except RPCException as e:
+            logger.warning("Failed to set nvmf max subsystems %s: %s", constants.NVMF_MAX_SUBSYSTEMS, e)
 
         # 2- set socket implementation options
         bind_to_device = None
@@ -8549,9 +8552,10 @@ def _restart_storage_node_impl(
         logger.error("Failed socket implement set options")
         return False
 
-    ret = rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
-    if not ret:
-        logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
+    try:
+        rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
+    except RPCException as e:
+        logger.warning("Failed to set nvmf max subsystems %s: %s", constants.NVMF_MAX_SUBSYSTEMS, e)
 
     # 3- set nvme config
     if snode.pollers_mask:
@@ -12545,9 +12549,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             snode_rpc_client.bdev_examine(primary_node.raid)
 
             ### 5- wait for examine
-            ret = snode_rpc_client.bdev_wait_for_examine()
-            if not ret:
-                logger.warning("Failed to examine bdevs on non-leader node")
+            try:
+                snode_rpc_client.bdev_wait_for_examine()
+            except RPCException as e:
+                logger.warning("Failed to examine bdevs on non-leader node: %s", e)
 
             # After examine, the lvstore MUST be present. If it isn't, SPDK
             # failed to rediscover the lvstore from its persisted metadata
@@ -16002,9 +16007,10 @@ def dump_lvstore(node_id):
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
     file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{datetime.datetime.now().isoformat()!s}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
-    ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
-    if not ret:
-        logger.warning("faild to dump lvstore data")
+    try:
+        rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
+    except RPCException as e:
+        logger.warning("Failed to dump lvstore data: %s", e)
     #     return False
 
     logger.info(f"LVS dump file will be here: {file_path}")

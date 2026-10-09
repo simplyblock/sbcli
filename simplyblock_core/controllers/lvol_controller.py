@@ -116,17 +116,18 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
             return False
 
     key_name = f'key_{name}'
-    ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
-    if not ret:
+    try:
+        rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
+    except RPCException as e:
         # SPDK returns failure when the key name already exists. On
         # re-activation that's the same node re-issuing the same key —
         # treat existing key as benign and proceed to the crypto-bdev
         # create below. If creation genuinely failed for another reason,
         # the next call will surface it.
         logger.warning(
-            "lvol_crypto_key_create returned failure for %s; if the key "
+            "lvol_crypto_key_create failed for %s (%s); if the key "
             "already exists from a prior pass this is expected — "
-            "proceeding to crypto bdev create", key_name)
+            "proceeding to crypto bdev create", key_name, e)
     ret = rpc_client.lvol_crypto_create(name, base_name, key_name)
     if not ret:
         logger.error(f"failed to create crypto LVol {name}")
@@ -1321,74 +1322,81 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             continue
 
         ret = None
-        if type == "bmap_init":
-            ret = rpc_client.ultra21_lvol_bmap_init(**params)
+        error = None
+        try:
+            if type == "bmap_init":
+                ret = rpc_client.ultra21_lvol_bmap_init(**params)
 
-        elif type == "ultra_lvol":
-            ret = rpc_client.ultra21_lvol_mount_lvol(**params)
+            elif type == "ultra_lvol":
+                ret = rpc_client.ultra21_lvol_mount_lvol(**params)
 
-        elif type == "crypto":
-            db_controller = DBController()
-            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            ret = _create_crypto_lvol(rpc_client, lvol, cluster)
+            elif type == "crypto":
+                db_controller = DBController()
+                cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+                ret = _create_crypto_lvol(rpc_client, lvol, cluster)
 
-        elif type == "bdev_lvstore":
-            ret = rpc_client.create_lvstore(**params)
+            elif type == "bdev_lvstore":
+                ret = rpc_client.create_lvstore(**params)
 
-        elif type == "bdev_lvol":
-            if is_primary:
-                ret = rpc_client.create_lvol(**params)
-                if not ret:
-                    # The bdev may already exist from a prior pass through
-                    # this function (the subsystem-full retry in
-                    # add_lvol_on_node re-enters _create_bdev_stack after
-                    # the bdev was created but nvmf_subsystem_add_ns
-                    # failed).  The idempotency probe above uses the bare
-                    # stack name which doesn't resolve for lvol bdevs
-                    # (SPDK registers them as lvstore/lvol_name).
-                    existing = rpc_client.bdev_get(
-                        f"{lvol.lvs_name}/{name}")
-                    if existing:
-                        ret = existing
+            elif type == "bdev_lvol":
+                if is_primary:
+                    try:
+                        ret = rpc_client.create_lvol(**params)
+                    except RPCException:
+                        # The bdev may already exist from a prior pass through
+                        # this function (the subsystem-full retry in
+                        # add_lvol_on_node re-enters _create_bdev_stack after
+                        # the bdev was created but nvmf_subsystem_add_ns
+                        # failed).  The idempotency probe above uses the bare
+                        # stack name which doesn't resolve for lvol bdevs
+                        # (SPDK registers them as lvstore/lvol_name).
+                        ret = rpc_client.bdev_get(f"{lvol.lvs_name}/{name}")
+                        if not ret:
+                            raise
+                else:
+                    ret = rpc_client.bdev_lvol_register(
+                        lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
+
+            elif type == "bdev_lvol_clone":
+                if is_primary:
+                    try:
+                        ret = rpc_client.lvol_clone(**params)
+                    except RPCException:
+                        # Same prior-pass adoption as the bdev_lvol branch above.
+                        ret = rpc_client.bdev_get(f"{lvol.lvs_name}/{name}")
+                        if not ret:
+                            raise
+                else:
+                    ret = rpc_client.bdev_lvol_clone_register(
+                        lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
+                    if ret:
+                        # clone_register ACKNOWLEDGES before the bdev is
+                        # examinable (the same async false-success family as
+                        # remove_ns in the PVC-expand and case-3 incidents). The
+                        # very next step adds this bdev to the nvmf subsystem, and
+                        # racing the registration lost every time on the fail-over
+                        # of namespaced volumes: peer add_ns -32602 with the
+                        # subsystem EMPTY, while the bdev existed moments later
+                        # (run 20260825_122423, LVS_13/LVOL_121). Poll until the
+                        # bdev is really there before letting add_ns proceed.
+                        bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+                        for _ in range(40):
+                            if rpc_client.bdev_get(bdev_name):
+                                break
+                            time.sleep(0.5)
+                        else:
+                            logger.error(
+                                f"clone_register acknowledged but {bdev_name} did "
+                                f"not appear within 20s on the peer")
+                            ret = None
+
             else:
-                ret = rpc_client.bdev_lvol_register(
-                    lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
-
-        elif type == "bdev_lvol_clone":
-            if is_primary:
-                ret = rpc_client.lvol_clone(**params)
-                if not ret:
-                    existing = rpc_client.bdev_get(
-                        f"{lvol.lvs_name}/{name}")
-                    if existing:
-                        ret = existing
-            else:
-                ret = rpc_client.bdev_lvol_clone_register(
-                    lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
-                if ret:
-                    # clone_register ACKNOWLEDGES before the bdev is
-                    # examinable (the same async false-success family as
-                    # remove_ns in the PVC-expand and case-3 incidents). The
-                    # very next step adds this bdev to the nvmf subsystem, and
-                    # racing the registration lost every time on the fail-over
-                    # of namespaced volumes: peer add_ns -32602 with the
-                    # subsystem EMPTY, while the bdev existed moments later
-                    # (run 20260825_122423, LVS_13/LVOL_121). Poll until the
-                    # bdev is really there before letting add_ns proceed.
-                    bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-                    for _ in range(40):
-                        if rpc_client.bdev_get(bdev_name):
-                            break
-                        time.sleep(0.5)
-                    else:
-                        logger.error(
-                            f"clone_register acknowledged but {bdev_name} did "
-                            f"not appear within 20s on the peer")
-                        ret = None
-
-        else:
-            logger.debug(f"Unknown BDev type: {type}")
-            continue
+                logger.debug(f"Unknown BDev type: {type}")
+                continue
+        except RPCException as e:
+            # Fall through to the stack rollback below — it is the only
+            # thing that removes the bdevs this loop already created.
+            error = str(e)
 
         if ret:
             bdev['status'] = "created"
@@ -1413,7 +1421,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                         logger.exception(
                             "failed to persist in_deletion after stack "
                             "rollback for %s", lvol.get_id())
-            return False, f"Failed to create BDev: {name}"
+            return False, f"Failed to create BDev: {name}" + (f": {error}" if error else "")
 
     return True, None
 
@@ -2256,9 +2264,10 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.has_qos():
-        ret = rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
-        if not ret:
-            logger.error("RPC failed bdev_lvol_remove_from_group")
+        try:
+            rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
+        except RPCException as e:
+            logger.error("RPC failed bdev_lvol_remove_from_group: %s", e)
 
     # 1- remove subsystem (no-op if the pre-leader phase already removed it).
     # Deleting the bdev stack under a namespace SPDK failed to remove is what
@@ -2331,9 +2340,11 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
         # here leaves the namespace behind on a shared subsystem forever.
         if ns["uuid"] == lvol.get_ns_uuid():
             logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
-            ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns['nsid']))
-            if not ret:
-                logger.error(f"Failed to remove namespace {ns['nsid']} from subsystem {lvol.nqn}")
+            try:
+                rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns['nsid'])
+            except RPCException as e:
+                logger.error("Failed to remove namespace %s from subsystem %s: %s",
+                             ns['nsid'], lvol.nqn, e)
                 return False
             confirmed, subsystem = _confirm_namespace_removed(rpc_client, lvol.nqn, ns['nsid'])
             if not confirmed:
@@ -6514,9 +6525,10 @@ def remove_host_from_lvol(lvol_id, host_nqn):
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
         rpc_client = snode.rpc_client()
-        ret = rpc_client.subsystem_remove_host(lvol.nqn, host_nqn)
-        if not ret:
-            logger.error("Failed to remove host %s from node %s", host_nqn, node_id)
+        try:
+            rpc_client.subsystem_remove_host(lvol.nqn, host_nqn)
+        except RPCException as e:
+            logger.error("Failed to remove host %s from node %s: %s", host_nqn, node_id, e)
             errors.append(node_id)
 
         # Clean up keyring keys
