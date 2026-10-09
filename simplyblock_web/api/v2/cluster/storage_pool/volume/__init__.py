@@ -266,17 +266,13 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None,
-            site: util.SiteParameter = None):
-    """The volume's connection entries. On a sync-replication cluster
-    ``site`` is required and only that site's paths are returned; elsewhere
-    it is ignored."""
-    if cluster.sync_replication:
-        with util.sync_http_errors():
-            details, err = lvol_controller.connect_lvol(
-                volume.get_id(), host_nqn=host_nqn, site=util.require_site(site))
-    else:
-        details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None):
+    """The volume's connection entries. On a sync-replication cluster the
+    paths are those of the site the volume's LVS is currently led from
+    (``lvs_active_site``, which promote and demote set); the caller does not
+    choose a site - leadership is control-plane state, so connect reads it
+    rather than being told it."""
+    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
         return Response(status_code=404, content=err)
     return details

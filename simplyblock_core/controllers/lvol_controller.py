@@ -3465,12 +3465,16 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     """The connect entries of volume ``uuid``: ``(entries, None)`` or
     ``(False, reason)`` when the volume does not exist.
 
-    Sync replication: ``site`` is required and names one of the cluster's
-    two sites; the entries are the paths of that site's triplet only.
+    Sync replication: the entries are the paths of the site the volume's LVS
+    is currently led from (``lvs_active_site``, which promote and demote set),
+    that site's triplet only. ``site`` is optional and defaults to that led
+    site - a caller does not have to know it, and should not, since leadership
+    is control-plane state. When given it is honored (the promote path asks
+    for the site it just brought up) and validated against the cluster's sites.
 
     Raises:
-        SyncReplicationSiteError: ``site`` missing or unknown on a
-            sync-replication cluster, or given on a cluster without sites.
+        SyncReplicationSiteError: ``site`` unknown on a sync-replication
+            cluster, or given on a cluster without sites.
     """
     db_controller = DBController()
     try:
@@ -3481,7 +3485,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         logger.exception("Failed to get lvol by id: %s", uuid)
         return False, "Failed to find volume"
 
-    _check_connect_site(db_controller, lvol, site)
+    site = _connect_site(db_controller, lvol, site)
 
     try:
         host_entry = HostConnectAuth.resolve(lvol, host_nqn, db_controller)
@@ -3532,8 +3536,16 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     return out, None
 
 
-def _check_connect_site(db_controller, lvol, site):
-    """Validate ``site`` against the cluster of ``lvol`` (connect_lvol)."""
+def _connect_site(db_controller, lvol, site):
+    """The site whose paths ``connect_lvol`` returns.
+
+    Outside sync replication: ``None`` (every path), and a caller-supplied
+    site is rejected. On a sync-replication cluster: the site the volume's LVS
+    is currently led from (``lvs_active_site``, which promote and demote set)
+    when the caller names none - leadership is control-plane state, so connect
+    reads it rather than being told it - or the caller's own site when given,
+    validated against the cluster's sites (the promote path asks for the site
+    it just brought up)."""
     owner = db_controller.get_storage_node_by_id(lvol.node_id)
     cluster = db_controller.get_cluster_by_id(owner.cluster_id)
     if not cluster.sync_replication:
@@ -3541,14 +3553,15 @@ def _check_connect_site(db_controller, lvol, site):
             raise SyncReplicationSiteError(
                 f"site {site!r} given, but cluster {cluster.get_id()} is not a "
                 f"sync-replication cluster")
-        return
+        return None
     if not site:
-        raise SyncReplicationSiteError(
-            f"site is required to connect a volume of sync-replication cluster {cluster.get_id()}")
+        from simplyblock_core import storage_node_ops
+        return storage_node_ops.lvs_active_site_of(owner)
     sites = {n.site for n in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()) if n.site}
     if site not in sites:
         raise SyncReplicationSiteError(
             f"site {site!r} is not a site of cluster {cluster.get_id()} (sites: {sorted(sites)})")
+    return site
 
 
 def _connect_path_volumes(db_controller, lvol):

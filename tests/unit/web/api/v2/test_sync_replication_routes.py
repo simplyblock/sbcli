@@ -176,12 +176,6 @@ class TestSiteRequired:
         assert 'site is required' in _detail(response)['message']
         assert sync_controller.method_calls == []
 
-    def test_connect_without_site_is_400(self, client, lvol_controller):
-        response = client.get(VOLUME_URL + 'connect')
-
-        assert response.status_code == 400
-        lvol_controller.connect_lvol.assert_not_called()
-
     @pytest.mark.parametrize('method, path', [
         ('post', 'replication/failover'), ('post', 'replication/demote'), ('get', 'replication/status'),
         ('get', 'replication/sync-status')])
@@ -478,22 +472,32 @@ class TestAsyncOperationsRefused:
 
 class TestConnect:
 
-    def test_sync_forwards_the_site(self, client, lvol_controller):
+    @pytest.mark.parametrize('query', ['', f'?site={SITE}'])
+    def test_does_not_require_or_forward_a_site(self, client, lvol_controller, query):
+        """Regression: 2026-10-09-connect-active-site — connect required the
+        caller to name the site and returned that site's paths, so a node that
+        guessed its own zone could be handed paths for a site the volume is not
+        led from (ANA-inaccessible). connect must read the led site server-side
+        (``lvs_active_site``, which promote/demote set), so it neither requires
+        a ``site`` nor forwards one when given."""
         lvol_controller.connect_lvol.return_value = ([_entry()], None)
 
-        response = client.get(VOLUME_URL + f'connect?site={SITE}&host_nqn=nqn.host')
+        response = client.get(VOLUME_URL + 'connect' + query)
 
         assert response.status_code == 200
-        lvol_controller.connect_lvol.assert_called_once_with(VOLUME_ID, host_nqn='nqn.host', site=SITE)
+        lvol_controller.connect_lvol.assert_called_once_with(VOLUME_ID, host_nqn=None)
         assert response.json()[0]['reconnect-delay'] == 2
 
-    def test_sync_unknown_site_is_400(self, client, lvol_controller):
-        lvol_controller.connect_lvol.side_effect = SyncReplicationSiteError("site 'x' is not a site")
+    def test_forwards_the_host_nqn(self, client, lvol_controller):
+        lvol_controller.connect_lvol.return_value = ([_entry()], None)
 
-        assert client.get(VOLUME_URL + 'connect?site=x').status_code == 400
+        response = client.get(VOLUME_URL + 'connect?host_nqn=nqn.host')
+
+        assert response.status_code == 200
+        lvol_controller.connect_lvol.assert_called_once_with(VOLUME_ID, host_nqn='nqn.host')
 
     @pytest.mark.parametrize('query', ['', f'?site={SITE}'])
-    def test_async_ignores_the_site(self, client, lvol_controller, async_cluster, query):
+    def test_async_unchanged(self, client, lvol_controller, async_cluster, query):
         lvol_controller.connect_lvol.return_value = ([_entry()], None)
 
         response = client.get(VOLUME_URL + 'connect' + query)

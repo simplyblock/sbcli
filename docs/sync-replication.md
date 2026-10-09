@@ -149,7 +149,8 @@ behaves as before (async snapshot replication) and `site` is ignored.
 
 `site` is the site the caller acts from - static per Kubernetes cluster. On a sync cluster it is
 required on every route marked "site" below: missing or empty -> **400**; not a site of the cluster ->
-**400**.
+**400**. `GET V/connect` is the exception: it takes no `site` and reads the led site itself (see its
+row), since a node cannot know which site a volume is currently led from.
 
 ### Volume routes
 
@@ -159,7 +160,7 @@ required on every route marked "site" below: missing or empty -> **400**; not a 
 | `POST V/replication/demote?site=S` | DemoteVolume | **204** fenced on S, also when the volume is not served on S (no-op). **409** gate failed. **500** an ANA RPC failed (nothing recorded; retry). |
 | `GET V/replication/sync-status?site=S` | GetVolumeReplicationInfo, GetReplicationStatus, GetSecondaryReadiness | **200** `SyncReplicationStatusDTO`. **400** on a cluster without sync replication. |
 | `GET V/replication/status?site=S` | (existing async read) | **200** the existing `ReplicationStatusDTO`, filled from the sync status (see [DTOs](#dtos)). |
-| `GET V/connect?site=S[&host_nqn=]` | NodeStage (driver) | **200** the connection entries of S's triplet only. **400** bad / missing site. **404** (plain text) when the entries cannot be built. |
+| `GET V/connect[?host_nqn=]` | NodeStage (driver) | **200** the connection entries of the site the volume's LVS is led from (`lvs_active_site`, which promote / demote set), that site's triplet only; the caller passes no site. **404** (plain text) when the entries cannot be built. |
 | `PUT V/` with `replication_policy_id` | Enable / DisableVolumeReplication | **204**, the policy part is a no-op. `replication_policy_id` omitted = untouched; `null` or a UUID = no-op on sync. Other fields (name, QoS, size) apply as usual. |
 | `POST V/replication/failback` (body `{}`) | ResyncVolume | **204** no-op (the resync is automatic). The body stays required. |
 | `POST V/replication/{start,stop,trigger,commit,cutover-proceed}` | - | **400**: direct async replication operations are refused on a sync cluster. |
@@ -249,7 +250,7 @@ else `degraded` (a running catch-up is `degraded` with `resyncing = true`); `las
 {"lvol_id": "<uuid>", "connection_strings": [ NvmeConnectEntry, ... ]}
 ```
 
-The entries are the ones `GET V/connect?site=S` returns - that site's triplet only, serialized with
+The entries are the ones `GET V/connect` returns - the led site's triplet only, serialized with
 hyphenated keys: `transport`, `ip`, `port`, `nqn`, `reconnect-delay`, `ctrl-loss-tmo`,
 `fast-io-fail-tmo`, `nr-io-queues`, `keep-alive-tmo`, `host-iface`, `tls`, `connect`, `ns-id`,
 `allowed-hosts`, `target-lvol-id`.
@@ -390,7 +391,7 @@ beyond its fault tolerance still suspends it.
 2. demote on A (`site=A`) **every** volume of every LVS involved - the application's volumes and every
    other live volume sharing their LVSs (same `storage_node_id`); a group demote covers the group;
 3. promote on B (`site=B`, `planned=true`); repeat while 409 "in progress" until 200;
-4. connect on B with the returned entries (or `GET V/connect?site=B`); start the applications on B.
+4. connect on B with the returned entries (or `GET V/connect`); start the applications on B.
 
 **Disaster fail-over** (A lost): promote on B with `planned=true` answers 412; csi-addons escalates to a
 forced promote (`planned=false`); repeat while 409 "in progress" until 200; connect on B.
@@ -428,7 +429,7 @@ such runs. A site return schedules the catch-up of every LVS.
 | `sbctl volume sync-status <volume_id> --site <S> [--json]` | a volume's role on S and the cluster-wide status |
 | `sbctl volume sync-demote <volume_id> --site <S>` | demote on S |
 | `sbctl volume sync-promote <volume_id> --site <S> [--force]` | promote on S; prints "in progress" while the task runs (run it again), then the connect commands |
-| `sbctl volume connect <volume_id> --site <S>` | connect commands for S's triplet |
+| `sbctl volume connect <volume_id> [--site <S>]` | connect commands for the volume's led site (or site S's triplet when given) |
 
 On a cluster without sync replication these commands fail with an explicit error; the async
 replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) fail on a sync cluster.
@@ -442,7 +443,7 @@ replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) f
   lose A while A keeps serving its own clients passes the liveness checks (research item).
 - Reads after a promote go to zone 0 while the home site is alive (local-zone reads are deferred).
 - Rejected on a sync cluster: lvol migration (single and batch), manual volume suspend / resume, the
-  v1 `lvol/connect` (use the v2 connect with a site).
+  v1 `lvol/connect` (use the v2 connect).
 - Only the direct async replication operations are refused; the policy paths (creating a volume with a
   replication policy, `volume replication-policy-set`, a group policy attach) still configure async
   replication on a sync cluster.

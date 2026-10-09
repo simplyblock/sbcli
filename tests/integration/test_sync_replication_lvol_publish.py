@@ -1139,11 +1139,22 @@ class TestConnect:
         assert _connect_ips(db, vol.get_id(), site=SITE_A) == [_ip(n) for n in home]
         assert _connect_ips(db, vol.get_id(), site=SITE_B) == [_ip(n) for n in b]
 
-    def test_without_a_site_it_raises(self, db):
-        cluster, a, b, owner = _layout(db)
+    def test_without_a_site_uses_the_led_site(self, db):
+        """Regression: 2026-10-09-connect-active-site - connect required the
+        caller to name the site and returned that site's paths, so a node that
+        guessed its own zone could be handed the paths of a site the volume is
+        not led from (ANA-inaccessible). With no site it returns the paths of
+        the site the LVS is led from (lvs_active_site)."""
+        cluster, a, b, owner = _layout(db)          # led from home => SITE_A
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
-        with pytest.raises(SyncReplicationSiteError, match="required"):
-            lvol_controller.connect_lvol(vol.get_id())
+        assert _connect_ips(db, vol.get_id()) == [_ip(n) for n in a[:3]]
+
+    def test_without_a_site_follows_a_promote_to_the_other_site(self, db):
+        """After a promote to SITE_B (lvs_active_site=SITE_B), connect with no
+        site returns SITE_B's paths, not the home site's."""
+        cluster, a, b, owner = _layout(db, active_site=SITE_B)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
+        assert _connect_ips(db, vol.get_id()) == [_ip(n) for n in b]
 
     def test_an_unknown_site_raises(self, db):
         cluster, a, b, owner = _layout(db)
