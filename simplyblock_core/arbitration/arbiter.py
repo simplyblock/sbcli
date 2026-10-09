@@ -23,6 +23,7 @@ from simplyblock_core.models.arbitration import (
     ARB_STEADY,
     LVS_FENCED,
     LVS_NORMAL,
+    ArbitrationEvent,
     ClusterArbitration,
 )
 from simplyblock_core.models.storage_node import StorageNode
@@ -44,10 +45,12 @@ class Arbiter:
     """
 
     def __init__(self, db, clock: Callable[[], int] = _now_ms,
-                 readmit: Callable[[StorageNode], None] | None = None):
+                 readmit: Callable[[StorageNode], None] | None = None,
+                 log_event: Callable[[ArbitrationEvent, dict], None] | None = None):
         self.db = db
         self.clock = clock
         self.readmit = readmit or default_readmit
+        self.log_event = log_event or default_log_event
         #: node_id -> NodeSignals
         self.signals: dict = {}
         #: node_id -> ms of the last successful lease renewal
@@ -96,11 +99,19 @@ class Arbiter:
         queued = self.db.get_arbitration_events(cluster_id)
         queued.sort(key=lambda e: (e.node_id, e.received_at, e.seq))
         for item in queued:
+            legacy = item.instance == ev.LEGACY_INSTANCE
+            if legacy and self.capable.get(item.node_id):
+                # JC pushes a remote-JM event into both queues; on a node with
+                # jc_wait_events the Go collector already delivered it.
+                item.remove(self.db.kv_store)
+                continue
             sig = self.signals.setdefault(item.node_id, ev.NodeSignals())
             event = dict(item.payload)
-            event.setdefault("instance", item.instance)
+            event["instance"] = item.instance
             event.setdefault("seq", item.seq)
-            ev.apply(sig, event)
+            # Legacy events were logged by the Python distr collector already.
+            if ev.apply(sig, event) and not legacy:
+                self.log_event(item, event)
             item.remove(self.db.kv_store)
         return len(queued)
 
@@ -473,3 +484,27 @@ def default_readmit(node: StorageNode) -> None:
     storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE,
                                      caused_by="two-node-arbiter")
     tasks_controller.add_node_to_auto_restart(node)
+
+
+#: Events that mean the node lost its peer or stopped serving; logged as warnings.
+_WARN_STATUSES = {ev.ST_UNHEALTHY, "ha_hold_started", "ha_self_fenced", "ha_lease_expired", "ha_fenced"}
+
+
+def default_log_event(item: ArbitrationEvent, event: dict) -> None:
+    """Contract section 4: HA events also go to the cluster event log, so they
+    appear in ``sbctl cluster get-logs``. Best effort: the log never blocks a decision."""
+    from simplyblock_core.controllers import events_controller as ec
+    from simplyblock_core.models.events import EventObj
+
+    status = str(event.get("status", ""))
+    parts = [status]
+    for field in ("jm_vuid", "reason", "ha_state", "epoch"):
+        if event.get(field) not in (None, ""):
+            parts.append("%s=%s" % (field, event[field]))
+    level = EventObj.LEVEL_WARN if status in _WARN_STATUSES else EventObj.LEVEL_INFO
+    try:
+        ec.log_event_cluster(item.cluster_id, ec.DOMAIN_JM, "TWO_NODE_" + status.upper(), item,
+                             ec.CAUSED_BY_MONITOR, " ".join(parts), node_id=item.node_id,
+                             event_level=level)
+    except Exception as e:                          # noqa: BLE001 - logging only
+        logger.warning("Could not log HA event %s of %s: %s", status, item.node_id, e)

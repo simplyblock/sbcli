@@ -69,6 +69,7 @@ class FakeDB:
         self.nodes = nodes
         self.rec = None
         self.events = []
+        self.logged = []
 
     def get_clusters(self):
         return [Cluster()]
@@ -102,7 +103,8 @@ def env(monkeypatch):
     monkeypatch.setattr(ArbitrationEvent, "remove", lambda self, kv: None)
     clock = Clock()
     readmitted = []
-    a = arb.Arbiter(db, clock=clock, readmit=readmitted.append)
+    a = arb.Arbiter(db, clock=clock, readmit=readmitted.append,
+                    log_event=lambda item, event: db.logged.append((item.node_id, event["status"])))
     return a, db, nodes, clock, readmitted
 
 
@@ -232,3 +234,37 @@ def test_override_naming_a_non_member_is_dropped(env):
     v = a.tick_cluster(CL, [nodes[A], nodes[B]])
     assert v.kind == "none" and db.rec.override == {}
     assert not calls(nodes[A], "jc_grant_solo") and not calls(nodes[B], "jc_grant_solo")
+
+
+def test_consumed_events_are_logged_once(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    db.events = [event(A, 1, "remote_jm_unhealthy", 3), event(A, 1, "remote_jm_unhealthy", 3),
+                 event(B, 1, "remote_jm_healthy", 4)]
+    a.consume_events(CL)
+    assert db.logged == [(A, "remote_jm_unhealthy"), (B, "remote_jm_healthy")]
+
+
+def legacy(node, status, vuid):
+    e = event(node, 0, status, vuid)
+    e.instance, e.seq = "legacy", 1_700_000_000_000_000_000
+    e.payload = dict(status=status, jm_vuid=vuid)
+    return e
+
+
+def test_legacy_copies_are_dropped_for_capable_nodes_and_never_reset_the_stream(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    db.events = [event(A, 5, "remote_jm_healthy", 3)]
+    a.consume_events(CL)
+    a.capable[A] = True
+    db.events = [legacy(A, "remote_jm_unhealthy", 3)]
+    a.consume_events(CL)
+    assert a.signals[A].instance == "i-" + A and a.signals[A].last_seq == 5
+    assert not a.signals[A].reports_peer_unhealthy()
+    # a node without the protocol is arbitrated from its legacy events
+    a.capable[B] = False
+    db.events = [legacy(B, "remote_jm_unhealthy", 4)]
+    a.consume_events(CL)
+    assert a.signals[B].reports_peer_unhealthy() and a.signals[B].instance == ""
+    assert (B, "remote_jm_unhealthy") not in db.logged
