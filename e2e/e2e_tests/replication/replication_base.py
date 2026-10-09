@@ -828,9 +828,13 @@ class ReplicationTestBase(TestClusterBase):
             return lambda: self.sbcli_utils.restart_node(node_uuid=node_id,
                                                          force=True)
         if kind == "storage_node_reboot":
+            self.expected_core_nodes.add(node_ip)
             self.ssh_obj.reboot_node(node_ip=node_ip)
             return lambda: True       # reboot_node waits for the node itself
         if kind in ("network_interrupt", "short_network_interrupt"):
+            # See cluster_test_base.expected_core_nodes: cutting a
+            # node's NICs makes its journal client abort by design.
+            self.expected_core_nodes.add(node_ip)
             # (node_ip, interfaces, duration_secs=...) -- interfaces is a
             # required list, and every working call site reads it from
             # get_active_interfaces first. Called as (node=...,

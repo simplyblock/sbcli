@@ -90,6 +90,12 @@ class _FaultBase(MigrationTestBase):
             raise MigrationPreconditionError(
                 f"[MIG-F] node {node_id} has no mgmt_ip; cannot inject {kind}")
         self.logger.info("[MIG-F] injecting %s on %s (%s)", kind, node_id, ip)
+        if kind in ("nic_down", "spdk_crash", "reboot"):
+            # A core on this node is now evidence the fault landed, not
+            # a failure. A NIC drop makes the journal client lose quorum
+            # and abort by design; spdk_crash is a kill. The runner
+            # still fails the run on a core anywhere else.
+            self.expected_core_nodes.add(ip)
         if kind == "graceful_shutdown":
             self.sbcli_utils.shutdown_node(node_uuid=node_id)
             if not self._await_offline(node_id, kind):

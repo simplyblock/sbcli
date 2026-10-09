@@ -1483,6 +1483,87 @@ class SshUtils:
         #     self.logger.info(f"Old folders deleted successfully on {node}.")
 
     
+    def find_core_dumps(self, node, since_epoch=0, location="/etc/simplyblock"):
+        """Core dumps in *location* on *node* that are NEWER than since_epoch.
+
+        Returns a list of {"name", "size", "mtime"}.
+
+        The age filter is the point. cleanup_logs() only runs before the FIRST
+        test of a run (e2e.py gates it on `i == 0`), so a core left by test 3
+        is still sitting there when test 7 looks. Until now that did not
+        matter, because the first core found ended the run outright; the
+        moment a core is allowed to be expected, an old one would be charged
+        to whichever test happened to look next.
+        """
+        # Anchored patterns, not *core*: that also matches any file with
+        # "core" inside its name (a test file called notacore matched in
+        # testing), and a false core fails a whole run. The two real
+        # shapes are systemd-coredump's core.reactor_0.<...>.zst and the
+        # spdk_core_dump that ultra's run_distr.sh writes explicitly.
+        # Two separate find calls rather than one with escaped parens: `\\(`
+        # is an invalid escape inside an f-string, and -o binds looser than
+        # the implicit -a before -printf, so an ungrouped `-o` would apply
+        # -printf to the second branch only and silently miss the first.
+        cmd = (f"sudo sh -c \"find {location} -maxdepth 1 "
+               f"-name 'core.*' -printf '%T@|%s|%f\\n'; "
+               f"find {location} -maxdepth 1 "
+               f"-name 'spdk_core_dump*' -printf '%T@|%s|%f\\n'\" "
+               f"2>/dev/null || true")
+        out, _ = self.exec_command(node=node, command=cmd)
+        found = []
+        for line in (out or "").splitlines():
+            parts = line.strip().split("|")
+            if len(parts) != 3:
+                continue
+            try:
+                mtime, size = float(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if mtime <= since_epoch:
+                continue
+            found.append({"name": parts[2], "size": size, "mtime": mtime})
+        return found
+
+    def describe_core_dump(self, node, core_name):
+        """Best-effort detail for one core: signal, and a stack if we can get one.
+
+        There is no gdb in the SPDK image, so the backtrace cannot be taken
+        inside the container that produced the core. systemd-coredump is in
+        use on these nodes (ultra's run_distr.sh calls `coredumpctl dump`), so
+        `coredumpctl info` is asked first -- it keeps what it captured at dump
+        time, which survives the container being recreated. The container log
+        does not: on 2026-10-08 the spdk_4424 log began at 15:12:27 for a core
+        written at 15:07:30, so the two SPDK_WARNLOG lines that precede the
+        abort were already gone.
+
+        Returns text, always. "nothing" is a legitimate answer and is said
+        plainly rather than left to look like an error.
+        """
+        pid = ""
+        bits = core_name.split(".")
+        for b in bits:
+            if b.isdigit() and len(b) >= 4 and len(b) <= 8:
+                pid = b          # core.reactor_0.0.<hash>.<pid>.<ts>.zst
+        chunks = []
+        probes = [
+            ("coredumpctl info", f"sudo coredumpctl info {pid} 2>&1 | head -80"
+                                 if pid else
+                                 "sudo coredumpctl info 2>&1 | head -80"),
+            ("coredumpctl list", "sudo coredumpctl list --no-pager 2>&1 | tail -10"),
+            ("file", f"sudo zstd -dc /etc/simplyblock/{core_name} 2>/dev/null "
+                     f"| head -c 4096 | file - 2>&1 | head -2"),
+        ]
+        for label, cmd in probes:
+            try:
+                out, err = self.exec_command(node=node, command=cmd,
+                                             timeout=120, max_retries=1)
+            except Exception as exc:                  # noqa: BLE001
+                chunks.append(f"--- {label}: could not run ({str(exc)[:120]})")
+                continue
+            body = (out or err or "").strip()
+            chunks.append(f"--- {label}:\n{body or '(no output)'}")
+        return '\n'.join(chunks)
+
     def list_files(self, node, location):
         """List the entities in given location on a node
         Args:

@@ -258,6 +258,13 @@ class TestClusterBase:
         # nameless too. A leaf that wants its own name still overrides
         # this by assigning after super().__init__().
         self.test_name = _snake_case(type(self).__name__)
+        # Nodes this test deliberately broke in a way that can end in
+        # an abort: a NIC drop makes the journal client lose quorum and
+        # call spdk_abort_node by design (ultra alg_journal.cpp:2267),
+        # and spdk_crash is a kill. A core on one of these is evidence
+        # the fault landed. A core on any OTHER node is a real failure,
+        # because nothing asked that node to die.
+        self.expected_core_nodes = set()
         self.container_nodes = {}
         self.docker_logs_path = ""
         self.runner_k8s_log = ""

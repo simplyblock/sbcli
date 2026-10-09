@@ -542,26 +542,41 @@ def main():
                         )
                     except Exception:
                         pass
-            if not args.run_k8s and check_for_dumps():
-                # If a full reset is about to happen, core dumps from the
-                # current test won't affect the fresh cluster.
-                _next_idx = i + 1
-                _reset_coming = (
-                    _next_idx < len(test_class_run)
-                    and test.__name__ in TOPOLOGY_MODIFYING_TESTS
-                    and test_class_run[_next_idx].__name__ in TOPOLOGY_MODIFYING_TESTS
+            if not args.run_k8s:
+                _since = 0.0
+                _started = getattr(test_obj, "test_start_time_utc", None)
+                if _started is not None:
+                    try:
+                        _since = _started.timestamp()
+                    except Exception:            # noqa: BLE001
+                        _since = 0.0
+                _fatal, _summary = inspect_core_dumps(
+                    since_epoch=_since,
+                    expected_nodes=getattr(test_obj, "expected_core_nodes", set()),
+                    log_dir=getattr(test_obj, "docker_logs_path", "") or "",
                 )
-                if _reset_coming:
-                    logger.info(
-                        "Core dump found, but inter-test cluster reset will "
-                        "re-bootstrap a fresh cluster. Continuing."
+                for _line in _summary.splitlines():
+                    logger.info(_line)
+                if _fatal:
+                    # If a full reset is about to happen, core dumps from the
+                    # current test won't affect the fresh cluster.
+                    _next_idx = i + 1
+                    _reset_coming = (
+                        _next_idx < len(test_class_run)
+                        and test.__name__ in TOPOLOGY_MODIFYING_TESTS
+                        and test_class_run[_next_idx].__name__ in TOPOLOGY_MODIFYING_TESTS
                     )
-                else:
-                    logger.info(
-                        "Found a core dump during test execution. "
-                        "Cannot execute more tests as cluster is not stable. Exiting"
-                    )
-                    break
+                    if _reset_coming:
+                        logger.info(
+                            "Core dump found, but inter-test cluster reset will "
+                            "re-bootstrap a fresh cluster. Continuing."
+                        )
+                    else:
+                        logger.info(
+                            "Cannot execute more tests as cluster is not stable. "
+                            "Exiting"
+                        )
+                        break
 
             # ── Inter-test cluster reset ──────────────────────────────
             # When two consecutive topology-modifying tests are queued,
@@ -1382,6 +1397,107 @@ def _k8s_cluster_reset(args, new_worker_nodes, logger):
 
     logger.info("[reset] K8s cluster reset complete.")
     return cluster_id, cluster_secret
+
+
+def inspect_core_dumps(since_epoch=0.0, expected_nodes=None, log_dir=""):
+    """Find cores written DURING this test and say whether they are a failure.
+
+    Returns ``(fatal, summary)``.
+
+    Two rules decide it, and neither needs a backtrace to work:
+
+    * a core on a node the test deliberately broke is EVIDENCE THE FAULT
+      LANDED, not a failure. Cutting a node's NICs makes its journal client
+      lose quorum and call ``spdk_abort_node`` by design -- ultra
+      ``alg_journal.cpp:2267``, which logs "JC aborts the node due to network
+      outage" immediately before aborting. Confirmed on 2026-10-08: both
+      cores from MigrationSourceAndTargetFaults were SIGABRT through
+      ``spdk_abort_node`` <- ``alg_journal_client::t_jc_inst::periodic``, 4
+      and 5 seconds after a nic_down, while the two deliberate spdk_crash
+      kills produced no core at all.
+    * a core on ANY OTHER node is a failure. Nothing asked that node to die.
+
+    Judging by attribution rather than by stack means it still works when the
+    core cannot be symbolised -- which is the normal case here, since there is
+    no gdb in the SPDK image and the container that wrote the core is usually
+    recreated before anyone can read its log.
+
+    ``since_epoch`` matters as much as the rules. ``cleanup_logs()`` runs only
+    before the FIRST test of a run (gated on ``i == 0`` above), so a core left
+    by test 3 is still on disk when test 7 looks. While any core ended the run
+    that was harmless; now that a core can be expected, an old one would be
+    charged to whichever test happened to look next.
+    """
+    expected_nodes = set(expected_nodes or ())
+    logger.info("Checking for core dumps written during this test!!")
+    cluster_base = TestClusterBase()
+    ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
+    sbcli_utils = SbcliUtils(
+        cluster_api_url=cluster_base.api_base_url,
+        cluster_id=cluster_base.cluster_id,
+        cluster_secret=cluster_base.cluster_secret
+    )
+    _, storage_nodes = sbcli_utils.get_all_nodes_ip()
+    for node in storage_nodes:
+        ssh_obj.connect(
+            address=node,
+            bastion_server_address=cluster_base.bastion_server,
+        )
+
+    expected_hits, unexpected_hits, lines = [], [], []
+    try:
+        for node in storage_nodes:
+            try:
+                cores = ssh_obj.find_core_dumps(node, since_epoch=since_epoch)
+            except Exception as exc:                  # noqa: BLE001
+                lines.append(f"[core] {node}: could not be listed ({str(exc)[:120]})")
+                continue
+            for core in cores:
+                where = "EXPECTED" if node in expected_nodes else "UNEXPECTED"
+                lines.append(
+                    f"[core] {where} on {node}: {core['name']} "
+                    f"({core['size']} bytes)")
+                try:
+                    detail = ssh_obj.describe_core_dump(node, core["name"])
+                except Exception as exc:              # noqa: BLE001
+                    detail = f"(no detail: {str(exc)[:160]})"
+                if log_dir:
+                    try:
+                        os.makedirs(log_dir, exist_ok=True)
+                        out = os.path.join(
+                            log_dir, f"core_analysis_{node}_{core['name']}.txt")
+                        with open(out, "w", encoding="utf-8") as fh:
+                            fh.write(f"node: {node}\ncore: {core['name']}\n"
+                                     f"size: {core['size']}\n"
+                                     f"mtime: {core['mtime']}\n"
+                                     f"verdict: {where}\n"
+                                     f"faulted by this test: "
+                                     f"{sorted(expected_nodes)}\n\n{detail}\n")
+                        lines.append(f"[core]   detail -> {out}")
+                    except Exception as exc:          # noqa: BLE001
+                        lines.append(f"[core]   detail could not be written: "
+                                     f"{str(exc)[:120]}")
+                (expected_hits if node in expected_nodes
+                 else unexpected_hits).append((node, core["name"]))
+    finally:
+        for node, ssh in ssh_obj.ssh_connections.items():
+            logger.info(f"Closing node ssh connection for {node}")
+            ssh.close()
+
+    if not expected_hits and not unexpected_hits:
+        lines.append("[core] none written during this test")
+    elif unexpected_hits:
+        lines.append(
+            f"[core] FAILING THE RUN: {len(unexpected_hits)} core(s) on node(s) "
+            f"this test did not break "
+            f"({', '.join(n for n, _ in unexpected_hits)}). Nodes it did break: "
+            f"{sorted(expected_nodes) or 'none'}.")
+    else:
+        lines.append(
+            f"[core] {len(expected_hits)} core(s), all on node(s) this test "
+            f"deliberately broke ({sorted(expected_nodes)}). A NIC drop aborts "
+            f"the node by design, so this is the fault landing. Continuing.")
+    return bool(unexpected_hits), "\n".join(lines)
 
 
 def check_for_dumps():
