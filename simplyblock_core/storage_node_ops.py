@@ -487,10 +487,43 @@ def _failover_primary_ana(primary_node: StorageNode):
             _set_lvol_ana_on_node(lvol, first_sec, "optimized")
 
 
-def _failback_primary_ana(primary_node: StorageNode):
+def _demote_listeners_on_peer(lvol_list, peer: StorageNode) -> list[str]:
+    """Set ``non_optimized`` on ``peer``'s listeners for every volume in
+    ``lvol_list``, one ANA group per namespace, and keep going past the
+    volumes the peer cannot flip.
+
+    A peer whose SPDK was recreated after a crash holds no subsystem for the
+    primary's volumes yet; SPDK answers the flip with "Unable to find
+    subsystem" and the RPC client raises. There is nothing to demote on such
+    a peer, and the registration repair re-creates the subsystem later, so
+    that volume is skipped and reported instead of aborting the caller. The
+    same goes for a listener whose ANA group SPDK rejects (``-22``).
+
+    Returns the NQNs that could not be flipped, so the caller can log them
+    and decide; an empty list means every listener was demoted.
+    """
+    failed: list[str] = []
+    # Same per-namespace dedupe as _failover_primary_ana.
+    seen_namespaces = set()
+    for lvol in lvol_list:
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
+            continue
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
+        try:
+            _set_lvol_ana_on_node(lvol, peer, "non_optimized")
+        except RPCException as e:
+            logger.warning("ANA failback: could not demote %s ns %s on peer %s: %s",
+                           lvol.nqn, lvol.ns_id, peer.get_id(), e)
+            failed.append(lvol.nqn)
+    return failed
+
+
+def _failback_primary_ana(primary_node: StorageNode) -> list[str]:
     """Primary restarting: demote first_sec→non_optimized.
 
-    The second_sec is already non_optimized and never changes.
+    The second_sec is already non_optimized and never changes. Returns the
+    NQNs the secondary could not flip (see _demote_listeners_on_peer); a
+    secondary that is not online is skipped entirely.
     """
     db_ctrl = DBController()
     lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
@@ -500,14 +533,9 @@ def _failback_primary_ana(primary_node: StorageNode):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Same per-namespace dedupe as _failover_primary_ana.
-    seen_namespaces = set()
-    for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
-            continue
-        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
-        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-            _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
+    if not (first_sec and first_sec.status == StorageNode.STATUS_ONLINE):
+        return []
+    return _demote_listeners_on_peer(lvol_list, first_sec)
 
 
 def trigger_ana_failover_for_node(offline_node: StorageNode):
@@ -13324,9 +13352,22 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, snode, rpc_client)
 
-    # ANA failback only when the original primary is coming back (not takeover)
+    # ANA failback only when the original primary is coming back (not takeover).
+    # Housekeeping, never a reason to abort the recreate: a peer that cannot
+    # flip a listener (its SPDK came back without the subsystem, incident
+    # 2026-10-08 run 62: cluster_activate failed 100+ times in a row on
+    # "Unable to find subsystem" and the cluster could not leave suspended)
+    # is logged and left to the registration repair, which is how the
+    # restart path (trigger_ana_failback_for_node) has always treated it.
     if not is_takeover and lvs_node.secondary_node_id and lvol_list:
-        _failback_primary_ana(snode)
+        try:
+            not_demoted = _failback_primary_ana(snode)
+        except Exception as e:
+            logger.error("ANA failback for primary %s skipped: %s", snode.get_id(), e)
+        else:
+            if not_demoted:
+                logger.error("ANA failback for primary %s left %d listener(s) undemoted on its "
+                             "secondary: %s", snode.get_id(), len(not_demoted), not_demoted)
 
     snode_lvs_port = lvs_node.get_lvol_subsys_port(lvs_name)
 
