@@ -1,7 +1,12 @@
 """Event folding for the two-node arbiter (contract sections 4 and 5)."""
 
 from simplyblock_core.arbitration import events as ev
-from simplyblock_core.models.arbitration import LVS_FENCED, LVS_HOLDING, LVS_NORMAL, LVS_SOLO
+from simplyblock_core.models.arbitration import (
+    LVS_FENCED,
+    LVS_HOLDING,
+    LVS_NORMAL,
+    LVS_SOLO,
+)
 
 
 def e(seq, status, vuid=3, instance="i1", **kw):
