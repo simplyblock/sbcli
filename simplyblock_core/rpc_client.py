@@ -1506,7 +1506,8 @@ class RPCClient:
     def distr_migration_status(self, name):
         return self._request("distr_migration_status", name=name)
 
-    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
+                                      relaxed_mode=False):
         params = {
             "name": name,
             "storage_ID": storage_ID,
@@ -1517,9 +1518,12 @@ class RPCClient:
             params["job_size"] = job_size
         if jobs:
             params["jobs"] = jobs
+        if relaxed_mode:
+            params["relaxed_mode"] = True
         return self._request("distr_migration_failure_start", **params)
 
-    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
+                                        relaxed_mode=False):
         params = {
             "name": name,
         }
@@ -1529,6 +1533,8 @@ class RPCClient:
             params["job_size"] = job_size
         if jobs:
             params["jobs"] = jobs
+        if relaxed_mode:
+            params["relaxed_mode"] = True
         return self._request("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
