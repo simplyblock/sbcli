@@ -1768,7 +1768,8 @@ class RPCClient:
         }
         return self._request('bdev_lvol_connect_hublvol', **params)
 
-    def jc_set_dual_node(self, enable):
+    def jc_set_dual_node(self, enable, *, preferred=None, hold_ms=None, lease_ttl_ms=None,
+                         arbitration=None):
         """Tell the journal component whether this is a DUAL-NODE cluster.
 
         The JC aborts its whole SPDK application when the number of reachable
@@ -1780,8 +1781,61 @@ class RPCClient:
         a network outage nd=1 njms=2" / "JC aborts the node due to network
         outage" / core dump, every client path gone, XFS shut down).
         The fork implements the tolerance; nothing ever switched it on.
+
+        The two-node arbitration fields (docs/design/two-node-arbitration.md,
+        section 3.1) are optional and sent only when given, so a node without
+        the protocol still accepts the call.
         """
-        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+        params: dict = {"enable": bool(enable)}
+        if preferred is not None:
+            params["preferred"] = bool(preferred)
+        if hold_ms is not None:
+            params["hold_ms"] = int(hold_ms)
+        if lease_ttl_ms is not None:
+            params["lease_ttl_ms"] = int(lease_ttl_ms)
+        if arbitration is not None:
+            params["arbitration"] = bool(arbitration)
+        return self._request2("jc_set_dual_node", params)
+
+    # ---- two-node arbitration (docs/design/two-node-arbitration.md, section 3) ----
+    # These raise RPCRemoteError with code -errno.ESTALE / EBUSY / EAGAIN /
+    # ENOENT / EINVAL as the contract lists; callers decide what each means.
+
+    def jc_lease_renew(self, epoch, ttl_ms):
+        return self._request("jc_lease_renew", epoch=int(epoch), ttl_ms=int(ttl_ms))
+
+    def jc_grant_solo(self, epoch, lvs, ttl_ms):
+        return self._request("jc_grant_solo", epoch=int(epoch),
+                             lvs=[int(v) for v in lvs], ttl_ms=int(ttl_ms))
+
+    def jc_fence(self, epoch, lvs):
+        return self._request("jc_fence", epoch=int(epoch), lvs=[int(v) for v in lvs])
+
+    def jc_unfence(self, epoch, lvs):
+        return self._request("jc_unfence", epoch=int(epoch), lvs=[int(v) for v in lvs])
+
+    def jc_ha_status(self):
+        return self._request("jc_ha_status")
+
+    def jc_wait_events(self, instance, after_seq, timeout_ms=20000, max_events=256):
+        """Long-poll for HA events (contract section 3.7).
+
+        The node may hold the request for ``timeout_ms``, so the HTTP timeout
+        is set above it; the proxy derives its own SPDK wait from that.
+        """
+        return self._request(
+            "jc_wait_events", request_timeout=int(timeout_ms) / 1000.0 + 5,
+            instance=str(instance), after_seq=int(after_seq),
+            timeout_ms=int(timeout_ms), max=int(max_events))
+
+    def supports_two_node_arbitration(self):
+        """True when the node exposes every RPC the arbiter drives
+        (constants.TWO_NODE_ARBITRATION_RPCS). Any error means no."""
+        try:
+            methods = set(self.rpc_get_methods() or [])
+        except Exception:                           # noqa: BLE001 - probe only
+            return False
+        return all(m in methods for m in constants.TWO_NODE_ARBITRATION_RPCS)
 
     def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
         """One crash-consistent snapshot per consistency-group member.

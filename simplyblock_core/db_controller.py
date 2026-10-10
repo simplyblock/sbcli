@@ -11,6 +11,7 @@ import fdb
 
 from simplyblock_core import constants, index_ops, utils
 from simplyblock_core.models import indices, watches
+from simplyblock_core.models.arbitration import ArbitrationEvent, ClusterArbitration
 from simplyblock_core.models.backup import (
     Backup,
     BackupChainLock,
@@ -654,6 +655,18 @@ class DBController(metaclass=Singleton):
         if not ret:
             raise KeyError("No deploy config found")
         return ret[0]
+
+    def get_cluster_arbitration(self, cluster_id: str) -> ClusterArbitration | None:
+        """The two-node arbitration record of a cluster, or None if never written."""
+        if not cluster_id:
+            return None
+        return single_or_none(ClusterArbitration().read_from_db(self.kv_store, id=cluster_id))
+
+    def get_arbitration_events(self, cluster_id: str, limit: int = 0) -> list[ArbitrationEvent]:
+        """Queued HA events of a cluster, oldest first per node."""
+        if not cluster_id:
+            return []
+        return ArbitrationEvent().read_from_db(self.kv_store, id="%s/" % cluster_id, limit=limit)
 
     def get_cluster_by_id(self, cluster_id: str) -> Cluster:
         if not cluster_id:

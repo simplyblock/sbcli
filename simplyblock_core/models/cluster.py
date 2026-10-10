@@ -258,6 +258,9 @@ class Cluster(BaseModel):
     #: falls back to the per-device record when it is still empty.
     jm_raid_layout: str = ""
     is_single_node: bool = False
+    # Two-node arbitration (docs/design/two-node-arbitration.md). Off by default:
+    # a dual-node cluster then keeps today's tolerance without the hold.
+    two_node_arbitration: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
     # operator-supplied failure_domain tag (rack/cabinet/DC) and placement
     # spreads data/parity chunks, HA journal copies and secondary/tertiary
