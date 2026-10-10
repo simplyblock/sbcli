@@ -550,11 +550,24 @@ def main():
                         _since = _started.timestamp()
                     except Exception:            # noqa: BLE001
                         _since = 0.0
-                _fatal, _summary = inspect_core_dumps(
-                    since_epoch=_since,
-                    expected_nodes=getattr(test_obj, "expected_core_nodes", set()),
-                    log_dir=getattr(test_obj, "docker_logs_path", "") or "",
-                )
+                # Guarded, because this now reaches every storage node over
+                # ssh and gathers per-core detail. It is a diagnostic: it must
+                # never be the reason a run ends. If it cannot answer, the run
+                # carries on and says so -- the same stance as
+                # start_alert_collection above.
+                try:
+                    _fatal, _summary = inspect_core_dumps(
+                        since_epoch=_since,
+                        expected_nodes=getattr(test_obj, "expected_core_nodes",
+                                               set()),
+                        log_dir=getattr(test_obj, "docker_logs_path", "") or "",
+                    )
+                except Exception:                    # noqa: BLE001
+                    logger.error("Core-dump inspection failed; continuing. "
+                                 "Cores on the nodes have NOT been judged for "
+                                 "this test.")
+                    logger.error(traceback.format_exc())
+                    _fatal, _summary = False, ""
                 for _line in _summary.splitlines():
                     logger.info(_line)
                 if _fatal:
