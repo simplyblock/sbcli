@@ -121,12 +121,34 @@ class CommonUtils:
                               "verify: bad", "checksum", "data mismatch")
     FIO_INTERRUPT_MARKERS = ("error", "fail", "throughput", "interrupt", "terminate")
 
-    def validate_fio_test(self, node, log_file):
+    # Structural damage: the verify header itself is wrong or fio dumped a
+    # mismatch file. Always fatal, on every device type.
+    FIO_STRUCTURAL_MARKERS = ("bad magic header", "hdr_fail", "verify: bad")
+    # Payload mismatch: the header was fine, the bytes were not. On a device
+    # without a 4K atomic-write guarantee this can also be produced by fio's own
+    # overlapping IO, so lblk callers can demote it -- see md5_severity.
+    FIO_PAYLOAD_MARKERS = ("verify failed", "checksum", "data mismatch")
+
+    def validate_fio_test(self, node, log_file, md5_severity="error"):
         """Validate an FIO log for corruption and for interruptions.
 
         Args:
             node (str): Node Host Name to check log file on
             log_file (str): Path to log file
+            md5_severity (str): "error" (default, unchanged behaviour) or
+                "warning". Only meaningful on non-NVMe (lblk) clusters, where a
+                device may not guarantee a 4K atomic write and fio's own
+                overlapping IO can therefore produce a payload mismatch that is
+                an artefact of the test rather than a defect. Demoting it keeps
+                that noise out of the pass/fail signal *without* hiding it --
+                the lines are still logged, and structural damage
+                (bad magic header / hdr_fail) stays fatal either way.
+
+                Note this only demotes; it never promotes. Real data integrity
+                on those clusters is gated by the raw-device crc32c check in
+                utils/raw_device_verify.py, which has no filesystem and no
+                overlapping IO and so cannot produce this class of false
+                positive at all.
 
         Raises:
             RuntimeError: on a verify/corruption hit, or on an interruption.
@@ -137,17 +159,57 @@ class CommonUtils:
         file_data = self.ssh_utils.read_file(node, log_file)
         lines = file_data.splitlines()
 
-        def _hits(markers):
+        # An FIO log always carries at least the job header, so nothing to read
+        # means the job never started -- a mistyped path, a session name the
+        # shell split on a space, a client that lost the mount. Every marker
+        # scan below would then match nothing and the caller would be told the
+        # volume is clean. Refusing to judge an empty log is the difference
+        # between "verified" and "never ran".
+        if not file_data.strip():
+            raise RuntimeError(
+                f"FIO log {log_file} on {node} is missing or empty, so nothing "
+                f"was verified. Treating as a failure rather than a pass: the "
+                f"job most likely never started.")
+
+        def _hits(markers, skip=()):
             out = []
             for ln in lines:
+                stripped = ln.strip()
+                if stripped in skip:
+                    continue
                 low = ln.lower()
                 for m in markers:
                     if m in low:
-                        out.append(ln.strip())
+                        out.append(stripped)
                         break
             return out
 
-        corruption = _hits(self.FIO_CORRUPTION_MARKERS)
+        # Lines already reported as demoted payload mismatches, so the
+        # interrupt scan below does not re-raise them. FIO_INTERRUPT_MARKERS
+        # contains the bare substrings "fail" and "error", which match
+        # "verify failed" and "checksum error" — without this, demoting the
+        # corruption check just moves the same failure to a different message.
+        demoted = set()
+
+        if md5_severity == "warning":
+            # Report the payload mismatches, then judge only on structural
+            # damage. Silence would be worse than noise here: these lines are
+            # exactly what a genuine torn write looks like, and somebody has to
+            # be able to triage them after the run.
+            payload = _hits(self.FIO_PAYLOAD_MARKERS)
+            demoted = set(payload)
+            if payload:
+                shown = "\n    ".join(payload[:6])
+                self.logger.warning(
+                    f"[fio-verify] {len(payload)} payload mismatch line(s) in "
+                    f"{log_file} on {node}, demoted to a warning for this "
+                    f"non-NVMe run. Triage each one; the raw-device crc32c "
+                    f"check is the authority on whether data was actually "
+                    f"lost:\n    {shown}"
+                )
+            corruption = _hits(self.FIO_STRUCTURAL_MARKERS)
+        else:
+            corruption = _hits(self.FIO_CORRUPTION_MARKERS)
         if corruption:
             shown = "\n    ".join(corruption[:6])
             self.logger.error(
@@ -162,7 +224,7 @@ class CommonUtils:
                 f"the next wave: they hold the bytes actually returned."
             )
 
-        interrupts = _hits(self.FIO_INTERRUPT_MARKERS)
+        interrupts = _hits(self.FIO_INTERRUPT_MARKERS, skip=demoted)
         if interrupts:
             shown = "\n    ".join(interrupts[:6])
             raise RuntimeError(
@@ -213,7 +275,18 @@ class CommonUtils:
             process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
             fio_count += len(process_fio)
 
-        assert fio_count == 0, f"FIO process list not empty: {process_list_after}"
+        # process_fio, not process_list_after. The count is taken from the
+        # FILTERED list -- the raw one also holds this check's own
+        # `bash -c ps -ef | grep -i 'fio --name'` and its grep child, which are
+        # dropped before counting. Printing the raw list put those two in every
+        # failure message and sent at least one reader hunting a self-match
+        # that the filter had already handled.
+        assert fio_count == 0, (
+            f"FIO process list not empty after waiting {timeout}s: "
+            f"{fio_count} process(es) still running. If the runtime was still "
+            f"ticking, the wait was too short rather than FIO being stuck -- "
+            f"compare the job's own runtime against this budget.\n    "
+            + "\n    ".join(p[:160] for p in process_fio))
         self.logger.info(f"FIO Running: {process_fio}")
 
         return end_time
@@ -612,3 +685,28 @@ def convert_bytes_to_gb_tb(bytes_value):
         return f"{bytes_value // TB}T"
     else:
         return f"{bytes_value // GB}G"
+
+def cli_failed(out, err=""):
+    """True when a CLI call did not do what was asked.
+
+    `if "error" in output` is not enough and cost a run: `volume add` answers
+    a missing pool with
+
+        Pool not found: testpool
+
+    which contains no "error" substring at all, so the check passed, the test
+    carried on, and it died later in seed() with "'NoneType' object is not
+    iterable" -- three frames away from the cause.
+
+    These are the shapes the CLI actually uses for failure.
+    """
+    text = ((out or "") + (err or "")).lower()
+    if not text.strip():
+        return True          # silence is not success for a -d command
+    markers = (
+        "error", "traceback", "not found", "no such", "does not exist",
+        "cannot", "invalid", "refus", "not allowed", "denied", "failed",
+        "unrecognized arguments", "usage:", "is required", "must be",
+        "already exists", "in use", "conflict", "insufficient",
+    )
+    return any(m in text for m in markers)

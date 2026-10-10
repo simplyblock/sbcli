@@ -18,6 +18,7 @@ from datetime import datetime
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
 
@@ -195,7 +196,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             f"verify_backlog=4096\n"
             f"verify_backlog_batch=32\n"
             f"randseed={randseed}\n"
-            f"max_latency=20s\n"
+            f"max_latency={FIO_MAX_LATENCY}\n"
             f"\n"
             f"[job1]\n"
         )
@@ -413,19 +414,31 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         )
 
         # Verify the StorageNodeOps CR was created
+        # Unqualified, so kubectl serves v1alpha2 -- the version the op is now
+        # written as. Pinning this to v1alpha1 to match the old spelling was a
+        # dead end: that version needs a conversion webhook this install does
+        # not deploy, so the read fails outright rather than returning the old
+        # shape.
         ops_json = self.k8s_utils.get_resource_json(
             "storagenodeops.storage.simplyblock.io", ops_name,
             namespace=self.k8s_utils.namespace,
         )
         ops_spec = ops_json.get("spec", {})
         self.logger.info(f"StorageNodeOps spec after create: {ops_spec}")
-        assert ops_spec.get("action") == "migrate", (
+        # v1alpha2 capitalises the enum; accept either so the assertion is
+        # about what was requested, not about which version served it.
+        assert str(ops_spec.get("action", "")).lower() == "migrate", (
             f"StorageNodeOps verification failed: expected action=migrate, "
             f"got: {ops_spec}"
         )
-        assert ops_spec.get("storageNodeRef") == storage_node_cr, (
+        # nodeRef in v1alpha2; storageNodeRef was the v1alpha1 spelling and is
+        # not served any more, so asserting on it failed every migration that
+        # had in fact been requested correctly. Both are accepted so the
+        # assertion is about what was asked for, not which version answered.
+        node_ref = ops_spec.get("nodeRef") or ops_spec.get("storageNodeRef")
+        assert node_ref == storage_node_cr, (
             f"StorageNodeOps verification failed: expected "
-            f"storageNodeRef={storage_node_cr}, got: {ops_spec}"
+            f"nodeRef={storage_node_cr}, got: {ops_spec}"
         )
 
         # ── Step 5: Wait for migration to complete ────────────────────────

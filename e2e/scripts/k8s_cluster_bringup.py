@@ -1,0 +1,1225 @@
+#!/usr/bin/env python3
+"""Bring up a simplyblock cluster through the operator's deployment config.
+
+The operator stopped reconciling StorageNodeSet. Nothing registers a reconciler
+for it in operator/cmd/main.go, and the only code that creates a StorageNode is
+deployment/expansion.go: a StorageNodeSet now applies cleanly, is never acted
+on, and the cluster waits forever for storage nodes that were never asked for.
+That is the "no spdk pod came up so the cluster never activated" failure, and it
+is not something a longer timeout fixes.
+
+The supported path is a ClusterDeploymentConfig -- a draft describing the whole
+deployment, which does nothing until somebody approves it:
+
+    OperatorOps(action: Discover)   inspects the workers and writes a draft
+    ClusterDeploymentConfig         the draft, in phase Draft
+    spec.approved = true            the gate; the operator then builds
+    phase: Expanded                 StorageCluster + one StorageNode per slot
+
+Two properties of that flow decide the shape of this script.
+
+*The draft is immutable once approved* ("an approved deployment config is
+immutable", and "approval cannot be withdrawn"). Every value we care about has
+to be written before the gate opens, not patched afterwards -- so this reads the
+draft back, edits it as one object, replaces it, and only then approves.
+
+*The device class is read off the groups*, not declared. DeviceClassOf() in
+expansion.go looks at whether a group lists devices.nvme or devices.block, and
+sets the cluster's immutable deviceClass from that. So lblk is not a flag we
+set on the cluster: it is a discovery that scanned block devices instead of
+NVMe ones, which is discover.enableLogicalBlockDevices. There is no
+deviceMode and no enableLblk in v1alpha2; both were removed.
+
+We raise our own discovery rather than using the one a fresh install performs by
+itself. That automatic run is guarded to fire only when no OperatorOps, no
+draft and no StorageCluster exist (bootstrap.go), so it is absent exactly when a
+job reruns against a half-built namespace; and it runs with default filters,
+which report every device including the one the worker boots from.
+
+Environment variables, all optional unless marked:
+
+    NAMESPACE            default simplyblock
+    CLUSTER_NAME         default simplyblock-cluster
+    ENVIRONMENT          Vanilla|OpenShift|Rancher|K3s|Talos; discovery
+                         concludes this itself, and this only overrides it
+    WORKER_NODES         whitespace- or comma-separated; empty inspects every
+                         schedulable worker
+    DEVICE_MODE          nvme (default) or lblk
+    NDCS / NPCS          erasure coding stripe
+    VCPU_COUNT           required by the CRD
+    MAX_SUBSYS           required by the CRD
+    MGMT_IFC             management interface name
+    DATA_NICS            comma-separated data interfaces
+    JM_COUNT             journal managers per node
+    JM_PERCENT           percent of each device given to the journal
+    ENABLE_JOURNAL_DEVICE  true|false
+    FORCE_DRIVE_FORMAT   true|false; 4K reformat on NVMe, wipefs on block
+    DRIVE_SIZE_RANGE     e.g. 1.7T-2T
+    PCIE_MODEL           NVMe only
+    BLOCK_DENY_LIST      comma-separated paths, lblk only. Unset by default:
+                         the root disk needs no help being excluded (it probes
+                         as Mounted/Busy/Partitioned), and a fixed name like
+                         /dev/sda is a data disk on some workers and the OS
+                         disk on others
+    BLOCK_DEVICES        comma-separated paths to use as block devices, e.g.
+                         /dev/nvme0n1,/dev/nvme1n1. Setting it SKIPS discovery
+                         and authors the document directly, for the case where
+                         discovery will not propose the hardware the lab has --
+                         see the RCA of 2026-09-25. Needs WORKER_NODES.
+    BLOCK_ALLOW_LIST     comma-separated paths, lblk only
+    ENABLE_PARTITIONED   true|false; report devices carrying a partition table
+    NODES_PER_SOCKET / SOCKETS_TO_USE
+    TIMEOUT_DISCOVERY    seconds, default 900
+    TIMEOUT_EXPAND       seconds, default 1800 (30 min)
+    TIMEOUT_CP_READY     seconds to wait for ControlPlane Available
+                         before approving, default 1800
+    DRY_RUN              1 prints what it would do and touches nothing
+    DRAFT_ONLY           1 discovers and writes the draft, but does not
+                         approve it, so it can be reviewed or hand-edited
+    APPROVE_ONLY         name of an existing draft: approve that and wait,
+                         changing none of its contents
+    KUBECTL_ATTEMPTS     tries per kubectl call (default 4)
+    DISCOVERY_ATTEMPTS   discovery runs before giving up (default 3)
+    FABRIC_TYPE          default tcp; no CRD default and immutable once set
+    SPDK_IMAGE           SPDK image every node should start. The deployment
+                         config has no field for it, so this is applied by
+                         setting SIMPLY_BLOCK_SPDK_ULTRA_IMAGE on the control
+                         plane before approval, and verified afterwards.
+                         Empty means no pin: the images are reported, not
+                         enforced.
+    CP_API_DEPLOYMENT    deployment serving add_node, default
+                         simplyblock-webappapi; only used to apply SPDK_IMAGE
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+NS = os.environ.get("NAMESPACE", "simplyblock")
+DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "yes")
+
+API = "storage.simplyblock.io/v1alpha2"
+
+#: How many times one kubectl call is tried before giving up.
+KUBECTL_ATTEMPTS = int(os.environ.get("KUBECTL_ATTEMPTS", "4"))
+
+#: How many times discovery is raised before giving up. Each attempt writes a
+#: fresh document, because a failed run's own document is its record.
+DISCOVERY_ATTEMPTS = int(os.environ.get("DISCOVERY_ATTEMPTS", "3"))
+
+#: Errors worth trying again. Everything else is the answer, not a hiccup.
+_TRANSIENT = (
+    "connection refused",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "too many requests",
+    "etcdserver",
+    "the server is currently unable",
+    "unable to connect to the server",
+    "no route to host",
+    "eof",
+    "tls handshake",
+    "webhook",            # the conversion webhook may not be serving yet
+)
+
+
+def _transient(stderr: str) -> bool:
+    low = (stderr or "").lower()
+    return any(m in low for m in _TRANSIENT)
+
+
+
+def log(msg: str) -> None:
+    print(f"[bringup] {msg}", flush=True)
+
+
+def kubectl(*args: str, check: bool = True, stdin: str | None = None) -> str:
+    cmd = ["kubectl", "-n", NS, *args]
+    if DRY_RUN:
+        # A dry run must not touch the cluster at all, reads included: it is
+        # run to check the document this script would build, often from a
+        # machine that has no kubectl and no kubeconfig. An empty read reads
+        # as "not there", which is the state a dry run is describing anyway.
+        log(f"DRY_RUN would run: {' '.join(cmd)}")
+        if stdin:
+            print(stdin)
+        return ""
+    last = None
+    for attempt in range(1, KUBECTL_ATTEMPTS + 1):
+        try:
+            proc = subprocess.run(
+                cmd, input=stdin, capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "kubectl is not on PATH; this script drives the cluster "
+                "through it and cannot run without one") from None
+
+        if proc.returncode == 0:
+            return proc.stdout
+
+        last = (f"{' '.join(cmd)} failed ({proc.returncode})\n"
+                f"stdout: {proc.stdout.strip()}\n"
+                f"stderr: {proc.stderr.strip()}")
+
+        # Retry only what a retry can fix. A rejected document is rejected on
+        # every attempt, and repeating it buries the reason under identical
+        # noise; an apiserver that is rolling, throttling or briefly
+        # unreachable is the case this exists for.
+        if not _transient(proc.stderr) or attempt == KUBECTL_ATTEMPTS:
+            break
+        wait = 5 * attempt
+        log(f"transient kubectl failure (attempt {attempt}/"
+            f"{KUBECTL_ATTEMPTS}), retrying in {wait}s: "
+            f"{proc.stderr.strip()[:120]}")
+        time.sleep(wait)
+
+    if check:
+        raise RuntimeError(last)
+    return ""
+
+
+def kubectl_out(*args):
+    """kubectl read that returns (stdout, stderr) instead of swallowing both.
+
+    kubectl() returns "" for both "no such object" and "the call failed", which
+    is fine where the caller only wants the happy path and hides the cause
+    where it does not.
+    """
+    cmd = ["kubectl", "-n", NS, *args]
+    if DRY_RUN:
+        return "", ""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return "", "kubectl is not on PATH"
+    return proc.stdout.strip(), proc.stderr
+
+
+def env_list(name: str) -> list[str]:
+    """Split a comma- or whitespace-separated variable, dropping blanks."""
+    raw = os.environ.get(name, "") or ""
+    return [p for p in raw.replace(",", " ").split() if p]
+
+
+def env_bool(name: str, default: bool | None = None) -> bool | None:
+    raw = (os.environ.get(name, "") or "").strip().lower()
+    if raw in ("true", "1", "yes"):
+        return True
+    if raw in ("false", "0", "no"):
+        return False
+    return default
+
+
+def env_int(name: str) -> int | None:
+    raw = (os.environ.get(name, "") or "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def resolve_workers(names):
+    """Map the names we were given onto node names the cluster actually has.
+
+    On OpenShift a node is named by its FQDN -- worker-1.ocp.simplyblock.ai --
+    and both metadata.name and the kubernetes.io/hostname label carry it. A
+    worker_nodes input of "worker-1" therefore names nothing.
+
+    Discovery accepts that list and writes it into the draft. The expansion
+    then creates StorageNodes with workerNode: worker-1, whose pods can never
+    be scheduled, and the document sits in Activating until its hour is up.
+    The run fails after 60 minutes with a message about the control plane,
+    which is not the problem -- the problem is a worker that does not exist,
+    and it was knowable in the first second.
+
+    So: exact match wins; failing that a unique name that starts with
+    "<given>." is taken as the same machine written short. Anything left over
+    is fatal here rather than an hour from now.
+    """
+    if not names:
+        return names
+
+    out = kubectl("get", "nodes", "-o",
+                  "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+                  check=False)
+    actual = [n.strip() for n in (out or "").splitlines() if n.strip()]
+    if not actual:
+        log("WARNING: could not list nodes, so worker names go through "
+            "unchecked")
+        return names
+
+    resolved, unknown = [], []
+    for name in names:
+        if name in actual:
+            resolved.append(name)
+            continue
+        matches = [a for a in actual if a.startswith(name + ".")]
+        if len(matches) == 1:
+            log(f"worker {name!r} -> {matches[0]!r}")
+            resolved.append(matches[0])
+        elif matches:
+            unknown.append(f"{name} (ambiguous: {', '.join(sorted(matches))})")
+        else:
+            unknown.append(name)
+
+    if unknown:
+        raise RuntimeError(
+            "these workers do not exist on this cluster: "
+            + ", ".join(unknown)
+            + f".\nNodes present: {', '.join(sorted(actual))}.\n"
+            "Discovery would accept the names and write them into the draft, "
+            "and the expansion would then wait out its full hour on "
+            "StorageNodes whose pods can never be scheduled.")
+    return resolved
+
+
+def is_lblk() -> bool:
+    return (os.environ.get("DEVICE_MODE", "nvme") or "nvme").lower() in (
+        "lblk", "logicalblock", "block")
+
+
+# ── step 1: discovery ────────────────────────────────────────────────────
+
+
+def build_discovery(name: str) -> dict:
+    """The OperatorOps that inspects the workers and writes the draft."""
+    lblk = is_lblk()
+    device_filter: dict = {}
+
+    size_range = (os.environ.get("DRIVE_SIZE_RANGE", "") or "").strip()
+    if size_range:
+        device_filter["driveSizeRange"] = size_range
+
+    # The per-class filters are mutually exclusive with the other class's, so
+    # each is only ever sent for the class actually being scanned.
+    if lblk:
+        allow = env_list("BLOCK_ALLOW_LIST")
+        deny = env_list("BLOCK_DENY_LIST")
+        if allow:
+            device_filter["blockAllowList"] = allow
+        if deny:
+            device_filter["blockDenyList"] = deny
+    else:
+        model = (os.environ.get("PCIE_MODEL", "") or "").strip()
+        if model:
+            device_filter["pcieModel"] = model
+
+    partitioned = env_bool("ENABLE_PARTITIONED")
+    if partitioned is not None:
+        device_filter["enablePartitionedDevices"] = partitioned
+
+    discover: dict = {
+        "configName": name,
+        # A storage node is a data path; the default already declines
+        # control-plane machines, and this states it so a single-node
+        # development cluster fails loudly rather than quietly enrolling etcd.
+        "enableControlPlaneNodes": False,
+    }
+
+    # The class is chosen here and nowhere else. Scanning block devices is what
+    # makes the draft's groups carry devices.block, which is what makes the
+    # cluster LogicalBlock.
+    #
+    # On spec.discover, NOT under deviceFilter. It was written one level too
+    # deep and the apiserver rejects the document outright, so every lblk k8s
+    # bring-up failed all three discovery attempts with
+    #   strict decoding error: unknown field
+    #   "spec.discover.deviceFilter.enableLogicalBlockDevices"
+    # Strict decoding is doing us a favour here: a tolerant apiserver would
+    # have dropped the field and silently given us an NVMe cluster under an
+    # lblk name.
+    if lblk:
+        discover["enableLogicalBlockDevices"] = True
+    if device_filter:
+        discover["deviceFilter"] = device_filter
+
+    workers = resolve_workers(env_list("WORKER_NODES"))
+    if workers:
+        # Named workers rather than a selector: a selector's entries are ANDed,
+        # so two hostnames in one selector match nothing at all.
+        discover["workers"] = workers
+
+    # Naming an existing cluster turns the run from "create a cluster" into
+    # "grow this one". It is how a node is added now: the draft it writes
+    # carries the same clusterRef, and the nodes it creates are marked as an
+    # expansion, which the control plane reads as a request to rebalance onto
+    # them rather than to treat them as part of an initial layout.
+    cluster_ref = (os.environ.get("CLUSTER_REF", "") or "").strip()
+    if cluster_ref:
+        discover["clusterRef"] = cluster_ref
+
+    return {
+        "apiVersion": API,
+        "kind": "OperatorOps",
+        "metadata": {"name": f"e2e-discover-{name}", "namespace": NS},
+        "spec": {"action": "Discover", "discover": discover},
+    }
+
+
+def run_discovery(config_name: str, timeout: int) -> str:
+    op = build_discovery(config_name)
+    op_name = op["metadata"]["name"]
+
+    existing = kubectl("get", "operatorops", op_name, "-o", "json", check=False)
+    if existing.strip():
+        prior = json.loads(existing).get("status", {}) or {}
+        if prior.get("configRef"):
+            log(f"discovery {op_name} already produced "
+                f"{prior['configRef']}; reusing it")
+        elif prior.get("phase") == "Failed":
+            # Reusing a failed run just waits out the timeout on a result that
+            # is already in. Clear it so this attempt is a real one.
+            log(f"discovery {op_name} previously failed "
+                f"({prior.get('message', 'no message')}); deleting and "
+                f"raising it again")
+            kubectl("delete", "operatorops", op_name, "--ignore-not-found",
+                    check=False)
+            kubectl("apply", "-f", "-", stdin=json.dumps(op))
+        else:
+            log(f"discovery {op_name} is still running; waiting on it")
+    else:
+        log(f"raising discovery {op_name}")
+        log(json.dumps(op["spec"], indent=2))
+        kubectl("apply", "-f", "-", stdin=json.dumps(op))
+
+    if DRY_RUN:
+        return config_name
+
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        out = kubectl("get", "operatorops", op_name, "-o", "json", check=False)
+        if out.strip():
+            st = json.loads(out).get("status", {})
+            phase = st.get("phase", "")
+            msg = st.get("message", "")
+            if (phase, msg) != last:
+                log(f"discovery phase={phase or '-'} {msg}")
+                last = (phase, msg)
+            ref = st.get("configRef")
+            if ref:
+                log(f"discovery wrote ClusterDeploymentConfig {ref}")
+                return ref
+            if phase == "Failed":
+                raise RuntimeError(f"discovery failed: {msg}")
+        time.sleep(10)
+    raise RuntimeError(
+        f"discovery did not produce a config within {timeout}s (phase={last})")
+
+
+# ── step 2: edit the draft ───────────────────────────────────────────────
+
+
+#: Registries the CRD's ImageSpec pattern admits. Anything else is refused by
+#: the apiserver with a message naming the regex rather than the value, so this
+#: is checked here where the offending variable can be named.
+_IMAGE_RE = re.compile(
+    r"^(quay\.io/simplyblock-io|docker\.io/simplyblock|public\.ecr\.aws/simply-block)"
+    r"/[a-z0-9][a-z0-9._-]*:[a-zA-Z0-9][a-zA-Z0-9._-]*(@sha256:[a-f0-9]{64})?$")
+
+
+def shape_images(spec: dict) -> None:
+    """Pin the images the deployment runs, in spec.images.
+
+    This is what replaced StorageNodeSet.spdkImage, and it landed on
+    2026-09-27. Before it there was no field at all: a document could not carry
+    an SPDK image, the StorageNodes the expansion created came out with
+    spec.config.spdkImage empty, and storage_node_ops.py fell back to
+    constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE. A run that named a build got the
+    default and, until the check below existed, said nothing about it.
+
+    The expansion spends these on two kinds: nodeAgent goes to
+    StorageCluster.spec.storageNodes, spdk and spdkProxy onto every
+    StorageNode.spec.config, which is why they are per node and can be rolled
+    one machine at a time later.
+
+    An earlier version of this script set SIMPLY_BLOCK_SPDK_ULTRA_IMAGE on the
+    control-plane Deployment instead, on the reasoning that get_config_var reads
+    the environment first. The variable applied and survived, and the nodes
+    still came up on the default -- so the add does not read it on this path.
+    That workaround is gone; this is the supported field.
+    """
+    wanted = {
+        "spdk": (os.environ.get("SPDK_IMAGE", "") or "").strip(),
+        "spdkProxy": (os.environ.get("SPDK_PROXY_IMAGE", "") or "").strip(),
+        "nodeAgent": (os.environ.get("NODE_AGENT_IMAGE", "") or "").strip(),
+    }
+    named = {k: v for k, v in wanted.items() if v}
+    if not named:
+        return
+
+    bad = [f"{k}={v}" for k, v in named.items() if not _IMAGE_RE.match(v)]
+    if bad:
+        raise RuntimeError(
+            "these images name a registry the CRD does not admit, so the "
+            "document would be refused: " + ", ".join(bad) + ".\n"
+            "    It takes quay.io/simplyblock-io, docker.io/simplyblock or "
+            "public.ecr.aws/simply-block, each with an explicit tag -- a bare "
+            "repository like simplyblock/spdk:main-latest is rejected, so the "
+            "registry has to be written out.")
+
+    images = spec.setdefault("images", {})
+    for slot, ref in named.items():
+        # Always, matching the CRD default: every tag this product ships by
+        # default is a moving one, and a node added later otherwise runs
+        # whatever its kubelet already held.
+        images[slot] = {"image": ref, "imagePullPolicy": "Always"}
+        log(f"  pinning {slot} -> {ref}")
+
+
+def shape_draft(cfg: dict) -> dict:
+    """Write our parameters into the draft, before anyone approves it."""
+    spec = cfg.setdefault("spec", {})
+
+    # Before the growth branch: spdk and spdkProxy are written per StorageNode,
+    # so a document that only adds nodes still pins what those nodes run.
+    shape_images(spec)
+
+    # A growth document names the cluster it grows and describes no new one.
+    # Writing a cluster template into it as well is how a draft ends up both
+    # creating and joining, which the expansion refuses.
+    if spec.get("clusterRef"):
+        return shape_growth(spec, cfg)
+
+    cluster = spec.setdefault("cluster", {})
+    cluster["name"] = os.environ.get("CLUSTER_NAME", "simplyblock-cluster")
+
+    for key, var in (("vcpuCount", "VCPU_COUNT"),
+                     ("maxSubsystemCount", "MAX_SUBSYS"),
+                     ("nodesPerSocket", "NODES_PER_SOCKET")):
+        val = env_int(var)
+        if val is not None:
+            cluster[key] = val
+
+    ndcs, npcs = env_int("NDCS"), env_int("NPCS")
+    if ndcs is not None or npcs is not None:
+        stripe = cluster.setdefault("stripe", {})
+        if ndcs is not None:
+            stripe["dataChunks"] = ndcs
+        if npcs is not None:
+            stripe["parityChunks"] = npcs
+
+    sockets = env_list("SOCKETS_TO_USE")
+    if sockets:
+        cluster["socketsToUse"] = sockets
+
+    # How many workers may be added at once. The CRD defaults this to 1, which
+    # adds nodes strictly serially -- four nodes then take four node-adds
+    # end to end, and every minute of that is another minute for a worker to
+    # reboot or a controller to drop underneath the deployment. The dev's own
+    # GCP pipelines pin it to the worker count for the same reason.
+    budget = env_int("NODE_PROVISIONING_BUDGET")
+    if budget is None:
+        budget = len(env_list("WORKER_NODES")) or None
+    if budget:
+        cluster["nodeProvisioningBudget"] = budget
+
+    jd = env_bool("ENABLE_JOURNAL_DEVICE")
+    if jd is not None:
+        cluster["enableJournalDevice"] = jd
+
+    # No default in the CRD and immutable on the cluster, so an unset fabric is
+    # not a value the cluster can be corrected to later -- it is a cluster that
+    # serves volumes over nothing, permanently. Discovery does not fill it in.
+    cluster["fabricType"] = (
+        os.environ.get("FABRIC_TYPE", "") or "tcp").strip()
+
+    # One field, two operations. buildWorkload resolves it to enableFormat4K on
+    # an NVMe cluster and enableBlockFormat on a block one, because reformatting
+    # a namespace and wiping a partition table are not the same act.
+    fmt = env_bool("FORCE_DRIVE_FORMAT")
+    if fmt is not None:
+        cluster["enableDriveFormat"] = fmt
+
+    env_name = (os.environ.get("ENVIRONMENT", "") or "").strip()
+    if env_name:
+        # Discovery concludes this itself; overriding is for the case where it
+        # guessed a distribution we know better than.
+        spec["environment"] = env_name
+
+    shape_groups(spec)
+
+    return cfg
+
+
+def shape_groups(spec: dict) -> None:
+    """Write the interfaces and journal layout into every group.
+
+    Shared by both paths: a growth document has groups too, and its nodes need
+    the same interfaces as the ones already in the cluster.
+    """
+    # Interfaces are stated per group, and buildWorkload carries the first
+    # group's onto the cluster -- a DaemonSet is one object and cannot differ
+    # per group. Writing them into every group is how discovery writes a draft,
+    # and keeps the document meaning what it looks like.
+    mgmt = (os.environ.get("MGMT_IFC", "") or "").strip()
+    data = env_list("DATA_NICS")
+    jm_count, jm_pct = env_int("JM_COUNT"), env_int("JM_PERCENT")
+
+    groups = devices = 0
+    for node_set in spec.get("nodeSets") or []:
+        for group in node_set.get("groups") or []:
+            groups += 1
+            devs = group.get("devices") or {}
+            devices += len(devs.get("nvme") or []) + len(devs.get("block") or [])
+            if mgmt:
+                group["mgmtInterface"] = mgmt
+            if data:
+                group["dataInterfaces"] = data
+            if jm_count is not None or jm_pct is not None:
+                jm = group.setdefault("journalManager", {})
+                if jm_count is not None:
+                    jm["count"] = jm_count
+                if jm_pct is not None:
+                    jm["percentPerDevice"] = jm_pct
+
+    if not groups:
+        raise RuntimeError(
+            "the draft has no groups: discovery found no worker with a usable "
+            "device. Check the device filter -- a driveSizeRange or pcieModel "
+            "that matches nothing produces exactly this.")
+
+    # Groups can exist and still name nothing. Approving that builds nodes that
+    # hand over no storage, and the failure surfaces much later as a cluster
+    # that will not activate.
+    if devices == 0:
+        raise RuntimeError(
+            f"the draft has {groups} group(s) but names no devices at all. "
+            f"The nodes it describes would hand over nothing. Check what the "
+            f"probe refused: kubectl -n {NS} describe operatorops <run>")
+    log(f"draft names {devices} device(s) across {groups} group(s)")
+
+    # lblk needs two units per node, and the draft already says whether it has
+    # them. LBLK_MIN_DEVICES_PER_NODE is 2 (constants.py), enforced by
+    # node_configure.py inside the storage-node init container:
+    #
+    #     lblk mode requires at least 2 partitions or SSDs per node;
+    #     only 1 eligible unit(s) selected: ['sdd']
+    #
+    # That container then crash-loops, so the storage-node API never starts,
+    # so every StorageNode sits at CheckingHost reporting HostUnreachable until
+    # its 30-minute deadline expires. The run on 2026-09-28 spent half an hour
+    # arriving at a conclusion the draft above had already stated: one device
+    # per group.
+    #
+    # Checked per group rather than per node because a group is the unit that
+    # carries devices, and every worker in it gets that same list.
+    thin = [(g.get("name") or "?", g.get("workers") or [], blk)
+            for ns_ in spec.get("nodeSets") or []
+            for g in ns_.get("groups") or []
+            if len(blk := ((g.get("devices") or {}).get("block") or [])) == 1]
+    if thin:
+        detail = "\n    ".join(
+            f"{name}: {len(dev)} device {dev} for worker(s) {', '.join(wrk)}"
+            for name, wrk, dev in thin)
+        raise RuntimeError(
+            f"{len(thin)} group(s) name only one block device, and lblk "
+            f"requires two per node:\n    " + detail + "\n"
+            f"    Approving this builds nodes whose init container refuses to "
+            f"configure them, and they fail at CheckingHost 30 minutes later.\n"
+            f"    What the probe refused, and why, is in the node reports:\n"
+            f"      kubectl -n {NS} get cm -l "
+            f"storage.simplyblock.io/component=nodeprobe -o name\n"
+            f"      kubectl -n {NS} get cm <name> -o "
+            f"jsonpath='{{.data.report\\.json}}'"
+            f" | python3 -m json.tool | grep -A3 rejections\n"
+            f"    A disk rejected as NotBlank carries a filesystem or foreign "
+            f"signature; discovery has no override for that, so it has to be "
+            f"wiped before it can be offered.")
+
+
+
+def shape_growth(spec: dict, cfg: dict) -> dict:
+    """Edit a growth document: only the groups are ours to set."""
+    log(f"growth document for existing cluster {spec['clusterRef']}")
+    shape_groups(spec)
+    return cfg
+
+
+def describe(cfg: dict) -> None:
+    """Say what is about to be approved, in the terms that decide the cluster."""
+    spec = cfg.get("spec", {})
+    cluster = spec.get("cluster") or {}
+    nvme = block = 0
+    workers: list[str] = []
+    for node_set in spec.get("nodeSets") or []:
+        for group in node_set.get("groups") or []:
+            devs = group.get("devices") or {}
+            per = len(devs.get("nvme") or []) or len(devs.get("block") or [])
+            n = len(group.get("workers") or [])
+            workers += group.get("workers") or []
+            if devs.get("block"):
+                block += per * n
+            else:
+                nvme += per * n
+    stripe = cluster.get("stripe") or {}
+    log("draft to approve:")
+    log(f"  cluster        {cluster.get('name')}")
+    log(f"  environment    {spec.get('environment')}")
+    log(f"  stripe         {stripe.get('dataChunks')}+{stripe.get('parityChunks')}")
+    log(f"  vcpu/subsys    {cluster.get('vcpuCount')}/{cluster.get('maxSubsystemCount')}")
+    log(f"  device class   {'LogicalBlock' if block else 'NVMe'} "
+        f"({block or nvme} device(s) across {len(workers)} worker slot(s))")
+    log(f"  workers        {', '.join(sorted(set(workers)))}")
+
+
+# ── step 3: approve and wait ─────────────────────────────────────────────
+
+
+def failed_storage_nodes():
+    """StorageNodes the operator has given up on, with the reason.
+
+    A node that reaches Failed is not retried -- on 2026-09-25 one sat there
+    for three hours while the deployment config waited out its full deadline
+    and then reported that the step had timed out, which says nothing about
+    which node or why. Its events did: the worker was cordoned and NotReady
+    because OpenShift's machine-config operator was rebooting it to apply the
+    KubeletConfig the cluster's own creation had just triggered.
+
+    So the wait ends here instead, naming the node. Waiting longer cannot help
+    once the operator has stopped trying.
+    """
+    out = kubectl("get", "storagenode", "-o",
+                  "jsonpath={range .items[*]}{.metadata.name}\t"
+                  "{.spec.workerNode}\t{.status.phase}\t"
+                  "{.status.message}{\"\\n\"}{end}", check=False)
+    bad = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[2].strip() == "Failed":
+            bad.append((parts[0], parts[1], (parts[3] if len(parts) > 3
+                                             else "").strip()))
+    return bad
+
+
+def worker_state(worker):
+    """Ready/schedulable summary for a worker, for the failure message."""
+    out = kubectl("get", "node", worker, "-o",
+                  "jsonpath={.spec.unschedulable}|"
+                  "{range .status.conditions[?(@.type=='Ready')]}{.status}{end}",
+                  check=False)
+    cordoned, _, ready = (out or "").partition("|")
+    return (f"Ready={ready.strip() or '?'}"
+            f"{' CORDONED' if cordoned.strip() == 'true' else ''}")
+
+
+def wait_control_plane_ready(timeout=1800):
+    """Block until the ControlPlane reports Available.
+
+    The manual OpenShift deploy gates on this explicitly -- install the chart,
+    watch for "the control plane's readiness probe passed", and only then edit
+    and approve the draft.
+
+    The first version of this read phase and step through one jsonpath with a
+    tab in it and treated any empty result as "not ready yet". When the read
+    came back empty it waited the full 1800s and then said
+
+        the control plane did not become Available within 1800s (last )
+
+    which names neither what it saw nor why it saw nothing -- the reading was
+    empty every time and the failure could not be told apart from a control
+    plane that genuinely never came up. So: read one field at a time, keep the
+    stderr, and say plainly whether the object is missing, unreadable, or
+    simply not ready.
+    """
+    deadline = time.time() + timeout
+    last = None
+    complained = False
+
+    while time.time() < deadline:
+        phase, err = kubectl_out("get", "controlplane", "-o",
+                                 "jsonpath={.items[0].status.phase}")
+        if phase:
+            step, _ = kubectl_out("get", "controlplane", "-o",
+                                  "jsonpath={.items[0].status.step.state}")
+            reading = f"{phase}/{step or '-'}"
+            if reading != last:
+                log(f"control plane: {reading}")
+                last = reading
+            if phase == "Available":
+                return
+            if phase == "Degraded":
+                # Degraded means up-but-something-is-unhealthy, not down. On a
+                # namespace whose previous runs failed, tasks-runner-sync-lvol-del
+                # crash-loops with "No clusters found!" because there is no
+                # cluster yet -- a consequence of the thing we are here to fix,
+                # and it would gate us out of ever fixing it. The pod is 16/17
+                # ready and the management API answers; node-add lives in a
+                # different container.
+                #
+                # So this proceeds, loudly. Waiting on Available would deadlock
+                # against a condition only a successful deploy can clear.
+                msg, _ = kubectl_out("get", "controlplane", "-o",
+                                     "jsonpath={.items[0].status.message}")
+                log(f"WARNING: control plane is Degraded, proceeding anyway: "
+                    f"{msg or 'no message'}")
+                return
+        elif not complained:
+            # Say it once, with whatever the API actually said, rather than
+            # silently retrying for half an hour.
+            names, _ = kubectl_out("get", "controlplane", "-o",
+                                   "jsonpath={.items[*].metadata.name}")
+            if names.strip():
+                log(f"control plane {names.strip()} exists but reports no "
+                    f"phase yet")
+            else:
+                log("no ControlPlane object in this namespace yet"
+                    + (f" (kubectl said: {err.strip()[:160]})" if err.strip()
+                       else ""))
+            complained = True
+        time.sleep(10)
+
+    raise RuntimeError(
+        f"the control plane did not reach Available within {timeout}s "
+        f"(last reading: {last or 'none -- nothing was ever read'}). "
+        f"Approving now would deploy storage nodes against a control plane "
+        f"that cannot answer them. Check: kubectl -n {NS} get controlplane")
+
+
+#: How long the deadline may be pushed out in total while OpenShift is
+#: rebooting workers underneath us. Generous because a rolling MachineConfig
+#: across four workers is drain + reboot + rejoin, one at a time.
+MCO_GRACE_TOTAL = int(os.environ.get("TIMEOUT_MCO_GRACE", "3600"))
+
+
+def mco_updating():
+    """MachineConfigPools OpenShift is currently applying, by name.
+
+    Creating a StorageCluster writes a KubeletConfig and a MachineConfigPool,
+    and the machine-config operator then drains, reboots and rejoins every
+    worker in that pool one at a time. Storage nodes cannot come up while
+    their worker is cordoned, so the deployment sits still through all of
+    it -- and reports only the phase it is stuck in.
+
+    That is what happened on 2026-10-07: "worker worker-1 is cordoned" at
+    20:06, the 1800s deadline fired at 20:33, and the SPDK pods came up at
+    21:00 -- the bring-up was still making progress when we gave up on it.
+
+    Columns, not jsonpath: NAME CONFIG UPDATED UPDATING DEGRADED ...
+    """
+    out = kubectl("get", "machineconfigpool", "--no-headers", check=False)
+    rolling = []
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[3] == "True":
+            rolling.append(parts[0])
+    return rolling
+
+
+def dump_stall_state(name: str) -> None:
+    """Everything worth seeing when the deployment stops advancing.
+
+    Written after a run sat in Expanding/Activating for the full 1800s and
+    then failed with nothing but the phase name. No node had reached Failed,
+    so the per-node warning above never fired; the test step never ran, so no
+    logs were collected; and the cluster was gone by the time anyone looked.
+    That left one phase string as the only evidence a 30 minute wait
+    produced. Not enough to act on.
+
+    Reads only, each independent and best-effort: this runs on the failure
+    path, and a dump that raises would replace the real error with its own.
+    """
+    def show(title, *args, limit=50):
+        log(f"---- {title}")
+        try:
+            out = kubectl(*args, check=False)
+        except Exception as exc:                       # noqa: BLE001
+            log(f"     (could not read: {str(exc)[:120]})")
+            return
+        lines = (out or "").strip().splitlines()
+        if not lines:
+            log("     (nothing)")
+            return
+        for line in lines[:limit]:
+            log(f"     {line}")
+        if len(lines) > limit:
+            log(f"     ... {len(lines) - limit} more line(s)")
+
+    log("")
+    log("state at the point the deployment stopped advancing:")
+    show("machine config pools (OpenShift reboots workers here)",
+         "get", "machineconfigpool", "--no-headers", limit=40)
+    show("storage nodes", "get", "storagenode", "-o", "wide")
+    show("storage cluster", "get", "storagecluster", "-o", "wide")
+    show("pods that are not Running", "get", "pods",
+         "--field-selector=status.phase!=Running", "-o", "wide")
+    show("recent warnings", "get", "events", "--field-selector=type=Warning",
+         "--sort-by=.lastTimestamp", limit=30)
+    show(f"clusterdeploymentconfig {name}", "describe",
+         "clusterdeploymentconfig", name, limit=80)
+    log("")
+
+
+def approve_and_wait(name: str, timeout: int) -> None:
+    # The gate the manual deploy waits on before it edits the draft.
+    wait_control_plane_ready(int(os.environ.get("TIMEOUT_CP_READY", "1800")))
+
+    log(f"approving {name}")
+    kubectl("patch", "clusterdeploymentconfig", name, "--type=merge",
+            "-p", json.dumps({"spec": {"approved": True}}))
+    if DRY_RUN:
+        return
+
+    deadline = time.time() + timeout
+    last = ""
+    reported_failed = set()
+    mco_granted = 0.0
+    mco_seen = set()
+    while time.time() < deadline:
+        out = kubectl("get", "clusterdeploymentconfig", name, "-o", "json",
+                      check=False)
+        if out.strip():
+            st = json.loads(out).get("status", {})
+            phase = st.get("phase", "")
+            step = (st.get("step") or {}).get("state", "")
+            msg = st.get("message", "")
+            cur = f"{phase}/{step}: {msg}"
+            if cur != last:
+                log(f"  {cur}")
+                last = cur
+            if phase == "Expanded":
+                log(f"cluster {st.get('clusterRef')} deployed; "
+                    f"{len(st.get('nodeRefs') or [])} storage node(s)")
+                return
+            if phase == "Failed":
+                raise RuntimeError(f"deployment failed: {msg}")
+
+        # The document stays Expanding while a node underneath it has already
+        # failed, so watch the nodes too -- but report rather than give up.
+        #
+        # Failed does look terminal: the handler that sets it releases the
+        # node's provisioning slot ("a node that has given up holds nothing")
+        # and nothing re-enters provisioning from there. Even so, aborting on
+        # it would turn a run that recovers by some other route -- an operator
+        # restart, a StorageNodeOps, somebody uncordoning a worker -- into a
+        # failure we caused. Saying which node and why, the moment it happens,
+        # is the part worth having; the deadline can still decide the outcome.
+        for node, worker, why in failed_storage_nodes():
+            if node in reported_failed:
+                continue
+            reported_failed.add(node)
+            log(f"WARNING: storage node {node} on worker {worker} has Failed: "
+                f"{why or 'no message'}")
+            log(f"         worker now: {worker_state(worker)}")
+            log(f"         kubectl -n {NS} get events "
+                f"--field-selector involvedObject.name={node}")
+            log("         still waiting -- usually terminal, but the deadline "
+                "decides, not this check")
+        # OpenShift is rebooting the workers this cluster needs, because
+        # creating the cluster is what asked it to. Nothing can progress
+        # until it finishes, so do not spend the deadline on it -- but cap
+        # the generosity, or a genuinely stuck pool buys unlimited time.
+        rolling = mco_updating()
+        if rolling and mco_granted < MCO_GRACE_TOTAL:
+            grant = min(15.0, MCO_GRACE_TOTAL - mco_granted)
+            deadline += grant
+            mco_granted += grant
+            for pool in rolling:
+                if pool in mco_seen:
+                    continue
+                mco_seen.add(pool)
+                log(f"NOTE: OpenShift is rolling MachineConfigPool {pool}. "
+                    f"It drains, reboots and rejoins each worker in turn, and "
+                    f"a cordoned worker cannot bring a storage node up. "
+                    f"Holding the deadline open for up to {MCO_GRACE_TOTAL}s "
+                    f"while it works.")
+        elif rolling:
+            joined = ", ".join(rolling)
+            log(f"WARNING: MachineConfigPool(s) {joined} are still rolling "
+                f"after {MCO_GRACE_TOTAL}s of grace; the deadline is running "
+                f"again.")
+        time.sleep(15)
+    dump_stall_state(name)
+    raise RuntimeError(
+        f"deployment did not finish within {timeout}s ({last}).\n"
+        f"This one is not retryable in place: an approved document is "
+        f"immutable and approval cannot be withdrawn, so there is nothing to "
+        f"edit and re-approve. To start over, delete the "
+        f"ClusterDeploymentConfig and the StorageCluster it created, then run "
+        f"the bring-up again -- cleanup_k8s.sh does both.")
+
+
+def verify_spdk_image(wanted: str, timeout: int = 600) -> None:
+    """Fail if the SPDK pods are not running the image that was asked for.
+
+    spdkImage lives on the StorageNode (spec.config.spdkImage in v1alpha2,
+    spec.overrides.spdkImage in v1alpha1) and not on the deployment config, so
+    the document cannot carry it. It is read once, in addParams, at the moment
+    postNode adds the node to the control plane -- not re-read on restart. The
+    config creates the node objects and an independent reconciler posts them,
+    with no pause hook and a provisioning budget whose floor is 1, so there is
+    no point after approval at which a patch reliably lands first.
+
+    What is left is to check. A run that asked for a particular SPDK build and
+    silently got the default is a wrong green -- the whole point of pinning it
+    is that the build under test is the variable -- so this is an error rather
+    than a warning.
+    """
+    # Select the SPDK pods, which are not the node-agent DaemonSet.
+    #
+    # This asked for "app=storage-node" and got
+    # simplyblock-storage-node-ds-<cluster>-<hash>, the DaemonSet that runs the
+    # node agent. Those legitimately run simplyblock/simplyblock:main, so every
+    # one of them was reported as carrying the wrong SPDK image and a cluster
+    # that had deployed correctly failed the gate.
+    #
+    # storage_deploy_spdk.yaml.j2 names the real pods
+    # snode-spdk-pod-<rpc_port>-<cluster_id> and labels them
+    # "role: simplyblock-storage-node" plus "app: spdk-app-<rpc_port>". The role
+    # is the stable one -- app carries the port, so it differs per node.
+    selector = "role=simplyblock-storage-node"
+
+    # Wait for them, rather than reading an empty list as an answer.
+    #
+    # The SPDK pod is created at node-add, so it appears while the nodes are
+    # Activating. approve_and_wait returns at phase Expanded, and the step line
+    # at that point is routinely "Expanded/Activating" -- the document is done,
+    # the nodes are not. Checking immediately can find nothing.
+    #
+    # An empty result used to WARN and return, which is the wrong green this
+    # function exists to prevent: a run that pinned an image, never checked it,
+    # and passed. So the absence of pods is a failure once the wait is spent.
+    expected = len(kubectl("get", "storagenode", "-o",
+                           "jsonpath={.items[*].metadata.name}",
+                           check=False).split())
+    deadline = time.time() + timeout
+    lines: list[str] = []
+    while True:
+        out = kubectl(
+            "get", "pods", "-l", selector, "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"
+            "{range .spec.containers[*]}{.image}{\" \"}{end}{\"\\n\"}{end}",
+            check=False)
+        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+        if lines and len(lines) >= expected:
+            break
+        if time.time() >= deadline:
+            break
+        log(f"  waiting for SPDK pods: {len(lines)}/{expected or '?'} up")
+        time.sleep(15)
+
+    if not lines:
+        raise RuntimeError(
+            f"no SPDK pods (-l {selector}) exist, so the requested image "
+            f"{wanted} could not be checked after {timeout}s. The cluster "
+            f"reported {expected} StorageNode(s); a node whose SPDK pod never "
+            f"started has not finished activating.\n    "
+            f"kubectl -n {NS} get pods -l {selector}\n    "
+            f"kubectl -n {NS} get storagenode")
+
+    if len(lines) < expected:
+        log(f"WARNING: only {len(lines)} of {expected} SPDK pods are up; "
+            f"checking the ones that are")
+
+    # No pin asked for: say what the nodes actually came up on and stop.
+    #
+    # Worth printing even when nothing is being enforced. Which SPDK build a
+    # run exercised is the first thing anyone reading a failure wants, and
+    # until now it appeared in no log at all -- the only way to find it was to
+    # go to the cluster, which is gone by the time the run is read.
+    if not wanted:
+        for line in lines:
+            name, _, images = line.partition("\t")
+            log(f"  {name}: {images.strip()}")
+        return
+
+    wrong = []
+    for line in lines:
+        name, _, images = line.partition("\t")
+        if wanted not in images:
+            wrong.append(f"{name}: {images.strip()}")
+
+    if wrong:
+        raise RuntimeError(
+            f"{len(wrong)} storage node(s) are not running the requested SPDK "
+            f"image {wanted}. The deployment config cannot set spdkImage, and "
+            f"it is consumed at node-add, so the pin did not take:\n    "
+            + "\n    ".join(wrong[:8]))
+    log(f"all {len(lines)} SPDK pod(s) run the requested image {wanted}")
+
+
+def author_draft(name: str) -> str:
+    """Write the deployment config ourselves, naming the devices directly.
+
+    Discovery refuses to propose an NVMe-transport disk for a logical-block
+    cluster: ClassRule (discovery/rules.go:190) excludes the whole class, and
+    it is a PreFilter, so the two 1.92T disks on each of this lab's workers are
+    dropped before the failure is even explained. lblk on NVMe hardware is
+    exactly how every lblk run here has worked -- an AIO bdev over /dev/nvme0n1
+    is a block device by path -- so discovery cannot deliver what the hardware
+    plainly supports.
+
+    The data model has no such objection. groups.devices.block takes any
+    ^/dev/... path, /dev/nvme0n1 included, and DeviceClassOf then reads the
+    cluster as LogicalBlock. So the document is written by hand and the
+    expansion acts on it unchanged.
+
+    This is a workaround for a discovery rule, not a second way to deploy. It
+    states the devices instead of finding them, which means it cannot notice a
+    worker whose disks differ -- the reason discovery exists. Prefer discovery
+    wherever it will answer; see the RCA of 2026-09-25.
+    """
+    devices = env_list("BLOCK_DEVICES")
+    workers = resolve_workers(env_list("WORKER_NODES"))
+
+    # The CRD takes ^/dev/[A-Za-z0-9._/-]+$ and rejects anything else, with an
+    # admission error naming the pattern rather than the value. Checking here
+    # says which entry is wrong. It also catches the shell having rewritten the
+    # path: a POSIX-emulating shell on Windows turns /dev/nvme0n1 into a
+    # C:/... path before this process ever sees it.
+    bad = [d for d in devices if not re.match(r"^/dev/[A-Za-z0-9._/-]+$", d)]
+    if bad:
+        raise RuntimeError(
+            f"BLOCK_DEVICES entries are not device paths: {bad}. Expected "
+            f"paths like /dev/nvme0n1. If these look like Windows paths, the "
+            f"shell rewrote them -- run this from the CI host or a real POSIX "
+            f"shell.")
+    if not workers:
+        raise RuntimeError(
+            "BLOCK_DEVICES names the devices but not the machines: set "
+            "WORKER_NODES too. Authoring a document means stating both, "
+            "because nothing is being discovered.")
+
+    log(f"authoring {name} directly: {len(devices)} device(s) on "
+        f"{len(workers)} worker(s), bypassing discovery")
+
+    doc = {
+        "apiVersion": API,
+        "kind": "ClusterDeploymentConfig",
+        "metadata": {"name": name, "namespace": NS},
+        "spec": {
+            "approved": False,
+            "cluster": {},
+            "nodeSets": [{
+                "name": "authored",
+                "groups": [{
+                    "name": "group-1",
+                    "workers": workers,
+                    "devices": {"block": devices},
+                }],
+            }],
+        },
+    }
+    env_name = (os.environ.get("ENVIRONMENT", "") or "").strip()
+    if env_name:
+        # Nothing inspected the fleet, so nothing concluded a distribution.
+        # Unstated, the workload flags it decides are all left at their
+        # defaults, which on OpenShift is the wrong deployment.
+        doc["spec"]["environment"] = env_name
+
+    existing = kubectl("get", "clusterdeploymentconfig", name, "-o", "json",
+                       check=False)
+    if existing.strip() and (json.loads(existing).get("spec") or {}).get("approved"):
+        log(f"{name} exists and is already approved; waiting on it")
+        return name
+    kubectl("apply", "-f", "-", stdin=json.dumps(doc))
+    return name
+
+
+def discover_with_retries(base_name: str, timeout: int) -> str:
+    """Raise discovery until it produces a draft, or give up saying why.
+
+    Retried at this level rather than inside the wait because a discovery that
+    failed has already written its own record: the OperatorOps holds the
+    reason, and a second run under the same name would be refused as existing.
+    Each attempt therefore gets its own name, and the failed ones are left
+    behind on purpose -- they are the evidence for why the first two did not
+    work.
+
+    Only the draft is produced here. Nothing has been approved yet, so every
+    attempt is free: discovery is read-only against the control plane and the
+    document it writes is inert until somebody approves it.
+    """
+    last = None
+    for attempt in range(1, DISCOVERY_ATTEMPTS + 1):
+        name = base_name if attempt == 1 else f"{base_name}-try{attempt}"
+        try:
+            return run_discovery(name, timeout)
+        except Exception as exc:                        # noqa: BLE001
+            last = exc
+            log(f"discovery attempt {attempt}/{DISCOVERY_ATTEMPTS} failed: "
+                f"{str(exc)[:200]}")
+            if attempt < DISCOVERY_ATTEMPTS:
+                log("retrying with a fresh document")
+                time.sleep(20)
+    raise RuntimeError(
+        f"discovery did not produce a usable draft in {DISCOVERY_ATTEMPTS} "
+        f"attempts. Last failure: {last}")
+
+
+def main() -> int:
+    config_name = os.environ.get(
+        "CDC_NAME", f"e2e-{os.environ.get('CLUSTER_NAME', 'simplyblock-cluster')}")
+
+    # APPROVE_ONLY skips discovery and shaping and approves a draft that is
+    # already sitting there. It is the second half of a review: somebody ran
+    # DRAFT_ONLY, read or edited the document, and now wants it deployed
+    # without this script touching the contents again.
+    approve_only = (os.environ.get("APPROVE_ONLY", "") or "").strip()
+    if approve_only:
+        log(f"approving the existing draft {approve_only} as it stands")
+        approve_and_wait(approve_only,
+                         int(os.environ.get("TIMEOUT_EXPAND", "1800")))
+        verify_spdk_image((os.environ.get("SPDK_IMAGE", "") or "").strip())
+        return 0
+
+    if env_list("BLOCK_DEVICES"):
+        ref = author_draft(config_name)
+    else:
+        ref = discover_with_retries(
+            config_name, int(os.environ.get("TIMEOUT_DISCOVERY", "900")))
+
+    if DRY_RUN:
+        log("DRY_RUN: no draft to read back")
+        describe(shape_draft({"spec": {"cluster": {}, "nodeSets": [
+            {"name": "dry", "groups": [{"name": "g", "workers": ["w"],
+                                        "devices": {"nvme": ["0000:01:00.0"]}}]}]}}))
+        return 0
+
+    raw = kubectl("get", "clusterdeploymentconfig", ref, "-o", "json")
+    cfg = json.loads(raw)
+
+    if (cfg.get("spec") or {}).get("approved"):
+        log(f"{ref} is already approved; waiting on it rather than editing "
+            f"(an approved document is immutable)")
+        approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "1800")))
+        return 0
+
+    cfg = shape_draft(cfg)
+    describe(cfg)
+
+    # Replace rather than patch: a merge patch replaces whole lists anyway, and
+    # sending the object we just read keeps the groups discovery found intact.
+    cfg.get("metadata", {}).pop("managedFields", None)
+    cfg.pop("status", None)
+    log(f"writing the edited draft back to {ref}")
+    kubectl("replace", "-f", "-", stdin=json.dumps(cfg))
+
+    if env_bool("DRAFT_ONLY", False):
+        log(f"DRAFT_ONLY: {ref} is written and NOT approved. Review it, edit "
+            f"anything else you need, then approve:")
+        log(f"    kubectl -n {NS} get clusterdeploymentconfig {ref} -o yaml")
+        log(f"    APPROVE_ONLY={ref} python3 {os.path.basename(__file__)}")
+        log("Nothing is deployed until it is approved, and after that the "
+            "document cannot be changed.")
+        return 0
+
+    approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "1800")))
+
+    verify_spdk_image((os.environ.get("SPDK_IMAGE", "") or "").strip())
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:                            # noqa: BLE001
+        log(f"FAILED: {exc}")
+        sys.exit(1)

@@ -15,19 +15,24 @@ Parallel MinIO uploader with:
 - Robust JSON embedding via SFTP (no giant heredocs)
 - Remote uploader accepts [src, key] OR {"src":..., "key":...}
 """
+from __future__ import annotations
 
 import argparse
 import json
 import os
 import random
 import subprocess
+import sys as _sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import boto3
 import paramiko
+
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import boto3
 from boto3.s3.transfer import TransferConfig
+from utils import ssh_auth  # noqa: E402
 
 # Optional tqdm for byte-level progress
 try:
@@ -66,7 +71,12 @@ transfer_config = TransferConfig(
 
 # SSH & Nodes
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
+# KEY_PATH first: the pipelines write the lab key to a path of their own
+# choosing and export it, and simplyblock-us-east-2.pem is no longer a
+# credential -- infra strips it from the nodes' authorized_keys, so the
+# old default resolves to a file that exists and does not authenticate.
+KEY_PATH = os.environ.get("KEY_PATH") or os.path.expanduser(
+    f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
 USER = os.getenv("USER", "root")
 
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
@@ -127,29 +137,26 @@ def compute_total_bytes(pairs):
     return sum(safe_filesize(p) for p, _ in pairs)
 
 # -------------------- SSH helpers --------------------
-def _load_private_key(path: str):
-    try:
-        return paramiko.Ed25519Key(filename=path)
-    except Exception:
-        return paramiko.RSAKey.from_private_key_file(path)
-
 def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5) -> paramiko.SSHClient:
     for attempt in range(retries):
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            if not os.path.exists(KEY_PATH):
-                raise FileNotFoundError(f"SSH private key not found at {KEY_PATH}")
-            key = _load_private_key(KEY_PATH)
+            # No pre-flight key check: ssh_auth tries every candidate and
+            # reports what it tried. Demanding one named file here would
+            # fail before the chain that exists to survive its absence.
             if bastion_ip:
                 bastion = paramiko.SSHClient()
                 bastion.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                bastion.connect(hostname=bastion_ip, username=USER, pkey=key, timeout=30)
+                used = ssh_auth.connect(bastion, bastion_ip, USER, timeout=30)
+                print(f"[ssh] bastion {bastion_ip}: {used}")
                 transport = bastion.get_transport()
                 channel = transport.open_channel("direct-tcpip", (target_ip, 22), ("localhost", 0))
-                ssh.connect(target_ip, username=USER, sock=channel, pkey=key, timeout=30)
+                used = ssh_auth.connect(ssh, target_ip, USER, sock=channel, timeout=30)
+                print(f"[ssh] {target_ip} via bastion: {used}")
             else:
-                ssh.connect(target_ip, username=USER, pkey=key, timeout=30)
+                used = ssh_auth.connect(ssh, target_ip, USER, timeout=30)
+                print(f"[ssh] {target_ip}: {used}")
             return ssh
         except Exception as e:
             print(f"[ERROR] SSH connection failed ({attempt+1}/{retries}): {e}")

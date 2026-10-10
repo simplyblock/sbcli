@@ -15,6 +15,7 @@ import requests
 from exceptions.custom_exception import LvolNotConnectException
 from logger_config import setup_logger, start_log_flusher
 from utils.common_utils import CommonUtils, sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sSbcliUtils, K8sUtils
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import RunnerK8sLog, SshUtils, _compress_and_cleanup_old_dumps
@@ -29,6 +30,12 @@ def generate_random_sequence(length):
     remaining_chars = ''.join(random.choices(all_chars, k=length-1))  # Next 14 characters
 
     return first_char + remaining_chars
+
+def _snake_case(name):
+    """MigrationSmoke -> migration_smoke. Safe as a directory name."""
+    s = re.sub(r"(?<!^)(?=[A-Z])", "_", str(name)).lower()
+    return re.sub(r"[^a-z0-9_.-]", "_", s) or "test"
+
 
 class TestClusterBase:
     # Heavyweight diagnostic collectors, scoped per platform: ON for k8s,
@@ -242,7 +249,22 @@ class TestClusterBase:
         self.log_threads = []
         self._nvme_iostat_thread = None
         self._nvme_iostat_stop = None
-        self.test_name = ""
+        # Named after the class rather than left empty. TestClusterBase
+        # builds the run's log directory as f"{test_name}-{timestamp}",
+        # so an unset name put every one of the 36 cases that never
+        # assigned it into "<nfs>/-20261007-173614" -- a leading dash,
+        # no way to tell one test's logs from another's, and the
+        # "Logs Path:" line the workflow summary greps came back
+        # nameless too. A leaf that wants its own name still overrides
+        # this by assigning after super().__init__().
+        self.test_name = _snake_case(type(self).__name__)
+        # Nodes this test deliberately broke in a way that can end in
+        # an abort: a NIC drop makes the journal client lose quorum and
+        # call spdk_abort_node by design (ultra alg_journal.cpp:2267),
+        # and spdk_crash is a kill. A core on one of these is evidence
+        # the fault landed. A core on any OTHER node is a real failure,
+        # because nothing asked that node to die.
+        self.expected_core_nodes = set()
         self.container_nodes = {}
         self.docker_logs_path = ""
         self.runner_k8s_log = ""
@@ -295,6 +317,300 @@ class TestClusterBase:
                 len(unhealthy), "\n".join(unhealthy),
             )
             time.sleep(20)
+
+    def _should_wipe_existing_objects(self):
+        """False when this run is resuming and must adopt, not destroy.
+
+        Checked at every wipe site rather than only in the base setup(),
+        because eleven classes replace setup() without calling super(): a
+        single base-class guard would be silently bypassed by most of the
+        tests that need it most.
+        """
+        return not getattr(self, "resume_requested", False)
+
+    # ── resume ────────────────────────────────────────────────────────────
+    #
+    # A stress run is 5 to 27 hours and leaves its objects behind on purpose
+    # (stress.py passes delete_lvols=False). Without a checkpoint, a failure at
+    # iteration 15 costs a full re-run. See utils/run_state.py for why the name
+    # prefixes, not the iteration counter, are what make adoption possible.
+
+    #: Whether --resume can actually re-enter this test mid-run.
+    #:
+    #: True for the iteration-shaped loops: an iteration is self-contained, so
+    #: re-entering at N is the same as having arrived there. False for
+    #: phase-shaped tests such as mass-create, where phase N+1 consumes the
+    #: in-memory registry phase N built -- resuming there needs those
+    #: registries rebuilt from the cluster first, and a resumed run with an
+    #: empty registry would "delete 0 lvols" and report success. Refusing is
+    #: better than that.
+    RESUME_SUPPORTED = True
+    RESUME_UNSUPPORTED_REASON = ""
+
+    def _resume_state(self):
+        """The RunState for this (test, cluster). Built lazily, because
+        nfs_log_base and cluster_id are set during setup(), not at __init__."""
+        if getattr(self, "_run_state_obj", None) is None:
+            from utils.run_state import RunState
+            self._run_state_obj = RunState(
+                nfs_log_base=self.nfs_log_base,
+                test_name=type(self).__name__,
+                cluster_id=self.cluster_id,
+                logger=self.logger,
+            )
+        return self._run_state_obj
+
+    def resume_prefixes(self):
+        """The random name prefixes this test uses, as {attr: value}.
+
+        Override when a suite names its objects differently. The default covers
+        the three schemes in the tree; anything absent is simply skipped.
+        """
+        out = {}
+        for attr in ("lvol_base", "clone_base", "snap_base", "lvol_name",
+                     "pool_name"):
+            val = getattr(self, attr, None)
+            if val:
+                out[attr] = val
+        return out
+
+    def resume_inventory(self):
+        """What this test created, as {kind: [names]}.
+
+        Names only: sizes, UUIDs and device paths are re-derived at adoption
+        time. A persisted UUID the cluster has since recycled is worse than no
+        UUID at all, because it reads as authoritative.
+        """
+        def _names(attr):
+            val = getattr(self, attr, None)
+            if isinstance(val, dict):
+                return sorted(val)
+            if isinstance(val, (list, set, tuple)):
+                return sorted(str(v) for v in val)
+            return []
+
+        return {
+            "lvols": _names("lvol_devices") or _names("_lvol_registry"),
+            "clones": _names("clone_devices") or _names("_clone_registry"),
+            "snapshots": (_names("snapshot_names")
+                          or _names("_snapshot_registry")),
+        }
+
+    def checkpoint(self, iteration=None, **extra):
+        """Persist enough to adopt later. Safe to call every iteration; it
+        never raises, because a checkpoint that kills a 20-hour run would cost
+        more than the resume it enables."""
+        self._checkpoint_iter = iteration or (
+            getattr(self, "_checkpoint_iter", 0) + 1)
+        inv = self.resume_inventory()
+        fields = dict(
+            iter=self._checkpoint_iter,
+            iteration=self._checkpoint_iter,
+            lvols=inv.get("lvols"),
+            clones=inv.get("clones"),
+            snapshots=inv.get("snapshots"),
+        )
+        fields.update(self.resume_prefixes())
+        fields.update(extra)
+        return self._resume_state().save(
+            run_dir=getattr(self, "docker_logs_path", None), **fields)
+
+    def resume_point(self):
+        """The iteration to re-enter at, or None to start fresh.
+
+        None unless --resume was passed AND a checkpoint exists for this exact
+        cluster. A checkpoint from another cluster is refused rather than
+        adopted: adopting by name across clusters would bind the run to
+        whatever happened to share a prefix.
+        """
+        if not getattr(self, "resume_requested", False):
+            return None
+        if not getattr(self, "RESUME_SUPPORTED", True):
+            self.logger.warning(
+                "[resume] %s does not support resuming: %s. Starting fresh.",
+                type(self).__name__,
+                getattr(self, "RESUME_UNSUPPORTED_REASON", "") or "unspecified")
+            return None
+        doc = self._resume_state().load()
+        if not doc:
+            return None
+        self._resumed_from = doc
+        # Restoring the prefixes is the whole feature: they are random per
+        # process, so without them this run cannot recognise its own objects.
+        for attr in ("lvol_base", "clone_base", "snap_base", "lvol_name",
+                     "pool_name"):
+            if doc.get(attr):
+                setattr(self, attr, doc[attr])
+        self._checkpoint_iter = doc.get("iter") or 0
+        self.logger.info(
+            "[resume] %s re-entering at iteration %s (checkpoint written %s)",
+            type(self).__name__, doc.get("iter"), doc.get("updated_at"))
+        return doc.get("iter")
+
+    def adopt_existing_objects(self):
+        """Reconcile the checkpoint's inventory against the live cluster.
+
+        Missing objects are reported, not fatal: a node that died mid-delete
+        can legitimately leave the cluster short, and refusing to resume there
+        throws away the point of resuming.
+        """
+        doc = getattr(self, "_resumed_from", None)
+        if not doc:
+            return {}
+        from utils.run_state import adopt_by_prefix, reconcile
+        try:
+            live = [lv.get("lvol_name") for lv in
+                    (self.sbcli_utils.list_lvols() or [])]
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[resume] could not list lvols: %s", exc)
+            return {}
+
+        prefix = doc.get("lvol_base") or doc.get("lvol_name") or ""
+        adopted = adopt_by_prefix(live, prefix)
+        reconcile(doc.get("lvols"), adopted, self.logger, kind="lvol")
+        self.logger.info("[resume] adopted %d lvol(s) matching %r",
+                         len(adopted), prefix)
+        return {"lvols": adopted}
+
+    def resume_mount_without_format(self, name, device, client_node,
+                                    fs_type=None, expected_ns_id=None):
+        """Mount an adopted volume, explicitly skipping mkfs.
+
+        The create path formats; doing that here would wipe the data this run
+        is resuming onto. Returns the mount point, or None when the device
+        could not be claimed safely.
+        """
+        mnt = "%s/%s" % (self.mount_path, name)
+        try:
+            self._assert_device_unclaimed(client_node, device, name,
+                                          expected_ns_id=expected_ns_id)
+        except Exception as exc:                      # noqa: BLE001
+            # Refusing one volume is survivable; mounting the wrong namespace
+            # over live data is not.
+            self.logger.error(
+                "[resume] refusing to mount %s on %s: %s", name, device, exc)
+            return None
+        self.ssh_obj.mount_path(node=client_node, device=device,
+                                mount_path=mnt)
+        self.logger.info("[resume] mounted %s at %s without mkfs",
+                         device, mnt)
+        return mnt
+
+    def resume_reconnect_one(self, lvol_name, client_node):
+        """Connect one adopted lvol and return its new /dev node, or None.
+
+        Mirrors the create path's connect step, minus the format: the device is
+        found by diffing get_devices() around the connect, which is how the
+        create path identifies a freshly surfaced namespace.
+        """
+        try:
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                lvol_name=lvol_name)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[resume] no connect string for %s: %s",
+                                lvol_name, exc)
+            return None, None
+
+        initial = self.ssh_obj.get_devices(node=client_node)
+        for c in connect_ls:
+            _, err = self.ssh_obj.exec_command(node=client_node, command=c)
+            if err:
+                self.logger.warning("[resume] connect failed for %s: %s",
+                                    lvol_name, err)
+                return None, None
+        final = self.ssh_obj.get_devices(node=client_node)
+        new_dev = next(("/dev/%s" % d.strip()
+                        for d in final if d not in initial), None)
+        if not new_dev:
+            self.logger.warning("[resume] %s did not surface a device",
+                                lvol_name)
+        return new_dev, connect_ls
+
+    def resume_reattach_clients(self, runtime=None):
+        """Reconnect, remount without formatting, and restart FIO.
+
+        Best-effort per volume: a resumed run that cannot remount one volume is
+        still far more useful than no resume at all, so failures are reported
+        and the run continues. Never raises.
+        """
+        if not getattr(self, "_resumed_from", None):
+            return {}
+
+        doc = self._resumed_from
+        report = {"connected": 0, "mounted": 0, "skipped": 0, "fio": False}
+
+        clients = getattr(self, "fio_node", None) or []
+        if not clients:
+            self.logger.warning(
+                "[resume] no client node available; cannot remount. The run "
+                "will continue against whatever is already attached.")
+            return report
+
+        details = getattr(self, "lvol_mount_details", None)
+        if details is None:
+            details = self.lvol_mount_details = {}
+
+        for i, name in enumerate(doc.get("lvols") or []):
+            client = clients[i % len(clients)]
+            d = details.setdefault(name, {
+                "ID": None, "Command": None, "Mount": None, "Device": None,
+                "MD5": None, "FS": doc.get("fs_type") or "xfs",
+                "Log": "%s/%s.log" % (getattr(self, "log_path", "."), name),
+                "snapshots": [],
+                "iolog_base_path": "%s/%s_fio_iolog" % (
+                    getattr(self, "log_path", "."), name),
+                "Client": client,
+            })
+            if d.get("Mount"):
+                continue
+
+            device = d.get("Device")
+            if not device:
+                device, connect_ls = self.resume_reconnect_one(name, client)
+                if not device:
+                    report["skipped"] += 1
+                    continue
+                d["Device"] = device
+                d["Command"] = connect_ls
+                report["connected"] += 1
+
+            mnt = self.resume_mount_without_format(
+                name, device, client, fs_type=d.get("FS"))
+            if mnt:
+                d["Mount"] = mnt
+                report["mounted"] += 1
+            else:
+                report["skipped"] += 1
+
+        # FIO fresh, never restored mid-stream: the previous process's FIO died
+        # with it, and a resumed run with no IO exercises outages against an
+        # idle cluster.
+        kicker = getattr(self, "_kick_fio_for_all", None)
+        if callable(kicker):
+            try:
+                kicker(runtime) if runtime else kicker()
+                report["fio"] = True
+                self.logger.info("[resume] FIO restarted")
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning("[resume] FIO restart failed: %s", exc)
+        else:
+            self.logger.warning(
+                "[resume] %s has no _kick_fio_for_all -- outages would run "
+                "against an idle cluster; start IO before trusting this run",
+                type(self).__name__)
+
+        self.logger.info(
+            "[resume] reattach: %d connected, %d mounted, %d skipped, FIO=%s",
+            report["connected"], report["mounted"], report["skipped"],
+            report["fio"])
+        return report
+
+
+    def resume_finished_clean(self):
+        """Drop the checkpoint on a clean finish, so the next run starts fresh
+        rather than adopting a completed one."""
+        if getattr(self, "_run_state_obj", None) is not None:
+            self._run_state_obj.clear()
 
     def setup(self):
         """Contains setup required to run the test case
@@ -427,24 +743,37 @@ class TestClusterBase:
             self.disconnect_lvols()
             sleep_n_sec(2)
         # Order: clones → snapshots → parent lvols → pools
-        self.sbcli_utils.delete_all_clones()
-        sleep_n_sec(2)
-        if self.k8s_test:
-            self.sbcli_utils.delete_all_snapshots()
-        elif self.mgmt_nodes:
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        sleep_n_sec(2)
-        self.sbcli_utils.delete_all_lvols()
-        sleep_n_sec(2)
-        if not self.k8s_test:
-            self.sbcli_utils.delete_all_storage_pools()
+        #
+        # ...unless this run is resuming. A stress run is 5 to 27 hours
+        # and leaves its objects behind on purpose (stress.py passes
+        # delete_lvols=False), so this wipe is exactly what makes a late
+        # failure cost a full re-run. The k8s branch below already skips
+        # pool deletion for a related reason; this is that precedent,
+        # widened to every object.
+        if self._should_wipe_existing_objects():
+            self.sbcli_utils.delete_all_clones()
+            sleep_n_sec(2)
+            if self.k8s_test:
+                self.sbcli_utils.delete_all_snapshots()
+            elif self.mgmt_nodes:
+                self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+            sleep_n_sec(2)
+            self.sbcli_utils.delete_all_lvols()
+            sleep_n_sec(2)
+            if not self.k8s_test:
+                self.sbcli_utils.delete_all_storage_pools()
+            else:
+                # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
+                # reconciliation is async and deleting+recreating pools between
+                # tests causes long waits or failures.  Tests create pools via
+                # _add_pool_dual() which reuses existing pools.
+                self.logger.info(
+                    "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+                )
         else:
-            # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
-            # reconciliation is async and deleting+recreating pools between
-            # tests causes long waits or failures.  Tests create pools via
-            # _add_pool_dual() which reuses existing pools.
             self.logger.info(
-                "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+                "[setup] resume active: keeping existing clones, snapshots, "
+                "lvols and pools so they can be adopted"
             )
         aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
         aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
@@ -578,6 +907,50 @@ class TestClusterBase:
             )
         self.pool_name = actual
         return actual
+
+    def ensure_pool(self, pool_name=None, timeout=180, **kwargs):
+        """Create the pool and block until the control plane will accept
+        volumes in it. Returns the actual pool name.
+
+        Three things have to happen in this order and every one of them has
+        bitten a lane that skipped it:
+
+        1. CREATE IT. On docker the base setup deletes every pool first, so
+           each run genuinely has to create one -- nothing is inherited. A
+           lane that assumes self.pool_name already exists gets
+           `Pool not found: testpool` on its first volume.
+
+        2. WAIT FOR IT. Pool creation is asynchronous: the POST returns
+           before the pool is queryable. Asking for a volume milliseconds
+           later gets the same `Pool not found`, which the API answers with a
+           dump of every storage node, so the real cause is buried.
+
+        3. ON K8S ONLY, make the StorageClass. Without it every PVC sits
+           Pending until the 300s wait gives up, and nothing in the timeout
+           mentions a StorageClass.
+
+        test_lblk.py learned all three the hard way and wrapped them in its
+        own _make_pool/_await_pool_visible. This is the same thing in the
+        base so the next lane does not have to.
+        """
+        pool = self._add_pool_dual(pool_name=pool_name, **kwargs)
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if self.sbcli_utils.get_storage_pool_id(pool):
+                    self.logger.info("[pool] %s is visible", pool)
+                    break
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.debug("[pool] lookup failed: %s", str(exc)[:100])
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"pool {pool!r} was created but never became visible to "
+                    f"the control plane within {timeout}s, so no volume can "
+                    f"be placed in it.")
+            sleep_n_sec(3)
+        if self.k8s_test:
+            self._k8s_ensure_storage_class()
+        return pool
 
     def _verify_pool_exists_dual(self, pool_name=None):
         """Assert that a pool exists. In K8s mode checks the StoragePool CRD;
@@ -911,6 +1284,26 @@ class TestClusterBase:
             self.logger.info(f"[k8s] _connect_and_mount_dual no-op for PVC '{pvc_name}'")
             return pvc_name, pvc_name
 
+        if mount_path is None:
+            # Two cases, both of which used to end with the volume formatted
+            # and not mounted, because the mount below is conditional on this
+            # argument being passed:
+            #
+            #   reconnecting (format_disk=False, after a fail-over or an
+            #   outage) -- put it back where it was, or the registry's mount
+            #   is overwritten with None and every later checksum reads an
+            #   empty directory;
+            #
+            #   a first connect -- derive /mnt/<name>. Per volume, not the
+            #   suite-wide self.mount_path, so lanes that hold several
+            #   volumes at once do not have them share one directory and
+            #   overwrite each other.
+            remembered = self._volume_registry.get(lvol_name, {}).get("mount")
+            mount_path = remembered or f"/mnt/{re.sub(r'[^A-Za-z0-9_.-]', '_', str(lvol_name))}"
+            self.logger.info(
+                f"No mount_path given for {lvol_name}; using {mount_path}"
+                f"{' (where it was mounted before)' if remembered else ''}")
+
         # Snapshot devices on ALL clients before connecting
         initial_devices_per_client = {}
         for client in self.client_machines:
@@ -957,6 +1350,16 @@ class TestClusterBase:
         if format_disk:
             self.ssh_obj.format_disk(node=found_node, device=disk_use, fs_type=fs_type)
         if mount_path:
+            # ssh_utils.mount_path starts with `rm -rf <mount_path>`. Unmount
+            # by PATH first: the umount above is by device, and a volume that
+            # comes back after a fail-over can be handed a different /dev
+            # name, which would leave the old mount live and turn that rm -rf
+            # into a wipe of the data this test is about to verify.
+            if self.ssh_obj.is_mountpoint(found_node, mount_path):
+                self.logger.info(
+                    f"{mount_path} is still a live mount point; unmounting it "
+                    f"by path before remounting {disk_use}")
+                self.ssh_obj.unmount_path(node=found_node, device=mount_path)
             self.ssh_obj.mount_path(node=found_node, device=disk_use, mount_path=mount_path)
         reg = self._volume_registry.get(lvol_name, {})
         reg["device"] = disk_use
@@ -965,11 +1368,81 @@ class TestClusterBase:
         self._volume_registry[lvol_name] = reg
         return disk_use, mount_path
 
+    def _seed_volume_dual(self, lvol_name, files=3, size="64M",
+                          prefix="seed", mount_path=None):
+        """Connect, format, MOUNT, write known files, return their checksums.
+
+        One helper because every lane that hand-rolled this sequence got the
+        same three things wrong, and each one fails silently rather than
+        loudly:
+
+          1. calling _connect_and_mount_dual WITHOUT mount_path. The mount is
+             conditional on that argument, so the volume is formatted and
+             left unmounted, and the writes land on the client's root disk --
+             or, as happened here, on a directory that does not exist.
+          2. writing to self.mount_path, a single suite-wide constant, while
+             running several volumes at once. They overwrite each other and
+             the survivor "verifies".
+          3. checksumming without a directory, so find_files searches None.
+
+        The mount is per volume for reason 2 -- _connect_and_mount_dual
+        derives /mnt/<name> when it is not given one. Everything else is
+        driven through the registry the dual helpers already maintain, so the
+        write and the read-back agree about which client holds the device.
+
+        Returns {path: md5}. Raises if that comes back empty -- a seed that
+        wrote nothing must not reach a comparison.
+        """
+        _dev, mounted = self._connect_and_mount_dual(
+            lvol_name, mount_path=mount_path, format_disk=True)
+        if self.k8s_test:
+            # k8s has no mount of ours to write into: the PVC is mounted
+            # inside the pod, so the seed is an fio job at /spdkvol.
+            handle = self._run_fio_dual(
+                lvol_name, runtime=120, rw="write", bs="256K", size=size,
+                numjobs=1, nrfiles=files, time_based=False,
+                name=f"{prefix}-{lvol_name}")
+            self._wait_fio_dual([handle], timeout=900)
+            self._cleanup_fio_k8s(handle)
+        else:
+            reg = self._volume_registry.get(lvol_name, {})
+            node = reg.get("node") or self.client_machines[0]
+            self.ssh_obj.create_random_files(
+                node=node, mount_path=mounted, file_size=size,
+                file_prefix=prefix, file_count=files)
+            self.ssh_obj.exec_command(node=node, command="sync")
+        sums = self._generate_checksums_dual(lvol_name)
+        if not sums:
+            raise AssertionError(
+                f"seeded {lvol_name} but it has no files on it. Every later "
+                f"checksum comparison would pass over an empty set and "
+                f"report success without having checked anything.")
+        self.logger.info("Seeded %s with %d file(s) at %s", lvol_name,
+                         len(sums), mounted)
+        return sums
+
     def _run_fio_dual(self, lvol_name, mount_path=None, log_path=None,
                       runtime=300, name=None, rw="randrw", size="1G",
                       bs="4K", iodepth=1, numjobs=2, nrfiles=8,
-                      time_based=True, **kwargs):
-        """Start FIO. Returns thread (Docker) or job_name str (K8s)."""
+                      time_based=True, verify=None, verify_fatal=False,
+                      node_selector=None, prefer_node=None, backoff_limit=6,
+                      **kwargs):
+        """Start FIO. Returns thread (Docker) or job_name str (K8s).
+
+        verify: e.g. "md5" or "crc32c". Opt-in and off by default, so existing
+            callers are unaffected. It is worth knowing that WITHOUT it the k8s
+            job does no data verification at all -- it only moves IO -- while
+            the docker path has always had --verify=md5 hardcoded inside
+            run_fio_test. The two lanes were never checking the same thing.
+        verify_fatal: fail the FIO job itself on a mismatch. Leave False where
+            a mismatch should be reported but not fail the run, which is the
+            case on hardware with no 4K atomic-write guarantee.
+        The latency ceiling is NOT a parameter. It comes from
+        utils.fio_defaults.FIO_MAX_LATENCY on both branches, because it used
+        to reach run_fio_test through kwargs on docker and be read by nothing
+        on the k8s branch, which builds its fio config by hand -- so one call
+        gated docker and silently no-opped on k8s.
+        """
         fio_name = name or f"fio_{lvol_name}"
 
         if self.k8s_test:
@@ -981,6 +1454,12 @@ class TestClusterBase:
             cm_name = f"fiocfg-{job_name}"
 
             time_cfg = f"time_based\nruntime={runtime}" if time_based else ""
+            lat_cfg = f"max_latency={FIO_MAX_LATENCY}\n"
+            verify_cfg = ""
+            if verify:
+                verify_cfg = f"verify={verify}\nverify_state_save=0\n"
+                if verify_fatal:
+                    verify_cfg += "verify_fatal=1\n"
             fio_config = (
                 f"[global]\n"
                 f"ioengine=libaio\n"
@@ -988,6 +1467,8 @@ class TestClusterBase:
                 f"bs={bs}\n"
                 f"iodepth={iodepth}\n"
                 f"numjobs={numjobs}\n"
+                f"{lat_cfg}"
+                f"{verify_cfg}"
                 f"{time_cfg}\n"
                 f"\n"
                 f"[{self._k8s_normalize_name(fio_name)[:20]}]\n"
@@ -996,7 +1477,25 @@ class TestClusterBase:
                 f"directory=/spdkvol\n"
                 f"nrfiles={nrfiles}\n"
             )
-            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config)
+            # node_selector matters for a DHCHAP pool: its PVs carry a
+            # nodeAffinity for the pool's allowed nodes, so an unpinned
+            # job can be scheduled somewhere that cannot mount it.
+            # prefer_node is a preference, not a pin: it places the job
+            # where the caller wants it while leaving the scheduler free
+            # to move it if that node is lost. Without that a Job can
+            # never be rescheduled, which is the behaviour the
+            # *_fio_worker outages exist to test.
+            # backoff_limit, not the create_fio_job default of 0. A pod
+            # evicted with its node counts as a FAILED pod, so at 0 the Job is
+            # marked Failed the moment an outage takes its node and Kubernetes
+            # never places a replacement. assert_clean_reschedule then waits
+            # out its full 900s for something that cannot happen -- which is
+            # exactly how run 20261005-081722 failed cycle 17, on the outage
+            # type whose entire purpose is to watch the pod move.
+            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
+                               node_selector=node_selector,
+                               prefer_node=prefer_node,
+                               backoff_limit=backoff_limit)
             self._k8s_fio_jobs.append(job_name)
             self._k8s_configmaps.append(cm_name)
             return job_name
@@ -1143,8 +1642,19 @@ class TestClusterBase:
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = self._k8s_normalize_name(clone_name)
+            # Same normalisation _create_lvol_dual does, and for a sharper
+            # reason here: "20G" is 20*10^9 to Kubernetes while the snapshot it
+            # clones was taken from a PVC sized "20Gi" = 20*2^30, so the
+            # provisioner refuses with "requested volume size 20000000000 is
+            # less than the size 21474836480 for the source snapshot" and the
+            # PVC never binds. A no-op for callers already passing Gi/Mi.
+            pvc_size = size
+            if "G" in pvc_size and "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            if "M" in pvc_size and "Mi" not in pvc_size:
+                pvc_size = pvc_size.replace("M", "Mi")
             k8s.create_clone_pvc(
-                name=pvc_name, size=size,
+                name=pvc_name, size=pvc_size,
                 storage_class=self._k8s_storage_class_name,
                 snapshot_name=snapshot_id,
             )
@@ -1158,7 +1668,7 @@ class TestClusterBase:
             self._k8s_pvcs.append(pvc_name)
             self._volume_registry[clone_name] = {
                 "pvc_name": pvc_name, "lvol_id": lvol_id,
-                "device": pvc_name, "mount": pvc_name, "size": size,
+                "device": pvc_name, "mount": pvc_name, "size": pvc_size,
             }
             return pvc_name, pvc_name
         else:
@@ -1223,8 +1733,21 @@ class TestClusterBase:
                 if pod_name in self._k8s_utility_pods:
                     self._k8s_utility_pods.remove(pod_name)
         else:
-            node = self.client_machines[0]
-            mount = directory or self._volume_registry.get(lvol_name, {}).get("mount")
+            reg = self._volume_registry.get(lvol_name, {})
+            # The volume is read back from the client it was mounted on.
+            # _connect_and_mount_dual searches every client and records the
+            # one the device turned up on, and _run_fio_dual already honours
+            # that; this used to be the single place that assumed
+            # client_machines[0] and so silently checksummed the wrong box.
+            node = reg.get("node") or self.client_machines[0]
+            mount = directory or reg.get("mount")
+            if not mount:
+                raise AssertionError(
+                    f"no mount point known for {lvol_name}: it was never "
+                    f"mounted (pass mount_path to _connect_and_mount_dual) "
+                    f"or this is the wrong volume name. Without one, "
+                    f"find_files has nothing to search and the comparison "
+                    f"would silently run over an empty set.")
             if files is None:
                 files = self.ssh_obj.find_files(node, directory=mount)
             return self.ssh_obj.generate_checksums(node, files)
@@ -1869,6 +2392,34 @@ class TestClusterBase:
                         )
                     except Exception as e:
                         self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
+                    # IO dumps, beside the distrib logs. Written by distrib when
+                    # an RPC such as events_update hangs for more than ten
+                    # seconds, and collected by nothing until now -- so on every
+                    # run before this they were written to the node and thrown
+                    # away with the cluster. Separate try: a missing io_dump is
+                    # the normal case on an image without the dump-io change,
+                    # and must not stop the distrib logs being kept.
+                    try:
+                        self.ssh_obj.fetch_io_dumps(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_io_dumps failed for {node_id}: {e}")
+                    # /var/lib/simplyblock: staged volumes and active volume
+                    # stacks. Dev asked for this -- it is the state that says
+                    # what the node believed it was serving, which is the
+                    # question every path-loss run has ended on. Own try for
+                    # the same reason as above.
+                    try:
+                        self.ssh_obj.fetch_volume_state(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_volume_state failed for {node_id}: {e}")
                 elif phase == "both":
                     self.logger.info(
                         f"[node_dump] fetch_distrib_logs SKIPPED for {node_id} "
@@ -1981,8 +2532,60 @@ class TestClusterBase:
             except Exception as e:
                 self.logger.warning(f"[k8s collect_mgmt] {filename}: {e}")
 
+        # Kernel logs from the WORKERS, which on k8s is the only place they
+        # exist. The client loop below cannot reach them: a k8s run has no ssh
+        # client machines, so client_machines carries a placeholder, and
+        # "0.0.0.0" over ssh is the RUNNER. Run 20260930-032853 collected
+        # 1.2MB of dmesg that way and every line of it was the runner's own,
+        # dated 14 May 2026 -- months before the run, and not from any node
+        # under test. A raw device died of ENXIO in that run and the kernel
+        # log that would have explained it was never collected from the host
+        # that had it.
+        #
+        # Same route the outages already use: a debug pod with the host's
+        # namespaces, so it works wherever run_on_node works.
+        if self.k8s_test:
+            try:
+                k8s_nodes = [n["mgmt_ip"] for n
+                             in self.sbcli_utils.get_storage_nodes()["results"]
+                             if n.get("mgmt_ip")]
+            except Exception as e:                    # noqa: BLE001
+                k8s_nodes = []
+                self.logger.warning(
+                    f"[k8s collect_mgmt] could not list storage nodes for "
+                    f"kernel logs: {e}")
+            for ip in dict.fromkeys(k8s_nodes):
+                try:
+                    node_log_dir = os.path.join(self.docker_logs_path, ip)
+                    os.makedirs(node_log_dir, exist_ok=True)
+                    for fname, hostcmd in (
+                        (f"dmesg_{ip}{suffix}.txt",
+                         "dmesg -T 2>/dev/null || dmesg"),
+                        (f"journalctl_{ip}{suffix}.txt",
+                         "journalctl -k --no-pager 2>/dev/null || true"),
+                    ):
+                        out, _err = k8s.run_on_node(ip, hostcmd, timeout=180,
+                                                    check=False)
+                        with open(os.path.join(node_log_dir, fname), "w") as fh:
+                            fh.write(out or "")
+                    self.logger.info(
+                        f"[k8s collect_mgmt] kernel logs collected from "
+                        f"worker {ip}")
+                except Exception as e:                # noqa: BLE001
+                    self.logger.warning(
+                        f"[k8s collect_mgmt] kernel logs for worker {ip}: {e}")
+
         # Collect journalctl + dmesg final snapshot from client/fio nodes (accessible via SSH)
         for node in self.client_machines:
+            # A k8s run has no real client, and the placeholder resolves to
+            # the runner. Collecting its kernel log files a large, plausible
+            # looking artefact under a node directory that is not a node.
+            if node in ("0.0.0.0", "127.0.0.1", "localhost", ""):
+                self.logger.info(
+                    "[k8s collect_mgmt] skipping kernel logs for placeholder "
+                    "client %r -- that address is the runner, not a node "
+                    "under test", node)
+                continue
             try:
                 node_log_dir = os.path.join(self.docker_logs_path, node)
                 os.makedirs(node_log_dir, exist_ok=True)
@@ -2907,10 +3510,131 @@ class TestClusterBase:
     # OpenSearch helpers (fallback when Graylog endpoints are unavailable)
     # ------------------------------------------------------------------
 
+    #: In-cluster OpenSearch on k8s. The control plane's own deployment
+    #: points at this same service, so it is the authority on where
+    #: OpenSearch lives -- not a management node, because on k8s there is no
+    #: separate management host.
+    K8S_OPENSEARCH_SVC = "opensearch-cluster-master"
+    K8S_OPENSEARCH_PORT = 9200
+
     def _opensearch_base_url(self):
-        """Return the OpenSearch base URL for the first management node."""
+        """Where to reach OpenSearch, per platform.
+
+        On docker this is the management node's reverse proxy. On k8s it is
+        NOT: mgmt_nodes[0] there is the placeholder 0.0.0.0, so this used to
+        return http://0.0.0.0/opensearch and every probe failed with
+
+            HTTPConnectionPool(host='0.0.0.0', port=80) ... Connection refused
+
+        which reads as a network fault and is really a bind address being used
+        as a connect address. Every k8s run this week exported an empty
+        control_plane/ and storage_nodes/ because of it.
+
+        On k8s a port-forward to the in-cluster service gives requests a URL it
+        can actually use, and leaves every query in this file unchanged.
+        """
+        if getattr(self, "k8s_test", False):
+            local = self._ensure_opensearch_port_forward()
+            if local:
+                return f"http://127.0.0.1:{local}"
+            # Fall through to the old shape rather than inventing one, so the
+            # failure stays recognisable instead of becoming a new mystery.
         mgmt_ip = self.mgmt_nodes[0]
         return f"http://{mgmt_ip}/opensearch"
+
+    #: Set by _ensure_opensearch_port_forward so the tunnel is reused and can
+    #: be torn down. (popen, local_port) or None.
+    _os_port_forward = None
+
+    def _ensure_opensearch_port_forward(self):
+        """Tunnel to in-cluster OpenSearch. Returns the local port, or 0.
+
+        Best effort: a diagnostic that cannot be collected must not fail a
+        run, so every failure here returns 0 and says why.
+        """
+        import socket
+        import subprocess
+        import time as _time
+
+        if self._os_port_forward:
+            proc, port = self._os_port_forward
+            if proc.poll() is None:
+                return port
+            self._os_port_forward = None
+
+        try:
+            k8s = self._ensure_k8s_utils()
+            ns = getattr(k8s, "namespace", "simplyblock")
+        except Exception:                             # noqa: BLE001
+            ns = "simplyblock"
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        cmd = (f"kubectl port-forward -n {ns} "
+               f"svc/{self.K8S_OPENSEARCH_SVC} "
+               f"{port}:{self.K8S_OPENSEARCH_PORT}")
+        try:
+            proc = subprocess.Popen(cmd, shell=True,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[graylog-export] could not start a port-forward to "
+                "%s: %s", self.K8S_OPENSEARCH_SVC, str(exc)[:160])
+            return 0
+
+        # Wait for the listener rather than sleeping a fixed amount: a
+        # port-forward is usually ready in well under a second, and a fixed
+        # sleep is either wasteful or flaky.
+        deadline = _time.time() + 15
+        while _time.time() < deadline:
+            if proc.poll() is not None:
+                self.logger.warning(
+                    "[graylog-export] port-forward to %s exited immediately; "
+                    "is the service present in namespace %s?",
+                    self.K8S_OPENSEARCH_SVC, ns)
+                return 0
+            probe = socket.socket()
+            probe.settimeout(0.5)
+            try:
+                probe.connect(("127.0.0.1", port))
+                probe.close()
+                self._os_port_forward = (proc, port)
+                self.logger.info(
+                    "[graylog-export] OpenSearch via port-forward "
+                    "127.0.0.1:%d -> %s:%d", port,
+                    self.K8S_OPENSEARCH_SVC, self.K8S_OPENSEARCH_PORT)
+                return port
+            except Exception:                         # noqa: BLE001
+                _time.sleep(0.25)
+            finally:
+                try:
+                    probe.close()
+                except Exception:                     # noqa: BLE001
+                    pass
+
+        self.logger.warning(
+            "[graylog-export] port-forward to %s never came up within 15s",
+            self.K8S_OPENSEARCH_SVC)
+        try:
+            proc.kill()
+        except Exception:                             # noqa: BLE001
+            pass
+        return 0
+
+    def _close_opensearch_port_forward(self):
+        """Tear the tunnel down. Safe to call when there is none."""
+        if not self._os_port_forward:
+            return
+        proc, _port = self._os_port_forward
+        self._os_port_forward = None
+        try:
+            proc.kill()
+        except Exception:                             # noqa: BLE001
+            pass
 
     def _build_opensearch_session(self):
         """Create a requests.Session for OpenSearch (no auth needed)."""
@@ -3520,10 +4244,42 @@ class TestClusterBase:
 
             if not opensearch_ok and not graylog_ok:
                 self.logger.warning(
-                    "[graylog-export] Neither OpenSearch nor Graylog "
-                    "is reachable, skipping export"
-                )
+                    "[graylog-export] Neither OpenSearch nor Graylog is "
+                    "reachable, skipping export. On k8s check that the "
+                    "%s service exists in the simplyblock namespace -- this "
+                    "used to fail with host='0.0.0.0' because there is no "
+                    "management node to ask.", self.K8S_OPENSEARCH_SVC)
                 return
+
+            # Reachable but empty is a different problem, and a quieter one:
+            # the export "succeeds" and writes nothing, which is how every
+            # k8s run this week produced a zero-byte control_plane/ without
+            # anyone noticing. Say it plainly, with the two things to check.
+            if opensearch_ok:
+                try:
+                    r = os_session.get(
+                        f"{os_url}/_cat/indices?h=index,docs.count&format=json",
+                        timeout=10)
+                    rows = r.json() if r.status_code == 200 else []
+                    total = sum(int(x.get("docs.count") or 0) for x in rows)
+                    if total == 0:
+                        self.logger.warning(
+                            "[graylog-export] OpenSearch is reachable but "
+                            "holds NO log documents (%s). Nothing will be "
+                            "exported, and this is an ingestion problem, not "
+                            "an export one. Check: (1) fluent-bit for "
+                            "'[output:gelf] no upstream connections "
+                            "available', (2) whether Graylog actually has a "
+                            "GELF input running -- the chart creates the "
+                            "service and the 12201 port mapping, but the "
+                            "input itself is a runtime object and nothing "
+                            "listens on 12201 until it is launched.",
+                            ", ".join(f"{x.get('index')}={x.get('docs.count')}"
+                                      for x in rows) or "no indices")
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.info(
+                        "[graylog-export] could not count documents: %s",
+                        str(exc)[:140])
 
             # Discover (container_name, source) pairs
             # _graylog_discover_containers tries:
@@ -3648,6 +4404,11 @@ class TestClusterBase:
             self.logger.warning(
                 f"[graylog-export] Unexpected error, skipping: {exc}"
             )
+        finally:
+            # Every path, including the early returns above: a leaked
+            # port-forward outlives the export and holds a local port for the
+            # rest of the run.
+            self._close_opensearch_port_forward()
 
     def _extract_delay_logs(self, graylog_dir):
         """Extract delay-qpair entries from SPDK logs into separate files.

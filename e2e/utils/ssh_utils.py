@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import gzip
 import json
 
@@ -14,12 +16,14 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 import paramiko
 import paramiko.buffered_pipe
 import paramiko.ssh_exception
 from exceptions.custom_exception import NodeUnreachableTimeout
 from logger_config import setup_logger
+from utils.fio_defaults import FIO_MAX_LATENCY
 
 # import importlib
 # from glob import glob
@@ -29,15 +33,24 @@ from utils.placement_dump_check import PlacementDump
 # from glob import glob
 
 
+# KEY_PATH before KEY_NAME. KEY_NAME is a bare filename this joins onto
+# ~/.ssh, which silently requires the key to live there; the pipelines write it
+# to a path of their own and export that path, so honouring it directly removes
+# an assumption that only holds by coincidence today.
+_key_path = os.environ.get("KEY_PATH")
 _key_name = os.environ.get("KEY_NAME")
-if _key_name:
+if _key_path and os.path.isfile(_key_path):
+    SSH_KEY_LOCATION = _key_path
+elif _key_name:
     SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", _key_name)
 elif os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes"):
     SSH_KEY_LOCATION = ""
 else:
     raise OSError(
-        "KEY_NAME env var is required for SSH access to nodes. "
-        "Set KEY_NAME or use K8S_LOCAL_KUBECTL=1 for k8s-native tests."
+        "KEY_PATH or KEY_NAME is required for SSH access to nodes. "
+        "The pipelines set KEY_PATH when they install the lab key from the "
+        "LAB_SSH_PRIVATE_KEY secret; set one of them, or use "
+        "K8S_LOCAL_KUBECTL=1 for k8s-native tests."
     )
 
 def generate_random_string(length=6):
@@ -96,7 +109,11 @@ class SshUtils:
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
         self._bastion_client = None
         self._reconnect_locks = defaultdict(threading.Lock)
-        self.ssh_pass = None
+        # Last resort, after every key has been refused. The pipelines pass
+        # SSH_PASSWORD through for exactly this, and _try_connect only sends it
+        # when it has no key left to offer. None when unset, which is what
+        # makes the key-only path unchanged.
+        self.ssh_pass = os.environ.get("SSH_PASSWORD") or None
         self.distrib_dump_paths = {}
 
         # Per-node SSH health, so a node that never comes back fails the run
@@ -226,12 +243,18 @@ class SshUtils:
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
         """
+        # The same chain the pipelines build, in the same order: the CI key
+        # first because it is the one that is supposed to work, then
+        # simplyblock-us-east-2.pem while some nodes may still authorise it,
+        # then the generic developer keys. Paramiko is handed every candidate
+        # and tries them in turn, so an unusable one costs an attempt rather
+        # than the connection.
         paths = []
-        # explicit single file via KEY_NAME → SSH_KEY_LOCATION
+        # explicit single file via KEY_PATH / KEY_NAME → SSH_KEY_LOCATION
         if SSH_KEY_LOCATION and os.path.isfile(SSH_KEY_LOCATION):
             paths.append(SSH_KEY_LOCATION)
-        # defaults
         home = os.path.join(Path.home(), ".ssh")
+        paths.append(os.path.join(home, "simplyblock-us-east-2.pem"))
         paths.extend([os.path.join(home, "id_ed25519"), os.path.join(home, "id_rsa")])
 
         keys = []
@@ -417,7 +440,11 @@ class SshUtils:
     #     )
         self._bastion_client = None
         self._reconnect_locks = defaultdict(threading.Lock)   
-        self.ssh_pass = None
+        # Last resort, after every key has been refused. The pipelines pass
+        # SSH_PASSWORD through for exactly this, and _try_connect only sends it
+        # when it has no key left to offer. None when unset, which is what
+        # makes the key-only path unchanged.
+        self.ssh_pass = os.environ.get("SSH_PASSWORD") or None
         self.distrib_dump_paths = {}
 
     def _candidate_usernames(self, explicit_user) -> list[str]:
@@ -432,12 +459,18 @@ class SshUtils:
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
         """
+        # The same chain the pipelines build, in the same order: the CI key
+        # first because it is the one that is supposed to work, then
+        # simplyblock-us-east-2.pem while some nodes may still authorise it,
+        # then the generic developer keys. Paramiko is handed every candidate
+        # and tries them in turn, so an unusable one costs an attempt rather
+        # than the connection.
         paths = []
-        # explicit single file via KEY_NAME → SSH_KEY_LOCATION
+        # explicit single file via KEY_PATH / KEY_NAME → SSH_KEY_LOCATION
         if SSH_KEY_LOCATION and os.path.isfile(SSH_KEY_LOCATION):
             paths.append(SSH_KEY_LOCATION)
-        # defaults
         home = os.path.join(Path.home(), ".ssh")
+        paths.append(os.path.join(home, "simplyblock-us-east-2.pem"))
         paths.extend([os.path.join(home, "id_ed25519"), os.path.join(home, "id_rsa")])
 
         keys = []
@@ -654,7 +687,7 @@ class SshUtils:
                 for key in keys:
                     try:
                         cli = self._try_connect(address, user, key, None, timeout=30)
-                        self.logger.info(f"Connected directly to {address} as '{user}'.")
+                        self.logger.info(f"Connected directly to {address} as '{user}' (key {key.get_fingerprint().hex()[:16]}).")
                         _store(address, cli)
                         return
                     except Exception as e:
@@ -715,7 +748,7 @@ class SshUtils:
             for key in keys:
                 try:
                     cli = self._try_connect(address, user, key, None, sock=chan, timeout=30)
-                    self.logger.info(f"Connected to {address} as '{user}' via bastion.")
+                    self.logger.info(f"Connected to {address} as '{user}' via bastion (key {key.get_fingerprint().hex()[:16]}).")
                     _store(address, cli)
                     return
                 except Exception as e:
@@ -1268,7 +1301,11 @@ class SshUtils:
         numjobs     = kwargs.get("numjobs", 2)
         nrfiles     = kwargs.get("nrfiles", 8)
         log_avg_ms  = kwargs.get("log_avg_msec", 1000)
-        max_latency  = kwargs.get("max_latency", "20s")
+        # NOT kwargs: the ceiling is a suite-wide constant so that "did
+        # IO stay under it" means the same thing in every lane and on
+        # both platforms. use_latency stays a choice -- whether to have
+        # a ceiling at all is a different question from what it is.
+        max_latency = FIO_MAX_LATENCY
         use_latency = kwargs.get("use_latency", True)
         output_fmt  = f' --output-format={kwargs["output_format"]} ' if kwargs.get("output_format") else ''
         output_file = f" --output={kwargs['output_file']} " if kwargs.get("output_file") else ''
@@ -1446,6 +1483,87 @@ class SshUtils:
         #     self.logger.info(f"Old folders deleted successfully on {node}.")
 
     
+    def find_core_dumps(self, node, since_epoch=0, location="/etc/simplyblock"):
+        """Core dumps in *location* on *node* that are NEWER than since_epoch.
+
+        Returns a list of {"name", "size", "mtime"}.
+
+        The age filter is the point. cleanup_logs() only runs before the FIRST
+        test of a run (e2e.py gates it on `i == 0`), so a core left by test 3
+        is still sitting there when test 7 looks. Until now that did not
+        matter, because the first core found ended the run outright; the
+        moment a core is allowed to be expected, an old one would be charged
+        to whichever test happened to look next.
+        """
+        # Anchored patterns, not *core*: that also matches any file with
+        # "core" inside its name (a test file called notacore matched in
+        # testing), and a false core fails a whole run. The two real
+        # shapes are systemd-coredump's core.reactor_0.<...>.zst and the
+        # spdk_core_dump that ultra's run_distr.sh writes explicitly.
+        # Two separate find calls rather than one with escaped parens: `\\(`
+        # is an invalid escape inside an f-string, and -o binds looser than
+        # the implicit -a before -printf, so an ungrouped `-o` would apply
+        # -printf to the second branch only and silently miss the first.
+        cmd = (f"sudo sh -c \"find {location} -maxdepth 1 "
+               f"-name 'core.*' -printf '%T@|%s|%f\\n'; "
+               f"find {location} -maxdepth 1 "
+               f"-name 'spdk_core_dump*' -printf '%T@|%s|%f\\n'\" "
+               f"2>/dev/null || true")
+        out, _ = self.exec_command(node=node, command=cmd)
+        found = []
+        for line in (out or "").splitlines():
+            parts = line.strip().split("|")
+            if len(parts) != 3:
+                continue
+            try:
+                mtime, size = float(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if mtime <= since_epoch:
+                continue
+            found.append({"name": parts[2], "size": size, "mtime": mtime})
+        return found
+
+    def describe_core_dump(self, node, core_name):
+        """Best-effort detail for one core: signal, and a stack if we can get one.
+
+        There is no gdb in the SPDK image, so the backtrace cannot be taken
+        inside the container that produced the core. systemd-coredump is in
+        use on these nodes (ultra's run_distr.sh calls `coredumpctl dump`), so
+        `coredumpctl info` is asked first -- it keeps what it captured at dump
+        time, which survives the container being recreated. The container log
+        does not: on 2026-10-08 the spdk_4424 log began at 15:12:27 for a core
+        written at 15:07:30, so the two SPDK_WARNLOG lines that precede the
+        abort were already gone.
+
+        Returns text, always. "nothing" is a legitimate answer and is said
+        plainly rather than left to look like an error.
+        """
+        pid = ""
+        bits = core_name.split(".")
+        for b in bits:
+            if b.isdigit() and len(b) >= 4 and len(b) <= 8:
+                pid = b          # core.reactor_0.0.<hash>.<pid>.<ts>.zst
+        chunks = []
+        probes = [
+            ("coredumpctl info", f"sudo coredumpctl info {pid} 2>&1 | head -80"
+                                 if pid else
+                                 "sudo coredumpctl info 2>&1 | head -80"),
+            ("coredumpctl list", "sudo coredumpctl list --no-pager 2>&1 | tail -10"),
+            ("file", f"sudo zstd -dc /etc/simplyblock/{core_name} 2>/dev/null "
+                     f"| head -c 4096 | file - 2>&1 | head -2"),
+        ]
+        for label, cmd in probes:
+            try:
+                out, err = self.exec_command(node=node, command=cmd,
+                                             timeout=120, max_retries=1)
+            except Exception as exc:                  # noqa: BLE001
+                chunks.append(f"--- {label}: could not run ({str(exc)[:120]})")
+                continue
+            body = (out or err or "").strip()
+            chunks.append(f"--- {label}:\n{body or '(no output)'}")
+        return '\n'.join(chunks)
+
     def list_files(self, node, location):
         """List the entities in given location on a node
         Args:
@@ -2468,11 +2586,34 @@ class SshUtils:
             
         self.exec_command(node=node, command=add_node_cmd)
 
+    #: 512K dd blocks per unit of `file_size`, by suffix.
+    _DD_BLOCKS_PER_UNIT: ClassVar = {"K": 1 / 512.0, "M": 2, "G": 2048}
+
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
+        """Write `file_count` files of `file_size` random bytes into mount_path.
+
+        `file_size` is a string with a K/M/G suffix and means what it says.
+        It used to be read as `int(file_size[:-1]) * 2048` 512K blocks -- the
+        suffix was sliced off and ignored, so every size was in GiB and
+        "32M" asked for 32 GiB. Three of those onto a 2G volume is what a
+        migration seed was doing.
+
+        Raises on failure. It used to log "Aborting." and return normally,
+        so a volume with nothing on it went on to be checksummed, compared
+        against an empty set, and reported as verified.
+        """
+        n = float(file_size[:-1])
+        unit = file_size[-1].upper()
+        if unit not in self._DD_BLOCKS_PER_UNIT:
+            raise ValueError(
+                f"create_random_files: file_size {file_size!r} needs a K, M "
+                f"or G suffix; a bare number has no meaning here.")
+        count = max(1, round(n * self._DD_BLOCKS_PER_UNIT[unit]))
         for i in range(1, file_count + 1):
             file_path = f"{mount_path}/{file_prefix}_{i}"
-            command = f"sudo dd if=/dev/urandom of={file_path} bs=512K count={int(file_size[:-1]) * 2048} status=none"
+            command = f"sudo dd if=/dev/urandom of={file_path} bs=512K count={count} status=none"
             retries = 3
+            last = None
             for attempt in range(retries):
                 try:
                     self.logger.info(f"Executing cmd: {command} (Attempt {attempt + 1}/{retries})")
@@ -2481,9 +2622,13 @@ class SshUtils:
                         raise Exception(error)
                     break
                 except Exception as e:
+                    last = e
                     self.logger.error(f"Error during `dd` command: {e}. Retrying...")
-                    if attempt == retries - 1:
-                        self.logger.error(f"Failed after {retries} retries. Aborting.")
+            else:
+                raise RuntimeError(
+                    f"could not write {file_path} on {node} after {retries} "
+                    f"attempts: {last}. Nothing was seeded, so every later "
+                    f"checksum comparison would run over an empty set.")
 
     def get_active_interfaces(self, node_ip):
         """
@@ -2626,16 +2771,14 @@ class SshUtils:
     def check_tmux_installed(self, node_ip):
         """Check tmux installation
         """
-        check_tmux_command = "command -v tmux"
-        output, _ = self.exec_command(node_ip, check_tmux_command)
-        if not output.strip():
-            self.logger.info(f"'tmux' is not installed on {node_ip}. Installing...")
-            install_tmux_command = (
-                "sudo apt-get update -y && sudo apt-get install -y tmux"
-                " || sudo yum install -y tmux"
-            )
-            self.exec_command(node_ip, install_tmux_command)
-            self.logger.info(f"'tmux' installed successfully on {node_ip}.")
+        if self.ensure_tool(node_ip, "tmux"):
+            return
+        # ensure_tool already probed, installed and re-probed, with the whole
+        # thing bounded. Reaching here means tmux is genuinely unavailable on
+        # this node; it has logged why.
+        self.logger.warning(
+            f"tmux is not available on {node_ip}; anything that needs a "
+            f"detached session on this node will be skipped.")
 
     def start_docker_logging(self, node_ip, containers, log_dir, test_name):
         """
@@ -2980,6 +3123,45 @@ class SshUtils:
             self.logger.error(f"Error fetching running containers on {node_ip}: {e}")
         return containers_by_node
     
+    #: Where the shared log store lives. Same values the suite mounts with at
+    #: setup (cluster_test_base), repeated here because a reboot drops the
+    #: mount and nothing else puts it back.
+    NFS_SERVER = "10.10.10.140"
+    NFS_EXPORT = "/srv/nfs_share"
+    NFS_MOUNT = "/mnt/nfs_share"
+
+    def _remount_nfs_after_reboot(self, node_ip):
+        """Put /mnt/nfs_share back after a reboot has dropped it.
+
+        The mount is made once at setup and there is no fstab entry, so every
+        reboot leaves the node with /mnt/nfs_share as an ordinary empty
+        directory. Nothing notices, because writing to it still succeeds --
+        it just goes to the root filesystem instead of the share.
+
+        Run 20261004-082535 shows what that costs. Fourteen mount calls, all
+        inside the first twenty seconds, then ten reboots over the next seven
+        hours and no remount after any of them. 192.168.10.201 accumulated
+        20G of run artefacts under the unmounted path, reached 95% full, and
+        then could not come back from the reboot the outage loop issued --
+        taking the run down at 8h17m and the node out of the lab entirely.
+        Its peers, rebooted less often across the lab's history, sat at 51-77%.
+
+        Best effort by design: a node that just rebooted into a run is more
+        useful than one we refuse to continue with because a log mount did
+        not come back. The warning is the signal.
+        """
+        if os.environ.get("SKIP_NFS", "").strip() in ("1", "true"):
+            return
+        try:
+            self.ensure_nfs_mounted(node_ip, self.NFS_SERVER, self.NFS_EXPORT,
+                                    self.NFS_MOUNT)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[nfs] could not remount %s on %s after its reboot: %s. "
+                "Anything written there now lands on the root filesystem, "
+                "which is how a node fills up and stops coming back.",
+                self.NFS_MOUNT, node_ip, str(exc)[:160])
+
     def reboot_node(self, node_ip, wait_time=300):
         """
         Reboot a node using SSH and wait for it to come online.
@@ -3015,6 +3197,7 @@ class SshUtils:
                     self.connect(address=node_ip,
                                  bastion_server_address=self.bastion_server)
                     self.logger.info(f"Node {node_ip} is back online.")
+                    self._remount_nfs_after_reboot(node_ip)
                     return True
                 except Exception as e:
                     self.logger.info(f"Node {node_ip} is not online yet: {e}")
@@ -3451,6 +3634,130 @@ class SshUtils:
 
         return all_ok
 
+    #: Biggest single file worth pulling out of /var/lib/simplyblock.
+    #: The tree holds small JSON/metadata describing staged volumes and active
+    #: volume stacks; anything much larger than this is not that, and copying
+    #: it over ssh at teardown on every node is not a trade worth making.
+    VOLUME_STATE_MAX_BYTES = 2 * 1024 * 1024
+
+    def fetch_volume_state(self, storage_node_ip, storage_node_id, logs_path):
+        """Pull /var/lib/simplyblock off a storage node.
+
+        Asked for by dev: the tree holds staged volumes and active volume
+        stacks, which is the state that says what a node believed it was
+        serving. Every path-loss run so far ends on the same unanswered
+        question -- run 20261003-080237 finishes with no new controller ever
+        being created on any client -- and nothing is captured today that would
+        show whether the node still had the subsystem staged.
+
+        Unlike io_dump this directory always exists, so finding it empty or
+        missing is itself worth a warning rather than an info line.
+
+        Returns the number of files collected. Never raises: this runs in
+        teardown and a diagnostic that cannot be fetched must not turn a
+        passing test red.
+        """
+        node_id_short = str(storage_node_id)[:8]
+        dest = f"{logs_path}/{storage_node_ip}_{node_id_short}/volume_state"
+        root = "/var/lib/simplyblock"
+        try:
+            listing, _err = self.exec_command(
+                storage_node_ip,
+                f"sudo find {root} -type f -size -{self.VOLUME_STATE_MAX_BYTES}c "
+                f"-printf '%P\n' 2>/dev/null || true",
+                supress_logs=True)
+            names = [n.strip() for n in (listing or "").splitlines() if n.strip()]
+            if not names:
+                self.logger.warning(
+                    "[volume-state] %s: %s is empty or unreadable. It should "
+                    "hold the staged volumes and active volume stacks, so an "
+                    "empty tree is itself worth noting.", storage_node_ip, root)
+                return 0
+            self.logger.info("[volume-state] %s: collecting %d file(s) -> %s",
+                             storage_node_ip, len(names), dest)
+            got = 0
+            for name in names:
+                try:
+                    data = self.read_file(storage_node_ip, f"{root}/{name}")
+                    if not data:
+                        continue
+                    # %P keeps the tree shape, so recreate it rather than
+                    # flattening -- which directory a file sits in is part of
+                    # what distinguishes a staged volume from an active stack.
+                    out_path = os.path.join(dest, *name.split("/"))
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "w") as fh:
+                        fh.write(data)
+                    got += 1
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.warning(
+                        "[volume-state] %s: could not fetch %s: %s",
+                        storage_node_ip, name, str(exc)[:120])
+            self.logger.info("[volume-state] %s: collected %d file(s)",
+                             storage_node_ip, got)
+            return got
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[volume-state] %s: collection failed: %s",
+                                storage_node_ip, str(exc)[:160])
+            return 0
+
+    def fetch_io_dumps(self, storage_node_ip, storage_node_id, logs_path):
+        """Pull /etc/simplyblock/io_dump off a storage node, if it has one.
+
+        Written by distrib (ultra `main-dump-io` and later) when an RPC such as
+        events_update hangs for more than ten seconds. The directory is created
+        by distrib itself and lives on the host mount, so it survives a
+        container crash and restart -- which is also why nothing else cleans it
+        and why it is worth taking a copy before the cluster goes away.
+
+        Returns the number of files collected. Never raises: this runs in
+        teardown alongside the other dumps, and a diagnostic that cannot be
+        fetched must not turn a passing test red.
+        """
+        node_id_short = str(storage_node_id)[:8]
+        dest = f"{logs_path}/{storage_node_ip}_{node_id_short}/io_dump"
+        try:
+            listing, _err = self.exec_command(
+                storage_node_ip,
+                "sudo find /etc/simplyblock/io_dump -maxdepth 1 -type f "
+                "-printf '%f\\n' 2>/dev/null || true",
+                supress_logs=True)
+            names = [n.strip() for n in (listing or "").splitlines() if n.strip()]
+            if not names:
+                self.logger.info(
+                    "[io_dump] %s: no /etc/simplyblock/io_dump content "
+                    "(expected unless the spdk image carries the dump-io "
+                    "change)", storage_node_ip)
+                return 0
+            os.makedirs(dest, exist_ok=True)
+            self.logger.info("[io_dump] %s: collecting %d file(s) -> %s",
+                             storage_node_ip, len(names), dest)
+            got = 0
+            for name in names:
+                try:
+                    # read_file rather than scp: the suite reaches these nodes
+                    # through one ssh path already, and these dumps are small.
+                    data = self.read_file(
+                        storage_node_ip, f"/etc/simplyblock/io_dump/{name}")
+                    if not data:
+                        continue
+                    with open(os.path.join(dest, name), "w") as fh:
+                        fh.write(data)
+                    got += 1
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.warning("[io_dump] %s: could not fetch %s: %s",
+                                        storage_node_ip, name, str(exc)[:120])
+            if got:
+                self.logger.warning(
+                    "[io_dump] %s: collected %d IO dump(s). These are only "
+                    "written when an RPC hung for >10s, so their presence is "
+                    "itself a finding.", storage_node_ip, got)
+            return got
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[io_dump] %s: collection failed: %s",
+                                storage_node_ip, str(exc)[:160])
+            return 0
+
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path,
                            validate_async=False, error_sink=None):
         # 0) Find ALL SPDK containers on this host (dual-node hosts have 2)
@@ -3679,27 +3986,21 @@ class SshUtils:
     def check_and_install_tcpdump(self, node_ip):
         """Installs tcpdump on given node ip
         """
-        output, _ = self.exec_command(node_ip, "which tcpdump")
-        if not output:
-            self.logger.info("tcpdump not found, installing...")
-            install_tcpdump_command = (
-                "sudo apt-get update -y && sudo apt-get install -y tcpdump"
-                " || sudo yum install -y tcpdump"
-            )
-            output, _ = self.exec_command(node_ip, install_tcpdump_command)
-            self.logger.info(f"tcpdump installed successfully: {output}")
+        # Routed through ensure_tool so a node with no package repo cannot
+        # hang here -- see its docstring for what that cost once.
+        if self.ensure_tool(node_ip, "tcpdump"):
+            return
+        self.logger.warning(
+            f"tcpdump is not available on {node_ip}; its packet captures will "
+            f"be empty. Not failing the test for a diagnostic.")
 
     def check_and_install_tshark(self, node_ip):
         """Check if tshark is installed on the remote node and install it if missing."""
-        output, _ = self.exec_command(node_ip, "which tshark")
-        if not output:
-            self.logger.info("tshark not found, installing...")
-            install_tcpdump_command = (
-                "sudo apt-get update -y && sudo apt-get install -y tshark"
-                " || sudo yum install -y wireshark"
-            )
-            output, _ = self.exec_command(node_ip, install_tcpdump_command)
-            self.logger.info(f"tshark installed successfully: {output}")
+        if self.ensure_tool(node_ip, "tshark"):
+            return
+        self.logger.warning(
+            f"tshark is not available on {node_ip}; its captures will be "
+            f"empty. Not failing the test for a diagnostic.")
 
 
     def start_tcpdump_logging(self, node_ip, log_dir):
@@ -3872,10 +4173,98 @@ class SshUtils:
 
         return logs_in_window
     
+    def ensure_tool(self, node_ip, binary, package=None, timeout=60):
+        """Make sure netstat exists, without ever blocking the test.
+
+        The previous version of this was one line:
+
+            sudo apt-get update && sudo apt-get install -y net-tools               || sudo yum install -y net-tools
+
+        and it cost a nine-hour run. Three things wrong with it:
+
+        * **apt-get update HANGS on a node with no package-repo access.** It
+          does not fail and fall through to the yum branch -- it sits there
+          until the SSH command times out at 360s, then exec_command retries
+          twice more, so one diagnostic helper burns 18 minutes per node.
+        * **It ran unconditionally**, including on the overwhelming majority
+          of nodes that already have netstat.
+        * **A missing diagnostic should never stop a test.** netstat here
+          feeds a log file nobody reads unless something else has already
+          gone wrong.
+
+        So: check first, install only if missing, bound the install, pick the
+        package manager rather than chaining on failure, and carry on either
+        way. Returns True if *binary* is available afterwards.
+
+        Every tool the suite installs on a node goes through here, so the
+        same hang cannot come back under a different package name.
+        """
+        pkg = package or binary
+        try:
+            out, _ = self.exec_command(
+                node_ip, "command -v {binary} >/dev/null 2>&1 && echo yes || echo no",
+                timeout=30, max_retries=1, supress_logs=True)
+            if "yes" in (out or ""):
+                return True
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.debug(f"netstat probe on {node_ip} failed: "
+                              f"{str(exc)[:120]}")
+            return False
+
+        # Detect the package manager instead of chaining installs on failure:
+        # the chain is what let a hanging apt-get swallow the whole budget.
+        try:
+            mgr, _ = self.exec_command(
+                node_ip,
+                "for m in dnf yum apt-get; do command -v $m >/dev/null 2>&1 "
+                "&& { echo $m; break; }; done",
+                timeout=30, max_retries=1, supress_logs=True)
+            mgr = (mgr or "").strip().splitlines()[0] if (mgr or "").strip() else ""
+        except Exception:                             # noqa: BLE001
+            mgr = ""
+        if not mgr:
+            self.logger.warning(
+                f"{binary} is missing on {node_ip} and no package manager was "
+                f"found; the netstat log for this node will be empty. Not "
+                f"failing the test for a diagnostic.")
+            return False
+
+        if mgr == "apt-get":
+            # -o options keep apt from waiting on a lock or a prompt, and the
+            # whole thing is wrapped in `timeout` on the REMOTE side so a
+            # hanging repo fetch cannot outlive our budget.
+            cmd = (f"sudo timeout {timeout} apt-get -y "
+                   f"-o Acquire::Retries=1 -o Acquire::http::Timeout=10 "
+                   f"-o DPkg::Lock::Timeout=20 install {pkg}")
+        else:
+            cmd = (f"sudo timeout {timeout} {mgr} install -y {pkg}")
+
+        try:
+            self.exec_command(node_ip, f"{cmd} >/dev/null 2>&1 || true",
+                              timeout=timeout + 30, max_retries=1,
+                              supress_logs=True)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                f"could not install {pkg} on {node_ip} "
+                f"({str(exc)[:120]}); continuing without it.")
+            return False
+
+        try:
+            out, _ = self.exec_command(
+                node_ip, "command -v {binary} >/dev/null 2>&1 && echo yes || echo no",
+                timeout=30, max_retries=1, supress_logs=True)
+            ok = "yes" in (out or "")
+        except Exception:                             # noqa: BLE001
+            ok = False
+        if not ok:
+            self.logger.warning(
+                f"{pkg} still not present on {node_ip} after an install "
+                f"attempt; its netstat log will be empty.")
+        return ok
+
     def start_netstat_dmesg_logging(self, node_ip, log_dir):
         """Start continuous netstat and dmesg logging without using watch."""
-        # Ensure netstat is installed
-        self.exec_command(node_ip, 'sudo apt-get update && sudo apt-get install -y net-tools || sudo yum install -y net-tools')
+        self.ensure_tool(node_ip, "netstat", "net-tools")
 
         # Start logging netstat and dmesg by directly redirecting output to files
         netstat_log = f"{log_dir}/netstat_segments_{node_ip}.log"
@@ -4748,7 +5137,12 @@ class RunnerK8sLog:
             print("tmux is already installed.")
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("tmux is not installed. Installing now...")
-            install_cmd = "sudo apt-get update -y && sudo apt-get install -y tmux || sudo yum install -y tmux"
+            # Bounded, and it picks the package manager rather than chaining
+            # on failure -- an unbounded apt-get update on a node with no repo
+            # is what turned one diagnostic into an 18-minute stall per node.
+            install_cmd = ("sudo timeout 60 sh -c 'for m in dnf yum apt-get; "
+                           "do command -v $m >/dev/null 2>&1 && exec $m "
+                           "install -y tmux; done' >/dev/null 2>&1 || true")
             subprocess.run(install_cmd, shell=True, check=True)
             print("tmux installed successfully.")
 

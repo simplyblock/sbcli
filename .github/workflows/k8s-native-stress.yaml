@@ -53,9 +53,9 @@ on:
         required: false
         default: 'root'
       key_path:
-        description: "SSH private key path on runner (default: /home/ec2-user/.ssh/simplyblock-us-east-2.pem)"
-        required: true
-        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+        description: "Fallback SSH key path on the runner. Ignored when the LAB_SSH_PRIVATE_KEY secret is set, which is the normal case. Note simplyblock-us-east-2.pem no longer authenticates: infra strips it from the nodes."
+        required: false
+        default: ''
       client_ips:
         description: 'Space-separated client IPs for external FIO (empty = FIO runs as K8s Jobs)'
         required: false
@@ -96,6 +96,17 @@ on:
         options:
           - 'false'
           - 'true'
+      test_case:
+        description: 'Case id for matrix tests (--case), e.g. dual_graceful_shutdown_with_container_stop_secondary_await_migration_allpaths. Leave empty for non-matrix tests.'
+        required: false
+        default: ''
+
+      resume:
+        description: 'Continue the previous run on this cluster instead of wiping its objects. Requires use_existing_cluster=true, since recreating the setup destroys exactly what resume would adopt.'
+        required: false
+        type: boolean
+        default: false
+
       use_existing_cluster:
         description: 'Skip cluster cleanup and setup, reuse existing cluster'
         required: false
@@ -104,11 +115,6 @@ on:
         options:
           - 'false'
           - 'true'
-      tls_enabled:
-        description: 'Enable TLS (installs cert-manager, sets tls.enabled + tls.mutual_enabled)'
-        required: false
-        default: true
-        type: boolean
       preserve_resources_on_failure:
         description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
         required: false
@@ -138,11 +144,70 @@ jobs:
       SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
     steps:
-      - name: Fix workspace permissions
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+      - name: Fix workspace permissions and reset a dirty tree
+        run: |
+          # Errors are NOT swallowed here. The previous version ended every
+          # command with "2>/dev/null || true", so a chown that failed on
+          # root-owned files looked identical to one that worked -- and the
+          # reset that followed could not rewrite those files either, printed
+          # its complaint to the discarded stderr, and still logged
+          # "HEAD is now at ...". The run then failed in an unrelated step.
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"             || echo "::warning::chown of the workspace failed"
+
+          if [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            git -C "$GITHUB_WORKSPACE" reset --hard               || echo "::warning::git reset --hard failed"
+            git -C "$GITHUB_WORKSPACE" clean -ffdx               || echo "::warning::git clean -ffdx failed"
+
+            # If anything survives that, git cannot reconcile this tree and
+            # actions/checkout will not either: it reports
+            #   "error: Path 'x' not uptodate; will not remove from working tree"
+            # and STILL EXITS 0, leaving HEAD on the new ref with files from it
+            # never written. Wipe instead and let checkout clone fresh -- the
+            # fetch is --depth=1, so this costs seconds.
+            dirty="$(git -C "$GITHUB_WORKSPACE" status --porcelain 2>/dev/null)"
+            if [ -n "${dirty}" ]; then
+              echo "::warning::workspace still dirty after reset; wiping it"
+              echo "${dirty}" | head -20
+              sudo rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* || true
+            fi
+          fi
 
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # A checkout that could not fully update the tree still exits 0, so the
+      # only way to know is to look. Cheap, and it turns a confusing exit 127
+      # hundreds of lines later into a failure that names the cause.
+      - name: Verify the checkout is complete
+        run: |
+          missing=""
+          for f in e2e/scripts/cleanup_upgrade_test.sh e2e/e2e.py e2e/requirements.txt; do
+            [ -f "$GITHUB_WORKSPACE/$f" ] || missing="${missing} ${f}"
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::Checkout left an incomplete tree. Missing:${missing}"
+            echo "HEAD is $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null)"
+            echo "This means actions/checkout hit 'not uptodate' on some paths"
+            echo "and could not finish. The workspace reset before it should"
+            echo "have prevented that; check its warnings above."
+            exit 1
+          fi
+          echo "checkout complete"
+
+      # resume adopts the objects a previous run left behind. Recreating the
+      # setup deletes exactly those, so the combination cannot do what it says
+      # and is far more likely a mistake than an intent. Failing here costs
+      # seconds; discovering it after the wipe costs the run.
+      - name: Validate resume inputs
+        if: ${{ github.event.inputs.resume == 'true' }}
+        run: |
+          if [ "${{ github.event.inputs.use_existing_cluster }}" != "true" ]; then
+            echo "::error::resume=true needs use_existing_cluster=true."
+            echo "::error::This run would recreate the cluster and delete the objects resume is meant to adopt."
+            exit 1
+          fi
+          echo "resume=true with use_existing_cluster=true -- the previous run's objects will be adopted."
+          echo "If no checkpoint exists for this test class on this cluster, the run starts fresh and says so."
 
       - uses: actions/checkout@master
         name: Checkout simplyblock-operator
@@ -151,6 +216,176 @@ jobs:
           ref: ${{ github.event.inputs.operator_repo_branch || 'main' }}
           path: 'simplyblock-operator'
       
+      # The lab nodes' authorized_keys are managed by infra, which strips any key
+      # it did not provision. The shared automation key this pipeline relied on
+      # (simplyblock-us-east-2.pem) is removed by that process and will keep being
+      # removed, which is what silently broke SSH mid-run on 2026-09-28 and threw
+      # away a passing 10h31m result. Only a key infra provisions for a person
+      # survives on those nodes, so the run carries one in rather than hoping to
+      # find one on the runner.
+      #
+      # KEY_PATH is the single place the rest of the pipeline looks: the next step
+      # resolves it, KEY_NAME derives from it, and ssh_utils._load_keys() reads it
+      # as SSH_KEY_LOCATION. Overriding it here means nothing else has to change.
+      #
+      # Unset secret leaves the key_path input alone, so a runner that still has a
+      # working key on disk behaves exactly as before.
+      #
+      # No `set -x` here, unlike every other step in this file. Tracing a step that
+      # handles key material prints the key; GitHub's log masking is a backstop for
+      # that, not a licence to rely on it.
+      - name: Install lab SSH key from secret
+        shell: bash
+        env:
+          LAB_SSH_PRIVATE_KEY: ${{ secrets.LAB_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # $RUNNER_TEMP, not $HOME/.ssh. Concurrent jobs on this runner share
+          # $HOME, and .ssh carries ssh-specific SELinux labelling that
+          # ssh-keygen -- alone among the tools here -- can be confined against.
+          # $RUNNER_TEMP is job-private, owned by the runner user, and cleaned
+          # up for us.
+          keydir="${RUNNER_TEMP:-$HOME}/sshkeys"
+          install -d -m 700 "$keydir"
+          dest="$keydir/ci_lab_key-${{ github.run_id }}"
+          if [ -z "${LAB_SSH_PRIVATE_KEY:-}" ]; then
+            echo "LAB_SSH_PRIVATE_KEY is not set; the chain below falls through to"
+            echo "the key_path input and then to the password."
+            dest=""
+          fi
+          if [ -n "$dest" ]; then
+            # tr -d, because a key pasted from a Windows clipboard carries CRLF and
+            # OpenSSH rejects the body outright -- reported as "invalid format",
+            # which reads like a wrong key rather than a wrong line ending.
+            # printf with an explicit newline for the other half of the same
+            # problem: a secret saved without its trailing newline is equally
+            # rejected. An extra blank line at EOF is harmless.
+            printf '%s' "$LAB_SSH_PRIVATE_KEY" | tr -d '\r' > "$dest"
+            printf '\n' >> "$dest"
+            chmod 600 "$dest"
+
+            # The only checks allowed to stop the run are the ones we make by
+            # reading the file ourselves. A secret that is plainly not a private
+            # key can never work, whatever ssh thinks of it later, so fail here
+            # and name the mistake. None of this prints key material: the
+            # BEGIN/END lines are structure.
+            first="$(head -1 "$dest")"
+            last="$(grep -v '^[[:space:]]*$' "$dest" | tail -1)"
+            case "$first" in
+              ssh-*|ecdsa-*)
+                echo "::error::LAB_SSH_PRIVATE_KEY is a PUBLIC key. The secret needs the private half (no .pub)."
+                rm -f "$dest"; exit 1 ;;
+              *BEGIN*) : ;;
+              *)
+                echo "::error::LAB_SSH_PRIVATE_KEY has no BEGIN line: the paste lost its header, or starts with a blank line."
+                rm -f "$dest"; exit 1 ;;
+            esac
+            case "$last" in
+              *END*) : ;;
+              *)
+                echo "::error::LAB_SSH_PRIVATE_KEY has no END line: the paste was truncated."
+                rm -f "$dest"; exit 1 ;;
+            esac
+
+            # ssh-keygen -y is a convenience, not a gate. It prints the public
+            # half, worth having in the log to say which key is in play, and
+            # -P '' keeps a passphrase-protected key from hanging on a prompt
+            # with no terminal. But ssh, not ssh-keygen, is what consumes this
+            # file. Run 36624968635 lost a whole run to ssh-keygen reporting
+            # "Permission denied" on a key that head and wc read fine two lines
+            # later, so a failure here warns and carries on, and the chain
+            # below -- key, then pem, then password -- settles it at the first
+            # real connection. The detail printed is what would have identified
+            # that run in one look.
+            kerr="$keydir/keyerr-$$"
+            if ssh-keygen -y -P '' -f "$dest" > "$dest.pub" 2>"$kerr"; then
+              echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
+            else
+              echo "::warning::ssh-keygen could not read the installed key. Continuing: the key may still work for ssh."
+              echo "  ssh-keygen : $(tr -d '\r' < "$kerr" | head -2 | tr '\n' ' ')"
+              echo "  line count : $(wc -l < "$dest")"
+              echo "  key file   : $(ls -ln "$dest" 2>/dev/null)"
+              echo "  key dir    : $(ls -lnd "$keydir" 2>/dev/null)"
+              echo "  selinux    : $(ls -Zd "$dest" 2>/dev/null || echo 'no labels')"
+              echo "  enforcing  : $(getenforce 2>/dev/null || echo 'n/a')"
+              rm -f "$dest.pub"
+            fi
+            rm -f "$kerr"
+          fi
+
+          # One chain, decided here, used by every ssh and scp in this workflow.
+          #
+          # ssh tries each -i identity in turn, so listing both is the fallback
+          # rather than something the call sites have to branch on. sshpass only
+          # supplies a password when one is actually prompted for, so wrapping a
+          # command whose key works costs nothing -- it is a passthrough.
+          #
+          # -e rather than -p: -p puts the password in the process arguments,
+          # where it is visible to anyone who can read /proc on the runner. -e
+          # takes it from SSHPASS in the environment instead.
+          #
+          # Order is deliberate. The CI key is the credential that is supposed to
+          # work; simplyblock-us-east-2.pem is kept while some nodes may still
+          # authorise it; the password is last because it is the one being
+          # withdrawn. Whatever answers, the log says which, so a green run does
+          # not hide that the key has stopped working.
+          ids=""
+          [ -n "$dest" ] && [ -f "$dest" ] && ids="$ids -i $dest"
+          legacy="$HOME/.ssh/simplyblock-us-east-2.pem"
+          [ -f "$legacy" ] && ids="$ids -i $legacy"
+          if [ -n "${KEY_PATH:-}" ] && [ -f "${KEY_PATH}" ] \
+               && [ "${KEY_PATH}" != "$dest" ] && [ "${KEY_PATH}" != "$legacy" ]; then
+            ids="$ids -i ${KEY_PATH}"
+          fi
+
+          # sshpass, only because the password is the last resort. Best effort:
+          # a runner without it simply has no password stage, which the line
+          # below reports rather than failing over. It is not installed at all
+          # unless SSH_PASSWORD is set, so the common case pays nothing.
+          if [ -n "${SSH_PASSWORD:-}" ] && ! command -v sshpass >/dev/null 2>&1; then
+            if command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y sshpass >/dev/null 2>&1 || true
+            elif command -v yum >/dev/null 2>&1; then
+              { sudo yum install -y epel-release; sudo yum install -y sshpass; } >/dev/null 2>&1 || true
+            elif command -v apt-get >/dev/null 2>&1; then
+              { sudo apt-get update -y; sudo apt-get install -y sshpass; } >/dev/null 2>&1 || true
+            fi
+          fi
+
+          sb_ssh="ssh${ids}"
+          sb_scp="scp${ids}"
+          if [ -n "${SSH_PASSWORD:-}" ] && command -v sshpass >/dev/null 2>&1; then
+            sb_ssh="sshpass -e $sb_ssh"
+            sb_scp="sshpass -e $sb_scp"
+            echo "SSHPASS=${SSH_PASSWORD}" >> "$GITHUB_ENV"
+            echo "  password fallback: available"
+          else
+            echo "  password fallback: not available (no SSH_PASSWORD, or sshpass missing)"
+          fi
+
+          if [ -z "$ids" ] && [ -z "${SSH_PASSWORD:-}" ]; then
+            echo "::error::No SSH credential at all: no LAB_SSH_PRIVATE_KEY, no key on disk, no SSH_PASSWORD."
+            exit 1
+          fi
+
+          echo "  identities:${ids:- none}"
+          echo "SB_SSH=$sb_ssh" >> "$GITHUB_ENV"
+          echo "SB_SCP=$sb_scp" >> "$GITHUB_ENV"
+          # The flags on their own, for the call sites that build an options
+          # array -- SSH_OPTS=(...) cannot take a whole command, only its
+          # arguments. Unquoted expansion is intended: it has to split into
+          # separate -i elements.
+          echo "SB_IDS=$ids" >> "$GITHUB_ENV"
+          # And the wrapper for those sites, empty unless a password is armed.
+          echo "SB_PREFIX=${sb_ssh%%ssh*}" >> "$GITHUB_ENV"
+          # KEY_PATH stays the first identity, because ssh_utils and KEY_NAME
+          # read it. Python runs its own chain over the same candidates.
+          if [ -n "$dest" ] && [ -f "$dest" ]; then
+            echo "KEY_PATH=$dest" >> "$GITHUB_ENV"
+          elif [ -f "$legacy" ] && [ -z "${KEY_PATH:-}" ]; then
+            echo "KEY_PATH=$legacy" >> "$GITHUB_ENV"
+          fi
+
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
         run: |
@@ -205,7 +440,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ${SB_SSH} \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -238,6 +473,7 @@ jobs:
             run_remote_with_retry "${ip}" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
+              rm -f /tmp/fio_*.log || true;
               # Unmount test mount dirs BEFORE NVMe disconnect (device busy otherwise).
               # Try umount unconditionally — if not mounted it just fails silently.
               for mp in /mnt/test_location/*; do
@@ -269,6 +505,54 @@ jobs:
             github.event.inputs.cluster_environment == 'gcp' && secrets.KUBECONFIG_GCP ||
             secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
             }}
+
+      - name: Resolve the openshift-local API server
+        if: ${{ github.event.inputs.cluster_environment == 'openshift-local' }}
+        run: |
+          set +e
+          # openshift-local publishes its API under a name only the lab
+          # resolver knows. A runner that cannot resolve it fails every
+          # kubectl call with "no such host", which reads like a dead cluster
+          # rather than a DNS gap, and the run then fails several steps later
+          # with something unrelated-looking.
+          #
+          # Deliberately scoped to NAME RESOLUTION, not general reachability:
+          # a check like `kubectl cluster-info` also fails on an expired
+          # token, and rewriting /etc/resolv.conf would not fix that while
+          # making the real cause harder to see.
+          API_HOST="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null \
+            | sed -E 's#^https?://##; s#[:/].*##')"
+          if [ -z "$API_HOST" ]; then
+            echo "::warning::could not read the API server host from the kubeconfig; skipping the DNS check"
+            exit 0
+          fi
+          echo "API server host: $API_HOST"
+
+          if getent hosts "$API_HOST" >/dev/null 2>&1; then
+            echo "$API_HOST already resolves; leaving /etc/resolv.conf alone"
+            exit 0
+          fi
+
+          echo "$API_HOST does not resolve — adding the lab resolver"
+          grep -qs "nameserver ${OCP_LOCAL_DNS}" /etc/resolv.conf \
+            || echo "nameserver ${OCP_LOCAL_DNS}" | sudo tee -a /etc/resolv.conf >/dev/null
+          grep -qs "search ${OCP_LOCAL_SEARCH}" /etc/resolv.conf \
+            || echo "search ${OCP_LOCAL_SEARCH}" | sudo tee -a /etc/resolv.conf >/dev/null
+          echo "--- /etc/resolv.conf ---"; cat /etc/resolv.conf
+
+          for i in 1 2 3 4 5 6; do
+            getent hosts "$API_HOST" >/dev/null 2>&1 && { echo "$API_HOST resolves now"; exit 0; }
+            sleep 5
+          done
+          echo "::error::$API_HOST still does not resolve after adding ${OCP_LOCAL_DNS} to /etc/resolv.conf."
+          echo "Every kubectl call in this run would fail with 'no such host'. Failing here rather than"
+          echo "letting a later step report it as a cluster problem."
+          exit 1
+        env:
+          # Hardcoded rather than added as workflow inputs: several of these
+          # lanes are already at GitHub's 25-input ceiling.
+          OCP_LOCAL_DNS: 192.168.10.34
+          OCP_LOCAL_SEARCH: simplyblock1.localdomain
 
       - name: Install Helm v3.15.4
         run: |
@@ -303,6 +587,7 @@ jobs:
               chunk_bs)   echo "CHUNK_BS=$val" >> $GITHUB_ENV ;;
               partitions) echo "PARTITIONS=$val" >> $GITHUB_ENV ;;
               jm_count)   echo "JM_COUNT=$val" >> $GITHUB_ENV ;;
+              device_mode) echo "DEVICE_MODE=$val" >> $GITHUB_ENV ;;
               vcpu_count) echo "VCPU_COUNT_PARAM=$val" >> $GITHUB_ENV ;;
             esac
           done
@@ -333,13 +618,38 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
-          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          # Ours first, the operator's second -- same order as
+          # k8s-native-e2e.yaml, which this lane did not have.
+          #
+          # cleanup_upgrade_test.sh is the 12-phase one: Helm R25+R26, CRs,
+          # CRDs, cert-manager, kube-system, snapshots, PVCs/PVs, node
+          # cleanup, labels, CSI hostpath data, namespace finalization. It
+          # auto-detects Talos and skips node debug operations.
+          #
+          # Running it first means the operator's script sees whatever ours
+          # could not resolve, rather than ours inheriting half-removed state
+          # from the operator's. This lane had the order the other way round
+          # AND only ran cleanup_k8s.sh, which does not touch CRDs, node
+          # labels, hugepages or CSI hostpath data -- so stale CRDs survived
+          # into the next run and the apiserver silently pruned unknown
+          # fields from the CRs.
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_upgrade_test.sh \
+            -n "$NAMESPACE" \
+            -e "$CLUSTER_ENV" \
+            -w "${{ github.event.inputs.worker_nodes }}" \
+            -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
+
+          # The operator's own cleanup, second: it picks up anything the
+          # 12-phase pass above could not resolve.
           if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
             bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
           fi
 
-          # Run the shared cleanup script (handles etcd overload with
-          # --request-timeout, bulk deletes, and parallel finalizer patching)
+          # Kept as a final sweep. By now the namespace should be empty, so
+          # this is cheap; it stays because it is the one pass tuned for a
+          # cluster with hundreds of thousands of objects, which is the state
+          # a stress run can genuinely leave behind.
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Phase 7: Delete Released PVs from simplyblock ==="
@@ -417,8 +727,36 @@ jobs:
           # Remove Helm release secrets in case uninstall left a broken/pending state
           kubectl delete secret -n vault -l name=openbao,owner=helm 2>/dev/null || true
           kubectl delete namespace vault --wait=false 2>/dev/null || true
+
+          # Orphaned aggregated APIServices are WHY this namespace hangs.
+          # The namespace controller will not finalize while it cannot
+          # enumerate every API group, and helm uninstall leaves
+          # simplyblock's own metrics APIService behind because it is
+          # cluster-scoped. One dead APIService blocks EVERY namespace
+          # deletion on the cluster, not just this one -- vault sat
+          # Terminating for 25h on exactly that.
+          for a in $(kubectl get apiservice -o json 2>/dev/null \
+            | jq -r '.items[] | select((.status.conditions // [])
+                | map(select(.type=="Available" and .status!="True"))
+                | length > 0) | .metadata.name'); do
+            echo "Removing unavailable APIService: ${a}"
+            kubectl delete apiservice "${a}" --timeout=30s 2>/dev/null || true
+          done
+
           echo "Waiting for vault namespace to be deleted..."
-          kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
+          kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null
+
+          # Last resort. Everything above addresses why it hangs; this makes
+          # sure it does not STAY hung, because a Terminating vault blocks
+          # the next run's KMS install and someone ends up clearing it by
+          # hand every time.
+          if kubectl get namespace vault >/dev/null 2>&1; then
+            echo "vault still Terminating; force-finalizing"
+            kubectl get namespace vault -o json \
+              | jq 'del(.spec.finalizers[])' \
+              | kubectl replace --raw /api/v1/namespaces/vault/finalize -f - || true
+            kubectl wait --for=delete namespace/vault --timeout=60s 2>/dev/null || true
+          fi
           echo "=== KMS cleanup complete ==="
 
       # ── Remove stale labels from previous runs ──────────────────────────────
@@ -612,7 +950,22 @@ jobs:
           echo "MC_ALIAS=${MC_ALIAS}" >> "$GITHUB_ENV"
 
           # 1. Install mc (MinIO Client) to our own per-run path
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "${MC_BIN}"
+          # dl.min.io served the "latest" mc binary until MinIO retired that
+          # mirror. It now answers 410 Gone for the file AND the directory, so
+          # this step died with curl exit 22 before a single test ran. GitHub
+          # releases still publishes mc, but only under a versioned asset name
+          # -- releases/latest/download/mc.linux-amd64 is a 404, because the
+          # asset is mc.linux-amd64.RELEASE.<timestamp>. Hence the pin, with a
+          # lookup as the fallback for when the pin is eventually yanked.
+          MC_RELEASE="RELEASE.2025-08-13T08-35-41Z"
+          MC_URL="https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.linux-amd64.${MC_RELEASE}"
+          if ! curl -fsSL -o "${MC_BIN}" "${MC_URL}"; then
+            echo "pinned mc ${MC_RELEASE} unavailable; resolving the current release"
+            MC_API=$(curl -fsSL https://api.github.com/repos/minio/mc/releases/latest)
+            MC_URL=$(echo "${MC_API}" | jq -r '[.assets[] | select(.name | startswith("mc.linux-amd64.RELEASE")) | select(.name | endswith(".asc") | not) | .browser_download_url][0] // empty')
+            test -n "${MC_URL}" || { echo "ERROR: cannot resolve an mc download URL"; exit 1; }
+            curl -fsSL -o "${MC_BIN}" "${MC_URL}"
+          fi
           chmod +x "${MC_BIN}"
 
           # 2. Configure our own mc alias — for in-cluster MinIO use localhost (port-forward)
@@ -661,7 +1014,7 @@ jobs:
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
       - name: Install cert-manager (TLS prerequisite)
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
@@ -679,17 +1032,17 @@ jobs:
           set -euxo pipefail
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
-          TLS_FLAGS=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
-            TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
-          fi
+          # TLS is always on: the tls_enabled input was removed when this
+          # workflow hit the 25-input workflow_dispatch limit, and true was
+          # already its default.
+          TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
 
           CSI_FLAGS=""
           if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ github.event.inputs.csi_repository }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.repository=${{ github.event.inputs.csi_repository }}"
           fi
           if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ github.event.inputs.csi_tag }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${{ github.event.inputs.csi_tag }}"
           fi
 
           helm upgrade --install spdk-csi ./ \
@@ -697,8 +1050,7 @@ jobs:
             --create-namespace \
             --debug \
             --timeout 10m \
-            --set controlplane.enabled=true \
-            --set operator.enabled=true \
+            --set deployment.profile=standalone \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
@@ -802,7 +1154,7 @@ jobs:
           done
 
       - name: Setup KMS (vault) for encryption
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           # Ensure vault namespace from previous run is fully terminated before installing.
           echo "Checking if vault namespace is still terminating..."
@@ -841,8 +1193,94 @@ jobs:
           UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/setup-kms.sh
 
           echo "Waiting for vault pods to be ready..."
-          kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
-          echo "KMS setup complete."
+          kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s
+          echo "openbao is unsealed and ready."
+
+          # ── Keep it that way ────────────────────────────────────────────
+          # setup-kms.sh unseals exactly once. The seal type is shamir with no
+          # auto-unseal, so ANY fresh openbao process comes up sealed again --
+          # a reschedule, an eviction, a node drain. It then answers every
+          # request with an auth failure, the control plane turns that into
+          # POST 500, and each encrypted volume fails to provision with
+          # nothing in the CSI error naming vault. On 2026-09-20 the pod was
+          # recreated after setup, came back sealed, and every crypto volume
+          # failed from that point on.
+          #
+          # There is no cloud KMS to auto-unseal against on bare metal, and
+          # transit auto-unseal would need a second openbao to hold the key.
+          # So: keep the unseal keys in a Secret and run a tiny watcher that
+          # re-unseals whenever it finds the seal closed. The keys stay on the
+          # cluster rather than only in a file on the runner, which is also
+          # what makes the vault survivable across a multi-hour run.
+          #
+          # NOT dev mode: that auto-unseals but keeps everything in memory, so
+          # a restart would lose the transit keys and silently break every
+          # volume already encrypted with them.
+          K1=$(grep -E '^Unseal Key 1:' ./openbao-init.txt | awk '{print $NF}')
+          K2=$(grep -E '^Unseal Key 2:' ./openbao-init.txt | awk '{print $NF}')
+          K3=$(grep -E '^Unseal Key 3:' ./openbao-init.txt | awk '{print $NF}')
+          if [ -z "$K1" ] || [ -z "$K2" ] || [ -z "$K3" ]; then
+            echo "::error::could not read 3 unseal keys from openbao-init.txt;"
+            echo "the auto-unsealer cannot be deployed and KMS will stay sealed"
+            echo "the first time this pod is rescheduled."
+            exit 1
+          fi
+          kubectl create secret generic openbao-unseal-keys -n vault \
+            --from-literal=KEY1="$K1" --from-literal=KEY2="$K2" --from-literal=KEY3="$K3" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          BAO_IMAGE=$(kubectl get pod openbao-0 -n vault -o jsonpath='{.spec.containers[0].image}')
+          echo "Deploying openbao-unsealer using $BAO_IMAGE"
+          # Quoted heredoc: nothing is expanded by the runner's shell, so
+          # $KEY1..$KEY3 reach the container intact for IT to expand. With an
+          # unquoted heredoc they had to be written \$KEY1, which lands in the
+          # manifest as a literal and makes the unsealer try the string '$KEY1'
+          # as a key. The image is the one thing that must come from the runner,
+          # so it goes in by sed rather than by expansion.
+          cat <<'UNSEALER' | sed "s|BAO_IMAGE_PLACEHOLDER|${BAO_IMAGE}|" | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: openbao-unsealer
+            namespace: vault
+          spec:
+            replicas: 1
+            selector:
+              matchLabels: { app: openbao-unsealer }
+            template:
+              metadata:
+                labels: { app: openbao-unsealer }
+              spec:
+                containers:
+                - name: unsealer
+                  image: BAO_IMAGE_PLACEHOLDER
+                  env:
+                  # The server certificate carries no IP SAN, so a verified
+                  # connection fails with "cannot validate certificate for
+                  # 127.0.0.1 because it doesn't contain any IP SANs".
+                  - { name: BAO_SKIP_VERIFY, value: "true" }
+                  - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.vault.svc:8200" }
+                  envFrom:
+                  - secretRef: { name: openbao-unseal-keys }
+                  command: ["/bin/sh","-c"]
+                  args:
+                  - |
+                    while true; do
+                      if bao status 2>/dev/null | grep -qE '^Sealed +true'; then
+                        echo "$(date -Is) openbao is sealed, unsealing"
+                        for k in "$KEY1" "$KEY2" "$KEY3"; do
+                          bao operator unseal "$k" >/dev/null 2>&1 || true
+                        done
+                        bao status 2>/dev/null | grep -E '^Sealed' || true
+                      fi
+                      sleep 10
+                    done
+                  resources:
+                    requests: { cpu: 10m, memory: 32Mi }
+                    limits: { cpu: 100m, memory: 128Mi }
+          UNSEALER
+          kubectl rollout status deploy/openbao-unsealer -n vault --timeout=120s || true
+          echo "KMS setup complete (auto-unseal watcher running)."
 
       - name: Cleanup stale CSI hostpath data on worker nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -872,6 +1310,47 @@ jobs:
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
+          # spdkImage and spdkProxyImage were StorageNodeSet fields. In v1alpha2
+          # they survive only as a per-StorageNode override
+          # (StorageNode.spec.config.spdkImage), and a ClusterDeploymentConfig
+          # has no field that sets them -- the nodes it creates leave the image
+          # empty and the control plane picks its own default.
+          #
+          # There is no non-racy way to pin it from here: the nodes are created
+          # and added by the expansion, so anything this job patched afterwards
+          # would land after the image had already been chosen. Rather than
+          # patch and hope, the run says the pin did not happen, because an
+          # lblk run silently testing the default SPDK build instead of the one
+          # it named is a wrong green.
+          # Exported so the bring-up checks it rather than assumes it: the
+          # document cannot set spdkImage, so the run verifies what the nodes
+          # actually came up on and fails if it is not what was asked for.
+          #
+          # The document can carry this again as of 2026-09-27:
+          # ClusterDeploymentConfig.spec.images.spdk, alongside spdkProxy and nodeAgent.
+          # The bring-up writes it into the draft before approval and the expansion
+          # spends it on every StorageNode.spec.config. Between the StorageNodeSet
+          # retirement and that field there was no slot at all, which is why run
+          # 36309737828 asked for a build and silently got
+          # public.ecr.aws/simply-block/ultra:main-latest on all four nodes.
+          #
+          # The default is still not a pin, for a new reason: the CRD's ImageSpec
+          # admits only quay.io/simplyblock-io, docker.io/simplyblock or
+          # public.ecr.aws/simply-block, each with an explicit tag. This input's
+          # hardcoded default is the bare "simplyblock/spdk:main-latest", which names
+          # no registry and the apiserver refuses. Passing it would fail the document,
+          # not the image check. Write the registry out to pin a build:
+          # docker.io/simplyblock/spdk:main-latest.
+          #
+          # So the default means "no pin": the bring-up then reports which SPDK image
+          # the nodes came up on instead of failing. Overriding the input still enforces
+          # it, and still fails, because v1alpha2 genuinely cannot carry the pin -- that
+          # failure is the honest one and is the point of the check.
+          if [ "$SPDK_IMAGE" = "simplyblock/spdk:main-latest" ]; then
+            echo "spdk_image is the legacy default; not enforcing a pin (v1alpha2 has no field for it)"
+            SPDK_IMAGE=""
+          fi
+          export SPDK_IMAGE
           PARTITIONS="${PARTITIONS:-0}"
           JM_COUNT="${JM_COUNT:-3}"
           # 0 (the default) means derive vcpuCount from the node's CPU count below;
@@ -879,13 +1358,11 @@ jobs:
           VCPU_COUNT_PARAM=$(echo "${VCPU_COUNT_PARAM:-0}" | tr -d '[:space:]')
           OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'openshift-local' && '50' || github.event.inputs.cluster_environment == 'openshift-baremetal' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
-          SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
-          ENABLE_CPU_TOPOLOGY="true"
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "local" ]; then
-            ENABLE_CPU_TOPOLOGY="false"
+            :
           fi
 
           # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
@@ -913,29 +1390,76 @@ jobs:
               VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
               [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
             else
-              echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
-              VCPU_COUNT=4
+              echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 6"
+              VCPU_COUNT=6
             fi
             echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
           fi
 
-          RESERVED_CPU_YAML=""
+          RESERVED_SYSTEM_CPU=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
-            RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+            RESERVED_SYSTEM_CPU="0,1,10,11,16,17,26,27"
           fi
 
-          PCIE_MODEL_YAML=""
+          PCIE_MODEL=""
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment }}"
           if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
-            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
+            PCIE_MODEL="SAMSUNG MZQLB1T9HAJR-00007"
           fi
 
-          # Build workerNodes YAML list from comma-separated input
-          WORKER_YAML=""
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          for NODE in "${NODES[@]}"; do
-            WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
-          done
+          # Which distribution the operator is deploying onto. It is a
+          # shorthand: naming OpenShift once sets openShiftCluster,
+          # enableCpuTopology and enableKubeletConfiguration together, so the
+          # three flags this workflow used to compute individually are now one
+          # word (expansion.go buildWorkload).
+          case "$CLUSTER_ENV" in
+            aws-openshift|openshift-local|openshift-baremetal) ENVIRONMENT="OpenShift" ;;
+            talos)                                             ENVIRONMENT="Talos" ;;
+            *)                                                 ENVIRONMENT="Vanilla" ;;
+          esac
+
+          # nvme unless cluster_params says otherwise. Defaulted where it
+
+          # is used, so it holds however the value arrived.
+
+          DEVICE_MODE="${DEVICE_MODE:-nvme}"
+
+          #
+
+          # lblk selectors and the NVMe PCIe selectors are mutually
+
+          # exclusive under the StorageNodeSet CEL rule, which tests
+
+          # size(...) > 0 -- so blanking is enough, the keys may stay.
+
+          if [ "${DEVICE_MODE}" = "lblk" ]; then
+            # Mandatory on lblk: add-node refuses with "lblk device mode
+            # requires --enable-journal-device; partitioned journal mode is not
+            # supported".
+            ENABLE_JOURNAL_DEVICE="true"
+            # Both are NVMe selectors, and discovery scans one class per run.
+            # Sending them with enableLogicalBlockDevices selects nothing.
+            DRIVE_SIZE_RANGE=""
+            PCIE_MODEL=""
+            # No drive format on lblk. FORCE_FORMAT_4K is true for every
+            # OpenShift environment, and on a block cluster the operator
+            # resolves enableDriveFormat to enableBlockFormat -- a wipefs
+            # node_configure.py performs on the worker before the node is
+            # added. Against 2x1.9TB that is what the control plane is waiting
+            # on when add_node gives up:
+            #
+            #   ERROR: add_node aborting after SPDK start:
+            #   HTTPSConnectionPool(host=worker-N...:5000): Read timed out.
+            #   (read timeout=300)
+            #   Cleaned up SPDK pod on port 4420 after failed add_node
+            #
+            # Every add failed that way and the cluster never activated. The
+            # dev's own GCP lblk pipeline sets no enableDriveFormat at all, so
+            # this matches it. Set FORCE_DRIVE_FORMAT=true explicitly if a run
+            # genuinely needs the wipe.
+            FORCE_FORMAT_4K="${LBLK_FORCE_FORMAT:-false}"
+            echo "lblk mode: block-device discovery, journal device on, PCIe selectors blanked"
+          fi
 
           # Conditionally build backup spec block
           BACKUP_SPEC=""
@@ -943,47 +1467,131 @@ jobs:
           TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
           TESTNAME_LOWER="$(echo "$TESTNAME_INPUT" | tr '[:upper:]' '[:lower:]')"
           if [ "$CLUSTER_SEC" = "backup" ] || echo "$TESTNAME_LOWER" | grep -q "backup"; then
-            BACKUP_SPEC="  backup:
-              credentialsSecretRef:
-                name: backup-credentials
-              localEndpoint: ${MINIO_ENDPOINT}
-              localTesting: true
-              secondaryTarget: 0
-              snapshotBackups: true
-              withCompression: false"
+            # v1alpha2's backup block is bucket/credentialsSecretRef/endpoint/
+            # prefix/region. localTesting, secondaryTarget, snapshotBackups and
+            # withCompression have no field here any more -- they are not
+            # renamed, they are gone from the cluster spec -- so they are
+            # dropped rather than guessed at, and the run says so.
+            echo "::warning title=backup spec reshaped::v1alpha2 StorageCluster.backup takes bucket, endpoint, credentialsSecretRef and region; localTesting, secondaryTarget, snapshotBackups and withCompression were dropped. Verify backup behaviour before trusting a backup run."
+            # Deferred: v1alpha2 also REQUIRES spec.backup.bucket, and the bucket
+            # is named for the cluster uuid so the MinIO cleanup can find it --
+            # which does not exist until the bring-up below has run.
+            BACKUP_WANTED=1
+            BACKUP_SPEC=""
           fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
+          # Always configured, for the same reason as TLS_FLAGS above.
           VAULT_SETTINGS=""
           ENCRYPTION_POOL_YAML=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
-            VAULT_SETTINGS="  hashicorpVaultSettings:
-              baseURL: \"https://openbao.vault:8200\""
+          if true; then
+            VAULT_SETTINGS="  kms:
+                vault:
+                  endpoint: \"https://openbao.vault:8200\""
             ENCRYPTION_POOL_YAML="---
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
             name: encryption-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
-            storageClassParameters:
-              encryption: true"
+            clusterRef: simplyblock-cluster"
+            echo "encryption-pool is created plain: v1alpha2 StoragePool has no encryption field. Encryption is a StorageClass setting, bound to this pool by the storage.simplyblock.io/{namespace,cluster,pool} labels, and the tests create that class themselves (create_storage_class(encryption=True))."
           fi
 
-          echo "=== Custom resource YAML to apply ==="
-          cat <<EOF
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageCluster
-          metadata:
-            name: simplyblock-cluster
-            namespace: ${NAMESPACE}
+          echo "=== Bringing the cluster up through the deployment config ==="
+          # StorageNodeSet is not reconciled any more. operator/cmd/main.go
+          # registers no reconciler for it and deployment/expansion.go is the
+          # only thing that creates a StorageNode, so applying a set succeeded
+          # and produced nothing -- the cluster then waited forever for storage
+          # nodes nobody had asked for.
+          #
+          # The supported path is a ClusterDeploymentConfig: discovery inspects
+          # the workers and writes a draft, we write our parameters into it, and
+          # approving it builds the StorageCluster and its StorageNodes. The
+          # draft is immutable once approved, so everything has to be set first;
+          # the script does that in order.
+          export NAMESPACE
+          export CLUSTER_NAME="simplyblock-cluster"
+          export DEVICE_MODE NDCS NPCS VCPU_COUNT MAX_SUBSYS
+          export MGMT_IFC DATA_NICS
+          export JM_COUNT
+          export JM_PERCENT="3"
+          export ENABLE_JOURNAL_DEVICE
+          export ENVIRONMENT
+          export DRIVE_SIZE_RANGE PCIE_MODEL
+          # No default in the CRD and immutable on the cluster once set,
+          # so an unstated fabric is not a thing that can be fixed later.
+          export FABRIC_TYPE="tcp"
+          # The other two images spec.images carries. These were
+          # StorageNodeSet.clusterImage and .spdkProxyImage, both built from
+          # SB_REPO:SB_TAG; without them the deployment takes the operator's
+          # defaults and a run that pinned a simplyblock build got it only on
+          # the control plane, not on the node agent the control plane drives.
+          # Skipped when the tag is empty, which is what "chart default" means.
+          if [ -n "${SB_TAG}" ]; then
+            export NODE_AGENT_IMAGE="${SB_REPO}:${SB_TAG}"
+            export SPDK_PROXY_IMAGE="${SB_REPO}:${SB_TAG}"
+          fi
+          # One field, two operations: the operator resolves it to a 4K reformat
+          # on an NVMe cluster and a wipefs on a block one.
+          export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
+          export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
+          # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
+          # reasoning that the workers boot from it and the draft would
+          # otherwise offer the root disk as storage. Both halves were wrong.
+          #
+          # The root disk defends itself: every OS disk on this lab probes as
+          # Mounted;Busy;Partitioned and is refused before any filter of ours
+          # runs. And sda is not the root disk anyway -- it is the OS disk on
+          # worker-3 and a 1.6T data disk on worker-1, worker-2 and worker-4,
+          # because letters are not stable across these machines. So the deny
+          # list protected nothing and cost a data disk on three of four
+          # workers, which is how the 2026-09-28 run reached discovery with one
+          # eligible device per node and failed the lblk two-device minimum.
+          #
+          # LBLK_DENY_LIST still works for a deliberate exclusion; it is simply
+          # not set by default.
+          if [ -n "${LBLK_DENY_LIST:-}" ]; then
+            export BLOCK_DENY_LIST="${LBLK_DENY_LIST}"
+          fi
+
+          python3 $GITHUB_WORKSPACE/e2e/scripts/k8s_cluster_bringup.py
+
+          echo "=== Settings the deployment config does not carry ==="
+          # A deployment config describes a deployment, not every knob of a
+          # cluster: thresholds, node affinity, backup and vault have no field
+          # on it. They are mutable on the StorageCluster, so they are patched
+          # onto the cluster the expansion just created.
+          #
+          # v1alpha2, not v1alpha1. Patching the older version looked safer --
+          # it carries these fields in the shapes this workflow already builds
+          # -- but it requires the conversion webhook, and this install does
+          # not deploy one:
+          #
+          #   conversion webhook for storage.simplyblock.io/v1alpha2 failed:
+          #   service "simplyblock-operator-conversion-webhook-service" not found
+          #
+          # Every v1alpha1 read and write against these kinds fails that way,
+          # so the whole step aborted here and the pool below was never
+          # applied. enableNodeAffinity and the two thresholds carry the same
+          # names in v1alpha2; only backup and vault are reshaped.
+          if [ "${BACKUP_WANTED:-0}" = "1" ]; then
+            SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
+            if [ -n "${SB_UUID}" ]; then
+              BACKUP_SPEC="  backup:
+              bucket: simplyblock-backup-${SB_UUID}
+              endpoint: ${MINIO_ENDPOINT}
+              credentialsSecretRef:
+                name: backup-credentials"
+              echo "backup bucket: simplyblock-backup-${SB_UUID}"
+            else
+              echo "::warning::no StorageCluster .status.uuid; leaving spec.backup unset rather than sending an invalid one"
+            fi
+          fi
+          cat > /tmp/cluster-extra.yaml <<EOF
           spec:
-            fabricType: tcp
             enableNodeAffinity: true
-            stripe:
-              dataChunks: ${NDCS}
-              parityChunks: ${NPCS}
             warningThreshold:
               capacity: 95
               provisionedCapacity: 97
@@ -992,109 +1600,30 @@ jobs:
               provisionedCapacity: 98
           ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
-            maxSubsystemCount: ${MAX_SUBSYS}
-            vcpuCount: ${VCPU_COUNT}
-
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StoragePool
-          metadata:
-            name: simplyblock-pool
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-          ${ENCRYPTION_POOL_YAML}
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageNodeSet
-          metadata:
-            name: simplyblock-node
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-            clusterImage: "${SB_REPO}:${SB_TAG}"
-            spdkImage: "${SPDK_IMAGE}"
-            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-          ${PCIE_MODEL_YAML}
-            driveSizeRange: "${DRIVE_SIZE_RANGE}"
-            mgmtIfname: ${MGMT_IFC}
-            dataIfname:
-              - ${DATA_NICS}
-          ${RESERVED_CPU_YAML}
-            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
-            journalManager:
-              count: ${JM_COUNT}
-              percentPerDevice: 3
-            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
-            openShiftCluster: ${OPENSHIFT_CLUSTER}
-            ubuntuHost: false
-            forceFormat4K: ${FORCE_FORMAT_4K}
-            workerNodes:
-          ${WORKER_YAML}
           EOF
+          echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
+          kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
+            --type=merge --patch-file /tmp/cluster-extra.yaml
 
-          echo "=== Applying custom resources ==="
+          # reservedSystemCPU was a StorageNodeSet field and is now part of the
+          # cluster's storage-node workload, so it has no v1alpha1 home and is
+          # patched on v1alpha2 directly.
+          if [ -n "${RESERVED_SYSTEM_CPU}" ]; then
+            kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
+              --type=merge \
+              -p "{\"spec\":{\"storageNodes\":{\"reservedSystemCPU\":\"${RESERVED_SYSTEM_CPU}\"}}}"
+          fi
+
+          echo "=== Applying pools ==="
           cat <<EOF | kubectl apply -f -
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageCluster
-          metadata:
-            name: simplyblock-cluster
-            namespace: ${NAMESPACE}
-          spec:
-            fabricType: tcp
-            enableNodeAffinity: true
-            stripe:
-              dataChunks: ${NDCS}
-              parityChunks: ${NPCS}
-            warningThreshold:
-              capacity: 95
-              provisionedCapacity: 97
-            criticalThreshold:
-              capacity: 96
-              provisionedCapacity: 98
-          ${BACKUP_SPEC}
-          ${VAULT_SETTINGS}
-            maxSubsystemCount: ${MAX_SUBSYS}
-            vcpuCount: ${VCPU_COUNT}
-
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
+            clusterRef: simplyblock-cluster
           ${ENCRYPTION_POOL_YAML}
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageNodeSet
-          metadata:
-            name: simplyblock-node
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-            clusterImage: "${SB_REPO}:${SB_TAG}"
-            spdkImage: "${SPDK_IMAGE}"
-            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-          ${PCIE_MODEL_YAML}
-            driveSizeRange: "${DRIVE_SIZE_RANGE}"
-            mgmtIfname: ${MGMT_IFC}
-            dataIfname:
-              - ${DATA_NICS}
-          ${RESERVED_CPU_YAML}
-            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
-            journalManager:
-              count: ${JM_COUNT}
-              percentPerDevice: 3
-            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
-            openShiftCluster: ${OPENSHIFT_CLUSTER}
-            ubuntuHost: false
-            forceFormat4K: ${FORCE_FORMAT_4K}
-            workerNodes:
-          ${WORKER_YAML}
           EOF
 
           echo "Custom resources applied"
@@ -1283,27 +1812,58 @@ jobs:
 
             echo "[poll $i/$MAX_POLL] Using admin pod: $ADMIN_POD"
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbctl cluster list 2>&1) || true
+              sbctl cluster list) || true
             echo "[poll $i/$MAX_POLL] sbctl cluster list output:"
             echo "$OUTPUT"
 
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
 
-              # Extract cluster ID and secret
-              # sbctl cluster list outputs a table; parse the data row
-              CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
-              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
+              # Match the UUID by its shape, not by its position. Parsing
+              # `NR==4{print $2}` broke the moment sbctl prefixed the table
+              # with an index-building WARNING: every row shifted down one, so
+              # line 4 became the +---+ separator and this came out empty and
+              # the run died before the test started. A UUID cannot be confused
+              # with a separator, a warning or a column heading, and the same
+              # expression works on a table or on JSON.
+              CLUSTER_ID=$(printf '%s\n' "$OUTPUT" | tr -d '\r' \
+                | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+                | head -1)
 
-              # Fallback: try JSON format if table parsing fails
-              if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
-                echo "Table parsing failed (CLUSTER_ID=$CLUSTER_ID), trying JSON..."
-                JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                  sbctl cluster list --json 2>&1) || true
-                echo "JSON output: $JSON_OUT"
-                CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
-                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              # NOT from `cluster list`: it has no secret column, so the old
+              # `{print $NF}` was reading the blank Replicate field. This is
+              # the command that has one, as the docker and upgrade workflows
+              # already do. Timestamped log lines are dropped first: the
+              # warning lands here too.
+              CLUSTER_SECRET=""
+              if [ -n "$CLUSTER_ID" ]; then
+                CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbctl cluster get-secret "$CLUSTER_ID" 2>/dev/null \
+                  | tr -d '\r' | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' \
+                  | tail -n 1 | xargs) || true
               fi
+
+              if [ -z "$CLUSTER_ID" ]; then
+                echo "ERROR: no cluster UUID in sbctl output:" >&2
+                echo "$OUTPUT" >&2
+                exit 1
+              fi
+
+
+              # Backfill the secondary indices now the cluster is up. The
+              # warning sbctl emits without them says what it costs: reads of
+              # StorageNode.cluster_id FALL BACK TO A FULL SCAN, and these
+              # suites poll node status constantly -- wait_for_storage_node_status
+              # alone is hundreds of lookups per run. An upgrade runs this
+              # automatically, so this just puts a fresh cluster where an
+              # upgraded one already is. Documented idempotent and safe on a
+              # live cluster.
+              #
+              # Never fatal: a cluster that cannot backfill is worth knowing
+              # about, but it is not a reason to refuse to run the tests.
+              echo "Backfilling database indices..."
+              kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster build-indices 2>&1 | tail -5 || true
 
               echo "Parsed CLUSTER_ID=${CLUSTER_ID}"
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
@@ -1336,15 +1896,19 @@ jobs:
           extract_cluster_info() {
             local output="$1"
             local cid csecret
-            cid=$(echo "$output" | awk 'NR==4{print $2}')
-            csecret=$(echo "$output" | awk 'NR==4{print $NF}')
-            if [ -z "$cid" ] || [ "$cid" = "+" ]; then
-              echo "Table parsing failed, trying JSON..." >&2
-              local json_out
-              json_out=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                sbctl cluster list --json 2>&1) || true
-              cid=$(echo "$json_out" | jq -r '.[0].id // .[0].uuid // empty')
-              csecret=$(echo "$json_out" | jq -r '.[0].secret // empty')
+            # Match the UUID by its shape, not its position -- sbctl now
+            # prefixes its output with an index-building WARNING, which
+            # shifted every table row down one and made positional parsing
+            # return the separator line.
+            cid=$(printf '%s\n' "$output" | tr -d '\r' \
+              | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+              | head -1)
+            csecret=""
+            if [ -n "$cid" ]; then
+              csecret=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster get-secret "$cid" 2>/dev/null \
+                | tr -d '\r' | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' \
+                | tail -n 1 | xargs) || true
             fi
             if [ -n "$cid" ] && [ "$cid" != "+" ]; then
               echo "CLUSTER_ID=${cid}" >> $GITHUB_ENV
@@ -1356,7 +1920,7 @@ jobs:
 
           echo "=== Verifying cluster activation ==="
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-            sbctl cluster list 2>&1) || true
+            sbctl cluster list) || true
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -qi "active"; then
@@ -1381,7 +1945,7 @@ jobs:
           sleep 60
 
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-            sbctl cluster list 2>&1) || true
+            sbctl cluster list) || true
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -qi "active"; then
@@ -1446,18 +2010,34 @@ jobs:
             PRESERVE_ARG="--preserve_resources_on_failure True"
           fi
 
+          CASE_ARG=""
+          if [ -n "${TEST_CASE:-}" ]; then
+            CASE_ARG="--case ${TEST_CASE}"
+          fi
+          if [ -n "${RESUME:-}" ]; then
+            echo "RESUME=1: adopting the objects left by the previous run on this cluster"
+          fi
+
           PYTHONUNBUFFERED=1 ./stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} $PRESERVE_ARG 2>&1 | tee output.log
+            --run_k8s True --tls_enabled true $PRESERVE_ARG $CASE_ARG 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The md5 gate depends on the hardware. GCP pd-balanced disks
+          # are the genuinely non-4K-atomic devices these tests exist
+          # for; elsewhere the drives do give a 4K atomic write, so an
+          # md5 mismatch is a real defect and must fail, not warn.
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
           CLIENT_IP: ${{ github.event.inputs.client_ips }}
           SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
           RUN_DIR_FILE: ${{ env.RUN_DIR_FILE }}
+          # Read by stress.py directly. Empty means a normal run.
+          RESUME: ${{ github.event.inputs.resume == 'true' && '1' || '' }}
+          TEST_CASE: ${{ github.event.inputs.test_case }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 
@@ -1509,7 +2089,20 @@ jobs:
       - name: Calculate Total Time Taken
         if: always()
         run: |
-          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          # Both default, because this step is if: always() and the test step
+          # may never have run -- a bring-up that stalls leaves TEST_END_TIME
+          # unset, and $(( 1791405229 - )) is "operand expected", which then
+          # leaves TEST_TIME unset for every line below it including
+          # LOG_COLLECT_TIMEOUT_MINS. Four shell errors in the summary of a
+          # run whose real failure was somewhere else entirely.
+          TEST_START_TIME="${TEST_START_TIME:-0}"
+          TEST_END_TIME="${TEST_END_TIME:-$(date +%s)}"
+          if [ "$TEST_START_TIME" -gt 0 ]; then
+            TEST_TIME=$((TEST_END_TIME - TEST_START_TIME))
+          else
+            TEST_TIME=0
+          fi
+          [ "$TEST_TIME" -ge 0 ] || TEST_TIME=0
           TEST_TIME_HOURS=$(($TEST_TIME / 3600))
           TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))
           TEST_TIME_SECS=$(($TEST_TIME % 60))
@@ -2075,3 +2668,4 @@ jobs:
           rm -rf ./* || true
           rm -rf ./.??* || true
           rm -f "$HOME/.kube/config-${{ github.run_id }}"
+          rm -f "${RUNNER_TEMP:-$HOME}/sshkeys/ci_lab_key-${{ github.run_id }}" "${RUNNER_TEMP:-$HOME}/sshkeys/ci_lab_key-${{ github.run_id }}.pub" || true

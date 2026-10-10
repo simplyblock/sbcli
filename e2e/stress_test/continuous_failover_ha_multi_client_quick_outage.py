@@ -16,6 +16,7 @@ from datetime import datetime
 
 from exceptions.custom_exception import LvolNotConnectException
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
+from stress_test.rapid_fio_lifecycle import RapidFioLifecycle
 from utils.common_utils import sleep_n_sec
 
 
@@ -28,7 +29,7 @@ def _rand_id(n=15, first_alpha=True):
     return ''.join(random.choices(allc, k=n))
 
 
-class RandomRapidFailoverNoGap(TestLvolHACluster):
+class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
     """
     - Minimal churn (only bootstrap creates)
     - Long FIO (30 mins) on every lvol/clone
@@ -410,30 +411,171 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 f"{mnt}/*fio*"
             ])
 
+    # ── RapidFioLifecycle hooks ──────────────────────────────────────────
+    # Client-side FIO: one tmux session per job on a client host, writing to a
+    # log on the shared NFS mount. Both of those are what make the lifecycle
+    # cheap here -- the log is a local read for the runner, and liveness is a
+    # single ps per client on a connection the suite already holds open.
+
+    def fio_jobs(self):
+        """Every lvol and clone currently under FIO."""
+        jobs = []
+        for name, det in (self.lvol_mount_details or {}).items():
+            jobs.append((name, det))
+        for name, det in (self.clone_mount_details or {}).items():
+            jobs.append((name, det))
+        return jobs
+
+    def fio_log_path(self, name, record):
+        return (record or {}).get("Log")
+
+    def fio_job_alive(self, name, record):
+        """Is this job's tmux session still there?
+
+        `[f]io_` rather than `fio_`: the shell running this check carries the
+        pattern in its own command line, so an unbracketed match finds itself
+        and every job looks alive forever. That exact bug cost a run in
+        September -- see _docker_fio_running in the lblk matrix.
+        """
+        client = (record or {}).get("Client")
+        if not client:
+            return False
+        try:
+            out, _err = self.ssh_obj.exec_command(
+                node=client,
+                command=(f"sudo tmux list-sessions -F '#S' 2>/dev/null "
+                         f"| grep -qx '[f]io_{name}_fio' && echo ALIVE "
+                         f"|| echo GONE"),
+                timeout=60, max_retries=1)
+            return "ALIVE" in (out or "")
+        except Exception as exc:                      # noqa: BLE001
+            # Unknown is not dead. Reporting a job gone because one ssh call
+            # failed would relaunch a job that is still writing.
+            self.logger.warning(
+                "[rapid-fio] could not check %s on %s (%s); assuming alive",
+                name, client, str(exc)[:100])
+            return True
+
+    def fio_relaunch(self, name, record, runtime):
+        """Start one job again, in place, without touching the others.
+
+        Any straggler is killed first. Liveness here is "does this job's tmux
+        session exist", and a session can be gone while a process it started is
+        not, so the check can say finished a moment too early. Two fio jobs
+        writing the same files report corruption that is ours -- and a verify
+        failure is the one result this suite exists to produce, so it must
+        never be one we caused. The kill costs a second and removes the whole
+        question.
+        """
+        client = record["Client"]
+        # This is only ever called for a job the lifecycle has already found
+        # finished, so nothing should be running. Check anyway and refuse if
+        # something is: a relaunch on top of a live fio is the one mistake
+        # here that produces fake corruption rather than a failed test.
+        if self._fio_running_for(name, client):
+            raise RuntimeError(
+                f"[rapid-fio] refusing to relaunch {name}: fio is still "
+                f"running on {client} despite the job reporting finished. "
+                f"Two writers on one volume produce verify failures that read "
+                f"as storage corruption.")
+
+        # Clear the previous run's files before starting, the same as the mass
+        # path does. Two reasons. Space: a finished run leaves its files at the
+        # size it used, and self.fio_size shrinks as churn adds objects, so
+        # stale larger files sit there consuming the volume -- which is how a
+        # 19G volume came to report 6G free and have its --size cut to 2G.
+        # And provenance: a fresh run writing into a previous run's files under
+        # a different randseed is the same two-layouts-one-file confusion that
+        # made the last set of verify failures look like storage corruption,
+        # just separated in time rather than concurrent.
+        #
+        # Safe here only because nothing is running -- the check above has
+        # already established that, which is why the delete follows it rather
+        # than leading.
+        self.ssh_obj.delete_files(client, [f"{record['Mount']}/*"])
+        self.ssh_obj.run_fio_test(
+            record["Client"], None, record["Mount"], record["Log"],
+            size=self.fio_size, name=f"{name}_fio", rw="randrw",
+            bs=self._short_bs(), nrfiles=8, iodepth=1, numjobs=2,
+            time_based=True, runtime=runtime, log_avg_msec=1000,
+            iolog_file=record["iolog_base_path"],
+            verify="md5", verify_dump=1, verify_fatal=1, retries=6,
+            use_latency=False,
+        )
+
+    def _fio_running_for(self, name, client):
+        """Is a fio for this volume alive on this client?
+
+        Unknown counts as running. Getting this wrong in that direction costs
+        a relaunch we skip; getting it wrong the other way puts a second writer
+        on the volume, which is the failure this whole path exists to avoid.
+        """
+        try:
+            pids = [p.strip() for p in self.ssh_obj.find_process_name(
+                client, f"{name}_fio", return_pid=True) or []]
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[fio-launch] cannot tell whether %s is running on %s (%s); "
+                "assuming it is", name, client, str(exc)[:100])
+            return True
+        # find_process_name greps ps, so its own pipeline is in the output.
+        # Two or fewer is that noise, the threshold _kill_fio_on_client uses.
+        return len([p for p in pids if p.isdigit()]) > 2
+
     def _kick_fio_for_all(self, runtime=None):
         """Start verified fio (PID-checked; auto-rerun) for all lvols + clones."""
+        # Split permanent from churnable and record the base runtime. Safe to
+        # call on every wave: it only acts once.
+        self.rapid_fio_init(runtime)
         # small stagger to avoid SSH bursts
         def _launch(name, det):
+            # Jitter this job's runtime the same way a relaunch does. Without
+            # it the whole first wave is started with one flat runtime and
+            # therefore ends within seconds of itself -- which is the bunching
+            # the jitter was added to prevent, left in place for the largest
+            # cohort of the run. The relaunches that follow were already
+            # spread; the cohort they replace was not.
+            job_runtime = (self.rapid_runtime_for(name)
+                           if getattr(self, "_rapid_lifecycle_ready", False)
+                           else runtime)
             self.ssh_obj.run_fio_test(
                 det["Client"], None, det["Mount"], det["Log"],
                 size=self.fio_size, name=f"{name}_fio", rw="randrw",
                 bs=self._short_bs(), nrfiles=8, iodepth=1, numjobs=2,
-                time_based=True, runtime=runtime, log_avg_msec=1000,
-                iolog_file=det["iolog_base_path"], max_latency="30s",
+                time_based=True, runtime=job_runtime, log_avg_msec=1000,
+                iolog_file=det["iolog_base_path"],
                 verify="md5", verify_dump=1, verify_fatal=1, retries=6,
                 use_latency=False
             )
 
-        for lvol, det in self.lvol_mount_details.items():
-            self.ssh_obj.delete_files(det["Client"], [f"/mnt/{lvol}/*"])
-            t = threading.Thread(target=_launch, args=(lvol, det))
-            t.start()
-            self.fio_threads.append(t)
-            sleep_n_sec(0.2)
-
-        for cname, det in self.clone_mount_details.items():
-            self.ssh_obj.delete_files(det["Client"], [f"/mnt/{cname}/*"])
-            t = threading.Thread(target=_launch, args=(cname, det))
+        # Start fio only where none is running. A job already under way is
+        # left to finish its own runtime, and the lifecycle relaunches it when
+        # it genuinely ends -- picking up whatever self.fio_size is by then.
+        #
+        # This used to relaunch everything unconditionally, which was safe only
+        # while the checkpoint drained fio first. Once that barrier went, the
+        # delete below started landing on live jobs: the files went out from
+        # under a running fio, space_check read the free space as collapsed
+        # because the deleted bytes were still held open, cut --size, and a
+        # second fio came up on the same names with a different randseed. Two
+        # writers, and verify failures that read exactly like storage handing
+        # back the wrong block.
+        #
+        # Killing the old job would also close that hole, and an earlier fix
+        # did just that. Letting it finish is better: a kill throws away the
+        # verification work in flight, and the whole reason the barrier was
+        # removed was to stop treating IO as something to interrupt between
+        # outages. Nothing here needs the job restarted -- it needs one to be
+        # running.
+        for name, det in (list(self.lvol_mount_details.items())
+                          + list(self.clone_mount_details.items())):
+            if self._fio_running_for(name, det["Client"]):
+                self.logger.info(
+                    "[fio-launch] %s already has fio running; leaving it to "
+                    "finish (the lifecycle relaunches it when it ends)", name)
+                continue
+            self.ssh_obj.delete_files(det["Client"], [f"/mnt/{name}/*"])
+            t = threading.Thread(target=_launch, args=(name, det))
             t.start()
             self.fio_threads.append(t)
             sleep_n_sec(0.2)
@@ -728,9 +870,35 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         # loses IO only on the tail of the last outage if they run to 900s.
         # The wait has to stay above the runtime or the checkpoint join gives up
         # on FIO that is still legitimately running.
-        self.FIO_WAVE_RUNTIME_SEC = 4000
+        # 8000, up from 4000. On lblk_rapid_outage_docker-20260924-171741 the
+        # five outages of a wave took fifteen minutes end to end (17:39-17:54)
+        # while the wave itself ran 4000s, so IO outlasted the outages it was
+        # there to cover by a wide margin and the run was dominated by waiting
+        # for it. Doubling the runtime keeps IO under every outage of a longer
+        # or slower wave; it does not make the run faster, and if the aim is
+        # more outages per hour the lever is the number of outages per
+        # checkpoint, not this.
+        self.FIO_WAVE_RUNTIME_SEC = 8000
         self._per_wave_fio_runtime = self.FIO_WAVE_RUNTIME_SEC
-        self._fio_wait_timeout = 5000
+
+        # Runtime is not the whole wall clock. `--time_based --runtime` starts
+        # counting only once FIO has laid out its files, and with
+        # --size=19G --nrfiles=8 that comes first and is not free. Measured on
+        # lblk_rapid_outage_docker-20260924-171741: launched 17:38, job
+        # processes forked 18:16 -- 38 minutes of layout -- then 4000s of
+        # runtime, due to finish 19:22:40.
+        #
+        # The budget was a flat 5000, which expired at 19:22:12: twenty-eight
+        # seconds before the job it was waiting for would have exited. The run
+        # failed with "FIO process list not empty" naming a job that went on to
+        # write a clean summary (run=4000001msec) a minute later.
+        #
+        # So it is sized as layout allowance plus runtime. Erring long costs
+        # only the time to notice a genuine hang; erring short fails runs that
+        # were working, which is the worse of the two and is what happened.
+        self.FIO_LAYOUT_ALLOWANCE_SEC = 3600
+        self._fio_wait_timeout = (self.FIO_WAVE_RUNTIME_SEC
+                                  + self.FIO_LAYOUT_ALLOWANCE_SEC)
 
     # ── helper: ft-aware single-node selection ───────────────────────────────
 
@@ -956,6 +1124,18 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 self.current_outage_node, ["offline", "unreachable"], timeout=900
             )
 
+        elif outage_type == "storage_node_reboot":
+            # Not in the default outage_types: this branch exists so a
+            # subclass CAN opt in. Without it, appending the type to
+            # outage_types would select it, fall through the if/elif chain
+            # below, and count an outage that never happened.
+            self.ssh_obj.notify_outage_started([node_ip])
+            self.ssh_obj.reboot_node(node_ip)
+            self.sbcli_utils.wait_for_storage_node_status(
+                self.current_outage_node, ["offline", "unreachable"],
+                timeout=900
+            )
+
         elif outage_type == "interface_full_network_interrupt":
             if not self.k8s_test and node_ip in self.container_nodes:
                 ts = int(datetime.now().timestamp())
@@ -1046,6 +1226,14 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 self.current_outage_node, "online", timeout=900
             )
 
+        elif outage_type == "storage_node_reboot":
+            # The machine is coming back on its own; what has to be waited out
+            # is the whole stack behind it. Longer than the others because a
+            # reboot is: kernel, then the node agent, then SPDK.
+            self.sbcli_utils.wait_for_storage_node_status(
+                self.current_outage_node, "online", timeout=1200
+            )
+
         elif "network_interrupt" in outage_type:
             self.sbcli_utils.wait_for_storage_node_status(
                 self.current_outage_node, "online", timeout=900
@@ -1080,6 +1268,13 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 )
         else:
             self.runner_k8s_log.restart_logging()
+
+        # One outage is now complete. Check FIO here rather than at the
+        # checkpoint: a failure is detected within this cycle and is
+        # attributable to THIS outage, and any job that reached the end of its
+        # runtime is relaunched on the spot instead of the loop waiting for
+        # the whole wave. Measured at about a second.
+        self.rapid_after_outage(f"after {outage_type}")
 
         # small cool-down before next outage
         sleep_n_sec(10)
@@ -1765,7 +1960,15 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
     def _outage_loop(self):
         """Outage, recover, and checkpoint until something raises."""
         iteration = 1
+        # --resume re-enters here instead of at 1, with the previous run's
+        # random name prefixes restored so its objects are recognisable.
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
         while True:
+            self.checkpoint(iteration)
             if self.dump_validation_errors:
                 raise RuntimeError(
                     f"[V2] Placement dump validation failed: {self.dump_validation_errors}"
@@ -1801,9 +2004,14 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                     t.join(timeout=10)
                 self.fio_threads = []
 
-                self.common_utils.manage_fio_threads(
-                    self.fio_node, [], timeout=self._fio_wait_timeout
-                )
+                # NOT manage_fio_threads. That blocked until every job in
+                # the wave had exited -- 88 of the 105 minutes of
+                # lblk_rapid_outage_docker-20260924-171741 -- and then failed
+                # the run 28 seconds before the last job would have finished
+                # cleanly. rapid_after_outage has been reading these same logs
+                # after every outage since, so by here a failure would already
+                # have stopped the run; there is nothing left to wait for.
+                self.rapid_check_and_revive("at checkpoint")
 
                 self._log_block_sizes("checkpoint")
 

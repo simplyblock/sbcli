@@ -1,3 +1,7 @@
+# First, and before any test module: a few tests import the product for its
+# constants, and e2e runs from e2e/ where the repo root is not on sys.path.
+# See _product_path.py -- this used to work only by accident.
+import _product_path  # noqa: F401
 from e2e_tests.add_node_fio_run import (
     TestAddK8sNodesDualNodePerHost,
     TestAddK8sNodesDuringFioRun,
@@ -58,10 +62,106 @@ from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
 from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
+from e2e_tests.lblk.test_lblk import (
+    LblkDeviceFaultDocker,
+    LblkDeviceFaultK8s,
+    LblkFunctionalDocker,
+    LblkFunctionalK8s,
+    LblkIntegrityDocker,
+    LblkIntegrityK8s,
+    LblkJournalRecoveryDocker,
+    LblkJournalRecoveryK8s,
+)
 from e2e_tests.mgmt_restart_fio_run import TestMgmtNodeReboot
+from e2e_tests.migration.test_migration_batch import (
+    MigrationBatchFlat,
+    MigrationBatchNegative,
+    MigrationBatchNsGaps,
+    MigrationBatchWithTrees,
+)
+from e2e_tests.migration.test_migration_fault import (
+    MigrationCancel,
+    MigrationClusterRestartBetween,
+    MigrationHaPartnerRestart,
+    MigrationRetryAfterTargetReboot,
+    MigrationSourceAndTargetFaults,
+    MigrationTargetOfflinePerPhase,
+)
+from e2e_tests.migration.test_migration_happy import (
+    MigrationHappyPath,
+    MigrationRoundTrip,
+    MigrationWithSnapshots,
+)
+from e2e_tests.migration.test_migration_negative import (
+    MigrationNegativeCapacity,
+    MigrationNegativeTargets,
+    MigrationUnderReplication,
+)
+from e2e_tests.migration.test_migration_scale import (
+    MigrationLargeVolume,
+    MigrationManyVolumes,
+    MigrationSoak,
+)
+from e2e_tests.migration.test_migration_smoke import MigrationSmoke
+from e2e_tests.migration.test_migration_topology import (
+    MigrationConcurrent,
+    MigrationHaOverlapMatrix,
+    MigrationSnapshotCloneTrees,
+)
 from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
+from e2e_tests.replication.test_replication_consistency import (
+    ConsistencyGroupGeneration,
+    ConsistencyGroupPlacement,
+)
+from e2e_tests.replication.test_replication_csi_addons import (
+    CsiAddonsEnableAndReport,
+    CsiAddonsForcedFailoverAndOutage,
+    CsiAddonsGroupReplication,
+    CsiAddonsOwnership,
+    CsiAddonsPromoteDemote,
+)
+from e2e_tests.replication.test_replication_functional import (
+    ReplicationHarness,
+    ReplicationPolicyVariants,
+    ReplicationStartsAndReports,
+    ReplicationTargetsAndPolicies,
+)
+from e2e_tests.replication.test_replication_integrity import (
+    ReplicationConvergesUnderLoad,
+    ReplicationDataIsIdentical,
+    ReplicationNoMetadataCorruption,
+)
+from e2e_tests.replication.test_replication_negative import (
+    ReplicationNegativeConfiguration,
+    ReplicationNegativeOperations,
+)
+from e2e_tests.replication.test_replication_outage import (
+    ReplicationConsistencyGroupNodeLoss,
+    ReplicationControlPlaneAndDeviceOutages,
+    ReplicationNetworkOutages,
+    ReplicationOutageDuringOperations,
+    ReplicationSourceNodeOutages,
+    ReplicationTargetNodeOutage,
+)
+from e2e_tests.replication.test_replication_recovery import (
+    ReplicationFailback,
+    ReplicationFailoverDataLoss,
+    ReplicationFailoverScopes,
+    ReplicationMigration,
+)
+from e2e_tests.replication.test_replication_scale import (
+    ReplicationLargeVolume,
+    ReplicationManyVolumes,
+    ReplicationOverlappingIntervals,
+    ReplicationSoak,
+)
+from e2e_tests.replication.test_replication_upgrade import (
+    ReplicationAnnotationToCsiAddonsMigration,
+    ReplicationSurvivesControlPlaneUpgrade,
+    ReplicationSurvivesOperatorUpgrade,
+)
 from e2e_tests.security.test_lvol_security import (
     TestDhchapPodScheduling,
     TestLvolCryptoWithDhchap,
@@ -185,6 +285,15 @@ from e2e_tests.upgrade_tests.major_upgrade import (
     TestMajorUpgradeSingleNode,
 )
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+from load_tests.migration_load import (
+    MigrationConcurrencyCurve,
+    MigrationFreezeByVolumeSize,
+    MigrationTimeBySnapshotCount,
+)
+from load_tests.replication_load import (
+    ReplicationCycleTimeBySize,
+    ReplicationDemoteDowntimeBySize,
+)
 from stress_test.continuous_backup_stress import (
     BackupStressComprehensive,
     BackupStressCryptoMix,
@@ -266,6 +375,12 @@ from stress_test.device_failure_migration import (
     DevicePCIeRestartUnderLoadDocker,
     DevicePCIeRestartUnderLoadK8s,
 )
+from stress_test.dual_outage_matrix import (
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+    LblkDualOutageMatrixDocker,
+    LblkDualOutageMatrixK8s,
+)
 from stress_test.k8s_native_namespace_failover import (
     K8sNativeMountVerifiedFailoverTest,
     K8sNativeNamespacedFailoverTest,
@@ -274,6 +389,19 @@ from stress_test.k8s_native_namespace_failover import (
 from stress_test.large_scale_lvol_stress import (
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
+)
+from stress_test.lblk_outage_matrix import (
+    LblkOutageMatrixDocker,
+    LblkOutageMatrixK8s,
+)
+from stress_test.lblk_stress import (
+    LblkMultiOutageStressDocker,
+    LblkQuickOutageStressDocker,
+    LblkRapidOutageStressDocker,
+    LblkRapidOutageStressK8s,
+    LblkResilientStressK8s,
+    LblkStressDocker,
+    LblkStressK8s,
 )
 from stress_test.lvol_ha_stress_fio import (
     TestLvolHAClusterGracefulShutdown,
@@ -321,6 +449,12 @@ from stress_test.mass_create_delete_stress import (
 from stress_test.mgmt_node_network_outage import (
     MgmtNodeNetworkOutageTest,
     MgmtNodeRebootTest,
+)
+from stress_test.product_limits_stress import (
+    ProductLimits_70TiB_Docker,
+    ProductLimits_70TiB_K8s,
+    ProductLimits_Docker,
+    ProductLimits_K8s,
 )
 
 ALL_TESTS = [
@@ -454,6 +588,31 @@ ALL_TESTS = [
     BulkLvolHotDeleteK8s,
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+    LblkDualOutageMatrixDocker,
+    LblkDualOutageMatrixK8s,
+    LblkFunctionalDocker,
+    LblkFunctionalK8s,
+    LblkIntegrityDocker,
+    LblkIntegrityK8s,
+    LblkDeviceFaultDocker,
+    LblkDeviceFaultK8s,
+    LblkJournalRecoveryDocker,
+    LblkJournalRecoveryK8s,
+    LblkOutageMatrixDocker,
+    LblkOutageMatrixK8s,
+    LblkStressDocker,
+    LblkStressK8s,
+    LblkMultiOutageStressDocker,
+    LblkQuickOutageStressDocker,
+    LblkRapidOutageStressDocker,
+    LblkRapidOutageStressK8s,
+    LblkResilientStressK8s,
+    ProductLimits_Docker,
+    ProductLimits_K8s,
+    ProductLimits_70TiB_Docker,
+    ProductLimits_70TiB_K8s,
     MassCreateDelete_1x500_Docker,
     MassCreateDelete_30x100_Docker,
     MassCreateDelete_300x10_Docker,
@@ -560,6 +719,82 @@ ALL_TESTS = [
     TestNodeShutdownRestart,
     # API parity audit
     TestAPIParityAudit,
+
+    # backup-stress: in its group but never in ALL_TESTS, so these four could
+    # only ever run as part of --testname backup-stress. Pre-existing; found by
+    # scripts/check_test_registry.py.
+    BackupStressLargeScale,
+    BackupStressFilesystemSecurityMix,
+    BackupStressRetentionMergeCycles,
+    BackupStressComprehensive,
+
+    # ── replication, migration and their stress/load lanes ───────────────
+    # These must be here as well as in their group functions. ALL_TESTS is
+    # what e2e.py searches when a class is named by hand (--testname
+    # MigrationSmoke); a class reachable only through a group key cannot be
+    # run on its own, which is how `--testname MigrationSmoke` failed with
+    # "Test not found" while `--testname migration` worked.
+    ReplicationHarness,
+    ReplicationTargetsAndPolicies,
+    ReplicationStartsAndReports,
+    ReplicationPolicyVariants,
+    ReplicationDataIsIdentical,
+    ReplicationConvergesUnderLoad,
+    ReplicationNoMetadataCorruption,
+    ConsistencyGroupPlacement,
+    ConsistencyGroupGeneration,
+    ReplicationFailoverScopes,
+    ReplicationFailoverDataLoss,
+    ReplicationFailback,
+    ReplicationMigration,
+    ReplicationSourceNodeOutages,
+    ReplicationTargetNodeOutage,
+    ReplicationNetworkOutages,
+    ReplicationOutageDuringOperations,
+    ReplicationConsistencyGroupNodeLoss,
+    ReplicationControlPlaneAndDeviceOutages,
+    ReplicationNegativeConfiguration,
+    ReplicationNegativeOperations,
+    CsiAddonsEnableAndReport,
+    CsiAddonsOwnership,
+    CsiAddonsPromoteDemote,
+    CsiAddonsForcedFailoverAndOutage,
+    CsiAddonsGroupReplication,
+    ReplicationOverlappingIntervals,
+    ReplicationManyVolumes,
+    ReplicationLargeVolume,
+    ReplicationSoak,
+    ReplicationSurvivesControlPlaneUpgrade,
+    ReplicationSurvivesOperatorUpgrade,
+    ReplicationAnnotationToCsiAddonsMigration,
+    MigrationSmoke,
+    MigrationHappyPath,
+    MigrationRoundTrip,
+    MigrationWithSnapshots,
+    MigrationHaOverlapMatrix,
+    MigrationSnapshotCloneTrees,
+    MigrationConcurrent,
+    MigrationBatchFlat,
+    MigrationBatchNsGaps,
+    MigrationBatchNegative,
+    MigrationBatchWithTrees,
+    MigrationNegativeTargets,
+    MigrationNegativeCapacity,
+    MigrationUnderReplication,
+    MigrationTargetOfflinePerPhase,
+    MigrationSourceAndTargetFaults,
+    MigrationCancel,
+    MigrationRetryAfterTargetReboot,
+    MigrationHaPartnerRestart,
+    MigrationClusterRestartBetween,
+    MigrationManyVolumes,
+    MigrationLargeVolume,
+    MigrationSoak,
+    MigrationFreezeByVolumeSize,
+    MigrationTimeBySnapshotCount,
+    MigrationConcurrencyCurve,
+    ReplicationCycleTimeBySize,
+    ReplicationDemoteDowntimeBySize,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -739,6 +974,23 @@ def get_stress_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
+        DualOutageMatrixDocker,
+        DualOutageMatrixK8s,
+        LblkDualOutageMatrixDocker,
+        LblkDualOutageMatrixK8s,
+        LblkStressDocker,
+        LblkStressK8s,
+        LblkMultiOutageStressDocker,
+        LblkQuickOutageStressDocker,
+        LblkRapidOutageStressDocker,
+        LblkRapidOutageStressK8s,
+        LblkResilientStressK8s,
+        LblkOutageMatrixDocker,
+        LblkOutageMatrixK8s,
+        ProductLimits_Docker,
+        ProductLimits_K8s,
+        ProductLimits_70TiB_Docker,
+        ProductLimits_70TiB_K8s,
         MassCreateDelete_1x500_Docker,
         MassCreateDelete_30x100_Docker,
         MassCreateDelete_300x10_Docker,
@@ -935,11 +1187,259 @@ def get_upgrade_tests():
     return tests
 
 
+def get_migration_load_tests():
+    """MIG-L: migration timings, as curves rather than verdicts.
+
+    A LOAD lane, which is a different kind of thing from e2e or stress --
+    the output is a number per step, appended to CSV, resumable, and
+    plotted. "Did it pass" is close to meaningless; the deliverable is
+    where the curve bends.
+
+        MIG-L-001  freeze duration vs volume size      <- the headline
+        MIG-L-002  duration vs snapshot count
+        MIG-L-003  wall-clock vs concurrency
+
+    MIG-L-001 is the one to run first. lvol_migrate is the only phase that
+    stops the volume serving, the design calls it a "short freeze", and
+    nobody has published what it is at the sizes customers use.
+
+        MIG_LOAD_SIZES (2,10,50,100)   MIG_LOAD_SNAPS (0,10,50,100)
+        MIG_LOAD_CONCURRENCY (1,2,4,8) MIG_LOAD_BUDGET_SEC (5400)
+        LOAD_CONTINUE (1)  -- resume from the CSV instead of redoing steps
+    """
+    return [
+        MigrationFreezeByVolumeSize,     # MIG-L-001
+        MigrationTimeBySnapshotCount,    # MIG-L-002
+        MigrationConcurrencyCurve,       # MIG-L-003
+    ]
+
+
+def get_replication_load_tests():
+    """AR-L: the two replication numbers nobody has.
+
+    Neither has a threshold to assert against, which is exactly why they
+    are load and not stress: the answer is a curve that tells you how big
+    a volume you can honestly offer the feature on.
+
+        AR-L-001  cycle time vs volume size -- the shortest honest interval,
+                  which does NOT improve when little changes because
+                  allow_partial is disabled and every transfer is full
+        AR-L-002  planned-relocation downtime vs size -- demote fences
+                  first and then ships a whole volume
+
+        AR_LOAD_SIZES (2,10,50,100)   AR_LOAD_BUDGET_SEC (7200)
+    """
+    return [
+        ReplicationCycleTimeBySize,      # AR-L-001
+        ReplicationDemoteDowntimeBySize, # AR-L-002
+    ]
+
+
 def get_load_tests():
+    """The load runner's registry -- e2e/load.py resolves --testname here.
+
+    A load test sweeps a parameter and records a number per step; see
+    load_tests/_load_base.py. These are ALSO in e2e.py's group map, under
+    migration-load and replication-load, because no workflow calls load.py --
+    so the e2e route is the only way to run them from a pipeline. Same
+    classes, two front doors: load.py for a single sweep by hand, e2e.py for
+    CI.
+    """
     tests = [
-        TestLvolOutageLoadTest
+        TestLvolOutageLoadTest,
+        MigrationFreezeByVolumeSize,
+        MigrationTimeBySnapshotCount,
+        MigrationConcurrencyCurve,
+        ReplicationCycleTimeBySize,
+        ReplicationDemoteDowntimeBySize,
     ]
     return tests
+
+
+def get_replication_tests():
+    """Async replication: two simplyblock clusters under one control plane.
+
+    Ordered so the harness runs first. If AR-S cannot stand two clusters up
+    nothing below it means anything, and the run should say that by name
+    rather than reporting whichever case happened to run next.
+
+    Needs enough storage nodes for two clusters -- see
+    ReplicationTestBase.MIN_NODES_PER_CLUSTER -- passed via
+    STORAGE_PRIVATE_IPS and/or NEW_NODE_IPS.
+
+    Test IDs map to documentation/async_replication_QA_test_plan.xlsx.
+    """
+    return [
+        # AR-S: if two clusters cannot be stood up, stop here.
+        ReplicationHarness,                       # AR-S-001, AR-S-002
+        # AR-F: configuration surface. Cheap, and fails fast on a broken build.
+        ReplicationTargetsAndPolicies,            # AR-F-001/003/004/005, AR-N-007
+        ReplicationStartsAndReports,              # AR-F-006/007/009/010/011
+        ReplicationPolicyVariants,                # AR-F-002/008/012/013/014/015
+        # AR-I: the core risk. Before anything destructive runs.
+        ReplicationDataIsIdentical,               # AR-I-001
+        ReplicationConvergesUnderLoad,            # AR-I-002
+        ReplicationNoMetadataCorruption,          # AR-I-003
+        # AR-C: a working group has to exist before AR-O-009 breaks one.
+        ConsistencyGroupPlacement,                # AR-C-001/005/006
+        ConsistencyGroupGeneration,               # AR-C-002/003/004/007/008
+        # AR-R: moves volumes between clusters; leaves the lab rearranged.
+        ReplicationFailoverScopes,                # AR-R-001/002/003/005
+        ReplicationFailoverDataLoss,              # AR-R-004
+        ReplicationFailback,                      # AR-R-006/007/008/009
+        ReplicationMigration,                     # AR-R-010/011/012
+        # AR-O: destructive and slowest.
+        ReplicationSourceNodeOutages,             # AR-O-001/002/003
+        ReplicationTargetNodeOutage,              # AR-O-004
+        ReplicationNetworkOutages,                # AR-O-005/006
+        ReplicationOutageDuringOperations,        # AR-O-007/008
+        ReplicationConsistencyGroupNodeLoss,      # AR-O-009
+        ReplicationControlPlaneAndDeviceOutages,  # AR-O-010/011/012
+        # AR-N: cheap, but AR-N-006 deletes a volume under replication.
+        ReplicationNegativeConfiguration,         # AR-N-001/002/003
+        ReplicationNegativeOperations,            # AR-N-004/005/006
+        # AR-K: the Kubernetes DR surface. Last because it is the newest and
+        # the only lane that no-ops on docker -- a failure here should not
+        # cost the engine coverage above it. Every case skips by name when
+        # the csi-addons CRDs are absent, so this is safe to leave enabled
+        # before operator PR #548 lands.
+        CsiAddonsEnableAndReport,                 # AR-K-001/002/003/010/011
+        CsiAddonsOwnership,                       # AR-K-004
+        CsiAddonsPromoteDemote,                   # AR-K-005/006/007/009
+        CsiAddonsForcedFailoverAndOutage,         # AR-K-008/012/013/014
+        CsiAddonsGroupReplication,                # AR-K-015 (Phase 4, records a skip)
+    ]
+
+
+def get_migration_tests():
+    """lvol migration: one volume between two nodes of ONE cluster.
+
+    The two-phase `volume migrate` / `volume migrate-continue` handshake,
+    which had NO e2e coverage before this lane -- our other "migration"
+    classes are device-failure rebalance, node migration, or cross-cluster
+    replication, none of which touch these verbs.
+
+    Ported from origin/lvol-migration-test-scripts, which were run by hand
+    and found most of this feature's bugs. Ordered cheapest-and-safest
+    first: the happy path has to work before a fault case means anything,
+    and the fault lane leaves nodes down and restarted, so it runs after
+    the topology work that needs a quiet cluster.
+
+        MIG-H  8 cases   happy path + the volume is still usable
+        MIG-T  11 cases  HA overlap matrix, trees, concurrency
+        MIG-B  8 cases   shared-namespace groups
+        MIG-N  7 cases   must-be-refused, plus migrate-while-replicating
+        MIG-F  15 cases  faults in a named phase -- longest, most disruptive
+    """
+    return [
+        # MIG-S first, always. Ten minutes, six named links, and a failure
+        # tells you WHICH link -- the CLI surface, the topology read, the
+        # pre-create, the record parsing, placement, or the data. The first
+        # full run of this lane spent nine hours proving nothing because a
+        # CLI flag did not exist; this is the guard against repeating that.
+        MigrationSmoke,                  # MIG-S-001
+        # MIG-H: if a plain migration does not work, nothing below matters.
+        MigrationHappyPath,              # MIG-H-001..004
+        MigrationRoundTrip,              # MIG-H-005/006
+        MigrationWithSnapshots,          # MIG-H-007/008
+        # MIG-T: needs a quiet cluster, so before anything destructive.
+        MigrationHaOverlapMatrix,        # MIG-T-001..005
+        MigrationSnapshotCloneTrees,     # MIG-T-006..009
+        MigrationConcurrent,             # MIG-T-010/011
+        # MIG-B: the batch path.
+        MigrationBatchFlat,              # MIG-B-001..003
+        MigrationBatchNsGaps,            # MIG-B-004
+        MigrationBatchNegative,          # MIG-B-005/006
+        MigrationBatchWithTrees,         # MIG-B-007/008
+        # MIG-N: cheap, but MIG-N-003 takes a node down.
+        MigrationNegativeTargets,        # MIG-N-001..004
+        MigrationNegativeCapacity,       # MIG-N-005
+        MigrationUnderReplication,       # MIG-N-006/007
+        # MIG-F: last. Kills nodes, reboots them, restarts the cluster.
+        MigrationTargetOfflinePerPhase,  # MIG-F-001..003
+        MigrationSourceAndTargetFaults,  # MIG-F-004..009
+        MigrationCancel,                 # MIG-F-010..012
+        MigrationRetryAfterTargetReboot, # MIG-F-013
+        MigrationHaPartnerRestart,       # MIG-F-014
+        MigrationClusterRestartBetween,  # MIG-F-015
+    ]
+
+
+def get_migration_stress_tests():
+    """MIG-P: migration at scale and over time. A SEPARATE lane.
+
+    Same split, same reason as the replication lanes: a soak measured in
+    hours must never stand between a correctness run and its answer.
+
+        MIG_LARGE_SIZE (100G)   MIG_LARGE_BUDGET_SEC (7200)
+        MIG_MANY_COUNT (20)     MIG_MANY_SETTLE_SEC (3600)
+        MIG_SOAK_HOURS (6)      MIG_VOL_SIZE (2G)  MIG_POST_OP_SEC (300)
+    """
+    return [
+        MigrationManyVolumes,   # MIG-P-003/004  minutes to an hour
+        MigrationLargeVolume,   # MIG-P-001/002  needs capacity; times the freeze
+        MigrationSoak,          # MIG-P-005/006  MIG_SOAK_HOURS
+    ]
+
+
+def get_replication_stress_tests():
+    """AR-P and AR-U: scale, endurance and upgrade. A SEPARATE lane.
+
+    Deliberately not part of get_replication_tests(). The correctness suite
+    answers "is this right" in a couple of hours; this one answers "does it
+    hold up" and a single soak can run for a weekend. Putting a 20-hour case
+    in front of a 2-hour answer is how a suite stops being run.
+
+    Ordered cheapest-first, because the early cases need nothing special and
+    the later ones need lab capacity and a time budget:
+
+        AR-U-007..009  migration      minutes   -- and it has a customer behind it
+        AR-P-001..003  overlap        ~20 min
+        AR-U-001..006  upgrade        ~30 min
+        AR-P-004..006  many volumes   ~45 min   needs headroom for N volumes
+        AR-P-007..009  large volume   hours     needs AR_LARGE_SIZE of capacity
+        AR-P-010..012  soak           AR_SOAK_HOURS (default 6)
+
+    Scale knobs, all environment-overridable because the right value is a
+    property of the lab and not of the test:
+
+        AR_OVERLAP_SIZE (20G)   AR_MANY_COUNT (25)    AR_MANY_SIZE (1G)
+        AR_LARGE_SIZE (100G)    AR_SOAK_HOURS (6)     AR_SOAK_RETENTION (3)
+    """
+    return [
+        # Cheap, no blockers, and the one with a customer waiting on the answer.
+        ReplicationAnnotationToCsiAddonsMigration,  # AR-U-007/008/009
+        ReplicationOverlappingIntervals,            # AR-P-001/002/003
+        # Upgrade: survives a control-plane roll, and the helm crds/ trap.
+        ReplicationSurvivesControlPlaneUpgrade,     # AR-U-001/002/003
+        ReplicationSurvivesOperatorUpgrade,         # AR-U-004/005/006
+        # Scale by count, then by size.
+        ReplicationManyVolumes,                     # AR-P-004/005/006
+        ReplicationLargeVolume,                     # AR-P-007/008/009
+        # Last: the only case measured in hours.
+        ReplicationSoak,                            # AR-P-010/011/012
+    ]
+
+
+def get_lblk_tests():
+    """Functional and integration coverage for lblk (non-NVMe) clusters.
+
+    Every one of these asserts device_mode == "lblk" first and fails fast if
+    not, so pointing this at an NVMe cluster reports a precondition error
+    rather than quietly passing against the wrong storage path.
+
+    The open-ended soak is LblkStress* in get_stress_tests().
+    """
+    return [
+        LblkFunctionalDocker,
+        LblkFunctionalK8s,
+        LblkIntegrityDocker,
+        LblkIntegrityK8s,
+        LblkDeviceFaultDocker,
+        LblkDeviceFaultK8s,
+        LblkJournalRecoveryDocker,
+        LblkJournalRecoveryK8s,
+    ]
 
 
 def get_parity_tests():

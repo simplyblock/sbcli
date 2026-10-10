@@ -570,6 +570,17 @@ class SecurityTestBase(TestClusterBase):
             f"allowedNodes={wanted} — assuming CRD name {derived!r}")
         return derived
 
+    #: Node-label prefixes the operator may use for a DHCHAP pool, newest
+    #: first. The key was renamed and reshaped (dev, 2026-10-03): the trailing
+    #: segment is now the pool UUID rather than <ns>.<cluster>.<pool>. Both are
+    #: accepted because the lab still runs older operator builds, and a test
+    #: that only knows the new spelling reports a missing label as a product
+    #: fault when it is really a version difference.
+    POOL_LABEL_PREFIXES = (
+        "storage.simplyblock.io/storage-pool.",
+        "simplyblock.io/pool.",
+    )
+
     def _k8s_pool_node_label(self, allowed_nodes=None):
         """Return the operator's node label key for the current pool.
 
@@ -594,13 +605,14 @@ class SecurityTestBase(TestClusterBase):
                 labels = {}
             pool_keys = [
                 key for key, val in labels.items()
-                if key.startswith("simplyblock.io/pool.") and val == "allowed"
+                if key.startswith(self.POOL_LABEL_PREFIXES) and val == "allowed"
             ]
             # Match on the CRD name first: the operator derives the key from
             # the StoragePool CRD's metadata.name, while self.pool_name is the
             # *backend* pool name, and the two diverge under the timestamp
             # suffix / 63-char truncation in add_storage_pool.
-            for candidate in (self._pool_crd_name, self.pool_name):
+            for candidate in (self._k8s_pool_uuid(), self._pool_crd_name,
+                              self.pool_name):
                 if not candidate:
                     continue
                 exact = [k for k in pool_keys
@@ -633,6 +645,28 @@ class SecurityTestBase(TestClusterBase):
             f"vacuously. Check that the operator reconciled the StoragePool "
             f"and labelled its allowedNodes.")
 
+    def _k8s_pool_uuid(self):
+        """The StoragePool's uuid, which the new label key ends with.
+
+        Returns "" when it cannot be read: the caller treats that as "no
+        candidate to match on" and falls through to the name-based matches,
+        which is what older operator builds need anyway.
+        """
+        k8s = self._ensure_k8s_utils()
+        name = self._pool_crd_name or self.pool_name
+        if not name:
+            return ""
+        try:
+            out, _err = k8s._exec_kubectl(
+                f"kubectl get storagepool {name} -n {k8s.namespace} "
+                f"-o jsonpath='{{.status.uuid}}' 2>/dev/null || true",
+                supress_logs=True)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[dhchap] could not read the pool uuid for "
+                                "%s: %s", name, str(exc)[:120])
+            return ""
+        return (out or "").strip().strip("'")
+
     def _k8s_pool_node_label_computed(self):
         """Best-effort construction of the pool label key (fallback only)."""
         k8s = self._ensure_k8s_utils()
@@ -642,9 +676,17 @@ class SecurityTestBase(TestClusterBase):
         )
         names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
         cluster_cr = names[0] if names else "simplyblock-cluster"
-        label = (
-            f"simplyblock.io/pool.{k8s.namespace}.{cluster_cr}.{self.pool_name}"
-        )
+        # New shape first, when the uuid is readable. The old
+        # ns.cluster.pool form is kept only for an older operator, and
+        # cluster_cr is still resolved above for that case.
+        uuid = self._k8s_pool_uuid()
+        if uuid:
+            label = f"storage.simplyblock.io/storage-pool.{uuid}"
+        else:
+            label = (
+                f"simplyblock.io/pool.{k8s.namespace}.{cluster_cr}"
+                f".{self.pool_name}"
+            )
         self.logger.info(f"[dhchap] pool node label: {label}")
         return label
 
@@ -2121,13 +2163,26 @@ class SecurityTestBase(TestClusterBase):
         """Trigger a self-restoring full network outage on a storage node.
 
         docker: drop the node's NICs over SSH for *duration* seconds.
-        k8s: kubectl exec into the privileged hostNetwork SPDK pod and apply
-          iptables DROP rules, with the flush scheduled as a HOST-level
-          process via ``nsenter --target 1`` so it survives SPDK's 60-second
-          abort timer killing the container. Without that, the DROP rules
-          would be permanent and the node never comes back. Ported from the
-          proven implementation in
-          ``e2e/stress_test/continuous_k8s_native_failover.py``.
+        k8s: delegate to K8sUtils.cut_storage_network, shared by every k8s
+          outage test.
+
+        This was ported from continuous_k8s_native_failover and inherited
+        two bugs from it, both since fixed in the shared version.
+
+        It blanket-DROPped everything on the node. That severed the node's
+        spdk-proxy from its peers, and `simplyblock-monitoring` is scheduled
+        onto a storage node -- so when it happened to be the node under test,
+        it reported three healthy peers as failed and the cluster went
+        degraded and then suspended. It also cut OVN geneve and FoundationDB,
+        which is a broken test environment rather than a storage outage. The
+        cut is now the peers' DATA addresses only.
+
+        And the flush was scheduled with ``nsenter --target 1`` from inside
+        the SPDK pod. The pod is hostNetwork but NOT hostPID, so PID 1 there
+        is the container's own: the timer died with the container, which is
+        exactly the case the old docstring claimed it survived. It is now a
+        transient systemd unit on the host, deleting the rules it added
+        rather than flushing the table.
         """
         if not self.k8s_test:
             active = self.ssh_obj.get_active_interfaces(node_ip)
@@ -2137,28 +2192,9 @@ class SecurityTestBase(TestClusterBase):
             return duration
 
         k8s = self._ensure_k8s_utils()
-        flush_delay = duration + 5
-        flush_cmd = (
-            f"sudo nsenter --target 1 --mount --net -- "
-            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
-            f"> /dev/null 2>&1 &'"
-        )
-        k8s.exec_in_spdk_container(node_ip, flush_cmd)
-        self.logger.info(
-            f"[k8s] scheduled host-level iptables flush in {flush_delay}s on "
-            f"{node_ip}")
-        drop_cmd = (
-            "sudo nohup bash -c '"
-            "sleep 5 && "
-            "iptables -A INPUT -j DROP && "
-            "iptables -A OUTPUT -j DROP"
-            "' > /tmp/k8s_nw_outage.log 2>&1 &"
-        )
-        k8s.exec_in_spdk_container(node_ip, drop_cmd)
-        self.logger.info(
-            f"[k8s] network outage triggered on {node_ip} (self-restoring "
-            f"after {duration}s)")
-        return duration
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        peers = k8s.peer_data_ips(nodes, node_ip)
+        return k8s.cut_storage_network(node_ip, peers, duration)
 
     def _disconnect_and_unmount_dual(self, lvol_name, lvol_id, mount_point):
         """Release the volume so it can be published elsewhere.
@@ -6098,7 +6134,8 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
                     f"-o jsonpath='{{.spec.nodeAffinity}}' "
                     f"2>/dev/null || true")
                 affinity = (aff_out or "").strip()
-                assert "simplyblock.io/pool." not in affinity, (
+                assert not any(p in affinity
+                               for p in self.POOL_LABEL_PREFIXES), (
                     f"TC-SEC-103: a non-DHCHAP pool's PV {pv_name} carries a "
                     f"pool nodeAffinity: {affinity!r}")
                 target = denied.node if denied else None

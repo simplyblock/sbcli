@@ -1,0 +1,4404 @@
+Run NAMESPACE=simplyblock
+  NAMESPACE=simplyblock
+  IFC_NAMES="br-ex:ens16np0"
+  MGMT_IFC="${IFC_NAMES%%:*}"
+  DATA_NICS="${IFC_NAMES#*:}"
+  MAX_SUBSYS="30"
+  SB_REPO="docker.io/simplyblock/simplyblock"
+  SB_TAG="main"
+  SPDK_IMAGE="docker.io/simplyblock/spdk:main-latest"
+  # spdkImage and spdkProxyImage were StorageNodeSet fields. In v1alpha2
+  # they survive only as a per-StorageNode override
+  # (StorageNode.spec.config.spdkImage), and a ClusterDeploymentConfig
+  # has no field that sets them -- the nodes it creates leave the image
+  # empty and the control plane picks its own default.
+  #
+  # There is no non-racy way to pin it from here: the nodes are created
+  # and added by the expansion, so anything this job patched afterwards
+  # would land after the image had already been chosen. Rather than
+  # patch and hope, the run says the pin did not happen, because an
+  # lblk run silently testing the default SPDK build instead of the one
+  # it named is a wrong green.
+  # Exported so the bring-up checks it rather than assumes it: the
+  # document cannot set spdkImage, so the run verifies what the nodes
+  # actually came up on and fails if it is not what was asked for.
+  export SPDK_IMAGE
+  PARTITIONS="${PARTITIONS:-0}"
+  JM_COUNT="${JM_COUNT:-3}"
+  # 0 (the default) means derive vcpuCount from the node's CPU count below;
+  # any other value in cluster_params is used verbatim.
+  VCPU_COUNT_PARAM=$(echo "${VCPU_COUNT_PARAM:-0}" | tr -d '[:space:]')
+  OPENSHIFT_CLUSTER="true"
+  CORE_PERCENTAGE="50"
+  FORCE_FORMAT_4K="true"
+  DRIVE_SIZE_RANGE="1.7T-2T"
+  CLUSTER_ENV="openshift-local"
+  if [ "$CLUSTER_ENV" = "local" ]; then
+    :
+  fi
+  
+  # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
+  if [ "${PARTITIONS}" = "0" ]; then
+    ENABLE_JOURNAL_DEVICE="true"
+  else
+    ENABLE_JOURNAL_DEVICE="false"
+  fi
+  
+  # vcpuCount: an explicit vcpu_count in cluster_params wins; 0 means calculate it
+  # from CORE_PERCENTAGE by querying the actual CPU count on a worker node.
+  if [ "${VCPU_COUNT_PARAM}" -gt 0 ] 2>/dev/null; then
+    VCPU_COUNT="${VCPU_COUNT_PARAM}"
+    echo "Using vcpuCount=${VCPU_COUNT} from cluster_params (skipping CPU-count query)"
+  else
+    FIRST_WORKER="worker-1,worker-2,worker-3,worker-4"
+    FIRST_WORKER="${FIRST_WORKER%%,*}"
+    if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
+      TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+    else
+      TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+    fi
+    TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
+    if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
+      VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
+      [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
+    else
+      echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 6"
+      VCPU_COUNT=6
+    fi
+    echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
+  fi
+  
+  RESERVED_SYSTEM_CPU=""
+  if [ "openshift-local" = "openshift-baremetal" ]; then
+    RESERVED_SYSTEM_CPU="0,1,10,11,16,17,26,27"
+  fi
+  
+  PCIE_MODEL=""
+  CLUSTER_ENV="openshift-local"
+  if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
+    PCIE_MODEL="SAMSUNG MZQLB1T9HAJR-00007"
+  fi
+  
+  # Which distribution the operator is deploying onto. It is a
+  # shorthand: naming OpenShift once sets openShiftCluster,
+  # enableCpuTopology and enableKubeletConfiguration together, so the
+  # three flags this workflow used to compute individually are now one
+  # word (expansion.go buildWorkload).
+  case "$CLUSTER_ENV" in
+    aws-openshift|openshift-local|openshift-baremetal) ENVIRONMENT="OpenShift" ;;
+    talos)                                             ENVIRONMENT="Talos" ;;
+    *)                                                 ENVIRONMENT="Vanilla" ;;
+  esac
+  
+  # nvme unless cluster_params says otherwise. Defaulted where it
+  
+  # is used, so it holds however the value arrived.
+  
+  DEVICE_MODE="${DEVICE_MODE:-nvme}"
+  
+  #
+  
+  # lblk selectors and the NVMe PCIe selectors are mutually
+  
+  # exclusive under the StorageNodeSet CEL rule, which tests
+  
+  # size(...) > 0 -- so blanking is enough, the keys may stay.
+  
+  if [ "${DEVICE_MODE}" = "lblk" ]; then
+    # Mandatory on lblk: add-node refuses with "lblk device mode
+    # requires --enable-journal-device; partitioned journal mode is not
+    # supported".
+    ENABLE_JOURNAL_DEVICE="true"
+    # Both are NVMe selectors, and discovery scans one class per run.
+    # Sending them with enableLogicalBlockDevices selects nothing.
+    DRIVE_SIZE_RANGE=""
+    PCIE_MODEL=""
+    echo "lblk mode: block-device discovery, journal device on, PCIe selectors blanked"
+  fi
+  
+  # Conditionally build backup spec block
+  BACKUP_SPEC=""
+  CLUSTER_SEC="none"
+  TESTNAME_INPUT="LblkOutageMatrixK8s"
+  TESTNAME_LOWER="$(echo "$TESTNAME_INPUT" | tr '[:upper:]' '[:lower:]')"
+  if [ "$CLUSTER_SEC" = "backup" ] || echo "$TESTNAME_LOWER" | grep -q "backup"; then
+    BACKUP_SPEC="  backup:
+      credentialsSecretRef:
+        name: backup-credentials
+      localEndpoint: ${MINIO_ENDPOINT}
+      localTesting: true
+      secondaryTarget: 0
+      snapshotBackups: true
+      withCompression: false"
+  fi
+  
+  # Build vault settings and encryption pool blocks (conditional on TLS)
+  # Always configured, for the same reason as TLS_FLAGS above.
+  VAULT_SETTINGS=""
+  ENCRYPTION_POOL_YAML=""
+  if true; then
+    VAULT_SETTINGS="  hashicorpVaultSettings:
+      baseURL: \"https://openbao.vault:8200\""
+    ENCRYPTION_POOL_YAML="---
+  apiVersion: storage.simplyblock.io/v1alpha1
+  kind: StoragePool
+  metadata:
+    name: encryption-pool
+    namespace: ${NAMESPACE}
+  spec:
+    clusterName: simplyblock-cluster
+    storageClassParameters:
+      encryption: true"
+  fi
+  
+  echo "=== Bringing the cluster up through the deployment config ==="
+  # StorageNodeSet is not reconciled any more. operator/cmd/main.go
+  # registers no reconciler for it and deployment/expansion.go is the
+  # only thing that creates a StorageNode, so applying a set succeeded
+  # and produced nothing -- the cluster then waited forever for storage
+  # nodes nobody had asked for.
+  #
+  # The supported path is a ClusterDeploymentConfig: discovery inspects
+  # the workers and writes a draft, we write our parameters into it, and
+  # approving it builds the StorageCluster and its StorageNodes. The
+  # draft is immutable once approved, so everything has to be set first;
+  # the script does that in order.
+  export NAMESPACE
+  export CLUSTER_NAME="simplyblock-cluster"
+  export DEVICE_MODE NDCS NPCS VCPU_COUNT MAX_SUBSYS
+  export MGMT_IFC DATA_NICS
+  export JM_COUNT
+  export JM_PERCENT="3"
+  export ENABLE_JOURNAL_DEVICE
+  export ENVIRONMENT
+  export DRIVE_SIZE_RANGE PCIE_MODEL
+  # No default in the CRD and immutable on the cluster once set,
+  # so an unstated fabric is not a thing that can be fixed later.
+  export FABRIC_TYPE="tcp"
+  # One field, two operations: the operator resolves it to a 4K reformat
+  # on an NVMe cluster and a wipefs on a block one.
+  export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
+  export WORKER_NODES="worker-1,worker-2,worker-3,worker-4"
+  # On lblk the workers boot from /dev/sda; without this the draft
+  # offers the root disk as storage and the approval gate is the only
+  # thing standing between that and a reformat.
+  if [ "${DEVICE_MODE}" = "lblk" ]; then
+    export BLOCK_DENY_LIST="${LBLK_DENY_LIST:-/dev/sda}"
+  fi
+  
+  python3 $GITHUB_WORKSPACE/e2e/scripts/k8s_cluster_bringup.py
+  
+  echo "=== Settings the deployment config does not carry ==="
+  # A deployment config describes a deployment, not every knob of a
+  # cluster: thresholds, node affinity, backup and vault have no field
+  # on it. They are mutable on the StorageCluster, so they are patched
+  # onto the cluster the expansion just created.
+  #
+  # Patched through v1alpha1 deliberately. That version is still served
+  # and carries these in exactly the shapes this workflow already
+  # builds -- backup's localEndpoint/localTesting/secondaryTarget among
+  # them -- and the conversion webhook translates. Rewriting them into
+  # v1alpha2's own backup shape by hand would be a silent guess, and a
+  # wrong guess reads as a backup test failing for its own reasons.
+  cat > /tmp/cluster-extra.yaml <<EOF
+  spec:
+    enableNodeAffinity: true
+    warningThreshold:
+      capacity: 95
+      provisionedCapacity: 97
+    criticalThreshold:
+      capacity: 96
+      provisionedCapacity: 98
+  ${BACKUP_SPEC}
+  ${VAULT_SETTINGS}
+  EOF
+  echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
+  kubectl -n ${NAMESPACE} patch \
+    storageclusters.v1alpha1.storage.simplyblock.io simplyblock-cluster \
+    --type=merge --patch-file /tmp/cluster-extra.yaml
+  
+  # reservedSystemCPU was a StorageNodeSet field and is now part of the
+  # cluster's storage-node workload, so it has no v1alpha1 home and is
+  # patched on v1alpha2 directly.
+  if [ -n "${RESERVED_SYSTEM_CPU}" ]; then
+    kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
+      --type=merge \
+      -p "{\"spec\":{\"storageNodes\":{\"reservedSystemCPU\":\"${RESERVED_SYSTEM_CPU}\"}}}"
+  fi
+  
+  echo "=== Applying pools ==="
+  cat <<EOF | kubectl apply -f -
+  apiVersion: storage.simplyblock.io/v1alpha1
+  kind: StoragePool
+  metadata:
+    name: simplyblock-pool
+    namespace: ${NAMESPACE}
+  spec:
+    clusterName: simplyblock-cluster
+  ${ENCRYPTION_POOL_YAML}
+  EOF
+  
+  echo "Custom resources applied"
+  sleep 10
+  shell: /usr/bin/bash -e {0}
+  env:
+    TESTNAME: LblkOutageMatrixK8s
+    KEY_PATH: /home/ec2-user/.ssh/simplyblock-us-east-2.pem
+    CLIENT_IPS: 
+    NFS_MOUNTPOINT: /mnt/nfs_share/
+    SSH_USER: root
+    SSH_PASSWORD: ***
+    KEY_NAME: simplyblock-us-east-2.pem
+    KUBECONFIG: /home/ec2-user/.kube/config-36106621262
+    NDCS: 1
+    NPCS: 1
+    BS: 4096
+    CHUNK_BS: 4096
+    PARTITIONS: 1
+    JM_COUNT: 4
+    VCPU_COUNT_PARAM: 0
+    DEVICE_MODE: lblk
+    FLUENTBIT_PATCHED: true
+Calculated vcpuCount=4 (8 CPUs * 50%)
+lblk mode: block-device discovery, journal device on, PCIe selectors blanked
+=== Bringing the cluster up through the deployment config ===
+[bringup] raising discovery e2e-discover-e2e-simplyblock-cluster
+[bringup] {
+  "action": "Discover",
+  "discover": {
+    "configName": "e2e-simplyblock-cluster",
+    "enableControlPlaneNodes": false,
+    "deviceFilter": {
+      "enableLogicalBlockDevices": true,
+      "blockDenyList": [
+        "/dev/sda"
+      ]
+    },
+    "workers": [
+      "worker-1",
+      "worker-2",
+      "worker-3",
+      "worker-4"
+    ]
+  }
+}
+[bringup] discovery phase=Running probing 4 worker(s) of a OpenShift cluster
+[bringup] discovery phase=Failed no worker has a device this run would use: 24 device(s) across 4 worker(s), none usable: 4 declined by available: the probe refused it: Mounted, Busy, Partitioned; 8 declined by available: the probe refused it: NotAWholeDisk; 8 declined by available: the probe refused it: NotAWholeDisk, Mounted, Busy; 4 declined by available: the probe refused it: NotBlank
+[bringup] discovery attempt 1/3 failed: discovery failed: no worker has a device this run would use: 24 device(s) across 4 worker(s), none usable: 4 declined by available: the probe refused it: Mounted, Busy, Partitioned; 8 declined by avai
+[bringup] retrying with a fresh document
+[bringup] raising discovery e2e-discover-e2e-simplyblock-cluster-try2
+[bringup] {
+  "action": "Discover",
+  "discover": {
+    "configName": "e2e-simplyblock-cluster-try2",
+    "enableControlPlaneNodes": false,
+    "deviceFilter": {
+      "enableLogicalBlockDevices": true,
+      "blockDenyList": [
+        "/dev/sda"
+      ]
+    },
+    "workers": [
+      "worker-1",
+      "worker-2",
+      "worker-3",
+      "worker-4"
+    ]
+  }
+}
+[bringup] discovery phase=Running probing 4 worker(s) of a OpenShift cluster
+[bringup] discovery phase=Failed no worker has a device this run would use: 24 device(s) across 4 worker(s), none usable: 4 declined by available: the probe refused it: Mounted, Busy, Partitioned; 8 declined by available: the probe refused it: NotAWholeDisk; 8 declined by available: the probe refused it: NotAWholeDisk, Mounted, Busy; 4 declined by available: the probe refused it: NotBlank
+[bringup] discovery attempt 2/3 failed: discovery failed: no worker has a device this run would use: 24 device(s) across 4 worker(s), none usable: 4 declined by available: the probe refused it: Mounted, Busy, Partitioned; 8 declined by avai
+[bringup] retrying with a fresh document
+[bringup] raising discovery e2e-discover-e2e-simplyblock-cluster-try3
+[bringup] {
+  "action": "Discover",
+  "discover": {
+    "configName": "e2e-simplyblock-cluster-try3",
+    "enableControlPlaneNodes": false,
+    "deviceFilter": {
+      "enableLogicalBlockDevices": true,
+      "blockDenyList": [
+        "/dev/sda"
+      ]
+    },
+    "workers": [
+      "worker-1",
+      "worker-2",
+      "worker-3",
+      "worker-4"
+    ]
+  }
+}
+[bringup] discovery phase=Running probing 4 worker(s) of a OpenShift cluster
+[bringup] discovery phase=Failed no worker has a device this run would use: 24 device(s) across 4 worker(s), none usable: 4 declined by available: the probe refused it: Mounted, Busy, Partitioned; 8 declined by available: the probe refused it: NotAWholeDisk; 8 declined by available: the probe refused it: NotAWholeDisk, Mounted, Busy; 4 declined by available: the probe refused it: NotBlank
+[bringup] discovery attempt 3/3 failed: discovery failed: no worker has a device this run would use: 24 device(s) across 4 worker(s), none usable: 4 declined by available: the probe refused it: Mounted, Busy, Partitioned; 8 declined by avai
+[bringup] FAILED: discovery did not produce a usable draft in 3 attempts. Last failure: discovery failed: no worker has a device this run would use: 24 device(s) across 4 worker(s), none usable: 4 declined by available: the probe refused it: Mounted, Busy, Partitioned; 8 declined by available: the probe refused it: NotAWholeDisk; 8 declined by available: the probe refused it: NotAWholeDisk, Mounted, Busy; 4 declined by available: the probe refused it: NotBlank
+Error: Process completed with exit code 1.
+
+
+
+kubectl -n simplyblock get cm -l storage.simplyblock.io/component=nodeprobe
+kubectl -n simplyblock get cm -l storage.simplyblock.io/nodeprobe-node=worker-1 -o yaml
+NAME                                                              DATA   AGE
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try2-b73a9795   1      5m42s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try2-bf48ee6d   1      5m42s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try2-c0a91ac9   1      5m42s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try2-ce789abd   1      5m42s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try3-44d6370e   1      5m12s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try3-514677a5   1      5m12s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try3-550c973a   1      5m12s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try3-6077bb7f   1      5m12s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-work-017f9a77   1      6m13s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-work-3d02e8cc   1      6m13s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-work-8e6c4f5a   1      6m13s
+sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-work-c4803d20   1      6m13s
+sb-nodeprobe-initial-discovery-worker-1-a7ff49df                  1      8m39s
+sb-nodeprobe-initial-discovery-worker-2-a4bc0659                  1      8m34s
+sb-nodeprobe-initial-discovery-worker-3-10e991e9                  1      8m34s
+sb-nodeprobe-initial-discovery-worker-4-101a078d                  1      8m39s
+apiVersion: v1
+items:
+- apiVersion: v1
+  data:
+    report.json: |-
+      {
+        "version": 6,
+        "node": "worker-1",
+        "probedAt": "2026-09-25T07:23:45Z",
+        "cpu": {
+          "onlineCPUs": 28,
+          "physicalCores": 28,
+          "sockets": 1,
+          "threadsPerCore": 1,
+          "hyperThreading": false,
+          "numaNodes": [
+            {
+              "node": 0,
+              "onlineCPUs": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27
+              ],
+              "physicalCores": 28
+            }
+          ]
+        },
+        "memory": {
+          "totalBytes": 33643319296,
+          "freeBytes": 23374163968,
+          "availableBytes": 29365997568,
+          "numaNodes": [
+            {
+              "node": 0,
+              "totalBytes": 33643319296,
+              "freeBytes": 23374163968
+            }
+          ]
+        },
+        "hugePages": [
+          {
+            "sizeBytes": 2097152,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          },
+          {
+            "sizeBytes": 1073741824,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          }
+        ],
+        "interfaces": [
+          {
+            "name": "041cfbe8daf2895",
+            "macAddress": "da:73:2a:55:0f:c6",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d873:2aff:fe55:fc6"
+            ]
+          },
+          {
+            "name": "2ce614428bbc21c",
+            "macAddress": "9e:97:0c:9a:df:38",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::9c97:cff:fe9a:df38"
+            ]
+          },
+          {
+            "name": "3250cb42d925713",
+            "macAddress": "ea:9d:c0:b9:d3:c5",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::e89d:c0ff:feb9:d3c5"
+            ]
+          },
+          {
+            "name": "3c6badb108cc9de",
+            "macAddress": "fa:e4:da:12:9e:87",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f8e4:daff:fe12:9e87"
+            ]
+          },
+          {
+            "name": "3f9d0dbf16927f1",
+            "macAddress": "7e:20:f8:a8:54:34",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::7c20:f8ff:fea8:5434"
+            ]
+          },
+          {
+            "name": "5a274a1ad078c3b",
+            "macAddress": "d6:55:92:ba:09:48",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d455:92ff:feba:948"
+            ]
+          },
+          {
+            "name": "5c91fb32a522bf5",
+            "macAddress": "42:ea:5e:63:28:f4",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::40ea:5eff:fe63:28f4"
+            ]
+          },
+          {
+            "name": "6a36ded7d592b8d",
+            "macAddress": "86:02:e1:42:3f:42",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8402:e1ff:fe42:3f42"
+            ]
+          },
+          {
+            "name": "6d8a79849aa1ffa",
+            "macAddress": "aa:c2:b7:cd:38:a4",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::a8c2:b7ff:fecd:38a4"
+            ]
+          },
+          {
+            "name": "8909ea6ab02a003",
+            "macAddress": "b6:78:4a:0f:b6:04",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::b478:4aff:fe0f:b604"
+            ]
+          },
+          {
+            "name": "89752f78e9de96c",
+            "macAddress": "4e:62:e1:aa:2c:9e",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::4c62:e1ff:feaa:2c9e"
+            ]
+          },
+          {
+            "name": "a6c9235a2c657e3",
+            "macAddress": "16:69:fe:67:7f:43",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::1469:feff:fe67:7f43"
+            ]
+          },
+          {
+            "name": "aad9204bd742d61",
+            "macAddress": "ae:f7:b0:93:5c:14",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::acf7:b0ff:fe93:5c14"
+            ]
+          },
+          {
+            "name": "af51f7391fa016e",
+            "macAddress": "86:83:a5:bb:d9:61",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8483:a5ff:febb:d961"
+            ]
+          },
+          {
+            "name": "b3fcdb073ffb782",
+            "macAddress": "f6:2d:72:89:3c:10",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f42d:72ff:fe89:3c10"
+            ]
+          },
+          {
+            "name": "b66c84b3872819b",
+            "macAddress": "c6:5a:cb:cf:99:0c",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::c45a:cbff:fecf:990c"
+            ]
+          },
+          {
+            "name": "br-ex",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "192.168.10.244",
+              "169.254.0.2"
+            ]
+          },
+          {
+            "name": "br-int",
+            "macAddress": "0a:a2:4b:6c:ef:2f",
+            "mtu": 1400,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual"
+          },
+          {
+            "name": "d2edb928327feb1",
+            "macAddress": "ae:c2:36:91:83:3d",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::acc2:36ff:fe91:833d"
+            ]
+          },
+          {
+            "name": "df44afef0b10e2b",
+            "macAddress": "5a:71:38:f2:0d:88",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::5871:38ff:fef2:d88"
+            ]
+          },
+          {
+            "name": "ens16np0",
+            "macAddress": "24:8a:07:8f:a1:98",
+            "speedMbps": 40000,
+            "mtu": 9000,
+            "state": "up",
+            "driver": "mlx5_core",
+            "pciAddress": "0000:01:00.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "addresses": [
+              "10.10.10.244"
+            ]
+          },
+          {
+            "name": "ens18",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "up",
+            "driver": "virtio_net",
+            "pciAddress": "0000:06:12.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "upper": [
+              "ovs-system"
+            ]
+          },
+          {
+            "name": "genev_sys_6081",
+            "macAddress": "e6:9a:88:51:14:9e",
+            "mtu": 65000,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::e49a:88ff:fe51:149e"
+            ]
+          },
+          {
+            "name": "lo",
+            "macAddress": "00:00:00:00:00:00",
+            "mtu": 65536,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "loopback": true,
+            "kind": "loopback",
+            "addresses": [
+              "127.0.0.1",
+              "::1"
+            ]
+          },
+          {
+            "name": "ovn-k8s-mp0",
+            "macAddress": "0a:58:0a:83:00:02",
+            "mtu": 1400,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "10.131.0.2",
+              "fe80::858:aff:fe83:2"
+            ]
+          },
+          {
+            "name": "ovs-system",
+            "macAddress": "fa:b9:f7:d8:3d:dc",
+            "mtu": 1500,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "lower": [
+              "041cfbe8daf2895",
+              "2ce614428bbc21c",
+              "3250cb42d925713",
+              "3c6badb108cc9de",
+              "3f9d0dbf16927f1",
+              "5a274a1ad078c3b",
+              "5c91fb32a522bf5",
+              "6a36ded7d592b8d",
+              "6d8a79849aa1ffa",
+              "8909ea6ab02a003",
+              "89752f78e9de96c",
+              "a6c9235a2c657e3",
+              "aad9204bd742d61",
+              "af51f7391fa016e",
+              "b3fcdb073ffb782",
+              "b66c84b3872819b",
+              "d2edb928327feb1",
+              "df44afef0b10e2b",
+              "ens18",
+              "genev_sys_6081"
+            ]
+          }
+        ],
+        "devices": [
+          {
+            "name": "nbd0",
+            "path": "/dev/nbd0",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd1",
+            "path": "/dev/nbd1",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd10",
+            "path": "/dev/nbd10",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd11",
+            "path": "/dev/nbd11",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd12",
+            "path": "/dev/nbd12",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd13",
+            "path": "/dev/nbd13",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd14",
+            "path": "/dev/nbd14",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd15",
+            "path": "/dev/nbd15",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd2",
+            "path": "/dev/nbd2",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd3",
+            "path": "/dev/nbd3",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd4",
+            "path": "/dev/nbd4",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd5",
+            "path": "/dev/nbd5",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd6",
+            "path": "/dev/nbd6",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd7",
+            "path": "/dev/nbd7",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd8",
+            "path": "/dev/nbd8",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd9",
+            "path": "/dev/nbd9",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nvme0n1",
+            "path": "/dev/nvme0n1",
+            "pciAddress": "0000:03:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701424",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701424      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "nvme1n1",
+            "path": "/dev/nvme1n1",
+            "pciAddress": "0000:02:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701313",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701313      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "sda",
+            "path": "/dev/sda",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128849018880,
+            "kind": "Disk",
+            "transport": "Virtio",
+            "vendor": "QEMU",
+            "model": "QEMU HARDDISK",
+            "rotational": true,
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot /etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/a738595c-ab87-4906-8726-4943fb4e4c33/volumes/kubernetes.io~csi/pvc-0a2c8e1e-4c16-435c-b086-340d050fddcf/mount /var/lib/kubelet/pods/bd45ef41-f3a6-4337-a7bf-7b6fe3770ac2/volume-subpaths/fdb-cluster-file/simplyblock-control/0 /var/lib/kubelet/pods/ec1d4b35-fbb1-4140-a51f-e82b4bb73778/volume-subpaths/fdb-cluster-file/exporter/1]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              },
+              {
+                "reason": "Partitioned",
+                "detail": "the device carries the partitions [sda1 sda2 sda3 sda4]"
+              }
+            ]
+          },
+          {
+            "name": "sda1",
+            "path": "/dev/sda1",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 1048576,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda2",
+            "path": "/dev/sda2",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 133169152,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda3",
+            "path": "/dev/sda3",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 402653184,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sda4",
+            "path": "/dev/sda4",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128311082496,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/a738595c-ab87-4906-8726-4943fb4e4c33/volumes/kubernetes.io~csi/pvc-0a2c8e1e-4c16-435c-b086-340d050fddcf/mount /var/lib/kubelet/pods/bd45ef41-f3a6-4337-a7bf-7b6fe3770ac2/volume-subpaths/fdb-cluster-file/simplyblock-control/0 /var/lib/kubelet/pods/ec1d4b35-fbb1-4140-a51f-e82b4bb73778/volume-subpaths/fdb-cluster-file/exporter/1]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sr0",
+            "path": "/dev/sr0",
+            "pciAddress": "0000:00:1f.2",
+            "sizeBytes": 924243968,
+            "kind": "Disk",
+            "transport": "SATA",
+            "vendor": "QEMU",
+            "model": "QEMU DVD-ROM",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "content": "Foreign",
+            "rejections": [
+              {
+                "reason": "NotBlank",
+                "detail": "no known signature, and the probed regions are not empty: first non-zero byte at 32768"
+              }
+            ]
+          }
+        ],
+        "nvmeControllers": [
+          {
+            "address": "0000:02:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          },
+          {
+            "address": "0000:03:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          }
+        ]
+      }
+  kind: ConfigMap
+  metadata:
+    creationTimestamp: "2026-09-25T07:23:45Z"
+    labels:
+      storage.simplyblock.io/component: nodeprobe
+      storage.simplyblock.io/nodeprobe-node: worker-1
+      storage.simplyblock.io/nodeprobe-run: e2e-discover-e2e-simplyblock-cluster-try2
+    name: sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try2-bf48ee6d
+    namespace: simplyblock
+    ownerReferences:
+    - apiVersion: storage.simplyblock.io/v1alpha2
+      kind: OperatorOps
+      name: e2e-discover-e2e-simplyblock-cluster-try2
+      uid: 872f298f-1532-4edc-bbac-a897d74c2990
+    resourceVersion: "76000320"
+    uid: 277c32af-91d5-4adc-b952-f2c48590a036
+- apiVersion: v1
+  data:
+    report.json: |-
+      {
+        "version": 6,
+        "node": "worker-1",
+        "probedAt": "2026-09-25T07:24:15Z",
+        "cpu": {
+          "onlineCPUs": 28,
+          "physicalCores": 28,
+          "sockets": 1,
+          "threadsPerCore": 1,
+          "hyperThreading": false,
+          "numaNodes": [
+            {
+              "node": 0,
+              "onlineCPUs": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27
+              ],
+              "physicalCores": 28
+            }
+          ]
+        },
+        "memory": {
+          "totalBytes": 33643319296,
+          "freeBytes": 23406915584,
+          "availableBytes": 29399642112,
+          "numaNodes": [
+            {
+              "node": 0,
+              "totalBytes": 33643319296,
+              "freeBytes": 23406915584
+            }
+          ]
+        },
+        "hugePages": [
+          {
+            "sizeBytes": 2097152,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          },
+          {
+            "sizeBytes": 1073741824,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          }
+        ],
+        "interfaces": [
+          {
+            "name": "041cfbe8daf2895",
+            "macAddress": "da:73:2a:55:0f:c6",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d873:2aff:fe55:fc6"
+            ]
+          },
+          {
+            "name": "2ce614428bbc21c",
+            "macAddress": "9e:97:0c:9a:df:38",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::9c97:cff:fe9a:df38"
+            ]
+          },
+          {
+            "name": "3250cb42d925713",
+            "macAddress": "ea:9d:c0:b9:d3:c5",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::e89d:c0ff:feb9:d3c5"
+            ]
+          },
+          {
+            "name": "3c6badb108cc9de",
+            "macAddress": "fa:e4:da:12:9e:87",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f8e4:daff:fe12:9e87"
+            ]
+          },
+          {
+            "name": "3f9d0dbf16927f1",
+            "macAddress": "7e:20:f8:a8:54:34",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::7c20:f8ff:fea8:5434"
+            ]
+          },
+          {
+            "name": "5a274a1ad078c3b",
+            "macAddress": "d6:55:92:ba:09:48",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d455:92ff:feba:948"
+            ]
+          },
+          {
+            "name": "5c91fb32a522bf5",
+            "macAddress": "42:ea:5e:63:28:f4",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::40ea:5eff:fe63:28f4"
+            ]
+          },
+          {
+            "name": "6a36ded7d592b8d",
+            "macAddress": "86:02:e1:42:3f:42",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8402:e1ff:fe42:3f42"
+            ]
+          },
+          {
+            "name": "6d8a79849aa1ffa",
+            "macAddress": "aa:c2:b7:cd:38:a4",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::a8c2:b7ff:fecd:38a4"
+            ]
+          },
+          {
+            "name": "8909ea6ab02a003",
+            "macAddress": "b6:78:4a:0f:b6:04",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::b478:4aff:fe0f:b604"
+            ]
+          },
+          {
+            "name": "89752f78e9de96c",
+            "macAddress": "4e:62:e1:aa:2c:9e",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::4c62:e1ff:feaa:2c9e"
+            ]
+          },
+          {
+            "name": "a6c9235a2c657e3",
+            "macAddress": "16:69:fe:67:7f:43",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::1469:feff:fe67:7f43"
+            ]
+          },
+          {
+            "name": "aad9204bd742d61",
+            "macAddress": "ae:f7:b0:93:5c:14",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::acf7:b0ff:fe93:5c14"
+            ]
+          },
+          {
+            "name": "af51f7391fa016e",
+            "macAddress": "86:83:a5:bb:d9:61",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8483:a5ff:febb:d961"
+            ]
+          },
+          {
+            "name": "b3fcdb073ffb782",
+            "macAddress": "f6:2d:72:89:3c:10",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f42d:72ff:fe89:3c10"
+            ]
+          },
+          {
+            "name": "b66c84b3872819b",
+            "macAddress": "c6:5a:cb:cf:99:0c",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::c45a:cbff:fecf:990c"
+            ]
+          },
+          {
+            "name": "br-ex",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "192.168.10.244",
+              "169.254.0.2"
+            ]
+          },
+          {
+            "name": "br-int",
+            "macAddress": "0a:a2:4b:6c:ef:2f",
+            "mtu": 1400,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual"
+          },
+          {
+            "name": "d2edb928327feb1",
+            "macAddress": "ae:c2:36:91:83:3d",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::acc2:36ff:fe91:833d"
+            ]
+          },
+          {
+            "name": "df44afef0b10e2b",
+            "macAddress": "5a:71:38:f2:0d:88",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::5871:38ff:fef2:d88"
+            ]
+          },
+          {
+            "name": "ens16np0",
+            "macAddress": "24:8a:07:8f:a1:98",
+            "speedMbps": 40000,
+            "mtu": 9000,
+            "state": "up",
+            "driver": "mlx5_core",
+            "pciAddress": "0000:01:00.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "addresses": [
+              "10.10.10.244"
+            ]
+          },
+          {
+            "name": "ens18",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "up",
+            "driver": "virtio_net",
+            "pciAddress": "0000:06:12.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "upper": [
+              "ovs-system"
+            ]
+          },
+          {
+            "name": "genev_sys_6081",
+            "macAddress": "e6:9a:88:51:14:9e",
+            "mtu": 65000,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::e49a:88ff:fe51:149e"
+            ]
+          },
+          {
+            "name": "lo",
+            "macAddress": "00:00:00:00:00:00",
+            "mtu": 65536,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "loopback": true,
+            "kind": "loopback",
+            "addresses": [
+              "127.0.0.1",
+              "::1"
+            ]
+          },
+          {
+            "name": "ovn-k8s-mp0",
+            "macAddress": "0a:58:0a:83:00:02",
+            "mtu": 1400,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "10.131.0.2",
+              "fe80::858:aff:fe83:2"
+            ]
+          },
+          {
+            "name": "ovs-system",
+            "macAddress": "fa:b9:f7:d8:3d:dc",
+            "mtu": 1500,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "lower": [
+              "041cfbe8daf2895",
+              "2ce614428bbc21c",
+              "3250cb42d925713",
+              "3c6badb108cc9de",
+              "3f9d0dbf16927f1",
+              "5a274a1ad078c3b",
+              "5c91fb32a522bf5",
+              "6a36ded7d592b8d",
+              "6d8a79849aa1ffa",
+              "8909ea6ab02a003",
+              "89752f78e9de96c",
+              "a6c9235a2c657e3",
+              "aad9204bd742d61",
+              "af51f7391fa016e",
+              "b3fcdb073ffb782",
+              "b66c84b3872819b",
+              "d2edb928327feb1",
+              "df44afef0b10e2b",
+              "ens18",
+              "genev_sys_6081"
+            ]
+          }
+        ],
+        "devices": [
+          {
+            "name": "nbd0",
+            "path": "/dev/nbd0",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd1",
+            "path": "/dev/nbd1",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd10",
+            "path": "/dev/nbd10",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd11",
+            "path": "/dev/nbd11",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd12",
+            "path": "/dev/nbd12",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd13",
+            "path": "/dev/nbd13",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd14",
+            "path": "/dev/nbd14",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd15",
+            "path": "/dev/nbd15",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd2",
+            "path": "/dev/nbd2",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd3",
+            "path": "/dev/nbd3",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd4",
+            "path": "/dev/nbd4",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd5",
+            "path": "/dev/nbd5",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd6",
+            "path": "/dev/nbd6",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd7",
+            "path": "/dev/nbd7",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd8",
+            "path": "/dev/nbd8",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd9",
+            "path": "/dev/nbd9",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nvme0n1",
+            "path": "/dev/nvme0n1",
+            "pciAddress": "0000:03:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701424",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701424      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "nvme1n1",
+            "path": "/dev/nvme1n1",
+            "pciAddress": "0000:02:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701313",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701313      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "sda",
+            "path": "/dev/sda",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128849018880,
+            "kind": "Disk",
+            "transport": "Virtio",
+            "vendor": "QEMU",
+            "model": "QEMU HARDDISK",
+            "rotational": true,
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot /etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/a738595c-ab87-4906-8726-4943fb4e4c33/volumes/kubernetes.io~csi/pvc-0a2c8e1e-4c16-435c-b086-340d050fddcf/mount /var/lib/kubelet/pods/bd45ef41-f3a6-4337-a7bf-7b6fe3770ac2/volume-subpaths/fdb-cluster-file/simplyblock-control/0 /var/lib/kubelet/pods/ec1d4b35-fbb1-4140-a51f-e82b4bb73778/volume-subpaths/fdb-cluster-file/exporter/1]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              },
+              {
+                "reason": "Partitioned",
+                "detail": "the device carries the partitions [sda1 sda2 sda3 sda4]"
+              }
+            ]
+          },
+          {
+            "name": "sda1",
+            "path": "/dev/sda1",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 1048576,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda2",
+            "path": "/dev/sda2",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 133169152,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda3",
+            "path": "/dev/sda3",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 402653184,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sda4",
+            "path": "/dev/sda4",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128311082496,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/a738595c-ab87-4906-8726-4943fb4e4c33/volumes/kubernetes.io~csi/pvc-0a2c8e1e-4c16-435c-b086-340d050fddcf/mount /var/lib/kubelet/pods/bd45ef41-f3a6-4337-a7bf-7b6fe3770ac2/volume-subpaths/fdb-cluster-file/simplyblock-control/0 /var/lib/kubelet/pods/ec1d4b35-fbb1-4140-a51f-e82b4bb73778/volume-subpaths/fdb-cluster-file/exporter/1]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sr0",
+            "path": "/dev/sr0",
+            "pciAddress": "0000:00:1f.2",
+            "sizeBytes": 924243968,
+            "kind": "Disk",
+            "transport": "SATA",
+            "vendor": "QEMU",
+            "model": "QEMU DVD-ROM",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "content": "Foreign",
+            "rejections": [
+              {
+                "reason": "NotBlank",
+                "detail": "no known signature, and the probed regions are not empty: first non-zero byte at 32768"
+              }
+            ]
+          }
+        ],
+        "nvmeControllers": [
+          {
+            "address": "0000:02:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          },
+          {
+            "address": "0000:03:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          }
+        ]
+      }
+  kind: ConfigMap
+  metadata:
+    creationTimestamp: "2026-09-25T07:24:15Z"
+    labels:
+      storage.simplyblock.io/component: nodeprobe
+      storage.simplyblock.io/nodeprobe-node: worker-1
+      storage.simplyblock.io/nodeprobe-run: e2e-discover-e2e-simplyblock-cluster-try3
+    name: sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-try3-514677a5
+    namespace: simplyblock
+    ownerReferences:
+    - apiVersion: storage.simplyblock.io/v1alpha2
+      kind: OperatorOps
+      name: e2e-discover-e2e-simplyblock-cluster-try3
+      uid: ee40d975-07cf-4fda-9f5c-50520f986abb
+    resourceVersion: "76000575"
+    uid: d8c5524d-54a5-4b9b-9444-020a6f65b57a
+- apiVersion: v1
+  data:
+    report.json: |-
+      {
+        "version": 6,
+        "node": "worker-1",
+        "probedAt": "2026-09-25T07:23:14Z",
+        "cpu": {
+          "onlineCPUs": 28,
+          "physicalCores": 28,
+          "sockets": 1,
+          "threadsPerCore": 1,
+          "hyperThreading": false,
+          "numaNodes": [
+            {
+              "node": 0,
+              "onlineCPUs": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27
+              ],
+              "physicalCores": 28
+            }
+          ]
+        },
+        "memory": {
+          "totalBytes": 33643319296,
+          "freeBytes": 23336955904,
+          "availableBytes": 29327892480,
+          "numaNodes": [
+            {
+              "node": 0,
+              "totalBytes": 33643319296,
+              "freeBytes": 23336955904
+            }
+          ]
+        },
+        "hugePages": [
+          {
+            "sizeBytes": 2097152,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          },
+          {
+            "sizeBytes": 1073741824,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          }
+        ],
+        "interfaces": [
+          {
+            "name": "041cfbe8daf2895",
+            "macAddress": "da:73:2a:55:0f:c6",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d873:2aff:fe55:fc6"
+            ]
+          },
+          {
+            "name": "2ce614428bbc21c",
+            "macAddress": "9e:97:0c:9a:df:38",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::9c97:cff:fe9a:df38"
+            ]
+          },
+          {
+            "name": "3250cb42d925713",
+            "macAddress": "ea:9d:c0:b9:d3:c5",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::e89d:c0ff:feb9:d3c5"
+            ]
+          },
+          {
+            "name": "3c6badb108cc9de",
+            "macAddress": "fa:e4:da:12:9e:87",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f8e4:daff:fe12:9e87"
+            ]
+          },
+          {
+            "name": "3f9d0dbf16927f1",
+            "macAddress": "7e:20:f8:a8:54:34",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::7c20:f8ff:fea8:5434"
+            ]
+          },
+          {
+            "name": "5a274a1ad078c3b",
+            "macAddress": "d6:55:92:ba:09:48",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d455:92ff:feba:948"
+            ]
+          },
+          {
+            "name": "5c91fb32a522bf5",
+            "macAddress": "42:ea:5e:63:28:f4",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::40ea:5eff:fe63:28f4"
+            ]
+          },
+          {
+            "name": "6a36ded7d592b8d",
+            "macAddress": "86:02:e1:42:3f:42",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8402:e1ff:fe42:3f42"
+            ]
+          },
+          {
+            "name": "6d8a79849aa1ffa",
+            "macAddress": "aa:c2:b7:cd:38:a4",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::a8c2:b7ff:fecd:38a4"
+            ]
+          },
+          {
+            "name": "8909ea6ab02a003",
+            "macAddress": "b6:78:4a:0f:b6:04",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::b478:4aff:fe0f:b604"
+            ]
+          },
+          {
+            "name": "89752f78e9de96c",
+            "macAddress": "4e:62:e1:aa:2c:9e",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::4c62:e1ff:feaa:2c9e"
+            ]
+          },
+          {
+            "name": "a6c9235a2c657e3",
+            "macAddress": "16:69:fe:67:7f:43",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::1469:feff:fe67:7f43"
+            ]
+          },
+          {
+            "name": "aad9204bd742d61",
+            "macAddress": "ae:f7:b0:93:5c:14",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::acf7:b0ff:fe93:5c14"
+            ]
+          },
+          {
+            "name": "af51f7391fa016e",
+            "macAddress": "86:83:a5:bb:d9:61",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8483:a5ff:febb:d961"
+            ]
+          },
+          {
+            "name": "b3fcdb073ffb782",
+            "macAddress": "f6:2d:72:89:3c:10",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f42d:72ff:fe89:3c10"
+            ]
+          },
+          {
+            "name": "b66c84b3872819b",
+            "macAddress": "c6:5a:cb:cf:99:0c",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::c45a:cbff:fecf:990c"
+            ]
+          },
+          {
+            "name": "br-ex",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "192.168.10.244",
+              "169.254.0.2"
+            ]
+          },
+          {
+            "name": "br-int",
+            "macAddress": "0a:a2:4b:6c:ef:2f",
+            "mtu": 1400,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual"
+          },
+          {
+            "name": "d2edb928327feb1",
+            "macAddress": "ae:c2:36:91:83:3d",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::acc2:36ff:fe91:833d"
+            ]
+          },
+          {
+            "name": "df44afef0b10e2b",
+            "macAddress": "5a:71:38:f2:0d:88",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::5871:38ff:fef2:d88"
+            ]
+          },
+          {
+            "name": "ens16np0",
+            "macAddress": "24:8a:07:8f:a1:98",
+            "speedMbps": 40000,
+            "mtu": 9000,
+            "state": "up",
+            "driver": "mlx5_core",
+            "pciAddress": "0000:01:00.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "addresses": [
+              "10.10.10.244"
+            ]
+          },
+          {
+            "name": "ens18",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "up",
+            "driver": "virtio_net",
+            "pciAddress": "0000:06:12.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "upper": [
+              "ovs-system"
+            ]
+          },
+          {
+            "name": "genev_sys_6081",
+            "macAddress": "e6:9a:88:51:14:9e",
+            "mtu": 65000,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::e49a:88ff:fe51:149e"
+            ]
+          },
+          {
+            "name": "lo",
+            "macAddress": "00:00:00:00:00:00",
+            "mtu": 65536,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "loopback": true,
+            "kind": "loopback",
+            "addresses": [
+              "127.0.0.1",
+              "::1"
+            ]
+          },
+          {
+            "name": "ovn-k8s-mp0",
+            "macAddress": "0a:58:0a:83:00:02",
+            "mtu": 1400,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "10.131.0.2",
+              "fe80::858:aff:fe83:2"
+            ]
+          },
+          {
+            "name": "ovs-system",
+            "macAddress": "fa:b9:f7:d8:3d:dc",
+            "mtu": 1500,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "lower": [
+              "041cfbe8daf2895",
+              "2ce614428bbc21c",
+              "3250cb42d925713",
+              "3c6badb108cc9de",
+              "3f9d0dbf16927f1",
+              "5a274a1ad078c3b",
+              "5c91fb32a522bf5",
+              "6a36ded7d592b8d",
+              "6d8a79849aa1ffa",
+              "8909ea6ab02a003",
+              "89752f78e9de96c",
+              "a6c9235a2c657e3",
+              "aad9204bd742d61",
+              "af51f7391fa016e",
+              "b3fcdb073ffb782",
+              "b66c84b3872819b",
+              "d2edb928327feb1",
+              "df44afef0b10e2b",
+              "ens18",
+              "genev_sys_6081"
+            ]
+          }
+        ],
+        "devices": [
+          {
+            "name": "nbd0",
+            "path": "/dev/nbd0",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd1",
+            "path": "/dev/nbd1",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd10",
+            "path": "/dev/nbd10",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd11",
+            "path": "/dev/nbd11",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd12",
+            "path": "/dev/nbd12",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd13",
+            "path": "/dev/nbd13",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd14",
+            "path": "/dev/nbd14",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd15",
+            "path": "/dev/nbd15",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd2",
+            "path": "/dev/nbd2",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd3",
+            "path": "/dev/nbd3",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd4",
+            "path": "/dev/nbd4",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd5",
+            "path": "/dev/nbd5",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd6",
+            "path": "/dev/nbd6",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd7",
+            "path": "/dev/nbd7",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd8",
+            "path": "/dev/nbd8",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd9",
+            "path": "/dev/nbd9",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nvme0n1",
+            "path": "/dev/nvme0n1",
+            "pciAddress": "0000:03:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701424",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701424      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "nvme1n1",
+            "path": "/dev/nvme1n1",
+            "pciAddress": "0000:02:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701313",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701313      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "sda",
+            "path": "/dev/sda",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128849018880,
+            "kind": "Disk",
+            "transport": "Virtio",
+            "vendor": "QEMU",
+            "model": "QEMU HARDDISK",
+            "rotational": true,
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot /etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/a738595c-ab87-4906-8726-4943fb4e4c33/volumes/kubernetes.io~csi/pvc-0a2c8e1e-4c16-435c-b086-340d050fddcf/mount /var/lib/kubelet/pods/bd45ef41-f3a6-4337-a7bf-7b6fe3770ac2/volume-subpaths/fdb-cluster-file/simplyblock-control/0 /var/lib/kubelet/pods/ec1d4b35-fbb1-4140-a51f-e82b4bb73778/volume-subpaths/fdb-cluster-file/exporter/1]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              },
+              {
+                "reason": "Partitioned",
+                "detail": "the device carries the partitions [sda1 sda2 sda3 sda4]"
+              }
+            ]
+          },
+          {
+            "name": "sda1",
+            "path": "/dev/sda1",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 1048576,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda2",
+            "path": "/dev/sda2",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 133169152,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda3",
+            "path": "/dev/sda3",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 402653184,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sda4",
+            "path": "/dev/sda4",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128311082496,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/a738595c-ab87-4906-8726-4943fb4e4c33/volumes/kubernetes.io~csi/pvc-0a2c8e1e-4c16-435c-b086-340d050fddcf/mount /var/lib/kubelet/pods/bd45ef41-f3a6-4337-a7bf-7b6fe3770ac2/volume-subpaths/fdb-cluster-file/simplyblock-control/0 /var/lib/kubelet/pods/ec1d4b35-fbb1-4140-a51f-e82b4bb73778/volume-subpaths/fdb-cluster-file/exporter/1]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sr0",
+            "path": "/dev/sr0",
+            "pciAddress": "0000:00:1f.2",
+            "sizeBytes": 924243968,
+            "kind": "Disk",
+            "transport": "SATA",
+            "vendor": "QEMU",
+            "model": "QEMU DVD-ROM",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "content": "Foreign",
+            "rejections": [
+              {
+                "reason": "NotBlank",
+                "detail": "no known signature, and the probed regions are not empty: first non-zero byte at 32768"
+              }
+            ]
+          }
+        ],
+        "nvmeControllers": [
+          {
+            "address": "0000:02:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          },
+          {
+            "address": "0000:03:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          }
+        ]
+      }
+  kind: ConfigMap
+  metadata:
+    creationTimestamp: "2026-09-25T07:23:14Z"
+    labels:
+      storage.simplyblock.io/component: nodeprobe
+      storage.simplyblock.io/nodeprobe-node: worker-1
+      storage.simplyblock.io/nodeprobe-run: e2e-discover-e2e-simplyblock-cluster
+    name: sb-nodeprobe-e2e-discover-e2e-simplyblock-cluster-work-c4803d20
+    namespace: simplyblock
+    ownerReferences:
+    - apiVersion: storage.simplyblock.io/v1alpha2
+      kind: OperatorOps
+      name: e2e-discover-e2e-simplyblock-cluster
+      uid: 90ec1951-d5cc-4b83-a5b8-41588ceb7af0
+    resourceVersion: "76000091"
+    uid: b19e2daf-0ac7-4492-a0e2-8786eef816d2
+- apiVersion: v1
+  data:
+    report.json: |-
+      {
+        "version": 6,
+        "node": "worker-1",
+        "probedAt": "2026-09-25T07:20:48Z",
+        "cpu": {
+          "onlineCPUs": 28,
+          "physicalCores": 28,
+          "sockets": 1,
+          "threadsPerCore": 1,
+          "hyperThreading": false,
+          "numaNodes": [
+            {
+              "node": 0,
+              "onlineCPUs": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27
+              ],
+              "physicalCores": 28
+            }
+          ]
+        },
+        "memory": {
+          "totalBytes": 33643319296,
+          "freeBytes": 25486970880,
+          "availableBytes": 30082678784,
+          "numaNodes": [
+            {
+              "node": 0,
+              "totalBytes": 33643319296,
+              "freeBytes": 25486970880
+            }
+          ]
+        },
+        "hugePages": [
+          {
+            "sizeBytes": 2097152,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          },
+          {
+            "sizeBytes": 1073741824,
+            "total": 0,
+            "free": 0,
+            "numaNodes": [
+              {
+                "node": 0,
+                "total": 0,
+                "free": 0
+              }
+            ]
+          }
+        ],
+        "interfaces": [
+          {
+            "name": "041cfbe8daf2895",
+            "macAddress": "da:73:2a:55:0f:c6",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d873:2aff:fe55:fc6"
+            ]
+          },
+          {
+            "name": "2ce614428bbc21c",
+            "macAddress": "9e:97:0c:9a:df:38",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::9c97:cff:fe9a:df38"
+            ]
+          },
+          {
+            "name": "3c6badb108cc9de",
+            "macAddress": "fa:e4:da:12:9e:87",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f8e4:daff:fe12:9e87"
+            ]
+          },
+          {
+            "name": "5a274a1ad078c3b",
+            "macAddress": "d6:55:92:ba:09:48",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::d455:92ff:feba:948"
+            ]
+          },
+          {
+            "name": "6a36ded7d592b8d",
+            "macAddress": "86:02:e1:42:3f:42",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8402:e1ff:fe42:3f42"
+            ]
+          },
+          {
+            "name": "6d8a79849aa1ffa",
+            "macAddress": "aa:c2:b7:cd:38:a4",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::a8c2:b7ff:fecd:38a4"
+            ]
+          },
+          {
+            "name": "8909ea6ab02a003",
+            "macAddress": "b6:78:4a:0f:b6:04",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::b478:4aff:fe0f:b604"
+            ]
+          },
+          {
+            "name": "89752f78e9de96c",
+            "macAddress": "4e:62:e1:aa:2c:9e",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::4c62:e1ff:feaa:2c9e"
+            ]
+          },
+          {
+            "name": "aad9204bd742d61",
+            "macAddress": "ae:f7:b0:93:5c:14",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::acf7:b0ff:fe93:5c14"
+            ]
+          },
+          {
+            "name": "af51f7391fa016e",
+            "macAddress": "86:83:a5:bb:d9:61",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::8483:a5ff:febb:d961"
+            ]
+          },
+          {
+            "name": "b3fcdb073ffb782",
+            "macAddress": "f6:2d:72:89:3c:10",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::f42d:72ff:fe89:3c10"
+            ]
+          },
+          {
+            "name": "b66c84b3872819b",
+            "macAddress": "c6:5a:cb:cf:99:0c",
+            "speedMbps": 10000,
+            "mtu": 1400,
+            "state": "up",
+            "numaNode": -1,
+            "virtual": true,
+            "peered": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::c45a:cbff:fecf:990c"
+            ]
+          },
+          {
+            "name": "br-ex",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "192.168.10.244",
+              "169.254.0.2"
+            ]
+          },
+          {
+            "name": "br-int",
+            "macAddress": "0a:a2:4b:6c:ef:2f",
+            "mtu": 1400,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual"
+          },
+          {
+            "name": "ens16np0",
+            "macAddress": "24:8a:07:8f:a1:98",
+            "speedMbps": 40000,
+            "mtu": 9000,
+            "state": "up",
+            "driver": "mlx5_core",
+            "pciAddress": "0000:01:00.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "addresses": [
+              "10.10.10.244"
+            ]
+          },
+          {
+            "name": "ens18",
+            "macAddress": "bc:24:11:87:25:56",
+            "mtu": 1500,
+            "state": "up",
+            "driver": "virtio_net",
+            "pciAddress": "0000:06:12.0",
+            "numaNode": -1,
+            "kind": "physical",
+            "upper": [
+              "ovs-system"
+            ]
+          },
+          {
+            "name": "genev_sys_6081",
+            "macAddress": "e6:9a:88:51:14:9e",
+            "mtu": 65000,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "upper": [
+              "ovs-system"
+            ],
+            "addresses": [
+              "fe80::e49a:88ff:fe51:149e"
+            ]
+          },
+          {
+            "name": "lo",
+            "macAddress": "00:00:00:00:00:00",
+            "mtu": 65536,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "loopback": true,
+            "kind": "loopback",
+            "addresses": [
+              "127.0.0.1",
+              "::1"
+            ]
+          },
+          {
+            "name": "ovn-k8s-mp0",
+            "macAddress": "0a:58:0a:83:00:02",
+            "mtu": 1400,
+            "state": "unknown",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "addresses": [
+              "10.131.0.2",
+              "fe80::858:aff:fe83:2"
+            ]
+          },
+          {
+            "name": "ovs-system",
+            "macAddress": "fa:b9:f7:d8:3d:dc",
+            "mtu": 1500,
+            "state": "down",
+            "numaNode": -1,
+            "virtual": true,
+            "kind": "virtual",
+            "lower": [
+              "041cfbe8daf2895",
+              "2ce614428bbc21c",
+              "3c6badb108cc9de",
+              "5a274a1ad078c3b",
+              "6a36ded7d592b8d",
+              "6d8a79849aa1ffa",
+              "8909ea6ab02a003",
+              "89752f78e9de96c",
+              "aad9204bd742d61",
+              "af51f7391fa016e",
+              "b3fcdb073ffb782",
+              "b66c84b3872819b",
+              "ens18",
+              "genev_sys_6081"
+            ]
+          }
+        ],
+        "devices": [
+          {
+            "name": "nbd0",
+            "path": "/dev/nbd0",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd1",
+            "path": "/dev/nbd1",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd10",
+            "path": "/dev/nbd10",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd11",
+            "path": "/dev/nbd11",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd12",
+            "path": "/dev/nbd12",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd13",
+            "path": "/dev/nbd13",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd14",
+            "path": "/dev/nbd14",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd15",
+            "path": "/dev/nbd15",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd2",
+            "path": "/dev/nbd2",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd3",
+            "path": "/dev/nbd3",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd4",
+            "path": "/dev/nbd4",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd5",
+            "path": "/dev/nbd5",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd6",
+            "path": "/dev/nbd6",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd7",
+            "path": "/dev/nbd7",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd8",
+            "path": "/dev/nbd8",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nbd9",
+            "path": "/dev/nbd9",
+            "sizeBytes": 0,
+            "kind": "Network",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Network"
+              },
+              {
+                "reason": "NoCapacity",
+                "detail": "the device reports a size of zero"
+              }
+            ]
+          },
+          {
+            "name": "nvme0n1",
+            "path": "/dev/nvme0n1",
+            "pciAddress": "0000:03:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701424",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701424      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "nvme1n1",
+            "path": "/dev/nvme1n1",
+            "pciAddress": "0000:02:00.0",
+            "sizeBytes": 1920383410176,
+            "kind": "Disk",
+            "transport": "NVMe",
+            "model": "SAMSUNG MZQLB1T9HAJR-00007",
+            "serial": "S439NC0T701313",
+            "atomicWriteUnitMaxBytes": 4096,
+            "atomicWriteUnitMinBytes": 4096,
+            "numaNode": -1,
+            "subsystemNQN": "nqn.2014.08.org.nvmexpress:144d144dS439NC0T701313      SAMSUNG MZQLB1T9HAJR-00007",
+            "available": true,
+            "content": "Simplyblock",
+            "contentType": "simplyblock_alceml"
+          },
+          {
+            "name": "sda",
+            "path": "/dev/sda",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128849018880,
+            "kind": "Disk",
+            "transport": "Virtio",
+            "vendor": "QEMU",
+            "model": "QEMU HARDDISK",
+            "rotational": true,
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot /etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/6ec0e788-a396-4698-9492-057f3d80bdf6/volumes/kubernetes.io~csi/pvc-2fef7c4e-c83a-4f81-9a42-d9978b3bee25/mount /var/lib/kubelet/pods/c201b39c-f78e-45dc-a4aa-cfcfa2b0e423/volumes/kubernetes.io~csi/pvc-080b6a8b-59d7-42f2-8a1f-b30f9b3b7d53/mount]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              },
+              {
+                "reason": "Partitioned",
+                "detail": "the device carries the partitions [sda1 sda2 sda3 sda4]"
+              }
+            ]
+          },
+          {
+            "name": "sda1",
+            "path": "/dev/sda1",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 1048576,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda2",
+            "path": "/dev/sda2",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 133169152,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              }
+            ]
+          },
+          {
+            "name": "sda3",
+            "path": "/dev/sda3",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 402653184,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/boot]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sda4",
+            "path": "/dev/sda4",
+            "pciAddress": "0000:09:01.0",
+            "sizeBytes": 128311082496,
+            "kind": "Partition",
+            "transport": "Virtio",
+            "numaNode": -1,
+            "available": false,
+            "rejections": [
+              {
+                "reason": "NotAWholeDisk",
+                "detail": "the device is a Partition"
+              },
+              {
+                "reason": "Mounted",
+                "detail": "mounted at [/etc /sysroot /sysroot/ostree/deploy/scos/var /var /var/lib/kubelet/pods/6ec0e788-a396-4698-9492-057f3d80bdf6/volumes/kubernetes.io~csi/pvc-2fef7c4e-c83a-4f81-9a42-d9978b3bee25/mount /var/lib/kubelet/pods/c201b39c-f78e-45dc-a4aa-cfcfa2b0e423/volumes/kubernetes.io~csi/pvc-080b6a8b-59d7-42f2-8a1f-b30f9b3b7d53/mount]"
+              },
+              {
+                "reason": "Busy",
+                "detail": "the kernel refused an exclusive open, and gives no reason"
+              }
+            ]
+          },
+          {
+            "name": "sr0",
+            "path": "/dev/sr0",
+            "pciAddress": "0000:00:1f.2",
+            "sizeBytes": 924243968,
+            "kind": "Disk",
+            "transport": "SATA",
+            "vendor": "QEMU",
+            "model": "QEMU DVD-ROM",
+            "atomicWriteUnitMaxBytes": 0,
+            "atomicWriteUnitMinBytes": 0,
+            "numaNode": -1,
+            "available": false,
+            "content": "Foreign",
+            "rejections": [
+              {
+                "reason": "NotBlank",
+                "detail": "no known signature, and the probed regions are not empty: first non-zero byte at 32768"
+              }
+            ]
+          }
+        ],
+        "nvmeControllers": [
+          {
+            "address": "0000:02:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          },
+          {
+            "address": "0000:03:00.0",
+            "driver": "nvme",
+            "vendor": "0x144d",
+            "product": "0xa808",
+            "numaNode": -1
+          }
+        ]
+      }
+  kind: ConfigMap
+  metadata:
+    creationTimestamp: "2026-09-25T07:20:48Z"
+    labels:
+      storage.simplyblock.io/component: nodeprobe
+      storage.simplyblock.io/nodeprobe-node: worker-1
+      storage.simplyblock.io/nodeprobe-run: initial-discovery
+    name: sb-nodeprobe-initial-discovery-worker-1-a7ff49df
+    namespace: simplyblock
+    ownerReferences:
+    - apiVersion: storage.simplyblock.io/v1alpha2
+      kind: OperatorOps
+      name: initial-discovery
+      uid: 3a2201e7-0e4a-4b12-aa73-64e2dc123f0c
+    resourceVersion: "75998125"
+    uid: d7324a24-ee17-4839-b8c4-f2c94a80029e
+kind: List
+metadata:
+  resourceVersion: ""

@@ -40,7 +40,7 @@ on:
         default: "root"
       KEY_PATH:
         type: string
-        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+        default: ''
       CLIENTNODES:
         type: string
         default: "192.168.10.165 192.168.10.166"
@@ -309,26 +309,6 @@ jobs:
               print(f"  {k}={display}")
           PY
 
-      - name: Install prereqs (sshpass)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if command -v sshpass >/dev/null 2>&1; then
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y sshpass
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y epel-release || true
-            sudo yum install -y sshpass
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y sshpass
-          else
-            echo "ERROR: Cannot install sshpass (unknown package manager)."
-            exit 1
-          fi
-
       - name: Parse CUSTOM_IMAGES overrides
         shell: bash
         run: |
@@ -356,6 +336,176 @@ jobs:
               *)            echo "Unknown image key: $key (ignored)" ;;
             esac
           done
+
+      # The lab nodes' authorized_keys are managed by infra, which strips any key
+      # it did not provision. The shared automation key this pipeline relied on
+      # (simplyblock-us-east-2.pem) is removed by that process and will keep being
+      # removed, which is what silently broke SSH mid-run on 2026-09-28 and threw
+      # away a passing 10h31m result. Only a key infra provisions for a person
+      # survives on those nodes, so the run carries one in rather than hoping to
+      # find one on the runner.
+      #
+      # KEY_PATH is the single place the rest of the pipeline looks: the next step
+      # resolves it, KEY_NAME derives from it, and ssh_utils._load_keys() reads it
+      # as SSH_KEY_LOCATION. Overriding it here means nothing else has to change.
+      #
+      # Unset secret leaves the key_path input alone, so a runner that still has a
+      # working key on disk behaves exactly as before.
+      #
+      # No `set -x` here, unlike every other step in this file. Tracing a step that
+      # handles key material prints the key; GitHub's log masking is a backstop for
+      # that, not a licence to rely on it.
+      - name: Install lab SSH key from secret
+        shell: bash
+        env:
+          LAB_SSH_PRIVATE_KEY: ${{ secrets.LAB_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # $RUNNER_TEMP, not $HOME/.ssh. Concurrent jobs on this runner share
+          # $HOME, and .ssh carries ssh-specific SELinux labelling that
+          # ssh-keygen -- alone among the tools here -- can be confined against.
+          # $RUNNER_TEMP is job-private, owned by the runner user, and cleaned
+          # up for us.
+          keydir="${RUNNER_TEMP:-$HOME}/sshkeys"
+          install -d -m 700 "$keydir"
+          dest="$keydir/ci_lab_key-${{ github.run_id }}"
+          if [ -z "${LAB_SSH_PRIVATE_KEY:-}" ]; then
+            echo "LAB_SSH_PRIVATE_KEY is not set; the chain below falls through to"
+            echo "the key_path input and then to the password."
+            dest=""
+          fi
+          if [ -n "$dest" ]; then
+            # tr -d, because a key pasted from a Windows clipboard carries CRLF and
+            # OpenSSH rejects the body outright -- reported as "invalid format",
+            # which reads like a wrong key rather than a wrong line ending.
+            # printf with an explicit newline for the other half of the same
+            # problem: a secret saved without its trailing newline is equally
+            # rejected. An extra blank line at EOF is harmless.
+            printf '%s' "$LAB_SSH_PRIVATE_KEY" | tr -d '\r' > "$dest"
+            printf '\n' >> "$dest"
+            chmod 600 "$dest"
+
+            # The only checks allowed to stop the run are the ones we make by
+            # reading the file ourselves. A secret that is plainly not a private
+            # key can never work, whatever ssh thinks of it later, so fail here
+            # and name the mistake. None of this prints key material: the
+            # BEGIN/END lines are structure.
+            first="$(head -1 "$dest")"
+            last="$(grep -v '^[[:space:]]*$' "$dest" | tail -1)"
+            case "$first" in
+              ssh-*|ecdsa-*)
+                echo "::error::LAB_SSH_PRIVATE_KEY is a PUBLIC key. The secret needs the private half (no .pub)."
+                rm -f "$dest"; exit 1 ;;
+              *BEGIN*) : ;;
+              *)
+                echo "::error::LAB_SSH_PRIVATE_KEY has no BEGIN line: the paste lost its header, or starts with a blank line."
+                rm -f "$dest"; exit 1 ;;
+            esac
+            case "$last" in
+              *END*) : ;;
+              *)
+                echo "::error::LAB_SSH_PRIVATE_KEY has no END line: the paste was truncated."
+                rm -f "$dest"; exit 1 ;;
+            esac
+
+            # ssh-keygen -y is a convenience, not a gate. It prints the public
+            # half, worth having in the log to say which key is in play, and
+            # -P '' keeps a passphrase-protected key from hanging on a prompt
+            # with no terminal. But ssh, not ssh-keygen, is what consumes this
+            # file. Run 36624968635 lost a whole run to ssh-keygen reporting
+            # "Permission denied" on a key that head and wc read fine two lines
+            # later, so a failure here warns and carries on, and the chain
+            # below -- key, then pem, then password -- settles it at the first
+            # real connection. The detail printed is what would have identified
+            # that run in one look.
+            kerr="$keydir/keyerr-$$"
+            if ssh-keygen -y -P '' -f "$dest" > "$dest.pub" 2>"$kerr"; then
+              echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
+            else
+              echo "::warning::ssh-keygen could not read the installed key. Continuing: the key may still work for ssh."
+              echo "  ssh-keygen : $(tr -d '\r' < "$kerr" | head -2 | tr '\n' ' ')"
+              echo "  line count : $(wc -l < "$dest")"
+              echo "  key file   : $(ls -ln "$dest" 2>/dev/null)"
+              echo "  key dir    : $(ls -lnd "$keydir" 2>/dev/null)"
+              echo "  selinux    : $(ls -Zd "$dest" 2>/dev/null || echo 'no labels')"
+              echo "  enforcing  : $(getenforce 2>/dev/null || echo 'n/a')"
+              rm -f "$dest.pub"
+            fi
+            rm -f "$kerr"
+          fi
+
+          # One chain, decided here, used by every ssh and scp in this workflow.
+          #
+          # ssh tries each -i identity in turn, so listing both is the fallback
+          # rather than something the call sites have to branch on. sshpass only
+          # supplies a password when one is actually prompted for, so wrapping a
+          # command whose key works costs nothing -- it is a passthrough.
+          #
+          # -e rather than -p: -p puts the password in the process arguments,
+          # where it is visible to anyone who can read /proc on the runner. -e
+          # takes it from SSHPASS in the environment instead.
+          #
+          # Order is deliberate. The CI key is the credential that is supposed to
+          # work; simplyblock-us-east-2.pem is kept while some nodes may still
+          # authorise it; the password is last because it is the one being
+          # withdrawn. Whatever answers, the log says which, so a green run does
+          # not hide that the key has stopped working.
+          ids=""
+          [ -n "$dest" ] && [ -f "$dest" ] && ids="$ids -i $dest"
+          legacy="$HOME/.ssh/simplyblock-us-east-2.pem"
+          [ -f "$legacy" ] && ids="$ids -i $legacy"
+          if [ -n "${KEY_PATH:-}" ] && [ -f "${KEY_PATH}" ] \
+               && [ "${KEY_PATH}" != "$dest" ] && [ "${KEY_PATH}" != "$legacy" ]; then
+            ids="$ids -i ${KEY_PATH}"
+          fi
+
+          # sshpass, only because the password is the last resort. Best effort:
+          # a runner without it simply has no password stage, which the line
+          # below reports rather than failing over. It is not installed at all
+          # unless SSH_PASSWORD is set, so the common case pays nothing.
+          if [ -n "${SSH_PASSWORD:-}" ] && ! command -v sshpass >/dev/null 2>&1; then
+            if command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y sshpass >/dev/null 2>&1 || true
+            elif command -v yum >/dev/null 2>&1; then
+              { sudo yum install -y epel-release; sudo yum install -y sshpass; } >/dev/null 2>&1 || true
+            elif command -v apt-get >/dev/null 2>&1; then
+              { sudo apt-get update -y; sudo apt-get install -y sshpass; } >/dev/null 2>&1 || true
+            fi
+          fi
+
+          sb_ssh="ssh${ids}"
+          sb_scp="scp${ids}"
+          if [ -n "${SSH_PASSWORD:-}" ] && command -v sshpass >/dev/null 2>&1; then
+            sb_ssh="sshpass -e $sb_ssh"
+            sb_scp="sshpass -e $sb_scp"
+            echo "SSHPASS=${SSH_PASSWORD}" >> "$GITHUB_ENV"
+            echo "  password fallback: available"
+          else
+            echo "  password fallback: not available (no SSH_PASSWORD, or sshpass missing)"
+          fi
+
+          if [ -z "$ids" ] && [ -z "${SSH_PASSWORD:-}" ]; then
+            echo "::error::No SSH credential at all: no LAB_SSH_PRIVATE_KEY, no key on disk, no SSH_PASSWORD."
+            exit 1
+          fi
+
+          echo "  identities:${ids:- none}"
+          echo "SB_SSH=$sb_ssh" >> "$GITHUB_ENV"
+          echo "SB_SCP=$sb_scp" >> "$GITHUB_ENV"
+          # The flags on their own, for the call sites that build an options
+          # array -- SSH_OPTS=(...) cannot take a whole command, only its
+          # arguments. Unquoted expansion is intended: it has to split into
+          # separate -i elements.
+          echo "SB_IDS=$ids" >> "$GITHUB_ENV"
+          # And the wrapper for those sites, empty unless a password is armed.
+          echo "SB_PREFIX=${sb_ssh%%ssh*}" >> "$GITHUB_ENV"
+          # KEY_PATH stays the first identity, because ssh_utils and KEY_NAME
+          # read it. Python runs its own chain over the same candidates.
+          if [ -n "$dest" ] && [ -f "$dest" ]; then
+            echo "KEY_PATH=$dest" >> "$GITHUB_ENV"
+          elif [ -f "$legacy" ] && [ -z "${KEY_PATH:-}" ]; then
+            echo "KEY_PATH=$legacy" >> "$GITHUB_ENV"
+          fi
 
       - name: Resolve KEY_PATH and validate key exists
         shell: bash
@@ -401,7 +551,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ${SB_SSH} \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -429,6 +579,7 @@ jobs:
             run_remote_with_retry "$ip" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
+              rm -f /tmp/fio_*.log || true;
               mp='${NFS_MOUNTPOINT}';
               if mountpoint -q \"\$mp\"; then umount -f \"\$mp\" || umount \"\$mp\"; else
                 if mount | grep -q \" \$mp \"; then umount -f \"\$mp\" || umount \"\$mp\" || true; fi
@@ -444,7 +595,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ${SB_SSH} \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -486,7 +637,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ${SB_SSH} \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -505,7 +656,7 @@ jobs:
 
           still=0
           for ip in $uniq_targets; do
-            if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            if ${SB_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "mount | grep -q \" ${NFS_MOUNTPOINT} \""; then
               echo "ERROR: ${NFS_MOUNTPOINT} still mounted on $ip"
               still=1
@@ -531,7 +682,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ${SB_SSH} \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -546,14 +697,14 @@ jobs:
 
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "---- reboot storage: $ip ----"
-            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            ${SB_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "nohup reboot >/dev/null 2>&1 &" || true
           done
 
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "Waiting for $ip..."
             for i in {1..60}; do
-              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
+              if ${SB_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
                 "echo online" >/dev/null 2>&1; then
                 echo "$ip online"
                 break
@@ -667,18 +818,18 @@ jobs:
           set -euxo pipefail
 
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
-          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${KEY_PATH}")
+          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SB_IDS})
 
-          cluster_id="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+          cluster_id="$(${SB_PREFIX} ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
             "${SBCLI_CMD} cluster list" | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -n 1)"
 
           if [[ -z "${cluster_id}" ]]; then
             echo "ERROR: Could not extract cluster_id from '${SBCLI_CMD} cluster list' on ${mgmt_ip}"
-            ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" "${SBCLI_CMD} cluster list" || true
+            ${SB_PREFIX} ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" "${SBCLI_CMD} cluster list" || true
             exit 1
           fi
 
-          cluster_secret="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+          cluster_secret="$(${SB_PREFIX} ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
             "${SBCLI_CMD} cluster get-secret ${cluster_id}" | tr -d '\r' | tail -n 1 | xargs)"
 
           if [[ -z "${cluster_secret}" ]]; then
@@ -698,7 +849,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          rm -rf sbcli
+          # sudo fallback: anything that ran as root in this workspace --
+          # a debug session, a container with it bind-mounted, a log
+          # collector -- leaves root-owned files under .git/objects, and
+          # then this rm fails with "Permission denied" and takes the whole
+          # run with it before a single test starts. The clone below
+          # recreates everything here, so removing it with privilege is
+          # safe and is strictly better than failing the run.
+          rm -rf sbcli 2>/dev/null || sudo rm -rf sbcli
 
           wf_branch="${{ github.ref_name }}"
           fallback_branch="${TARGET_SBCLI_BRANCH}"
@@ -904,7 +1062,7 @@ jobs:
           set -euxo pipefail
 
           TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
-          SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
+          SSH_OPTS=(${SB_IDS} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
 
           NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
@@ -913,10 +1071,10 @@ jobs:
             LOCAL_NODE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
             mkdir -p "${LOCAL_NODE_DIR}"
 
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "docker ps -a 2>&1 || true" \
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "docker ps -a 2>&1 || true" \
               > "${LOCAL_NODE_DIR}/docker_ps_a_${NODE}.txt" || true
 
-            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+            CONTAINERS="$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
               "docker ps -a --format '{{.Names}}' 2>/dev/null || true" 2>/dev/null || true)"
 
             if [[ -z "${CONTAINERS}" ]]; then
@@ -929,10 +1087,10 @@ jobs:
               C="${C%%$'\r'}"
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
                 "docker logs --timestamps --details '${C}' 2>&1 || true" \
                 > "${LOCAL_NODE_DIR}/${C}.txt" || true
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
                 "docker inspect '${C}' 2>&1 || true" \
                 > "${LOCAL_NODE_DIR}/${C}_inspect.json" || true
             done <<< "${CONTAINERS}"
@@ -1092,7 +1250,7 @@ jobs:
           WINDOW_END=$((TEST_END_EPOCH + 3600))
 
           MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
-          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+          SSH_OPTS=(${SB_IDS} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
 
           OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
           mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
@@ -1109,10 +1267,40 @@ jobs:
           done
           NUM_CHUNKS=${#_CHUNK_STARTS[@]}
 
+          # `python3` on the mgmt node is /root/.local/bin/python3, which does NOT
+          # have sbcli. What it finds instead is
+          # /usr/local/lib/python3.12/site-packages/simplyblock_core/ holding only
+          # scripts/prometheus.yml and scripts/alerting/alert_resources.yaml and
+          # no __init__.py -- so `import simplyblock_core` succeeds as an empty
+          # namespace package and `-m ...collect_logs` dies with "No module named".
+          #
+          # That directory is NOT junk and must not be deleted. The product writes
+          # it: render_and_deploy_alerting_configs (simplyblock_core/utils) renders
+          # the templates and sudo-mv's them into <parent-of-package>/
+          # simplyblock_core/scripts/, and docker-compose-swarm-monitoring.yml
+          # mounts ./prometheus.yml from there into the Prometheus container. It is
+          # live monitoring config. It outlived the package only because a sudo mv
+          # is not pip-managed, so it stayed put when sbcli moved to the uv tool
+          # install behind sbctl.
+          #
+          # So: resolve the interpreter instead of touching the path. Derive it
+          # from sbctl's shebang and confirm it can import the module.
+          COLLECT_PY=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" '
+            for c in "$(head -1 "$(command -v sbctl 2>/dev/null)" 2>/dev/null | sed "s|^#!||")" \
+                     /root/.local/share/uv/tools/sbctl/bin/python \
+                     python3; do
+              [ -n "$c" ] || continue
+              "$c" -c "import simplyblock_core.scripts.collect_logs" >/dev/null 2>&1 \
+                && { echo "$c"; exit 0; }
+            done
+            echo python3' 2>/dev/null | tail -1)
+          COLLECT_PY=${COLLECT_PY:-python3}
+          echo "  collect_logs interpreter: ${COLLECT_PY}"
+
           run_collect() {
             local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "python3 -m simplyblock_core.scripts.collect_logs \
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "${COLLECT_PY} -m simplyblock_core.scripts.collect_logs \
                 '${iso}' '${mins}' \
                 --mode docker \
                 --output-dir '${outdir}' \
@@ -1122,7 +1310,7 @@ jobs:
             local rc=$?
             [ $rc -ne 0 ] && return $rc
             local has_content
-            has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+            has_content=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
               "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
             if [ -z "${has_content}" ]; then
               echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
@@ -1173,7 +1361,7 @@ jobs:
             CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
             echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
             REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
             if [ -z "${PREFER_OPENSEARCH}" ]; then
               echo "  Probing OpenSearch availability..."
               if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_OUTPUT_DIR}" "--use-opensearch"; then
@@ -1182,8 +1370,8 @@ jobs:
               else
                 PREFER_OPENSEARCH=false
                 echo "  OpenSearch unavailable — using Graylog for all chunks"
-                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
                 collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || \
                   echo "WARN: Graylog also failed for chunk ${CHUNK}"
               fi
@@ -1198,17 +1386,17 @@ jobs:
                 collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || true
               }
             fi
-            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+            TARBALLS=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
               "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
             if [ -n "${TARBALLS}" ]; then
               for TB in ${TARBALLS}; do
-                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+                ${SB_PREFIX} scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
               done
               for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
                 [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
               done
             fi
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
           done
           echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
 
