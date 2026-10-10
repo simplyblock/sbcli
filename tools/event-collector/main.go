@@ -27,7 +27,10 @@ func main() {
 	if clusterFile == "" {
 		clusterFile = "/etc/foundationdb/fdb.cluster"
 	}
-	store, err := newStore(clusterFile)
+	store, isFile, err := fileStoreFromEnv()
+	if !isFile {
+		store, err = newStore(clusterFile)
+	}
 	if err != nil {
 		log.Error("cannot open the store", "err", err)
 		os.Exit(1)
