@@ -258,6 +258,26 @@ def qos_high_priority(cluster_id):
     return db.get_cluster_by_id(cluster_id).is_qos_set()
 
 
+def needs_relaxed_placement(member_nodes, ndcs, npcs):
+    """Whether a migration on a cluster of ``member_nodes`` must run relaxed.
+
+    Strict placement puts every chunk of a stripe on a different node. A
+    1- or 2-node cluster, or one with fewer nodes than chunks per stripe,
+    has no such placement, so a strict migration has nowhere to move data
+    and never completes; relocation then needs a third node. ultra already
+    relaxes writes in that case on its own, but migrations only relax when
+    asked (``relaxed_mode``, default false).
+    """
+    return member_nodes <= 2 or member_nodes < ndcs + npcs
+
+
+def migration_relaxed(cluster_id):
+    cluster = db.get_cluster_by_id(cluster_id)
+    members = [n for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    return needs_relaxed_placement(len(members), cluster.distr_ndcs, cluster.distr_npcs)
+
+
 def sibling_eligibility(task, cluster):
     """Spec-shaped wrapper of :func:`no_sibling_migration`."""
     return no_sibling_migration(task)
