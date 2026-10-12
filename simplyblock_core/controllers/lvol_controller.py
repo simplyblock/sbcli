@@ -3865,8 +3865,8 @@ def resize_lvol(id, new_size, lock=True) -> None:
     logger.info("Done")
 
 
-def create_snapshot(lvol_id, snapshot_name, backup=False):
-    return snapshot_controller.add(lvol_id, snapshot_name, backup=backup)
+def create_snapshot(lvol_id, snapshot_name):
+    return snapshot_controller.add(lvol_id, snapshot_name)
 
 
 def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):

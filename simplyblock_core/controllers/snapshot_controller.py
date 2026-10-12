@@ -630,7 +630,7 @@ def check_snapshot_capacity(pool, cluster, lvol, all_snaps=None):
     return None
 
 
-def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
+def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
         bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -980,12 +980,6 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                         logger.info("Created snapshot replication task on original node")
             except KeyError:
                 pass
-
-    if backup:
-        from simplyblock_core.controllers.backup import controller as backup_controller
-        backup_id, backup_err = backup_controller.backup_snapshot(snap.uuid)
-        if backup_err:
-            logger.warning(f"Snapshot created but backup failed: {backup_err}")
 
     return snap.uuid, False
 

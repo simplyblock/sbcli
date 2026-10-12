@@ -953,11 +953,10 @@ class CLIWrapperBase:
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        backup = getattr(args, 'backup', False)
         if backup_controller.is_reserved_snapshot_name(name):
             print(f"Error: {backup_controller.RESERVED_SNAPSHOT_NAME_ERROR}")
             return False
-        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name, backup=backup)
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
         return snapshot_id if not error else error
 
     def volume__backup(self, sub_command, args):
@@ -1251,11 +1250,10 @@ class CLIWrapperBase:
         return True
 
     def snapshot__add(self, sub_command, args):
-        backup = getattr(args, 'backup', False)
         if backup_controller.is_reserved_snapshot_name(args.name):
             print(f"Error: {backup_controller.RESERVED_SNAPSHOT_NAME_ERROR}")
             return False
-        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name, backup=backup)
+        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name)
         return snapshot_id if not error else error
 
     def snapshot__backup(self, sub_command, args):

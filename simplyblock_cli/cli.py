@@ -845,7 +845,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('name', help='The snapshot name.', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot.', dest='backup', action='store_true')
 
     def init_volume__backup(self, subparser):
         subcommand = self.add_sub_command(subparser, 'backup', 'Creates a backup directly from a logical volume, snapshotting it first.')
@@ -1105,7 +1104,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new snapshot.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('name', help='The new snapshot name.', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot.', dest='backup', action='store_true')
 
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots.')

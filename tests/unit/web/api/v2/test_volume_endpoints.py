@@ -227,7 +227,7 @@ class TestCreateVolumeSnapshot:
             f'{BASE}/{VOLUME_ID}/snapshots', json={'name': 'snapshot-1'})
 
         assert response.status_code == 201
-        snapshot_controller.add.assert_called_once_with(VOLUME_ID, 'snapshot-1', backup=False)
+        snapshot_controller.add.assert_called_once_with(VOLUME_ID, 'snapshot-1')
         assert response.headers['Location'].endswith(f'/snapshots/{SNAPSHOT_ID}/')
 
     def test_duplicate_name_returns_409(self, client, volume, snapshot_controller):
