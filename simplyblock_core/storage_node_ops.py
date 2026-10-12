@@ -14642,6 +14642,27 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, sec_node, rpc_client)
 
+    # The registration below (add_lvol_thread -> nvmf_subsystem_add_ns) needs
+    # this lvol's bdev to exist on the node. The node's own lvstore activation
+    # rebuilds the bdev on RESTART, after which this repair only re-exposes it on
+    # the fabric. But a non-leader that was merely RPC-unresponsive while
+    # fabric-connected (FTT-tolerated during the create, not restarting) never
+    # re-activates, so an lvol created while it was in that state has no bdev here
+    # and the add_ns loops forever on "No such device" -- its replication, and any
+    # later snapshot of it, is stuck for good (finding #30: a landing volume whose
+    # secondary create was deferred as a bare register). Register the replica blob
+    # when it is missing: _create_bdev_stack(is_primary=False) issues
+    # bdev_lvol_register against the leader's blobid -- a true mirror, never a
+    # fresh blob -- so the subsequent registration has a bdev to add.
+    if rpc_client.bdev_get(lvol.top_bdev) is None:
+        logger.warning(
+            "Repairing missing bdev %s on non-leader %s (lvol %s) before registration",
+            lvol.top_bdev, sec_node.get_id(), lvol.get_id())
+        ok, err = lvol_controller._create_bdev_stack(lvol, sec_node, is_primary=False)
+        if not ok:
+            return False, (f"replica bdev create for {lvol.get_id()} on "
+                           f"{sec_node.get_id()} failed: {err}")
+
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
 
