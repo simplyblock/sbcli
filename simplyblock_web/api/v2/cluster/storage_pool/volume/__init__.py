@@ -308,7 +308,7 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
 
 
 class _SnapshotParams(BaseModel):
-    name: str
+    name: util.SnapshotName
     backup: bool = False
 
 
@@ -354,7 +354,7 @@ def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 @instance_api.post('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
 def clone(
         request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
-        clone_name: str,
+        clone_name: util.SnapshotName,
         new_size: str | None = None,
         pvc_name: str | None = None,
 ) -> Response:

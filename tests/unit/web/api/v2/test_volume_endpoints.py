@@ -238,6 +238,34 @@ class TestCreateVolumeSnapshot:
 
         assert response.status_code == 409
 
+    def test_reserved_name_is_rejected_before_reaching_the_controller(
+            self, client, volume, snapshot_controller):
+        response = client.post(
+            f'{BASE}/{VOLUME_ID}/snapshots', json={'name': '_backup_mine'})
+
+        assert response.status_code == 422
+        snapshot_controller.add.assert_not_called()
+
+
+class TestCloneVolume:
+
+    def test_calls_clone_lvol(self, client, volume, lvol_controller):
+        lvol_controller.clone_lvol.return_value = (VOLUME_ID, None)
+
+        response = client.post(
+            f'{BASE}/{VOLUME_ID}/clone', params={'clone_name': 'clone-1'})
+
+        assert response.status_code == 201
+        lvol_controller.clone_lvol.assert_called_once_with(VOLUME_ID, 'clone-1', None, None)
+
+    def test_reserved_clone_name_is_rejected_before_reaching_the_controller(
+            self, client, volume, lvol_controller):
+        response = client.post(
+            f'{BASE}/{VOLUME_ID}/clone', params={'clone_name': 'auto_mine'})
+
+        assert response.status_code == 422
+        lvol_controller.clone_lvol.assert_not_called()
+
 
 class TestVolumeHosts:
 
