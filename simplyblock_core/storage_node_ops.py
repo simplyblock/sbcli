@@ -1289,21 +1289,55 @@ def apply_jc_dual_node(cluster_id):
     Keyed on MEMBERSHIP, not on how many nodes are online: a 3-node cluster
     with one node down must keep requiring 2 journals. Only a cluster whose
     whole membership is 2 is a dual-node cluster.
+
+    Two-node arbitration (campaign c1, B2): a ``jc_set_dual_node`` call that
+    carries only ``enable`` resets the node to its defaults and so switches
+    arbitration OFF on every restarted node. On a cluster with
+    ``two_node_arbitration`` every call therefore carries the full arbitration
+    config (``arbitration.dual_node_params``). A node that rejects the fields
+    (built without the protocol) still gets the plain dual-node flag: that one
+    keeps the survivor from aborting and must never be lost.
     """
+    from simplyblock_core.arbitration import dual_node_params
+
     db_controller = DBController()
     members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
                if n.status != StorageNode.STATUS_REMOVED]
     enable = len(members) == 2
+    arbitrated = False
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+        arbitrated = bool(getattr(cluster, "two_node_arbitration", False))
+    except Exception as e:                      # noqa: BLE001 - best effort
+        logger.warning("Could not read cluster %s for the arbitration flag: %s", cluster_id, e)
+    extra = dual_node_params(enable) if arbitrated else {}
     for node in members:
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            node.rpc_client().jc_set_dual_node(enable)
-            logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
-                        enable, node.get_id(), len(members))
+            rpc = node.rpc_client()
+            _, err = _unpack_rpc2(rpc.jc_set_dual_node(enable, **extra))
+            if err and extra:
+                logger.warning("Node %s rejected the arbitration fields of jc_set_dual_node "
+                               "(%s); applying the plain dual-node flag", node.get_id(), err)
+                _, err = _unpack_rpc2(rpc.jc_set_dual_node(enable))
+            if err:
+                logger.warning("Could not set JC dual-node=%s on %s: %s",
+                               enable, node.get_id(), err)
+                continue
+            logger.info("JC dual-node=%s applied on %s (cluster membership %d, arbitration %s)",
+                        enable, node.get_id(), len(members),
+                        extra.get("arbitration", "not managed"))
         except Exception as e:                  # noqa: BLE001 - best effort
             logger.warning("Could not set JC dual-node=%s on %s: %s",
                            enable, node.get_id(), e)
+
+
+def _unpack_rpc2(ret):
+    """``(result, error)`` of a ``_request2`` call; tolerates a bare result."""
+    if isinstance(ret, tuple) and len(ret) == 2:
+        return ret
+    return ret, None
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
@@ -8903,6 +8937,7 @@ def _restart_storage_node_impl(
             logger.info(f"Starting migration task for node {snode.get_id()}")
             tasks_controller.add_device_mig_task_for_node(snode.get_id())
 
+        _resync_solo_lvs_after_restart(snode)
         return True
 
     else:
@@ -9047,6 +9082,7 @@ def _restart_storage_node_impl(
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
         logger.info(f"Found {len(lvol_list)} lvols")
 
+        _resync_solo_lvs_after_restart(snode)
         return True
 
 
@@ -11111,6 +11147,143 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     logger.error("take-leadership on %s for %s did not take effect — "
                  "refusing to route", taker.get_id(), lvs_name)
     return None
+
+
+def _lvs_leader_probe(nodes, lvs_name):
+    """``(leaders, unknown)`` for ``lvs_name`` over ``nodes``: the nodes that
+    report "lvs leadership", and whether any node could not be asked (then
+    "no leader" cannot be concluded)."""
+    leaders, unknown = [], False
+    for node in nodes:
+        try:
+            info = node.rpc_client(timeout=5, retry=1).get_lvstore(lvs_name)
+        except Exception as e:                      # noqa: BLE001 - unknown, not "no"
+            logger.debug("get_lvstore %s on %s failed: %s", lvs_name, node.get_id()[:8], e)
+            unknown = True
+            continue
+        if info and info.get("lvs leadership"):
+            leaders.append(node)
+    return leaders, unknown
+
+
+def reconcile_lvs_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=()):
+    """Restore leadership of an LVS that lost it while its primary is healthy.
+
+    Two-node campaign c1, B6: after fence -> resync -> unfence an LVS can be
+    left without a leader on either node. Leadership is otherwise restored
+    only by the restart, creation and activation flows, so the LVS stays
+    leaderless (and the rebuild stalls on "not the leader") until someone
+    restarts the primary by hand.
+
+    For each node's primary LVS: when the primary is ONLINE and healthy, every
+    member is ONLINE and answers, and none reports leadership, the LVS is
+    leaderless. One seen leaderless on the previous pass too (``confirmed``)
+    is handed to ``_recover_leaderless_lvs`` with the primary as taker: the
+    existing guarded path (single-flight lock with cooldown, no restart or
+    port-allow task active, JM quorum on the taker, blob-md reload before the
+    grant, grant verified). No ad-hoc leadership RPC is sent from here.
+
+    ``skip_jm_vuids``: LVS the caller knows to be fenced, holding or solo on a
+    node (arbitration owns them). Returns ``(restored, leaderless)`` LVS names.
+    """
+    restored: list[str] = []
+    leaderless: list[str] = []
+    db = DBController()
+    members = []
+    for node in nodes:
+        fresh = db.get_storage_node_by_id(node.get_id())
+        if fresh.status != StorageNode.STATUS_REMOVED:
+            members.append(fresh)
+    if not members or any(m.status != StorageNode.STATUS_ONLINE for m in members):
+        return restored, leaderless
+    skip = {int(v) for v in skip_jm_vuids}
+    for primary in members:
+        lvs_name = primary.lvstore
+        if not lvs_name or primary.is_secondary_node or not primary.jm_vuid:
+            continue
+        if int(primary.jm_vuid) in skip or primary.health_check is False:
+            continue
+        leaders, unknown = _lvs_leader_probe(members, lvs_name)
+        if leaders or unknown:
+            continue
+        leaderless.append(lvs_name)
+        if lvs_name not in set(confirmed):
+            logger.warning("LVS %s has no leader on any member while its primary %s is "
+                           "online and healthy; restoring it on the next pass if it stays so",
+                           lvs_name, primary.get_id())
+            continue
+        logger.warning("LVS %s still has no leader; restoring leadership on its primary %s "
+                       "through the leaderless-recovery path", lvs_name, primary.get_id())
+        taker = _recover_leaderless_lvs(cluster_id, members, lvs_name, primary)
+        if taker is not None:
+            restored.append(lvs_name)
+    return restored, leaderless
+
+
+def resync_solo_lvs_on_leaders(snode):
+    """After a peer returns: start the journal resync of every LVS its
+    surviving peer ran alone, on that LVS's LEADER only.
+
+    Two-node campaign c1, B1: the survivor's HA state stays ``solo`` after its
+    peer returns until the JC re-levels the recovered remote JM, which it does
+    not start by itself; ``jc_explicit_synchronization`` on the leader cleared
+    it within 5 s. The restart flow only ever synced on the restarting node.
+
+    Never on a follower: explicit synchronization makes the calling node's JC
+    the journal writer, so on a follower it raises a writer_conflict on the
+    real leader, which drops LVS leadership and blocks its ports (B6). The
+    leader is confirmed by its own "lvs leadership" right before the call; an
+    LVS without a confirmed leader is skipped (leadership reconciliation owns
+    it). Idempotent and harmless when the node already resynced on its own:
+    only LVS still reported ``solo`` are synced, once each.
+    Returns the ``(node_id, jm_vuid)`` pairs synced.
+    """
+    from simplyblock_core.controllers.lvol_controller import is_node_leader
+
+    db = DBController()
+    members = [n for n in db.get_storage_nodes_by_cluster_id(snode.cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    if len(members) != 2:
+        return []
+    lvs_of_vuid = {int(n.jm_vuid): n.lvstore for n in members if n.jm_vuid and n.lvstore}
+    online = [n for n in members if n.status == StorageNode.STATUS_ONLINE]
+    synced = []
+    for survivor in online:
+        if survivor.get_id() == snode.get_id():
+            continue
+        try:
+            status = survivor.rpc_client(timeout=5, retry=1).jc_ha_status() or {}
+        except Exception as e:                      # noqa: BLE001 - no HA protocol / unreachable
+            logger.debug("jc_ha_status on %s: %s; no solo resync", survivor.get_id()[:8], e)
+            continue
+        solo = sorted(int(x["jm_vuid"]) for x in status.get("lvs", [])
+                      if x.get("state") == "solo" and "jm_vuid" in x)
+        for vuid in solo:
+            lvs_name = lvs_of_vuid.get(vuid)
+            if not lvs_name:
+                continue
+            leader = next((n for n in online if is_node_leader(n, lvs_name)), None)
+            if leader is None:
+                logger.warning("LVS %s (jm_vuid %s) is solo on %s but has no confirmed leader; "
+                               "not syncing (never on a follower)", lvs_name, vuid,
+                               survivor.get_id()[:8])
+                continue
+            try:
+                leader.rpc_client(timeout=10, retry=0).jc_explicit_synchronization(vuid)
+                synced.append((leader.get_id(), vuid))
+                logger.info("Journal resync of %s (jm_vuid %s) started on its leader %s after "
+                            "the peer returned", lvs_name, vuid, leader.get_id())
+            except Exception as e:                  # noqa: BLE001 - best effort
+                logger.warning("jc_explicit_synchronization %s on leader %s failed: %s",
+                               vuid, leader.get_id()[:8], e)
+    return synced
+
+
+def _resync_solo_lvs_after_restart(snode):
+    try:
+        resync_solo_lvs_on_leaders(snode)
+    except Exception as e:                          # noqa: BLE001 - never fails a restart
+        logger.warning("Solo-LVS resync after restart of %s failed: %s", snode.get_id(), e)
 
 
 def find_leader_with_failover(all_nodes, lvs_name):

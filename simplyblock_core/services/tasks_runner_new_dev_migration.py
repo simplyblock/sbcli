@@ -90,6 +90,7 @@ SPEC = RunnerSpec(
     handler=task_runner,
     is_eligible=mig.sibling_eligibility,
     interval=3,
+    backoff_reset_key=mig.backoff_reset_key,
 )
 
 

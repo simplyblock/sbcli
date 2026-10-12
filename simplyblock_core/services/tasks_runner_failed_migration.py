@@ -75,6 +75,7 @@ SPEC = RunnerSpec(
     on_finish=tag_device_migrated,
     is_eligible=mig.sibling_eligibility,
     interval=3,
+    backoff_reset_key=mig.backoff_reset_key,
 )
 
 

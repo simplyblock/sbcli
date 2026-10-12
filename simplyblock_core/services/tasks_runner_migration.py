@@ -215,6 +215,7 @@ SPEC = RunnerSpec(
     on_cycle=lambda cluster: update_master_tasks(cluster.get_id()),
     is_eligible=_is_eligible,
     interval=3,
+    backoff_reset_key=mig.backoff_reset_key,
 )
 
 

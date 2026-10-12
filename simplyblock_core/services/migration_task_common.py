@@ -261,3 +261,21 @@ def qos_high_priority(cluster_id):
 def sibling_eligibility(task, cluster):
     """Spec-shaped wrapper of :func:`no_sibling_migration`."""
     return no_sibling_migration(task)
+
+
+def backoff_reset_key(cluster):
+    """What a deferred migration waits on: node statuses and LVS leadership.
+
+    Used as the migration runners' ``RunnerSpec.backoff_reset_key``: a change
+    drops the in-memory retry backoff, so a rebuild that failed on "not the
+    leader" or on a node being down resumes as soon as that changes. On a
+    two-node arbitrated cluster the arbitration record's epoch (every verdict)
+    and ``leadership_restored_at`` (leadership reconciliation) stand for
+    leadership changes that come without a node status change.
+    """
+    nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+    statuses = tuple(sorted((n.get_id(), n.status) for n in nodes))
+    rec = db.get_cluster_arbitration(cluster.get_id()) if getattr(
+        cluster, "two_node_arbitration", False) else None
+    leadership = (rec.epoch, rec.leadership_restored_at) if rec is not None else ()
+    return statuses, leadership
