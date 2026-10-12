@@ -960,6 +960,15 @@ class CLIWrapperBase:
         snapshot_id, error = lvol_controller.create_snapshot(volume_id, name, backup=backup)
         return snapshot_id if not error else error
 
+    def volume__backup(self, sub_command, args):
+        try:
+            backup_id = backup_controller.backup_lvol(args.volume_id)
+        except (PreconditionError, RuntimeError) as e:
+            print(f"Error: {e}")
+            return False
+        print(f"Backup task created: {backup_id}")
+        return True
+
     def volume__clone(self, sub_command, args):
         clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, args.resize, args.namespaced)
         return clone_id if not error else error
