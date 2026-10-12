@@ -64,7 +64,8 @@ def task_runner(task):
 
         started = mig.start_migration(task, lambda: rpc_client.distr_migration_expansion_start(
             task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
-            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS))
+            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
+            relaxed_mode=mig.migration_relaxed(snode.cluster_id)))
         if started is None:
             raise TaskAbort("canceled while starting migration")
         task = started
