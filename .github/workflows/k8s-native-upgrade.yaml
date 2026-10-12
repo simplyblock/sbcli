@@ -759,6 +759,50 @@ jobs:
             CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${CSI_TAG}"
           fi
 
+          # Resolve the StorageClass the chart's PVCs will ask for, and
+          # prove it exists before installing anything.
+          #
+          # This was hardcoded to ${SC_NAME}, which does not exist on
+          # the lab. The chart does not create it -- controlplane.storageclass
+          # .name is a REFERENCE to a class that must already be there, and
+          # there is no StorageClass template in the chart at all. The
+          # companion --set controlplane.csiHostpathDriver.enabled=true was
+          # a dead value: no such key exists in the chart, and helm accepts
+          # unknown --set keys silently, so it deployed nothing and said
+          # nothing.
+          #
+          # What that cost, on run 38235143791: all eleven PVCs in the
+          # namespace -- FoundationDB's six, mongo, minio, opensearch,
+          # prometheus -- sat Pending on a class with no provisioner. FDB's
+          # log and storage pods never scheduled ("pod has unbound immediate
+          # PersistentVolumeClaims"), so the FoundationDBCluster never
+          # reported status.health.available, so the control plane sat in
+          # AwaitingFoundationDB for its full 1800s and the run failed there.
+          # Nothing in that chain names a StorageClass, which is why it took
+          # a live cluster to find.
+          #
+          # So: take STORAGE_CLASS if given, else the cluster's default,
+          # else the only class there is -- and fail HERE with the list if
+          # the result does not exist. A missing StorageClass is a one-line
+          # failure at install time, not a thirty-minute timeout three steps
+          # later.
+          SC_NAME="${STORAGE_CLASS:-}"
+          if [ -z "${SC_NAME}" ]; then
+            SC_NAME="$(kubectl get sc -o go-template='{{range .items}}{{if eq (index .metadata.annotations "storageclass.kubernetes.io/is-default-class") "true"}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | head -1)"
+          fi
+          if [ -z "${SC_NAME}" ]; then
+            only="$(kubectl get sc --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null)"
+            [ "$(printf '%s\n' "${only}" | grep -c .)" = "1" ] && SC_NAME="$(printf '%s\n' "${only}" | tr -d '[:space:]')"
+          fi
+          if [ -z "${SC_NAME}" ] || ! kubectl get sc "${SC_NAME}" >/dev/null 2>&1; then
+            echo "::error::no usable StorageClass. Wanted '${SC_NAME:-<none resolved>}'; the cluster has:"
+            kubectl get sc 2>&1 | sed 's/^/  /'
+            echo "::error::Set the STORAGE_CLASS env for this workflow, or create the class. Every chart PVC targets this, and a class that does not exist leaves them Pending until FoundationDB times out the control plane."
+            exit 1
+          fi
+          echo "storage class for chart PVCs: ${SC_NAME}"
+          kubectl get sc "${SC_NAME}" -o custom-columns=NAME:.metadata.name,PROVISIONER:.provisioner,BINDING:.volumeBindingMode
+
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock \
             --create-namespace \
@@ -766,16 +810,16 @@ jobs:
             --timeout 10m \
             --set deployment.profile=standalone \
             --set controlplane.csiHostpathDriver.enabled=true \
-            --set controlplane.storageclass.name=local-hostpath \
+            --set controlplane.storageclass.name=${SC_NAME} \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.base_simplyblock_image }}" \
             --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
             --set image.operator.tag="${{ github.event.inputs.base_simplyblock_image }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
-            --set prometheus.server.persistentVolume.storageClass=local-hostpath \
+            --set prometheus.server.persistentVolume.storageClass=${SC_NAME} \
             --set controlplane.observability.enabled=true \
-            --set opensearch.persistence.storageClass=local-hostpath \
-            --set controlplane.observability.minio.storageClass=local-hostpath \
+            --set opensearch.persistence.storageClass=${SC_NAME} \
+            --set controlplane.observability.minio.storageClass=${SC_NAME} \
             $TLS_FLAGS $CSI_FLAGS
 
       - name: Grant OpenShift SCC to all service accounts (post-helm, operator)
