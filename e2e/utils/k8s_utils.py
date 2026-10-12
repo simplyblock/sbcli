@@ -3251,6 +3251,127 @@ class K8sUtils:
             f"{timeout}s (last phase={phase})"
         )
 
+    # ── PersistentVolumeOps: a volume move, the way k8s raises one ───────
+    #
+    # On Kubernetes nothing calls ``sbctl volume migrate``. A move is a
+    # cluster-scoped PersistentVolumeOps, and the operator performs the
+    # whole two-phase handshake itself: ``Validating`` POSTs the migration
+    # and starts one Job per CONSUMING NODE to connect and verify the
+    # target paths, ``Migrating`` continues it (which is what starts the
+    # copy), and ``Verifying`` deletes those Jobs and clears the
+    # controllers they left behind.  The spec is
+    # operator/docs/designs/crd-redesign/design-persistentvolumeops.md §5.
+    #
+    # Which is why a test must NOT connect the target paths here.  On
+    # docker the harness does it because nothing else will; doing it on
+    # k8s races the operator's own Jobs for the same paths, and
+    # ``Verifying`` exists precisely because paths a checker left behind
+    # once "outlived the Jobs, poisoned the data path, and blocked every
+    # later migration on that volume".
+    #
+    # VolumeMigration is a DIFFERENT kind and is not this one.  It is the
+    # registered/legacy spelling, kept one release for drain-on-upgrade,
+    # and operator cmd/main.go defaults --legacy-volume-migration to
+    # false -- so on a default install a VolumeMigration CR is reconciled
+    # by nobody and the move silently never happens.
+    PVO_KIND = "persistentvolumeops.storage.simplyblock.io"
+
+    def create_persistent_volume_ops(self, name: str, pv_name: str,
+                                     target_node_ref: str,
+                                     target_namespace: str | None = None):
+        """Raise a volume move as a PersistentVolumeOps.  Returns (out, err).
+
+        Cluster-scoped, unlike its StorageNodeOps sibling -- the PV it
+        names is cluster-scoped too, so there is no namespace for the
+        operation to live in.  ``targetNodeRef`` needs BOTH name and
+        namespace (the CRD marks them required): it locates a StorageNode,
+        which is namespaced.
+        """
+        ns = target_namespace or self.namespace
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: PersistentVolumeOps\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            "spec:\n"
+            "  action: Migrate\n"
+            f"  persistentVolumeName: {pv_name}\n"
+            "  migrate:\n"
+            "    targetNodeRef:\n"
+            f"      name: {target_node_ref}\n"
+            f"      namespace: {ns}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating PersistentVolumeOps '{name}': migrate "
+            f"{pv_name} -> StorageNode {ns}/{target_node_ref}"
+        )
+        return self.apply_yaml_cluster_scoped(yaml_content)
+
+    def get_persistent_volume_ops(self, name: str) -> dict:
+        """The operation as JSON, or ``{}`` when it does not exist."""
+        out, err = self._exec_kubectl(
+            f"kubectl get {self.PVO_KIND} {name} -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        text = (out or "").strip()
+        if not text or "NotFound" in (err or ""):
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:                             # noqa: BLE001
+            return {}
+
+    def list_persistent_volume_ops(self) -> list:
+        """Every operation on the cluster.  Cheap enough to poll."""
+        out, _ = self._exec_kubectl(
+            f"kubectl get {self.PVO_KIND} -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        try:
+            return json.loads((out or "").strip() or "{}").get("items", [])
+        except Exception:                             # noqa: BLE001
+            return []
+
+    def abort_persistent_volume_ops(self, name: str):
+        """Ask a running operation to stop at its next step and unwind.
+
+        Expressible from ``Validating`` and ``Migrating`` only.  Once the
+        copy has finished the volume has already moved and there is
+        nothing to undo, so the step graph rejects the edge and the
+        controller reports an IllegalTransitionError rather than leaving a
+        half-undone move.  An abort that arrives that late is therefore
+        not an error in the test -- it is the documented answer.
+        """
+        patch = '{"spec":{"abort":true}}'
+        return self._exec_kubectl(
+            f"kubectl patch {self.PVO_KIND} {name} --type merge "
+            f"-p '{patch}'"
+        )
+
+    def delete_persistent_volume_ops(self, name: str):
+        """Delete one operation.
+
+        Safe at every step that admits it, and not a way to drop paths on
+        the floor: a non-terminal object carries a finalizer that clears
+        only once "the backend migration is canceled, the Jobs are
+        deleted, no path is left connected, and the volume's lock is
+        released" (§5.1).  A finalizer that cannot finish BLOCKS the
+        delete and leaves the object with the reason in
+        ``status.message``, which is the intended outcome rather than a
+        hang to work around.
+
+        Two consequences for a test.  A delete during ``Verifying`` is
+        REFUSED by admission -- that step declares no abort edge and is
+        itself the cleanup, so there is nothing to unwind.  And a delete
+        leaves no record, so "stop it and keep the evidence" is
+        :meth:`abort_persistent_volume_ops` alone; this is only for
+        discarding it afterwards.
+        """
+        return self._exec_kubectl(
+            f"kubectl delete {self.PVO_KIND} {name} "
+            f"--ignore-not-found --wait=false"
+        )
+
     def _dump_storage_node_ops_diagnostics(self, ops_name: str,
                                             namespace: str) -> None:
         """Log diagnostic info when a StorageNodeOps fails or times out."""
@@ -4292,6 +4413,78 @@ class K8sUtils:
         raise TimeoutError(
             f"Pod '{pod_name}' not Running within {timeout}s"
         )
+
+    def csi_node_pod(self, node_name: str) -> tuple:
+        """The CSI node-plugin pod on *node_name*, as (pod, container).
+
+        It is the window onto a worker's own NVMe fabric.  The node plugin
+        already mounts the host's ``/sys`` -- that is how it finds the
+        devices it attaches -- so reading a subsystem's ANA state through
+        it needs no privileged pod of our own, and nothing is created or
+        scheduled to take a reading.
+
+        Returns ``(None, None)`` rather than raising: a missing plugin pod
+        makes a diagnostic unavailable, and a diagnostic must never be the
+        thing that fails a run.
+        """
+        ns = self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pods -n {ns} --no-headers -o custom-columns="
+            f"NAME:.metadata.name,NODE:.spec.nodeName,"
+            f"PHASE:.status.phase 2>/dev/null || true",
+            supress_logs=True,
+        )
+        pod = None
+        for line in (out or "").splitlines():
+            cols = line.split()
+            if len(cols) < 3:
+                continue
+            name, node, phase = cols[0], cols[1], cols[2]
+            low = name.lower()
+            if node != node_name or phase != "Running":
+                continue
+            if "csi" in low and "node" in low:
+                pod = name
+                break
+        if not pod:
+            self.logger.warning(
+                "[K8sUtils] no running CSI node pod on %s; the host's NVMe "
+                "fabric cannot be read from here", node_name)
+            return None, None
+        # Pick the container that actually has the host mounts rather than
+        # a registrar or liveness sidecar, which do not.
+        out, _ = self._exec_kubectl(
+            f"kubectl get pod {pod} -n {ns} -o jsonpath="
+            f"'{{range .spec.containers[*]}}{{.name}}{{\"\\n\"}}{{end}}' "
+            f"2>/dev/null || true",
+            supress_logs=True,
+        )
+        names = [c.strip() for c in (out or "").splitlines() if c.strip()]
+        container = next((c for c in names
+                          if "csi" in c.lower() and "node" in c.lower()),
+                         None) or next(
+            (c for c in names if "registrar" not in c.lower()
+             and "liveness" not in c.lower()), None)
+        return pod, container
+
+    def exec_in_pod_container(self, pod_name: str, container: str,
+                              command: str, namespace: str | None = None,
+                              timeout: int = 15) -> str:
+        """Run *command* in one container of a pod. Returns stdout only.
+
+        The default timeout is short because the caller for this is a
+        periodic sampler: one that blocks stops sampling during whatever
+        it was watching, and a gap in the samples reads as "nothing
+        happened" rather than as a gap.
+        """
+        ns = namespace or self.namespace
+        c = f"-c {container} " if container else ""
+        out, _ = self._exec_kubectl(
+            f"kubectl exec -n {ns} {pod_name} {c}-- sh -c "
+            f"{shlex.quote(command)} 2>/dev/null || true",
+            supress_logs=True, timeout=timeout,
+        )
+        return out or ""
 
     def exec_in_pod(self, pod_name: str, command: str,
                     namespace: str | None = None, timeout: int = 300) -> tuple:

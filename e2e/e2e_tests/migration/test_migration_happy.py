@@ -43,7 +43,8 @@ class MigrationHappyPath(MigrationTestBase):
         # ── MIG-H-001 migrate under load ─────────────────────────────────
         handle = self._run_fio_dual(vol, runtime=600, rw="randrw", bs="16K",
                                     iodepth=8, numjobs=1, size="512M",
-                                    verify="md5", name="mighappy")
+                                    verify="md5", verify_fatal=True,
+                                    name="mighappy")
         sleep_n_sec(15)          # let IO actually be in flight
 
         mid, status, phase = self.full_migration(
@@ -65,27 +66,21 @@ class MigrationHappyPath(MigrationTestBase):
         # own status says "done" either way.
         self.logger.info("[MIG-H-004] exercising the migrated volume")
         snap = f"migsnap{stamp}"
-        out, err = self._cli(f"{self.base_cmd} -d snapshot add {vol_id} "
-                             f"{snap} 2>&1")
-        if cli_failed(out, err):
+        try:
+            handle = self.make_snapshot(vol, snap)
+        except Exception as exc:                      # noqa: BLE001
             raise AssertionError(
                 f"[MIG-H-004] cannot snapshot {vol} after migrating it: "
-                f"{(out + err)[:300]}. The migration reported success, so "
-                f"this is state it left behind, not an unrelated failure.")
-        snap_id = None
-        data = self._cli_json(f"{self.base_cmd} snapshot list")
-        for s in (data.get("results", data) if isinstance(data, dict) else data) or []:
-            if self._get(s, "snap_name", "name") == snap:
-                snap_id = self._get(s, "uuid", "id")
-        if snap_id:
+                f"{str(exc)[:300]}. The migration reported success, so "
+                f"this is state it left behind, not an unrelated failure."
+            ) from exc
+        if handle:
             clone = f"migclone{stamp}"
-            out, err = self._cli(f"{self.base_cmd} -d snapshot clone "
-                                 f"{snap_id} {clone} 2>&1")
-            if cli_failed(out, err):
+            clone_id, detail = self.make_clone(handle, clone)
+            if not clone_id:
                 raise AssertionError(
                     f"[MIG-H-004] cannot clone a snapshot of the migrated "
-                    f"volume: {(out + err)[:300]}")
-            self._mig_vols.append(clone)
+                    f"volume: {detail}")
             self.logger.info("[MIG-H-004] snapshot + clone OK")
 
         out, err = self._cli(f"{self.base_cmd} -d volume resize {vol_id} "

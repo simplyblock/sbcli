@@ -1375,6 +1375,35 @@ jobs:
           # One field, two operations: the operator resolves it to a 4K reformat
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
+          # Waive the stale-partition-table refusal whenever we are also going
+          # to wipe the device, and only then.
+          #
+          # These are two different gates and setting one without the other is
+          # how run 38210410964 failed: FORCE_DRIVE_FORMAT governs what the
+          # CLUSTER does to a device it has been given, while discovery decides
+          # what to offer in the first place -- and discovery declines a
+          # partitioned disk before enableDriveFormat is ever consulted. That
+          # run ended with "no worker has a device this run would use: 18
+          # device(s) across 6 worker(s), none usable: 12 declined by
+          # available: the probe refused it: Partitioned", on a lab whose data
+          # disks still carried the previous deployment's partition table. All
+          # three discovery attempts failed identically, because nothing
+          # between them wipes anything.
+          #
+          # Safe to waive, and the only one of the three availability
+          # conditions that is: the field "reports devices carrying a partition
+          # table alongside the available ones, for the administrator who knows
+          # the table is stale", while "a mounted or otherwise busy device is
+          # never reported, because simplyblock taking it would corrupt
+          # whatever is using it" (operator/api/v1alpha2/operatorops_types.go).
+          # So the OS disk stays refused on Mounted,Busy -- which is exactly
+          # how that run's other 6 devices were declined -- and only the data
+          # disks are promoted.
+          #
+          # Tied to FORCE_DRIVE_FORMAT rather than set unconditionally, because
+          # waiving the refusal WITHOUT wiping would hand the cluster a disk
+          # with a live partition table on it.
+          export ENABLE_PARTITIONED="${FORCE_FORMAT_4K}"
           export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
           # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
           # reasoning that the workers boot from it and the draft would

@@ -65,7 +65,7 @@ on:
         required: false
         default: '/mnt/nfs_share/'
       testname:
-        description: 'Test to run: empty=default suite, or category (backup/backup-stress/security), or class name (e.g. TestLvolFioNpcsCustom)'
+        description: 'Test to run: empty=default suite, or category (backup/backup-stress/security/migration), or class name (e.g. TestLvolFioNpcsCustom)'
         required: false
         default: ''
         type: string
@@ -1452,6 +1452,35 @@ jobs:
           # One field, two operations: the operator resolves it to a 4K reformat
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
+          # Waive the stale-partition-table refusal whenever we are also going
+          # to wipe the device, and only then.
+          #
+          # These are two different gates and setting one without the other is
+          # how run 38210410964 failed: FORCE_DRIVE_FORMAT governs what the
+          # CLUSTER does to a device it has been given, while discovery decides
+          # what to offer in the first place -- and discovery declines a
+          # partitioned disk before enableDriveFormat is ever consulted. That
+          # run ended with "no worker has a device this run would use: 18
+          # device(s) across 6 worker(s), none usable: 12 declined by
+          # available: the probe refused it: Partitioned", on a lab whose data
+          # disks still carried the previous deployment's partition table. All
+          # three discovery attempts failed identically, because nothing
+          # between them wipes anything.
+          #
+          # Safe to waive, and the only one of the three availability
+          # conditions that is: the field "reports devices carrying a partition
+          # table alongside the available ones, for the administrator who knows
+          # the table is stale", while "a mounted or otherwise busy device is
+          # never reported, because simplyblock taking it would corrupt
+          # whatever is using it" (operator/api/v1alpha2/operatorops_types.go).
+          # So the OS disk stays refused on Mounted,Busy -- which is exactly
+          # how that run's other 6 devices were declined -- and only the data
+          # disks are promoted.
+          #
+          # Tied to FORCE_DRIVE_FORMAT rather than set unconditionally, because
+          # waiving the refusal WITHOUT wiping would hand the cluster a disk
+          # with a live partition table on it.
+          export ENABLE_PARTITIONED="${FORCE_FORMAT_4K}"
           export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
           # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
           # reasoning that the workers boot from it and the draft would
@@ -2317,8 +2346,21 @@ jobs:
           set +e
           echo "=== Collecting K8s pod logs ==="
           NAMESPACE=simplyblock
-          LOG_DIR="${RUN_BASE_DIR}/k8s_pod_logs"
-          mkdir -p "${LOG_DIR}"
+          # Fall back when RUN_BASE_DIR is unset, which is exactly the case
+          # where these logs matter most. It is set by "Set RUN_DIR_FILE",
+          # which only runs once the cluster is active -- so a bring-up
+          # failure skips it, LOG_DIR becomes the absolute path
+          # "/k8s_pod_logs", mkdir is refused, and every pod log is lost.
+          # Run 38210410964 failed in discovery and lost the six nodeprobe
+          # pod logs that would have NAMED the devices it declined; the
+          # summary only says how many.
+          LOG_DIR="${RUN_BASE_DIR:-${GITHUB_WORKSPACE:-.}/k8s-bringup-logs}/k8s_pod_logs"
+          if ! mkdir -p "${LOG_DIR}"; then
+            LOG_DIR="$(mktemp -d)/k8s_pod_logs"
+            mkdir -p "${LOG_DIR}"
+            echo "::warning::RUN_BASE_DIR was unset and the fallback was not writable; pod logs are in ${LOG_DIR}"
+          fi
+          echo "pod logs -> ${LOG_DIR}"
 
           # Collect logs from all simplyblock pods
           PODS=$(kubectl get pods -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
@@ -2610,6 +2652,7 @@ jobs:
           name: simplyblock-k8s-native-e2e-logs-${{ github.run_id }}
           path: |
             e2e/output.log
+            k8s-bringup-logs/
           if-no-files-found: warn
 
       - name: Stop MinIO trace logging and save

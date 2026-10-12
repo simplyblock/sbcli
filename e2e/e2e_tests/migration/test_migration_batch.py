@@ -41,6 +41,8 @@ class _BatchBase(MigrationTestBase):
         members = members or self.MEMBERS
         stamp = int(time.time()) % 100000
         self._subsys = f"migsub{tag}{stamp}"
+        if self.k8s_test:
+            return self._make_group_k8s(tag, stamp, members, seed_first)
         group = []
         for i in range(members):
             name = f"mig{tag}{stamp}n{i}"
@@ -67,8 +69,87 @@ class _BatchBase(MigrationTestBase):
             group.append({"name": name, "id": vid,
                           "ns_id": self._ns_id(vid)})
         self._group = group
-        self._sums = self.seed(group[0]["name"]) if seed_first else {}
+        self._seeded = self._lead(group)
+        self._sums = (self.seed(self._seeded["name"]) if seed_first
+                      else {})
         return group
+
+    def _make_group_k8s(self, tag, stamp, members, seed_first):
+        """The same group, built the way a Kubernetes user gets one.
+
+        There is no ``volume add --namespaced`` here. A CSI volume's
+        subsystem packing is a StorageClass parameter, so the group is
+        "every PVC provisioned from a class whose
+        ``max_namespace_per_subsys`` leaves room" -- which is how the
+        operator's own ``test/fio_migration_test.py`` builds its
+        namespaced volumes.
+
+        Building them as PVCs is not a stylistic choice: a k8s move is
+        addressed by PV NAME, so a group created through the CLI would
+        have no PersistentVolume for the operation to name and could not
+        be migrated here at all.
+        """
+        k8s = self._ensure_k8s_utils()
+        sc = f"migbatch-{tag}-{stamp}"[:63]
+        k8s.create_storage_class(
+            name=sc, cluster_id=self.cluster_id, pool_name=self.pool_name,
+            ndcs=self.ndcs, npcs=self.npcs,
+            max_namespace_per_subsys=members + 2)
+        self._extra_scs.append(sc)
+
+        prev_sc = self._k8s_storage_class_name
+        self._k8s_storage_class_name = sc
+        try:
+            group = []
+            for i in range(members):
+                name = f"mig{tag}{stamp}n{i}"
+                _, vid = self._create_lvol_dual(name, self.VOL_SIZE)
+                self._mig_vols.append(name)
+                group.append({"name": name, "id": vid,
+                              "ns_id": self._ns_id(vid)})
+        finally:
+            self._k8s_storage_class_name = prev_sc
+
+        # The group only exists if they actually landed in ONE subsystem.
+        # max_namespace_per_subsys is a ceiling, not an instruction -- the
+        # picker packs the most-occupied subsystem of the pool first, and
+        # on a cluster with other volumes in this pool a member can open a
+        # subsystem of its own. A "batch" of one-per-subsystem volumes
+        # passes every assertion below while testing nothing, so this is a
+        # precondition failure and not a warning.
+        by_nqn = {}
+        for g in group:
+            by_nqn.setdefault(self.lvol_nqn(g["id"]), []).append(g["name"])
+        if len(by_nqn) != 1 or None in by_nqn:
+            raise MigrationPreconditionError(
+                f"[MIG-B] the {members} PVCs did not land in one subsystem: "
+                f"{ {k: v for k, v in by_nqn.items()} }. A batch case needs a "
+                f"shared-namespace group, and max_namespace_per_subsys only "
+                f"RAISES the ceiling -- it cannot pull a volume into a "
+                f"subsystem another pool member already filled. Run this on a "
+                f"pool with no other volumes, or raise MEMBERS' headroom.")
+        self.logger.info("[MIG-B] %d PVCs share subsystem %s",
+                         members, next(iter(by_nqn)))
+
+        self._group = group
+        self._seeded = self._lead(group)
+        self._sums = (self.seed(self._seeded["name"]) if seed_first
+                      else {})
+        return group
+
+    def _lead(self, group=None):
+        """The member a batch migration NAMES. Drawn, not group[0].
+
+        A batch moves the whole subsystem, so naming any member must have
+        the same effect. Always naming the first one means the lane never
+        tests that: a product that resolves the group from the named
+        volume's own position -- or that only rewrites the named member's
+        database row -- passes every case here while being wrong for the
+        other three members.
+        """
+        g = group or self._group
+        name = self.pick([m["name"] for m in g], "batch lead member")
+        return next(m for m in g if m["name"] == name)
 
     def _ns_id(self, vol_id):
         try:
@@ -91,12 +172,12 @@ class MigrationBatchFlat(_BatchBase):
 
     def run(self):
         group = self._make_group("flat")
-        src = self.lvol_node(group[0]["id"])
+        src = self.lvol_node(self._seeded["id"])
         tgt = self.pick_target(src, "no-overlap")
         self.logger.info("[MIG-B-001] migrating %d members as a group: "
                          "%s -> %s", len(group), src, tgt)
 
-        mid = self.migrate(group[0]["id"], tgt, batch=True)
+        mid = self.migrate(self._seeded["id"], tgt, batch=True)
         self.migrate_continue(mid, batch=True)
         status, phase = self.await_batch(mid, timeout=1800,
                                          what="MIG-B-001 flat group")
@@ -129,7 +210,7 @@ class MigrationBatchFlat(_BatchBase):
                 f"namespaces by id; renumbering them silently repoints every "
                 f"one of them at different data.")
         self.logger.info("[MIG-B-003] PASS: ns_ids unchanged")
-        self.verify(group[0]["name"], self._sums,
+        self.verify(self._seeded["name"], self._sums,
                     "after a group migration (MIG-B-003)")
         self._teardown()
 
@@ -147,10 +228,26 @@ class MigrationBatchNsGaps(_BatchBase):
 
     def run(self):
         group = self._make_group("gaps")
-        victim = group[2]
+        # An INTERIOR member, drawn -- and never the seeded one, which this
+        # case still has to verify at the end. Interior because the point
+        # is a gap in the middle of the numbering: deleting the first or
+        # last member shortens the range instead of perforating it, which
+        # a product could compact without anyone noticing.
+        interior = [m for m in group[1:-1] if m["name"] != self._seeded["name"]]
+        if not interior:
+            raise MigrationPreconditionError(
+                f"[MIG-B-004] no interior member is available to delete "
+                f"({len(group)} members, seeded {self._seeded['name']}). "
+                f"MEMBERS must be at least 4 for this case to have a "
+                f"middle that is not the volume it verifies.")
+        vname = self.pick([m["name"] for m in interior], "ns-gap victim")
+        victim = next(m for m in interior if m["name"] == vname)
         self.logger.info("[MIG-B-004] deleting the middle member %s (ns_id "
                          "%s) to make a gap", victim["name"], victim["ns_id"])
-        self.sbcli_utils.delete_lvol(lvol_name=victim["name"])
+        # The dual helper: on k8s the member is a PVC, and deleting the
+        # lvol under a live claim leaves the claim bound to a PV whose
+        # backing volume is gone.
+        self._delete_lvol_dual(victim["name"])
         if victim["name"] in self._mig_vols:
             self._mig_vols.remove(victim["name"])
         sleep_n_sec(20)
@@ -159,9 +256,11 @@ class MigrationBatchNsGaps(_BatchBase):
         before = {m["name"]: self._ns_id(m["id"]) for m in remaining}
         self.logger.info("[MIG-B-004] ns_ids before: %s", before)
 
-        src = self.lvol_node(remaining[0]["id"])
+        # Name the seeded member, so the volume this case verifies is the
+        # one it asked to move -- and it is a drawn member of the group.
+        src = self.lvol_node(self._seeded["id"])
         tgt = self.pick_target(src, "no-overlap")
-        mid = self.migrate(remaining[0]["id"], tgt, batch=True)
+        mid = self.migrate(self._seeded["id"], tgt, batch=True)
         self.migrate_continue(mid, batch=True)
         status, _ = self.await_batch(mid, timeout=1800,
                                      what="MIG-B-004 group with a gap")
@@ -196,14 +295,14 @@ class MigrationBatchNegative(_BatchBase):
 
     def run(self):
         group = self._make_group("neg")
-        src = self.lvol_node(group[0]["id"])
+        src = self.lvol_node(self._seeded["id"])
         tgt = self.pick_target(src, "no-overlap")
 
         # ── MIG-B-005 a group member, migrated without --batch ───────────
         self.logger.info("[MIG-B-005] migrating a group member WITHOUT "
                          "--batch")
         out, err = self._cli(f"{self.base_cmd} --dev volume migrate "
-                             f"{group[0]['id']} {tgt} 2>&1")
+                             f"{self._seeded['id']} {tgt} 2>&1")
         combined = (out + err)
         mid = self.MIG_ID_RE.search(combined)
         if not mid:
@@ -218,7 +317,7 @@ class MigrationBatchNegative(_BatchBase):
                 "across two nodes. Checking what it actually does.",
                 mid.group(1))
             self.migrate_continue(mid.group(1))
-            self.await_migration(vol_id=group[0]["id"],
+            self.await_migration(vol_id=self._seeded["id"],
                                  migration_id=mid.group(1), timeout=1800,
                                  what="MIG-B-005 non-batch on a group member")
             nodes = {m["name"]: self.lvol_node(m["id"]) for m in group}
@@ -273,9 +372,9 @@ class MigrationBatchWithTrees(_BatchBase):
         self.logger.info("[MIG-B-007] %d members, %d snapshots each",
                          len(group), self.SNAPS_EACH)
 
-        src = self.lvol_node(group[0]["id"])
+        src = self.lvol_node(self._seeded["id"])
         tgt = self.pick_target(src, "no-overlap")
-        mid = self.migrate(group[0]["id"], tgt, batch=True)
+        mid = self.migrate(self._seeded["id"], tgt, batch=True)
         self.migrate_continue(mid, batch=True)
         status, phase = self.await_batch(
             mid, timeout=2400, what="MIG-B-007 group with per-member chains")
@@ -305,6 +404,6 @@ class MigrationBatchWithTrees(_BatchBase):
                     f"{self.SNAPS_EACH} snapshots after the group migrated. "
                     f"Every member's history moves, or none of it does.")
         self.logger.info("[MIG-B-008] PASS: every member kept its chain")
-        self.verify(group[0]["name"], self._sums,
+        self.verify(self._seeded["name"], self._sums,
                     "after a group-with-trees migration (MIG-B-008)")
         self._teardown()

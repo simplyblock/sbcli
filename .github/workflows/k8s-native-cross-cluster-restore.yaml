@@ -1046,6 +1046,17 @@ jobs:
           # One field, two operations: the operator resolves it to a 4K reformat
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
+          # Waive the stale-partition-table refusal, and only where we also
+          # wipe. Two different gates: FORCE_DRIVE_FORMAT governs what the
+          # cluster does to a device it was given, while DISCOVERY decides what
+          # to offer -- and it declines a partitioned disk before
+          # enableDriveFormat is consulted. See the long note in
+          # k8s-native-e2e.yaml and run 38210410964, which failed all three
+          # discovery attempts with "12 declined by available: the probe
+          # refused it: Partitioned" on a lab still carrying the previous
+          # deployment's partition tables. Mounted/Busy is never waived, so the
+          # OS disk stays refused.
+          export ENABLE_PARTITIONED="${FORCE_FORMAT_4K}"
           export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
           # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
           # reasoning that the workers boot from it and the draft would
@@ -1240,6 +1251,17 @@ jobs:
           # One field, two operations: the operator resolves it to a 4K reformat
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
+          # Waive the stale-partition-table refusal, and only where we also
+          # wipe. Two different gates: FORCE_DRIVE_FORMAT governs what the
+          # cluster does to a device it was given, while DISCOVERY decides what
+          # to offer -- and it declines a partitioned disk before
+          # enableDriveFormat is consulted. See the long note in
+          # k8s-native-e2e.yaml and run 38210410964, which failed all three
+          # discovery attempts with "12 declined by available: the probe
+          # refused it: Partitioned" on a lab still carrying the previous
+          # deployment's partition tables. Mounted/Busy is never waived, so the
+          # OS disk stays refused.
+          export ENABLE_PARTITIONED="${FORCE_FORMAT_4K}"
           export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
           # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
           # reasoning that the workers boot from it and the draft would

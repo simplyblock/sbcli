@@ -128,6 +128,16 @@ class _FaultBase(MigrationTestBase):
             # reads it from get_active_interfaces first. Calling it as
             # (node=..., interfaces=None, duration=...) raised TypeError and
             # took MigrationSourceAndTargetFaults out before it ran.
+            if self.k8s_test:
+                # isolate_node, not an interface drop. Dropping every
+                # interface on a k8s worker takes the kubelet with it, so
+                # the operator loses the node as well as the cluster does
+                # and the recovery under test is a different one. isolate
+                # cuts the storage paths and leaves the control plane able
+                # to watch what happens, which is the fault this case
+                # means. It restores itself, like the docker arm.
+                self._ensure_k8s_utils().isolate_node(ip, 90)
+                return lambda: True
             if_names = self.ssh_obj.get_active_interfaces(ip)
             if not if_names:
                 raise MigrationPreconditionError(
@@ -189,9 +199,17 @@ class MigrationTargetOfflinePerPhase(_FaultBase):
     """
 
     def run(self):
-        for case_id, phase in (("MIG-F-001", "snap_copy"),
-                               ("MIG-F-002", "intermediate"),
-                               ("MIG-F-003", "lvol_migrate")):
+        cases = [("MIG-F-001", "snap_copy"),
+                 ("MIG-F-002", "intermediate"),
+                 ("MIG-F-003", "lvol_migrate")]
+        # Drawn order. Each case stages and tears down its own volume, so
+        # the sequence means nothing -- and a fault whose recovery only
+        # works when it follows a clean run is exactly what a fixed order
+        # hides.
+        self.rng.shuffle(cases)
+        self.logger.info("[MIG-F] phases this run, in order: %s",
+                         [p for _, p in cases])
+        for case_id, phase in cases:
             # 20 snapshots widen snap_copy enough to land a fault in it.
             self._stage(f"f{phase[:4]}", snaps=20 if phase == "snap_copy" else 4)
             self.logger.info("[%s] target offline during %s", case_id, phase)
@@ -279,6 +297,13 @@ class MigrationSourceAndTargetFaults(_FaultBase):
             ("MIG-F-008", "target", "graceful_shutdown"),
             ("MIG-F-009", "target", "nic_down"),
         ]
+        # Drawn order, same reasoning: six independent faults, each on
+        # its own staged volume. Running spdk_crash first every time means
+        # nic_down is only ever tested on a cluster that has already
+        # recovered from a crash.
+        self.rng.shuffle(cases)
+        self.logger.info("[MIG-F] fault order this run: %s",
+                         [(s, k) for _, s, k in cases])
         for case_id, side, kind in cases:
             self._stage(f"f{case_id[-3:]}", snaps=12)
             victim = self._src if side == "source" else self._tgt
@@ -331,22 +356,106 @@ class MigrationSourceAndTargetFaults(_FaultBase):
 
 
 class MigrationCancel(_FaultBase):
-    """MIG-F-010, MIG-F-011, MIG-F-012: cancel mid-flight.
+    """MIG-F-016, MIG-F-010, MIG-F-011, MIG-F-012: cancel at four points.
 
     Deterministic where a fault is not: cancel forces the same rollback path
     a real failure takes, at a moment of the test's choosing. Early and late
     in snap_copy differ because the amount to undo differs; during
     lvol_migrate the source has already been frozen, which is the one that
     could plausibly leave a volume unusable.
+
+    **MIG-F-016 is the one that must succeed, and it was missing.** All
+    three original cases cancel after ``migrate-continue``, and dev says a
+    cancel is only honoured before that:
+
+        "It should abort while still in preparing. Whenever the actual
+        migration started, it cannot be canceled and has to finish first."
+
+    So the lane had three cases on the side where cancel is refused -- and
+    was logging the resulting completion as a suspected "canceled-flag
+    race" -- and none on the side where it works. MIG-F-016 cancels
+    between the pre-create and the continue, and REQUIRES the rollback.
+
+    The other three now accept either outcome and record which they saw,
+    because dev's answer and the operator's design doc disagree:
+    ``design-persistentvolumeops.md`` section 5 says an abort is
+    expressible from ``Validating`` *and* ``Migrating``, which would make a
+    mid-copy cancel legal. Only one can be right, and a test should not
+    pick the loser. What both readings agree on is asserted either way:
+    terminal state, the volume on exactly one node, data intact, target
+    clean.
     """
 
     def run(self):
-        for case_id, phase, wait_snaps in (
-                ("MIG-F-010", "snap_copy", 2),
-                ("MIG-F-011", "snap_copy", 15),
-                ("MIG-F-012", "lvol_migrate", 0)):
+        # ("case", phase-to-cancel-in, snapshots-to-wait-for)
+        # phase None means CANCEL BEFORE THE COPY STARTS -- between the
+        # pre-create and the continue. That is the one point dev says a
+        # cancel actually takes:
+        #
+        #     "It should abort while still in preparing. Whenever the
+        #     actual migration started, it cannot be canceled and has to
+        #     finish first."
+        #
+        # Which is worth stating plainly, because every case this class
+        # had cancelled AFTER the continue -- so the lane tested only the
+        # side where cancel is refused, called the resulting completion a
+        # "known canceled-flag race", and had no coverage at all of the
+        # side where it works. MIG-F-016 is that coverage.
+        #
+        # Note this is also where dev and the operator's own design doc
+        # disagree. design-persistentvolumeops.md section 5 says "an abort
+        # is expressible from Validating and Migrating and not from
+        # Verifying", which would make a cancel during the copy legal;
+        # dev says the copy cannot be cancelled once started. The cases
+        # below therefore ACCEPT EITHER on the post-continue points and
+        # assert only what both readings agree on -- it ends terminal, the
+        # volume is on exactly one node, the data verifies, and the target
+        # is left clean. Whichever answer is right, those hold.
+        cancels = [("MIG-F-016", None, 0),
+                   ("MIG-F-010", "snap_copy", 2),
+                   ("MIG-F-011", "snap_copy", 15),
+                   ("MIG-F-012", "lvol_migrate", 0)]
+        self.rng.shuffle(cancels)
+        self.logger.info("[MIG-F] cancel points this run: %s",
+                         [(c, p or "preparing") for c, p, _ in cancels])
+        for case_id, phase, wait_snaps in cancels:
             self._stage(f"c{case_id[-3:]}", snaps=20)
             mid = self.migrate(self._vol_id, self._tgt)
+
+            if phase is None:
+                # ── MIG-F-016 cancel while still preparing ───────────────
+                # No continue has been issued, so there is no copy to
+                # interrupt: the migration exists, its target paths are
+                # built, and nothing has moved. This cancel MUST take, and
+                # the volume must stay on the source.
+                self.logger.info(
+                    "[%s] cancelling before migrate-continue -- the copy "
+                    "has not started, so this is the one cancel that is "
+                    "documented to work", case_id)
+                self.migrate_cancel(mid)
+                status, _ = self._assert_terminal_and_placed(
+                    case_id, self._src, self._tgt, mid)
+                if status in self.OK_TERMINAL:
+                    raise AssertionError(
+                        f"[{case_id}] a migration cancelled BEFORE "
+                        f"migrate-continue still ended {status!r} and the "
+                        f"copy ran. Cancelling while preparing is the one "
+                        f"point a cancel is meant to be honoured -- nothing "
+                        f"has moved yet and there is a target to tear down. "
+                        f"If this cannot be cancelled either, then no "
+                        f"migration can be cancelled at any point, and "
+                        f"migrate-cancel does nothing.")
+                self.verify(self._vol, self._sums,
+                            f"after cancelling while preparing ({case_id})")
+                self.assert_no_target_leftovers(
+                    self._tgt, self._vol_id,
+                    f"after cancelling while preparing ({case_id})")
+                self.logger.info(
+                    "[%s] PASS: cancelled while preparing, ended %r, volume "
+                    "still on the source", case_id, status)
+                self._teardown()
+                continue
+
             self.migrate_continue(mid)
 
             if wait_snaps:
@@ -367,23 +476,34 @@ class MigrationCancel(_FaultBase):
                     continue
 
             self.migrate_cancel(mid)
-            # A cancelled migration must leave the volume on the source;
-            # pass the target too so a cancel that nevertheless
-            # completed is judged against the right node.
+            # Either outcome is acceptable here and the case says which it
+            # saw rather than judging it. Pass the target too, so a cancel
+            # that did not take is judged against the node the volume
+            # actually ended on.
             status, _ = self._assert_terminal_and_placed(
                 case_id, self._src, self._tgt, mid)
-            if status not in ("cancelled", "failed", "error"):
-                self.logger.warning(
-                    "[%s] cancel was issued but the migration ended %r. The "
-                    "runner has a known canceled-flag race; if the volume "
-                    "moved anyway that is the race, not a clean completion.",
+            if status in self.OK_TERMINAL:
+                self.logger.info(
+                    "[%s] the cancel did NOT stop it: the migration "
+                    "completed and the volume is on the target. Per dev "
+                    "that is the contract once the copy has started ('it "
+                    "cannot be canceled and has to finish first'), so this "
+                    "is recorded rather than failed -- but it is the "
+                    "opposite of what design-persistentvolumeops.md "
+                    "section 5 says, and only one of the two can be right.",
+                    case_id)
+            else:
+                self.logger.info(
+                    "[%s] the cancel took: ended %r and the volume stayed "
+                    "on the source, which is a rollback mid-copy.",
                     case_id, status)
             self.verify(self._vol, self._sums,
-                        f"after a cancelled migration ({case_id})")
+                        f"after cancelling in {phase} ({case_id})")
             self.assert_no_target_leftovers(self._tgt, self._vol_id,
                                             f"after cancel ({case_id})")
-            self.logger.info("[%s] PASS: clean rollback, volume on the source",
-                             case_id)
+            self.logger.info(
+                "[%s] PASS: terminal, on exactly one node, data intact, "
+                "target clean", case_id)
             self._teardown()
 
 
@@ -412,7 +532,15 @@ class MigrationRetryAfterTargetReboot(_FaultBase):
                              timeout=900, what="MIG-F-013 cancel")
 
         ip = self._node_ip(self._tgt)
-        self.ssh_obj.reboot_node(node_ip=ip)
+        if self.k8s_test:
+            # drain first. An undrained reboot evicts the fio pods with
+            # the node and the Jobs behind them count as failed, which
+            # loses the IO this case is watching for corruption -- the
+            # reboot is meant to reload the TARGET's lvstore from disk,
+            # not to end the workload.
+            self._ensure_k8s_utils().reboot_node(ip, drain=True)
+        else:
+            self.ssh_obj.reboot_node(node_ip=ip)
         deadline = time.time() + 1200
         while time.time() < deadline:
             if any((n.get("uuid") or n.get("id")) == self._tgt

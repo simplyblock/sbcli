@@ -95,6 +95,7 @@ from e2e_tests.migration.test_migration_happy import (
 from e2e_tests.migration.test_migration_negative import (
     MigrationNegativeCapacity,
     MigrationNegativeTargets,
+    MigrationProtectionGuards,
     MigrationUnderReplication,
 )
 from e2e_tests.migration.test_migration_scale import (
@@ -781,6 +782,7 @@ ALL_TESTS = [
     MigrationNegativeTargets,
     MigrationNegativeCapacity,
     MigrationUnderReplication,
+    MigrationProtectionGuards,
     MigrationTargetOfflinePerPhase,
     MigrationSourceAndTargetFaults,
     MigrationCancel,
@@ -1328,8 +1330,13 @@ def get_migration_tests():
         MIG-H  8 cases   happy path + the volume is still usable
         MIG-T  11 cases  HA overlap matrix, trees, concurrency
         MIG-B  8 cases   shared-namespace groups
-        MIG-N  7 cases   must-be-refused, plus migrate-while-replicating
-        MIG-F  15 cases  faults in a named phase -- longest, most disruptive
+        MIG-N  10 cases  must-be-refused, migrate-while-replicating, and
+                         the three protection guards (delete/resize/
+                         snapshot-delete must be refused mid-migration)
+        MIG-F  16 cases  faults in a named phase -- longest, most
+                         disruptive. MIG-F-016 cancels while still
+                         preparing, which is the one cancel dev says
+                         is honoured.
     """
     return [
         # MIG-S first, always. Ten minutes, six named links, and a failure
@@ -1355,10 +1362,11 @@ def get_migration_tests():
         MigrationNegativeTargets,        # MIG-N-001..004
         MigrationNegativeCapacity,       # MIG-N-005
         MigrationUnderReplication,       # MIG-N-006/007
+        MigrationProtectionGuards,       # MIG-N-008..010
         # MIG-F: last. Kills nodes, reboots them, restarts the cluster.
         MigrationTargetOfflinePerPhase,  # MIG-F-001..003
         MigrationSourceAndTargetFaults,  # MIG-F-004..009
-        MigrationCancel,                 # MIG-F-010..012
+        MigrationCancel,                 # MIG-F-010..012, MIG-F-016
         MigrationRetryAfterTargetReboot, # MIG-F-013
         MigrationHaPartnerRestart,       # MIG-F-014
         MigrationClusterRestartBetween,  # MIG-F-015

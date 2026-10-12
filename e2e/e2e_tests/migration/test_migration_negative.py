@@ -31,22 +31,10 @@ class MigrationNegativeTargets(MigrationTestBase):
     """MIG-N-001 .. MIG-N-004: targets that make no sense."""
 
     def _refused(self, case_id, out_err, what, allow=()):
-        combined = out_err if isinstance(out_err, str) else "".join(out_err)
-        low = combined.lower()
-        if self.MIG_ID_RE.search(combined):
-            raise AssertionError(
-                f"[{case_id}] {what} was ACCEPTED and returned a migration "
-                f"id. Response: {combined.strip()[:300]}")
-        markers = ("error", "cannot", "invalid", "refus", "not allowed",
-                   "same", "offline", "not found", "no such",
-                   "insufficient", "space") + tuple(allow)
-        if not any(m in low for m in markers):
-            raise AssertionError(
-                f"[{case_id}] {what} produced no migration id but also no "
-                f"recognisable refusal: {combined.strip()[:300] or '(empty)'}. "
-                f"Silence is acceptance as far as an operator can tell.")
-        self.logger.info("[%s] PASS: refused -- %s", case_id,
-                         combined.strip()[:200])
+        # One implementation, in the base: this lane now has four classes
+        # that need it and they were drifting apart on which words count
+        # as a refusal.
+        return self.assert_refused(case_id, out_err, what, allow=allow)
 
     def run(self):
         stamp = int(time.time()) % 100000
@@ -381,4 +369,155 @@ class MigrationUnderReplication(MigrationTestBase):
                   f"{vol_id} 2>&1")
         self._cli(f"{self.base_cmd} -d cluster replication-policy-remove "
                   f"{pol} 2>&1")
+        self.cleanup_migrations()
+
+
+class MigrationProtectionGuards(MigrationTestBase):
+    """MIG-N-008, MIG-N-009, MIG-N-010: what must be refused DURING a move.
+
+    From the product's own description of the feature
+    (``docs/architecture/concepts/volume-migration.md``):
+
+        "**Protection guards:** Volumes undergoing migration are protected
+        from deletion, resizing, and snapshot deletion until the migration
+        completes or is canceled."
+
+    Three documented guards, and we had a case for none of them. They are
+    worth more than they look: a migration transfers the volume's whole
+    lineage, so deleting a snapshot halfway through removes a link the
+    transfer is still walking, and resizing changes the geometry the target
+    side was built for. Both are the kind of defect that corrupts rather
+    than errors.
+
+    The case also checks the guards are RELEASED afterwards, which is the
+    half a naive test skips: a guard that never lifts is as broken as one
+    that never applies, and it surfaces later as a volume nobody can
+    manage.
+
+    Asked through the CLI on both backends, deliberately. These are control
+    plane guards rather than Kubernetes admission, and the CLI is how to
+    address the control plane directly on either. Deleting a *claim* on k8s
+    is a documented and different thing -- it drives the operation to
+    ``Aborted`` and removes it, rather than being refused -- so that path
+    is not exercised here.
+    """
+
+    def run(self):
+        stamp = int(time.time()) % 100000
+        vol = f"mignguard{stamp}"
+        vol_id, sums = self.make_volume(vol)
+        src = self.lvol_node(vol_id)
+
+        # A snapshot to try to delete mid-flight, and enough of them that
+        # snap_copy has real work to do -- the guards only mean anything
+        # while the migration is actually in a phase.
+        snaps = []
+        for i in range(6):
+            name = f"{vol}s{i}"
+            try:
+                self.make_snapshot(vol, name)
+                snaps.append(name)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning("[MIG-N-008] could not snapshot: %s",
+                                    str(exc)[:160])
+                break
+        if not snaps:
+            self.logger.warning(
+                "[MIG-N-008] SKIPPED: no snapshot could be taken, so the "
+                "snapshot-deletion guard cannot be tested and the volume "
+                "has no lineage to make the migration slow enough to "
+                "interrupt.")
+            self.cleanup_migrations()
+            return
+
+        tgt = self.pick_target(src, "no-overlap")
+        self.logger.info("[MIG-N-008] migrating %s (%d snapshots) %s -> %s, "
+                         "then trying the three guarded operations",
+                         vol, len(snaps), src, tgt)
+        mid = self.migrate(vol_id, tgt)
+        self.migrate_continue(mid)
+
+        # The guards only apply while it is running. If it finishes before
+        # we can ask, the case proves nothing and must say so rather than
+        # pass: an operation refused because it is already done is not the
+        # guard working.
+        reached = self.await_phase(vol_id, ("snap_copy", "intermediate"),
+                                   timeout=420)
+        rec = self.migration_record(vol_id=vol_id, migration_id=mid) or {}
+        status = str(self._get(rec, "status") or "").lower()
+        if not reached or status in self.TERMINAL:
+            self.logger.warning(
+                "[MIG-N-008] SKIPPED: the migration reached %r before the "
+                "guarded operations could be attempted (phase seen: %r). A "
+                "refusal now would be 'already finished' rather than the "
+                "guard, so this is not reported as a pass. Retry with a "
+                "longer lineage or a larger volume.",
+                status or "unknown", reached)
+            self.await_migration(vol_id=vol_id, migration_id=mid,
+                                 what="MIG-N-008 settle")
+            self.cleanup_migrations()
+            return
+
+        # -- MIG-N-008 delete, mid-migration -----------------------------
+        out, err = self._cli(f"{self.base_cmd} -d volume delete {vol_id} "
+                             f"--force 2>&1")
+        self.assert_refused(
+            "MIG-N-008", out + err,
+            "deleting a volume while it is migrating", reject_id=False)
+        if not self.lvol_node(vol_id):
+            raise AssertionError(
+                f"[MIG-N-008] the refusal was printed but {vol} is GONE from "
+                f"the cluster. The guard reported itself and then deleted "
+                f"the volume anyway, which is worse than no guard: the "
+                f"migration is still running against storage that no longer "
+                f"has an owner.")
+
+        # -- MIG-N-009 resize, mid-migration -----------------------------
+        out, err = self._cli(f"{self.base_cmd} -d volume resize {vol_id} "
+                             f"4G 2>&1")
+        self.assert_refused(
+            "MIG-N-009", out + err,
+            "resizing a volume while it is migrating", reject_id=False)
+
+        # -- MIG-N-010 snapshot delete, mid-migration --------------------
+        sid = self.snap_id(snaps[0])
+        if sid:
+            out, err = self._cli(f"{self.base_cmd} -d snapshot delete {sid} "
+                                 f"--force 2>&1")
+            self.assert_refused(
+                "MIG-N-010", out + err,
+                f"deleting snapshot {snaps[0]}, a link in the lineage the "
+                f"migration is still transferring", reject_id=False)
+            if not self.snap_id(snaps[0]):
+                raise AssertionError(
+                    f"[MIG-N-010] the refusal was printed but {snaps[0]} is "
+                    f"gone. A migration transfers the ancestry chain oldest "
+                    f"first; removing a link while it is being walked is how "
+                    f"a transfer ends up with a chain pointing at nothing.")
+        else:
+            self.logger.warning("[MIG-N-010] SKIPPED: could not resolve the "
+                                "id of %s", snaps[0])
+
+        # -- and the guards must LIFT ------------------------------------
+        status, phase = self.await_migration(
+            vol_id=vol_id, migration_id=mid, what="MIG-N-008 completion")
+        if status not in self.OK_TERMINAL:
+            raise AssertionError(
+                f"[MIG-N-008] the migration ended {status!r} after three "
+                f"refused operations. Being asked to do something it "
+                f"correctly refused must not disturb the migration itself.")
+        self.assert_placed_on(vol_id, tgt, "(MIG-N-008 after the guards)")
+        self.verify(vol, sums, "after three guarded operations were refused")
+
+        out, err = self._cli(f"{self.base_cmd} -d volume resize {vol_id} "
+                             f"4G 2>&1")
+        if cli_failed(out, err):
+            raise AssertionError(
+                f"[MIG-N-009] the volume still cannot be resized AFTER the "
+                f"migration completed: {(out + err)[:300]}. The guard is "
+                f"documented to hold 'until the migration completes or is "
+                f"canceled'; one that never lifts leaves a volume nobody "
+                f"can manage.")
+        self.logger.info("[MIG-N-009] PASS: the guard lifted once the "
+                         "migration completed")
         self.cleanup_migrations()

@@ -33,7 +33,6 @@ from e2e_tests.migration.migration_base import (
     MigrationPreconditionError,
     MigrationTestBase,
 )
-from utils.common_utils import cli_failed
 
 
 class MigrationHaOverlapMatrix(MigrationTestBase):
@@ -54,7 +53,16 @@ class MigrationHaOverlapMatrix(MigrationTestBase):
               ("MIG-T-005", "d"))
 
     def run(self):
-        for case_id, shape in self.SHAPES:
+        # Drawn order. The five shapes are independent -- each makes its
+        # own volume and cleans up after itself -- so the sequence carries
+        # no meaning, which is exactly why it should not be the same every
+        # run: a shape that only works when it follows no-overlap is a bug
+        # a fixed order can never surface.
+        shapes = list(self.SHAPES)
+        self.rng.shuffle(shapes)
+        self.logger.info("[MIG-T] overlap shapes this run, in order: %s",
+                         [sh for _, sh in shapes])
+        for case_id, shape in shapes:
             stamp = int(time.time()) % 100000
             vol = f"migov{shape.replace('-', '')}{stamp}"
             vol_id, sums = self.make_volume(vol)
@@ -118,26 +126,33 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
         vol_id, sums = self.make_volume(vol)
         src = self.lvol_node(vol_id)
         snap = f"migtsnap{stamp}"
-        self._cli(f"{self.base_cmd} -d snapshot add {vol_id} {snap} 2>&1")
+        # handle is what clones from; snap_id is the backend uuid the
+        # assertions below read. They are the same string on docker and
+        # deliberately different on k8s, where a clone PVC's dataSource
+        # names the VolumeSnapshot and only the status carries the uuid.
+        handle = self.make_snapshot(vol, snap)
         snap_id = self._snap_id(snap)
-        if not snap_id:
+        if not handle or not snap_id:
             raise MigrationPreconditionError(
-                f"[MIG-T-006] could not resolve the snapshot {snap}; there is "
-                f"no tree to migrate.")
+                f"[MIG-T-006] could not resolve the snapshot {snap} "
+                f"(handle={handle!r}, id={snap_id!r}); there is no tree to "
+                f"migrate.")
         clones = []
         for i in range(2):
             cn = f"migtclone{stamp}n{i}"
-            # These land in the PARENT's subsystem, not their own:
-            # --namespaced defaults to true on snapshot clone and
-            # cannot be set false from the CLI (SFAM-2819). The cases
-            # below detect that rather than assume either way.
-            out, err = self._cli(f"{self.base_cmd} -d snapshot clone "
-                                 f"{snap_id} {cn} 2>&1")
-            if cli_failed(out, err):
+            # On docker these land in the PARENT's subsystem, not their
+            # own: --namespaced defaults to true on snapshot clone and
+            # cannot be set false from the CLI (SFAM-2819). On k8s the
+            # packing is the StorageClass's max_namespace_per_subsys
+            # instead, so the lane's default class gives each clone its
+            # own subsystem. Either way the cases below DETECT which
+            # happened rather than assuming, which is why they work on
+            # both without being told.
+            cid, detail = self.make_clone(handle, cn)
+            if not cid:
                 raise MigrationPreconditionError(
-                    f"[MIG-T-006] could not clone {snap}: {(out + err)[:240]}")
-            self._mig_vols.append(cn)
-            clones.append((cn, self.sbcli_utils.get_lvol_id(lvol_name=cn)))
+                    f"[MIG-T-006] could not clone {snap}: {detail}")
+            clones.append((cn, cid))
         tgt = self.pick_target(src, "no-overlap")
 
         # ── MIG-T-006 migrate the parent while clones exist ────────────
@@ -233,24 +248,17 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
 
         # ── MIG-T-009 snapshots still usable after all that ────────────
         newclone = f"migtpost{stamp}"
-        out, err = self._cli(f"{self.base_cmd} -d snapshot clone {snap_id} "
-                             f"{newclone} 2>&1")
-        if cli_failed(out, err):
+        newclone_id, detail = self.make_clone(handle, newclone)
+        if not newclone_id:
             raise AssertionError(
                 f"[MIG-T-009] the snapshot cannot be cloned after its volume "
-                f"was migrated twice: {(out + err)[:300]}. The chain has "
-                f"been left pointing at something that moved.")
-        self._mig_vols.append(newclone)
+                f"was migrated twice: {detail}. The chain has been left "
+                f"pointing at something that moved.")
         self.logger.info("[MIG-T-009] PASS: the chain is still usable")
         self.cleanup_migrations()
 
     def _snap_id(self, name):
-        data = self._cli_json(f"{self.base_cmd} snapshot list")
-        for s in (data.get("results", data) if isinstance(data, dict)
-                  else data) or []:
-            if self._get(s, "snap_name", "name") == name:
-                return self._get(s, "uuid", "id")
-        return None
+        return self.snap_id(name)
 
 
 class MigrationConcurrent(MigrationTestBase):
@@ -279,7 +287,12 @@ class MigrationConcurrent(MigrationTestBase):
         # that is already on the target rather than asking for a no-op.
         for v in vols:
             v["start"] = self.lvol_node(v["id"])
-        src = vols[0]["start"]
+        # Drawn, not vols[0]: the four are spread across nodes by the
+        # scheduler, so whose node becomes the source decides how many of
+        # them have to move and in which direction. Fixing it to the first
+        # tested one arrangement of the four.
+        lead = self.pick([v["name"] for v in vols], "concurrency lead volume")
+        src = next(v["start"] for v in vols if v["name"] == lead)
         tgt = self.pick_target(src, "no-overlap")
         self.logger.info("[MIG-T] starting placement: %s; target %s",
                          {v["name"]: v["start"] for v in vols}, tgt)
@@ -319,38 +332,77 @@ class MigrationConcurrent(MigrationTestBase):
                          len(back))
         t0 = time.time()
         mids = []
+        deferred = []
         for v in back:
+            # A refusal here is NOT a failure. Every volume in `back` sits on
+            # the same node, and the documented constraint is "only one
+            # volume migration can run on a given source node at a time ...
+            # required to maintain snapshot consistency during the transfer"
+            # (docs/architecture/concepts/volume-migration.md). So the
+            # product is entitled to refuse the second pre-create outright
+            # (docker) or to park the operation in Pending with an
+            # OperationQueued event until the first finishes (k8s, where
+            # the volume's lock is the storage.simplyblock.io/active-ops
+            # annotation on the PersistentVolume).
+            #
+            # This used to raise, blaming "contention in the pre-create
+            # path" -- which asserted the opposite of the contract and would
+            # fail a correctly-behaving cluster. What the case actually has
+            # to prove is unchanged and is checked below: however the
+            # product chooses to sequence them, all of them arrive and the
+            # data survives.
             try:
                 mid = self.migrate(v["id"], src)
                 self.migrate_continue(mid)
                 mids.append((v, mid))
             except Exception as exc:                  # noqa: BLE001
-                raise AssertionError(
-                    f"[MIG-T-011] could not even START a concurrent "
-                    f"migration for {v['name']}: {str(exc)[:240]}. The "
-                    f"sequential run above passed, so this is contention in "
-                    f"the pre-create path, not migration being broken.") from exc
+                deferred.append((v, str(exc)[:160]))
+                self.logger.info(
+                    "[MIG-T-011] %s was not accepted while another "
+                    "migration is running on %s, which is the documented "
+                    "one-per-source-node rule: %s", v["name"], tgt,
+                    str(exc)[:160])
+        if deferred:
+            self.logger.info(
+                "[MIG-T-011] %d of %d accepted concurrently, %d deferred; "
+                "finishing the accepted ones, then the rest in order",
+                len(mids), len(back), len(deferred))
 
         failures = []
         for v, mid in mids:
             try:
                 status, phase = self.await_migration(
-                    vol_id=v["id"], migration_id=mid, timeout=1800,
+                    vol_id=v["id"], migration_id=mid,
+                    timeout=max(1800, self.migration_timeout()),
                     what=f"MIG-T-011 concurrent {v['name']}")
                 if status not in self.OK_TERMINAL:
                     failures.append((v["name"], status, phase))
             except AssertionError as exc:
                 failures.append((v["name"], "stuck", str(exc)[:120]))
+        # Anything the product deferred is run now, one at a time. The case
+        # is "N volumes get from here to there while sharing a source", not
+        # "N pre-creates are accepted in one breath", so a deferred volume
+        # that then migrates cleanly is a pass.
+        for v, why in deferred:
+            try:
+                self.full_migration(v["id"], src,
+                                    what=f"MIG-T-011 deferred {v['name']}")
+            except Exception as exc:                  # noqa: BLE001
+                failures.append((v["name"], "deferred-then-failed",
+                                 f"refused while busy ({why}); then "
+                                 f"{str(exc)[:120]}"))
         con = time.time() - t0
 
         if failures:
             raise AssertionError(
-                f"[MIG-T-011] {len(failures)} of {len(back)} concurrent "
-                f"migrations did not complete: {failures}. The same "
-                f"{len(movable)} volume(s) migrated cleanly one at a time "
-                f"({seq:.0f}s), so this is contention between concurrent "
-                f"migrations on one source/target pair.")
-        for v, _ in mids:
+                f"[MIG-T-011] {len(failures)} of {len(back)} volume(s) did "
+                f"not reach {src}: {failures}. The same {len(movable)} "
+                f"volume(s) migrated cleanly one at a time ({seq:.0f}s). "
+                f"Note the product MAY serialise these -- one migration per "
+                f"source node is the documented rule -- so this failure is "
+                f"about a volume that never arrived, not about one that was "
+                f"made to wait.")
+        for v in back:
             self.assert_placed_on(v["id"], src, "(MIG-T-011)")
         self.verify(vols[0]["name"], vols[0]["sums"],
                     "after concurrent migrations (MIG-T-011)")
