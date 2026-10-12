@@ -16,6 +16,7 @@ from simplyblock_core.models.arbitration import (
     ARB_STEADY,
     LVS_FENCED,
     LVS_HOLDING,
+    LVS_NORMAL,
     LVS_SOLO,
 )
 
@@ -48,9 +49,16 @@ class NodeView:
     #: 500 on ``TWO_NODE_SPDK_DOWN_HTTP500_STREAK`` consecutive calls (the proxy
     #: runs, the SPDK socket behind it does not). Counts as loss of the node.
     spdk_lost: bool = False
+    #: The control plane itself stops this node's SPDK (restart/shutdown,
+    #: campaign c2 F3): counts as loss of the node, like ``spdk_lost``.
+    planned_loss: bool = False
 
     def holding(self) -> bool:
         return any(s == LVS_HOLDING for s in self.lvs_state.values())
+
+    def gone(self) -> bool:
+        """Positive evidence that the node is not serving."""
+        return self.positively_fenced or self.spdk_lost or self.planned_loss
 
 
 @dataclass
@@ -68,6 +76,8 @@ class Snapshot:
     healthy_since: int = 0
     #: Healing steps finished (resync gate, restart flow, unfence).
     healing_done: bool = False
+    #: Winner of the verdict in force (DEGRADED), "" otherwise.
+    winner: str = ""
 
 
 @dataclass
@@ -84,6 +94,10 @@ class Verdict:
     fence: dict = field(default_factory=dict)
     #: jm_vuid -> [node ids] to fence; a partition (fence_both) fences both.
     fence_all: dict = field(default_factory=dict)
+    #: The fences go to a node that is known gone or being stopped by the
+    #: control plane: only ESTALE withholds the grant, any other failure of
+    #: the fence does not (planned loss, F3).
+    fence_best_effort: bool = False
     reason: str = ""
 
 
@@ -103,7 +117,7 @@ def _peer_is_fenced(peer: NodeView, now_ms: int, margin_ms: int) -> bool:
     is positively known to be gone (``spdk_lost``), or on positive fencing
     evidence from the operator.
     """
-    if peer.positively_fenced or peer.spdk_lost:
+    if peer.gone():
         return True
     return (not peer.reachable) and _lease_expired(peer, now_ms, margin_ms)
 
@@ -130,14 +144,67 @@ def _partition_verdict(snap: Snapshot) -> Verdict:
 
 def _degraded_verdict(snap: Snapshot, survivor: NodeView, dead: NodeView, reason: str) -> Verdict:
     vuids = _all_lvs(snap)
-    return Verdict(V_DEGRADED, ARB_DEGRADED, raise_epoch=True, winner=survivor.node_id,
-                   loser=dead.node_id, grant={v: survivor.node_id for v in vuids},
-                   reason=reason)
+    verdict = Verdict(V_DEGRADED, ARB_DEGRADED, raise_epoch=True, winner=survivor.node_id,
+                      loser=dead.node_id, grant={v: survivor.node_id for v in vuids},
+                      reason=reason)
+    if dead.planned_loss and dead.reachable:
+        # The node is still up until the control plane stops it: fence it
+        # first (best effort, it is going away), then grant its peer.
+        verdict.fence = {v: dead.node_id for v in vuids}
+        verdict.fence_best_effort = True
+    return verdict
+
+
+def _why_gone(dead: NodeView) -> str:
+    if dead.positively_fenced:
+        return "positive fencing"
+    if dead.spdk_lost:
+        return "peer SPDK down (proxy HTTP 500)"
+    if dead.planned_loss:
+        return "peer stopped by the control plane (planned loss)"
+    return "peer silent and its lease expired"
+
+
+def _unreported_loss(snap: Snapshot) -> Verdict | None:
+    """Grant a survivor whose peer is gone, without waiting for its report.
+
+    Campaign c2: a frozen peer (F5) keeps its TCP connections, and a restarted
+    one (F3) keeps its proxy, so the survivor may report nothing for seconds
+    while its writes wait on the peer's journal. When the arbiter itself knows
+    the peer is gone -- positively (HTTP 500 streak, planned loss, operator)
+    or because it is silent and its lease ran out beyond the margin -- and the
+    survivor is reachable with an LVS still in normal or holding state, the
+    survivor is granted at once.
+
+    Safe without the survivor's report: a peer whose lease has expired fences
+    itself the moment it starts holding (lease-expiry rule on the node), and a
+    node that wakes from a stall longer than its lease fences itself (node
+    side, campaign c2); a gone peer does not write at all. A grant to a
+    survivor whose remote JM is still healthy only permits it to continue
+    alone should it lose the peer later."""
+    a, b, now, margin = snap.a, snap.b, snap.now_ms, snap.lease_margin_ms
+    for survivor, dead in ((a, b), (b, a)):
+        if not survivor.reachable or survivor.gone():
+            continue
+        if dead.reports_peer_unhealthy and dead.reachable and not dead.gone():
+            continue                                # the peer speaks: the matrix decides
+        if not _peer_is_fenced(dead, now, margin):
+            continue
+        if not any(s in (LVS_NORMAL, LVS_HOLDING) for s in survivor.lvs_state.values()):
+            continue                                # nothing left to grant (solo or fenced)
+        return _degraded_verdict(snap, survivor, dead, _why_gone(dead) + " (no report needed)")
+    return None
 
 
 def _deciding(snap: Snapshot) -> Verdict:
     """The matrix for a fresh unhealthy / hold / lease-expiry signal."""
     a, b, now, margin = snap.a, snap.b, snap.now_ms, snap.lease_margin_ms
+
+    # A peer the arbiter knows to be gone: grant its survivor without waiting
+    # for a report (campaign c2, F3/F5).
+    unreported = _unreported_loss(snap)
+    if unreported is not None:
+        return unreported
 
     # Invariant 4: no node holding means no decision is needed. An uplink loss
     # (both unreachable) or WAN jitter with both JMs healthy lands here.
@@ -155,10 +222,7 @@ def _deciding(snap: Snapshot) -> Verdict:
         dead_reports = dead.reports_peer_unhealthy and not dead.spdk_lost
         if survivor.reports_peer_unhealthy and survivor.reachable and not dead_reports:
             if _peer_is_fenced(dead, now, margin):
-                why = ("positive fencing" if dead.positively_fenced
-                       else "peer SPDK down (proxy HTTP 500)" if dead.spdk_lost
-                       else "peer silent and its lease expired")
-                return _degraded_verdict(snap, survivor, dead, why)
+                return _degraded_verdict(snap, survivor, dead, _why_gone(dead))
             if dead.reachable:
                 # Reachable but not (yet) reporting: its event may still be on
                 # the way. Wait for it, never decide on half the picture.
@@ -187,6 +251,17 @@ def decide(snap: Snapshot) -> Verdict:
                 return Verdict(V_HEAL, ARB_HEALING, raise_epoch=True,
                                reason="both healthy for the stable window")
             return Verdict(V_WAIT, snap.state, reason="healthy again; inside the stable window")
+        if snap.state == ARB_DEGRADED:
+            # Campaign c2, F2: the verdict in force does not cover a NEW loss.
+            # The survivor holds again (its peer failed a second time), or the
+            # peer is gone again while the survivor runs an LVS normally:
+            # decide afresh, at a new epoch.
+            survivor = next((n for n in (a, b) if n.node_id == snap.winner), None)
+            if survivor is not None and survivor.holding():
+                return _deciding(snap)
+            unreported = _unreported_loss(snap)
+            if unreported is not None and unreported.winner == snap.winner:
+                return unreported
         return Verdict(V_NONE, snap.state, reason="verdict in force")
 
     if snap.state == ARB_HEALING:

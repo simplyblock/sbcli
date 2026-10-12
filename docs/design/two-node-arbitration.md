@@ -67,8 +67,15 @@ existing proxy path. Errors use JSON-RPC errors with `code` = negative errno and
 New fields are optional; existing callers (`{"enable": bool}`) keep working with defaults.
 
 ```json
-{"enable": true, "hold_ms": 2500, "lease_ttl_ms": 1500, "arbitration": true}
+{"enable": true, "hold_ms": 2500, "lease_ttl_ms": 1500, "arbitration": true,
+ "remote_jm_timeout_ms": 1000}
 ```
+
+`remote_jm_timeout_ms` (campaign c2, F5): a remote JM that has not acknowledged for this long
+counts as unavailable and the node starts holding. A frozen peer keeps its TCP connections, so
+connection loss alone (NVMe keep-alive 5 s, IO timeout 8 s) is detected too late for the 3 s
+budget. Nodes built before c2 reject the field; the CP then retries without it, and only then
+falls back to the plain flag (`arbitration.set_dual_node`).
 
 Result: `true`. `arbitration: false` (default for old callers) keeps today's behaviour
 (dual-node tolerance without hold); the CP sets it `true` only when the cluster flag
@@ -264,9 +271,12 @@ rule of a fenced LVS (invariant 6).
 | --- | --- | --- |
 | steady | deciding | unhealthy, hold or lease-expiry event |
 | deciding | partitioned | both nodes report each other and the CP reaches both (a cut link, both alive and renewing): policy `fence_both`. Raise epoch, `jc_fence` every LVS on **both** nodes, grant nobody: IO stops |
-| deciding | degraded | one node silent with its lease expired, lost (section 7.6) or positively fenced: raise epoch, `jc_grant_solo` the survivor |
+| deciding | degraded | one node silent with its lease expired, lost (section 7.6), stopped by the CP (planned loss, section 7.8) or positively fenced: raise epoch, `jc_grant_solo` the survivor |
+| steady | degraded | the same, **without a report from the survivor** (section 7.8): the arbiter knows the peer is gone, the survivor is reachable and still runs an LVS normal or holding |
+| degraded | degraded | a new loss while degraded (campaign c2, F2): the winner holds again, or its peer is gone again while the winner runs an LVS normally: decide afresh at a new epoch, grant again |
 | degraded | degraded | a lost node answers again: raise epoch, `jc_fence` it for every LVS its peer leads alone, before its next lease renewal |
 | partitioned, degraded | healing | both report `remote_jm_healthy` and stay healthy for `stable_for_s` |
+| partitioned | partitioned | link between the nodes answers again but the remote JMs stay unavailable: reconnect them, then hand one node to the restart flow (section 7.9) |
 | healing | steady | resync gate passed, restart flow done, `jc_unfence` done, optional failback done; remove the taint |
 
 The arbiter writes the new epoch and the verdict to FDB in one transaction **before** sending
@@ -289,7 +299,9 @@ One record per cluster, key `{cluster_id}`, model in `simplyblock_core/models/`:
 
 `verdicts` keeps the last 50 entries. A partition verdict lists both fenced nodes per LVS in
 `fence_all`. `leadership_restored_at` is the time of the last leadership reconciliation
-(section 7.7). `preferred_node` is deprecated: stored records keep loading, the field is
+(section 7.7). `planned_loss` holds the CP-initiated losses in progress (section 7.8):
+`{node_id: {"at": ms, "instance": "...", "reason": "restart"}}`. Each verdict records the state
+it was decided in (`from_state`); the heal uses it (section 8). `preferred_node` is deprecated: stored records keep loading, the field is
 ignored and never written.
 
 ### 7.3 Lease renewal
@@ -359,13 +371,68 @@ port-allow task active, JM quorum on the primary, metadata reload before the gra
 verified), never by ad-hoc RPCs. A restore, and every verdict epoch, resets the migration
 runners' in-memory retry backoff, so a rebuild deferred on "not the leader" resumes at once.
 
+### 7.8 Peer gone without a report: planned loss and frozen peers (campaign c2)
+
+Campaign c2 found two cases where the survivor reports nothing for seconds although its peer is
+gone, so a rule that waits for the survivor's hold misses the 3 s budget or lets the survivor
+fence itself at the hold deadline:
+
+- **F5, frozen peer** (SIGSTOP, 02a): the frozen SPDK keeps its TCP connections, so the survivor
+  saw the remote JM as connected until the peer woke and aborted (6.2 s). The node side now
+  holds after `remote_jm_timeout_ms` without an acknowledgement (section 3.1) and fences itself
+  when it wakes from a stall longer than its lease.
+- **F3, CP restart of a live node**: the restarting node's proxy stays up and answers "framework
+  not initialized", never HTTP 500, so the node was neither lost nor silent; its peer held and
+  fenced both LVS at the deadline.
+
+Rules:
+
+- **Grant without a report.** The arbiter grants the survivor at once when it knows the peer is
+  gone -- positively (HTTP 500 streak, planned loss, operator fencing) or because the peer is
+  silent and its lease ran out beyond `lease_margin_ms` -- the survivor is reachable, and it
+  still runs an LVS `normal` or `holding`. Not when both nodes are unreachable (uplink loss,
+  invariant 4), not for a peer that was never leased, and not again once the survivor is solo
+  everywhere. Safe without the survivor's report: a peer whose lease has expired fences itself
+  as soon as it starts holding, a node that wakes from a stall longer than its lease fences
+  itself, and a gone peer does not write at all. A grant to a survivor whose remote JM is still
+  healthy only permits it to continue alone if it loses the peer later.
+- **Planned loss.** Every CP path that stops SPDK (restart, shutdown, restart abort, the
+  kill-until-dead helper) first records a planned-loss marker in the record
+  (`arbitration.planned.note_planned_loss`, best effort, never fails or delays the stop). A node
+  with a marker counts as gone: if it still answers, the verdict fences it first, best effort
+  (only `ESTALE` withholds the grant; it is going away anyway), then grants its peer. The marker
+  ends when the node answers with a new SPDK instance, when it still serves the same instance
+  60 s later (the stop did not happen), or after `planned_loss_max_s`.
+
+### 7.9 Self-fenced nodes and partition recovery (campaign c2)
+
+- **F4, self-fenced node.** A node that fenced itself (hold deadline, lease expiry, stall) while
+  no verdict is in force stayed fenced for 30 minutes in c2: unfence ran only in `healing`. In
+  `steady` and `degraded` the arbiter now calls `jc_unfence` at the current epoch for every LVS
+  the node fenced itself, once the node's own view reports the remote JM healthy, at most every
+  `self_fence_readmit_ms` (EAGAIN until the resync gate passes). An LVS the arbiter fenced (the
+  record's `fenced_node`) is left to the heal. Leadership then comes back through section 7.7.
+- **F6, partition recovery.** After a partition, a both-links cut or a lossy link healed, the
+  remote JMs stayed unavailable and both nodes fenced, so the stable-window heal never started
+  (c2: 07, 08, 10b; only a node restart recovered). While `partitioned` with both nodes
+  reachable by the CP, the arbiter probes the link between them every `link_probe_s` (ping of
+  the peer's data IP from each node's data NIC, both ways). While it answers and the remote JMs
+  stay unhealthy, it reconnects the remote JMs (JM mesh repair) every `jm_reconnect_s`; after
+  `partition_restart_after_s` it hands one node (the one whose primary LVS has no leader, else
+  the second member) to the restart flow, once per partition. Probes and reconnects run off the
+  decision loop. Healthy remote JMs then lead to the ordinary heal (section 8).
+
 ## 8. Healing and re-admission
 
 1. Both nodes report `remote_jm_healthy`; after `stable_for_s` the arbiter enters `healing`.
 2. Resync gate: JC replicates the missing journal to the returning JM; distrib rebuilds the
    writes the fenced node missed. `jc_unfence` returns `EAGAIN` until the gate passes (section
    3.5: remote reconnected on a follower, in sync on the leader).
-3. Re-admission reuses the restart flow on the fenced node
+3. After a **partition** (`fence_both`, the heal verdict's `from_state`), nobody was granted and
+   no node wrote alone: the heal is `jc_unfence` on both (the leader re-levels its journal by
+   itself, step 4) and the leadership reconciliation in `steady` (section 7.7); no node goes
+   through the restart flow (campaign c2, F6). After **degraded**, re-admission reuses the
+   restart flow on the fenced node
    (`storage_node_ops.py`: `recreate_lvstore_on_non_leader` / `recreate_lvstore_on_sec`,
    hublvol reconnect, non-optimized ANA path), then `jc_unfence`. The fence leaves the hublvol
    port open (section 6.1), so the reconnect works while the survivor is fenced.
@@ -382,6 +449,13 @@ runners' in-memory retry backoff, so a rebuild deferred on "not the leader" resu
    (`_presumed_acting_leader`: `jc_disable_replication`, `bdev_distrib_check_inflight_io`,
    set non-leader).
 6. The arbiter asks the operator to remove the storage-fenced taint.
+
+### 8.1 Restart flow precheck during a re-level (campaign c2, F1)
+
+Right after the returning node's SPDK is up, the LVS leader re-levels the returning JM by itself
+(step 4). While it does, `jc_compression` on the leader answers "Compression request failed";
+the restart used to abort on that one answer and kill the new SPDK (c2 01b). The precheck now
+retries for `RESTART_JC_COMPRESSION_RETRY_S` (60 s) and aborts only if the failure outlasts it.
 
 ## 9. Operator (simplyblock-operator, managed profile on the edge)
 
@@ -426,6 +500,13 @@ setting brings that below KATO.
 | `reconcile_ms` | 1000 | arbiter, `jc_ha_status` reconciliation (section 7.5) |
 | `spdk_down_http500_streak` | 2 | arbiter, consecutive HTTP 500 answers that make a node lost (section 7.6) |
 | `leadership_reconcile_s` | 10 | arbiter, leadership reconciliation pass (section 7.7) |
+| `remote_jm_timeout_ms` | 1000 | `jc_set_dual_node`, remote JM acknowledgement timeout (section 3.1) |
+| `planned_loss_max_s` | 900 | arbiter, longest planned-loss marker (section 7.8) |
+| `self_fence_readmit_ms` | 2000 | arbiter, unfence retry of a self-fenced node (section 7.9) |
+| `link_probe_s` | 10 | arbiter, link probe while partitioned (section 7.9) |
+| `jm_reconnect_s` | 30 | arbiter, remote JM reconnect while partitioned (section 7.9) |
+| `partition_restart_after_s` | 120 | arbiter, link up but JMs unavailable before the restart flow (section 7.9) |
+| `jc_compression` precheck retry | 60 s | restart flow, while the leader re-levels the returning JM (section 8.1) |
 | client keep-alive | 4 s | connect parameters of arbitrated clusters (section 9.1) |
 | `wait_timeout_ms` | 20000 | collector, `jc_wait_events` |
 | event ring | 1024 events | node |

@@ -216,7 +216,9 @@ def test_restart_resends_the_last_verdict_with_a_higher_epoch(env):
     assert calls(nodes[B], "jc_fence")[-1][1][0] == epoch + 1
 
 
-def test_healing_unfences_after_resync_and_readmits_once(env):
+def test_healing_after_a_partition_unfences_without_the_restart_flow(env):
+    """Campaign c2, F6: fence_both granted nobody, so nobody wrote alone and
+    no node is handed to the restart flow; unfence (after resync) is the heal."""
     a, db, nodes, clock, readmitted = env
     a.renew_all()
     db.events = [event(A, 1, "remote_jm_unhealthy", 3), event(B, 1, "remote_jm_unhealthy", 3)]
@@ -230,10 +232,10 @@ def test_healing_unfences_after_resync_and_readmits_once(env):
     assert db.rec.state == "healing" and not readmitted
     nodes[B].errors.clear()
     a.tick_cluster(CL, [nodes[A], nodes[B]])
-    assert [n.get_id() for n in readmitted] == [B]
+    assert calls(nodes[B], "jc_unfence")
     a.tick_cluster(CL, [nodes[A], nodes[B]])
     assert db.rec.state == "steady" and db.rec.taint_requests == []
-    assert len(readmitted) == 1
+    assert readmitted == []
 
 
 def test_not_arbitrated_without_the_flag_or_with_three_nodes(env):
@@ -313,7 +315,8 @@ def test_no_preferred_node_anywhere(env):
         for _, args, kwargs in calls(n, "jc_set_dual_node"):
             assert args == (True,)
             assert kwargs == {"arbitration": True, "hold_ms": constants.TWO_NODE_HOLD_MS,
-                              "lease_ttl_ms": constants.TWO_NODE_LEASE_TTL_MS}
+                              "lease_ttl_ms": constants.TWO_NODE_LEASE_TTL_MS,
+                          "remote_jm_timeout_ms": constants.TWO_NODE_REMOTE_JM_TIMEOUT_MS}
 
 
 def test_silent_peer_is_granted_after_its_lease_whichever_node_it_is(env):
@@ -425,7 +428,8 @@ def test_view_is_reconciled_from_ha_status_never_append_only(env):
     nodes[A].seq = 1
     a.tick_cluster(CL, [nodes[A], nodes[B]])
     assert a.signals[A].lvs_state == {4: "normal"}
-    # every poll, not only once
+    # every poll, not only once (EAGAIN: not resynced, so F4 leaves it fenced)
+    nodes[A].errors["jc_unfence"] = RPCRemoteError("resync", -errno.EAGAIN)
     nodes[A].ha = {4: ("fenced", "healthy")}
     clock.t += constants.TWO_NODE_RECONCILE_MS
     a.tick_cluster(CL, [nodes[A], nodes[B]])

@@ -1061,3 +1061,23 @@ TWO_NODE_ARBITRATION_RPCS = (
 )
 #: Taint the edge operator applies to the Kubernetes node of a fenced storage node.
 TWO_NODE_FENCED_TAINT = "storage.simplyblock.io/fenced"
+#: ``jc_set_dual_node`` field: a remote JM that has not acknowledged for this
+#: long counts as unavailable and the node starts holding (campaign c2, F5: a
+#: frozen peer keeps its TCP connections, so connection loss alone is too late).
+TWO_NODE_REMOTE_JM_TIMEOUT_MS = 1000
+#: Minimum interval between two unfence attempts of a self-fenced node (F4).
+TWO_NODE_SELF_FENCE_READMIT_MS = 2000
+#: A planned loss (CP-initiated restart/shutdown, F3) ends when the node comes
+#: back with a new SPDK instance, at the latest after this many seconds.
+TWO_NODE_PLANNED_LOSS_MAX_S = 900
+#: Partitioned pair (F6): with the node-to-node link answering again, the
+#: arbiter reconnects the remote JMs every this many seconds ...
+TWO_NODE_JM_RECONNECT_S = 30
+#: ... and after this long with the link up but remote JMs still unavailable,
+#: hands one node to the restart flow (the manual c1/c2 remedy).
+TWO_NODE_PARTITION_RESTART_AFTER_S = 120
+#: How often the link between the two nodes is probed while partitioned.
+TWO_NODE_LINK_PROBE_S = 10
+#: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
+#: retried while it fails (a journal re-level in progress) before the restart aborts.
+RESTART_JC_COMPRESSION_RETRY_S = 60

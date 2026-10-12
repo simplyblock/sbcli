@@ -1732,7 +1732,8 @@ class RPCClient:
         }
         return self._request('bdev_lvol_connect_hublvol', **params)
 
-    def jc_set_dual_node(self, enable, *, hold_ms=None, lease_ttl_ms=None, arbitration=None):
+    def jc_set_dual_node(self, enable, *, hold_ms=None, lease_ttl_ms=None, arbitration=None,
+                         remote_jm_timeout_ms=None):
         """Tell the journal component whether this is a DUAL-NODE cluster.
 
         The JC aborts its whole SPDK application when the number of reachable
@@ -1763,6 +1764,9 @@ class RPCClient:
             params["lease_ttl_ms"] = int(lease_ttl_ms)
         if arbitration is not None:
             params["arbitration"] = bool(arbitration)
+        if remote_jm_timeout_ms is not None:
+            # Campaign c2 (F5); older nodes reject it, see arbitration.set_dual_node.
+            params["remote_jm_timeout_ms"] = int(remote_jm_timeout_ms)
         return self._request("jc_set_dual_node", **params)
 
     # ---- two-node arbitration (docs/design/two-node-arbitration.md, section 3) ----

@@ -12,15 +12,18 @@ reloads the record, raises the epoch and re-sends the last verdict.
 
 import errno
 import logging
+import threading
 import time
 from collections.abc import Callable
 
 from simplyblock_core import constants
 from simplyblock_core.arbitration import decision as dec
-from simplyblock_core.arbitration import dual_node_params
 from simplyblock_core.arbitration import events as ev
+from simplyblock_core.arbitration import set_dual_node
 from simplyblock_core.models.arbitration import (
+    ARB_DEGRADED,
     ARB_HEALING,
+    ARB_PARTITIONED,
     ARB_STEADY,
     LVS_FENCED,
     LVS_NORMAL,
@@ -49,12 +52,22 @@ class Arbiter:
     def __init__(self, db, clock: Callable[[], int] = _now_ms,
                  readmit: Callable[[StorageNode], None] | None = None,
                  log_event: Callable[[ArbitrationEvent, dict], None] | None = None,
-                 reconcile_leadership: Callable | None = None):
+                 reconcile_leadership: Callable | None = None,
+                 link_probe: Callable | None = None,
+                 reconnect_jms: Callable | None = None,
+                 run_async: Callable | None = None):
         self.db = db
         self.clock = clock
         self.readmit = readmit or default_readmit
         self.log_event = log_event or default_log_event
         self.reconcile_leadership = reconcile_leadership or default_reconcile_leadership
+        #: (node, peer) -> True/False/None: can ``node`` reach ``peer`` on the
+        #: data network (None: the probe itself failed, inconclusive).
+        self.link_probe = link_probe or default_link_probe
+        #: (node, peer) -> None: reconnect node's remote JM devices of peer.
+        self.reconnect_jms = reconnect_jms or default_reconnect_jms
+        #: Runs slow recovery work (pings, reconnects) off the decision loop.
+        self.run_async = run_async or _run_in_thread
         #: node_id -> NodeSignals
         self.signals: dict = {}
         #: node_id -> ms of the last successful lease renewal
@@ -85,6 +98,15 @@ class Arbiter:
         self.leadership_checked_at: dict = {}
         #: cluster_id -> LVS names seen leaderless on the previous pass
         self.leaderless_seen: dict = {}
+        #: node_id -> SPDK instance the node had when its planned loss was
+        #: first seen (the marker ends once it answers with another one)
+        self.planned_instance: dict = {}
+        #: node_id -> ms of the last unfence attempt of a self-fenced LVS (F4)
+        self.self_fence_tried_at: dict = {}
+        #: cluster_id -> partition recovery progress (F6): link_ok_since,
+        #: probed_at, reconnected_at, restarted, busy
+        self.partition_recovery: dict = {}
+        self._lock = threading.Lock()
 
     # ---- membership ---------------------------------------------------------
 
@@ -169,6 +191,7 @@ class Arbiter:
             lease_expires_at=expires,
             positively_fenced=bool(node.remediation_fenced),
             spdk_lost=bool(self.spdk_lost.get(nid)),
+            planned_loss=nid in (rec.planned_loss or {}),
         )
 
     def snapshot(self, rec: ClusterArbitration, nodes: list) -> dec.Snapshot:
@@ -181,6 +204,8 @@ class Arbiter:
             stable_for_ms=int(constants.TWO_NODE_STABLE_FOR_S) * 1000,
             healthy_since=rec.healthy_since,
             healing_done=self._healing_done(rec, nodes, cid),
+            winner=(rec.verdicts[-1].get("winner", "")
+                    if rec.state == ARB_DEGRADED and rec.verdicts else ""),
         )
 
     # ---- node configuration and leases ---------------------------------------
@@ -201,9 +226,12 @@ class Arbiter:
         instance = (self.signals.get(nid) or ev.NodeSignals()).instance
         if self.configured.get(nid) == instance and nid in self.configured:
             return
-        # A rejection raises RPCRemoteError, and the node stays unconfigured
-        # until a later tick succeeds.
-        node.rpc_client(timeout=3, retry=0).jc_set_dual_node(True, **dual_node_params(True))
+        err, level = set_dual_node(node.rpc_client(timeout=3, retry=0), True, True)
+        if err or level == "plain":
+            raise RuntimeError("jc_set_dual_node rejected the arbitration fields: %s" % (err,))
+        if level != "full":
+            logger.warning("Node %s does not take remote_jm_timeout_ms (older build); "
+                           "frozen peers are detected late (campaign c2, F5)", nid)
         self.configured[nid] = instance
 
     def renew(self, rec: ClusterArbitration, node: StorageNode,
@@ -435,6 +463,7 @@ class Arbiter:
                      "fence": {str(k): v for k, v in verdict.fence.items()},
                      "fence_all": {str(k): list(v) for k, v in verdict.fence_all.items()},
                      "reason": verdict.reason,
+                     "from_state": snap.state,
                      "signals": {"a": vars(snap.a), "b": vars(snap.b)}},
                     constants.TWO_NODE_VERDICT_HISTORY)
         return self.db.atomic_update(rec, write)
@@ -454,6 +483,13 @@ class Arbiter:
             try:
                 by_id[nid].rpc_client(timeout=5, retry=0).jc_fence(rec.epoch, sorted(vuids))
             except Exception as e:                  # noqa: BLE001
+                stale = isinstance(e, RPCRemoteError) and e.code == -errno.ESTALE
+                if verdict.fence_best_effort and not stale:
+                    # A node being stopped by the control plane (planned
+                    # loss): it is going away; the grant does not wait.
+                    logger.info("jc_fence epoch %s on %s (planned loss) failed: %s; "
+                                "granting its peer anyway", rec.epoch, nid, e)
+                    continue
                 logger.warning("jc_fence epoch %s on %s failed: %s; grant withheld",
                                rec.epoch, nid, e)
                 return False
@@ -474,8 +510,16 @@ class Arbiter:
 
     def heal(self, rec: ClusterArbitration, nodes: list) -> None:
         """Unfence each fenced LVS (EAGAIN until resync completes), then hand the
-        node to the restart flow once."""
+        node to the restart flow once.
+
+        Not after a partition (campaign c2, F6): ``fence_both`` granted nobody,
+        so no node wrote alone and none needs to be rebuilt; unfence (the
+        leader re-levels its journal) and the leadership reconciliation that
+        follows in steady are the whole heal. The restart flow re-admits only
+        a node that lost while its peer ran solo (DEGRADED)."""
         done = self.readmitted.setdefault(rec.cluster_id, set())
+        if self._healing_from(rec) == ARB_PARTITIONED:
+            done.update(n.get_id() for n in nodes)
         for node in nodes:
             nid = node.get_id()
             sig = self.signals.get(nid) or ev.NodeSignals()
@@ -497,6 +541,193 @@ class Arbiter:
                 if nid not in done:
                     self.readmit(node)
                     done.add(nid)
+
+    @staticmethod
+    def _healing_from(rec: ClusterArbitration) -> str:
+        for verdict in reversed(rec.verdicts or []):
+            if verdict.get("kind") == dec.V_HEAL:
+                return verdict.get("from_state", "")
+        return ""
+
+    # ---- planned loss (campaign c2, F3) ---------------------------------------
+
+    def track_planned_loss(self, rec: ClusterArbitration, nodes: list) -> ClusterArbitration:
+        """End planned-loss markers: the node answers with a new SPDK instance
+        (it was restarted), it still answers with the same instance well after
+        the marker (the stop never happened), or the marker is too old."""
+        markers = rec.planned_loss or {}
+        if not markers:
+            return rec
+        now = self.clock()
+        ended = []
+        for node in nodes:
+            nid = node.get_id()
+            marker = markers.get(nid)
+            if marker is None:
+                self.planned_instance.pop(nid, None)
+                continue
+            sig = self.signals.get(nid) or ev.NodeSignals()
+            before = marker.get("instance") or self.planned_instance.setdefault(nid, sig.instance)
+            age = now - int(marker.get("at", 0))
+            answered = self.reconciled_at.get(nid, 0) > int(marker.get("at", 0))
+            if answered and sig.instance and before and sig.instance != before:
+                ended.append((nid, "back with a new SPDK instance"))
+            elif answered and sig.instance == before and age > 60_000 and self.reachable.get(nid):
+                ended.append((nid, "still serving the same SPDK instance; the stop did not happen"))
+            elif age > int(constants.TWO_NODE_PLANNED_LOSS_MAX_S) * 1000:
+                ended.append((nid, "marker expired"))
+        if not ended:
+            return rec
+
+        def put(fresh):
+            fresh.planned_loss = {k: v for k, v in (fresh.planned_loss or {}).items()
+                                  if k not in {nid for nid, _ in ended}}
+        for nid, why in ended:
+            self.planned_instance.pop(nid, None)
+            logger.info("Planned loss of %s ended: %s", nid, why)
+        return self.db.atomic_update(rec, put)
+
+    # ---- self-fenced nodes (campaign c2, F4) -----------------------------------
+
+    def readmit_self_fenced(self, rec: ClusterArbitration, nodes: list) -> None:
+        """Unfence an LVS a node fenced by itself (hold deadline, lease expiry,
+        stall) once its remote JM is healthy again.
+
+        Without a verdict in force nothing else ever unfences it (campaign c2:
+        30 min fenced in STEADY, LVS leaderless, rebuild stalled). Only in
+        STEADY and DEGRADED, only for LVS the arbiter did not fence itself
+        (the record's ``fenced_node``), and only while the node's own view says
+        the remote JM is healthy: ``jc_unfence`` answers EAGAIN until it is.
+        Leadership then comes back through ``maybe_reconcile_leadership``."""
+        if rec.state not in (ARB_STEADY, ARB_DEGRADED):
+            return
+        now = self.clock()
+        arbiter_fenced: dict = {}
+        for entry in rec.lvs:
+            names = [x for x in str(entry.get("fenced_node") or "").split(",") if x]
+            arbiter_fenced[int(entry.get("jm_vuid", -1))] = set(names)
+        for node in nodes:
+            nid = node.get_id()
+            if not self.reachable.get(nid, True) or self.spdk_lost.get(nid) \
+                    or nid in (rec.planned_loss or {}):
+                continue
+            sig = self.signals.get(nid) or ev.NodeSignals()
+            vuids = sorted(int(v) for v, st in sig.lvs_state.items()
+                           if st == LVS_FENCED and sig.peer_unhealthy.get(v) is False
+                           and nid not in arbiter_fenced.get(int(v), set()))
+            if not vuids:
+                continue
+            if now - self.self_fence_tried_at.get(nid, 0) < int(constants.TWO_NODE_SELF_FENCE_READMIT_MS):
+                continue
+            self.self_fence_tried_at[nid] = now
+            try:
+                node.rpc_client(timeout=5, retry=0).jc_unfence(rec.epoch, vuids)
+            except RPCRemoteError as e:
+                if e.code == -errno.ESTALE:
+                    self.raise_epoch(rec.cluster_id, at_least=self._seen_epoch(nid) + 1)
+                elif e.code == -errno.EAGAIN:
+                    logger.info("Self-fenced node %s not resynced yet for %s; unfence later", nid, vuids)
+                else:
+                    logger.warning("jc_unfence of self-fenced %s on %s failed: %s", vuids, nid, e)
+                continue
+            except Exception as e:                  # noqa: BLE001 - next tick retries
+                logger.debug("jc_unfence on %s unreachable: %s", nid, e)
+                continue
+            for v in vuids:
+                sig.lvs_state[v] = LVS_NORMAL
+            self.needs_resync.add(nid)
+            logger.warning("Self-fenced node %s re-admitted for LVS %s at epoch %s "
+                           "(remote JM healthy again)", nid, vuids, rec.epoch)
+
+    # ---- partition recovery (campaign c2, F6) ----------------------------------
+
+    def recover_partition(self, rec: ClusterArbitration, nodes: list) -> None:
+        """Bring a partitioned pair back when the link between them answers.
+
+        After a partition, a both-links cut or a lossy link healed, the remote
+        JMs stayed unavailable and both nodes fenced: the pair never became
+        healthy, so the stable-window heal never started (campaign c2: 07, 08,
+        10b). While PARTITIONED with both nodes reachable by the CP, the link
+        between them is probed every ``TWO_NODE_LINK_PROBE_S``; while it
+        answers but the remote JMs stay unhealthy, the remote JMs are
+        reconnected every ``TWO_NODE_JM_RECONNECT_S``, and after
+        ``TWO_NODE_PARTITION_RESTART_AFTER_S`` one node is handed to the
+        restart flow once (the manual c1/c2 remedy). Healthy remote JMs then
+        lead to the ordinary stable-window heal. Slow work runs off the
+        decision loop."""
+        cid = rec.cluster_id
+        if rec.state != ARB_PARTITIONED:
+            self.partition_recovery.pop(cid, None)
+            return
+        st = self.partition_recovery.setdefault(cid, {"link_ok_since": 0, "probed_at": 0,
+                                                       "reconnected_at": 0, "restarted": False,
+                                                       "busy": False})
+        a, b = nodes
+        views = [self.signals.get(n.get_id()) or ev.NodeSignals() for n in nodes]
+        if not all(self.reachable.get(n.get_id(), True) and not self.spdk_lost.get(n.get_id())
+                   for n in nodes):
+            st["link_ok_since"] = 0
+            return
+        if not any(v.reports_peer_unhealthy() for v in views):
+            return                                  # healthy again: the heal takes over
+        now = self.clock()
+        with self._lock:
+            if st["busy"]:
+                return
+        if now - st["probed_at"] >= int(constants.TWO_NODE_LINK_PROBE_S) * 1000:
+            st["probed_at"] = now
+            self._spawn(st, lambda: self._probe_link(st, a, b))
+            with self._lock:
+                if st["busy"]:
+                    return                          # the probe runs; act on its result next tick
+        if not st["link_ok_since"]:
+            return
+        if now - st["reconnected_at"] >= int(constants.TWO_NODE_JM_RECONNECT_S) * 1000:
+            st["reconnected_at"] = now
+            logger.warning("Cluster %s partitioned, the link answers again but the remote "
+                           "JMs are unavailable: reconnecting them", cid)
+            self._spawn(st, lambda: (self.reconnect_jms(a, b), self.reconnect_jms(b, a)))
+            return
+        if not st["restarted"] and \
+                now - st["link_ok_since"] >= int(constants.TWO_NODE_PARTITION_RESTART_AFTER_S) * 1000:
+            st["restarted"] = True
+            target = self._restart_target(rec, nodes)
+            logger.warning("Cluster %s partitioned, link up for %ss and the remote JMs still "
+                           "unavailable: handing %s to the restart flow", cid,
+                           (now - st["link_ok_since"]) // 1000, target.get_id())
+            self.readmit(target)
+
+    def _spawn(self, st: dict, fn) -> None:
+        with self._lock:
+            st["busy"] = True
+
+        def run():
+            try:
+                fn()
+            except Exception as e:                  # noqa: BLE001 - next round retries
+                logger.warning("Partition recovery step failed: %s", e)
+            finally:
+                with self._lock:
+                    st["busy"] = False
+        self.run_async(run)
+
+    def _probe_link(self, st: dict, a: StorageNode, b: StorageNode) -> None:
+        ok_ab, ok_ba = self.link_probe(a, b), self.link_probe(b, a)
+        if ok_ab and ok_ba:
+            if not st["link_ok_since"]:
+                st["link_ok_since"] = self.clock()
+                logger.info("Link between %s and %s answers again", a.get_id(), b.get_id())
+        elif ok_ab is False or ok_ba is False:
+            st["link_ok_since"] = 0
+
+    def _restart_target(self, rec: ClusterArbitration, nodes: list) -> StorageNode:
+        """The node whose primary LVS has no leader in the record, else the
+        second member (the first keeps serving the metadata reads)."""
+        leaders = {int(e.get("jm_vuid", -1)): e.get("leader", "") for e in rec.lvs}
+        for node in nodes:
+            if node.jm_vuid and not leaders.get(int(node.jm_vuid)):
+                return node
+        return nodes[1]
 
     def _healing_done(self, rec: ClusterArbitration, nodes: list, cluster_id: str) -> bool:
         if rec.state != ARB_HEALING:
@@ -552,6 +783,8 @@ class Arbiter:
             self.resume(rec, nodes)
             rec = self.db.get_cluster_arbitration(cluster_id)
 
+        rec = self.track_planned_loss(rec, nodes)
+
         if rec.override:
             return self.apply_override(rec, nodes)
 
@@ -582,8 +815,11 @@ class Arbiter:
         elif verdict.new_state != rec.state:
             self.commit(rec, verdict, snap)
 
+        rec = self.db.get_cluster_arbitration(cluster_id)
         if rec.state == ARB_HEALING:
             self.heal(rec, nodes)
+        self.readmit_self_fenced(rec, nodes)
+        self.recover_partition(rec, nodes)
         self.persist_leases(rec)
         self.maybe_reconcile_leadership(cluster_id, nodes)
         return verdict
@@ -721,6 +957,35 @@ def default_readmit(node: StorageNode) -> None:
     storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE,
                                      caused_by="two-node-arbiter")
     tasks_controller.add_node_to_auto_restart(node)
+
+
+def _run_in_thread(fn) -> None:
+    threading.Thread(target=fn, daemon=True, name="arbiter-recovery").start()
+
+
+def default_link_probe(node: StorageNode, peer: StorageNode):
+    """Ping the peer's data IP from the node (its own data NIC). Tri-state:
+    None when the probe itself could not be made (inconclusive)."""
+    if not node.data_nics or not peer.data_nics:
+        return None
+    try:
+        ret, _ = node.client(timeout=8, retry=1, connect_retry=0).ping_ip(
+            peer.data_nics[0].ip4_address, node.data_nics[0].if_name)
+        return bool(ret)
+    except Exception as e:                          # noqa: BLE001 - inconclusive
+        logger.debug("Link probe %s -> %s failed: %s", node.get_id(), peer.get_id(), e)
+        return None
+
+
+def default_reconnect_jms(node: StorageNode, peer: StorageNode) -> None:
+    """Reconnect ``node``'s remote JM devices owned by ``peer`` (JM mesh repair)."""
+    from simplyblock_core import storage_node_ops
+    from simplyblock_core.db_controller import DBController
+    db = DBController()
+    fresh = db.get_storage_node_by_id(node.get_id())
+    remote = storage_node_ops._connect_to_remote_jm_devs(fresh, only_node_id=peer.get_id())
+    db.atomic_update(db.get_storage_node_by_id(node.get_id()),
+                     lambda n: setattr(n, "remote_jm_devices", remote))
 
 
 def default_reconcile_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=()):
