@@ -572,6 +572,20 @@ def failover_policy(policy_id):
     return results
 
 
+def _members_reachable(members):
+    """True when every member's storage node answers. This is the reachability
+    test BOTH promote early-exits depend on: a member whose source is down or gone
+    is an UNPLANNED fail-over, which the live-primary exit must decline and the
+    failed-home exit must NOT mistake for a Ramen re-drive (finding #29)."""
+    for m in members:
+        try:
+            if not lvol_controller.replication_source_online(m):
+                return False                   # source down -> unplanned fail-over
+        except KeyError:
+            return False                       # source gone -> unplanned fail-over
+    return True
+
+
 def _members_are_live_primary(members):
     """True when every member is still the UNTOUCHED serving primary on its own
     cluster: not demoted, not failed over, and its storage node online.
@@ -601,12 +615,7 @@ def _members_are_live_primary(members):
             return False                       # a planned hand-off (relocate), source stays up
         if _settled_relationship(m.get_id()) is not None:
             return False                       # already failed over -> a resume
-        try:
-            if not lvol_controller.replication_source_online(m):
-                return False                   # source down -> unplanned fail-over
-        except KeyError:
-            return False                       # source gone -> unplanned fail-over
-    return True
+    return _members_reachable(members)         # source down/gone -> unplanned fail-over
 
 
 def failover_group(group):
@@ -651,7 +660,16 @@ def failover_group(group):
         # so it reads these target-side members as pending, finds no generation that
         # qualifies for them, and refuses with "mixed-generation fail-over" -- leaving
         # the relocate stuck although the data is already home (live 2026-09-28).
-        if all(_failed_home_relationship(m.get_id()) is not None for m in members):
+        #
+        # Only when the members are REACHABLE here, exactly as the live-primary exit
+        # requires. The "failed home" mark is permanent, so after a fail-back it stays
+        # on the member forever; a later UNPLANNED fail-over away from home -- home
+        # partitioned, these nodes down -- is a real fail-over, not a re-drive, and
+        # must fall through to _failover_group_members. Without the reachability gate
+        # it returned success without promoting and the target attached the disk from
+        # the dead home site (finding #29, WordPress stuck 77 min, 2026-10-10).
+        if (all(_failed_home_relationship(m.get_id()) is not None for m in members)
+                and _members_reachable(members)):
             logger.info("Promote of consistency group %s is a no-op: its %d "
                         "member(s) already failed home to this cluster",
                         group.group_name, len(members))
