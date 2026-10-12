@@ -383,6 +383,20 @@ def backups(volume: Volume) -> builtins.list[BackupDTO]:
     return [BackupDTO.from_model(b) for b in rows]
 
 
+@instance_api.post('/backups', name='clusters:storage-pools:volumes:backups:create', status_code=201, responses={201: {"content": None}})
+def create_backup(
+        request: Request,
+        cluster: Cluster, pool: StoragePool, volume: Volume,
+) -> Response:
+    backup_id = backup_controller.backup_lvol(volume.get_id())
+
+    entity_url = request.app.url_path_for(
+        'clusters:backups:detail',
+        cluster_id=cluster.get_id(), backup_id=backup_id,
+    )
+    return Response(status_code=201, headers={'Location': str(entity_url)})
+
+
 @instance_api.delete(
     '/backups',
     name='clusters:storage-pools:volumes:backups:delete',
