@@ -992,7 +992,8 @@ class MigrationTestBase(TestClusterBase):
 
     # ── waiting ──────────────────────────────────────────────────────────
     def await_migration(self, vol_id=None, migration_id=None,
-                        terminal_only=True, timeout=None, what=""):
+                        terminal_only=True, timeout=None, what="",
+                        watcher=None):
         """Poll until terminal (or cutover, if terminal_only is False).
 
         Logs the record's own error and retry fields every poll. Without
@@ -1028,6 +1029,16 @@ class MigrationTestBase(TestClusterBase):
             status = str(self._get(m, "status") or "unknown").lower()
             phase = str(self._get(m, "phase") or "").lower()
             err = self._get(m, "error_message", "error")
+            # Stamp the sampler with the step, so an ANA transition reads
+            # as "during Migrating" rather than as a bare timestamp. The
+            # operator's own sampler does this and the reasoning holds for
+            # ours: for split-brain especially, both ends serving during
+            # the cutover and during Validating are not the same finding.
+            if watcher is not None and phase:
+                try:
+                    watcher.set_phase(phase)
+                except Exception:                     # noqa: BLE001
+                    pass
             line = (f"[MIG] status={status} phase={phase} "
                     f"snaps={self._get(m, 'snaps') or ''} "
                     f"retries={self._get(m, 'retries') or ''}")
@@ -1150,8 +1161,9 @@ class MigrationTestBase(TestClusterBase):
             if batch:
                 status, phase = self.await_batch(mid, what=what)
             else:
-                status, phase = self.await_migration(migration_id=mid,
-                                                     vol_id=vol_id, what=what)
+                status, phase = self.await_migration(
+                    migration_id=mid, vol_id=vol_id, what=what,
+                    watcher=watcher)
         except BaseException:
             # Stop the sampler on any exit, or its thread outlives a failed
             # case and keeps ssh-ing to a node the next case is using.

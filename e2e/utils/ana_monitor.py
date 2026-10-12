@@ -157,9 +157,11 @@ def pause_budget(interval=DEFAULT_INTERVAL_S):
 class AnaSample:
     """One reading of a subsystem's paths on one host."""
 
-    __slots__ = ("addresses", "at", "by_ns", "paths", "raw", "serving")
+    __slots__ = ("addresses", "at", "by_ns", "paths", "phase", "raw",
+                 "serving")
 
-    def __init__(self, at, by_ns, paths, raw, serving=None, addresses=None):
+    def __init__(self, at, by_ns, paths, raw, serving=None, addresses=None,
+                 phase=""):
         self.at = at
         #: {nsid: True when some path for it was accessible}
         self.by_ns = by_ns
@@ -173,6 +175,19 @@ class AnaSample:
         self.serving = serving or {}
         #: every traddr seen, serving or not
         self.addresses = addresses or set()
+        #: The migration step this sample was taken during, when the
+        #: caller knew it. Borrowed from the operator's own sampler, whose
+        #: reasoning is exactly right: "this is what turns a wall-clock
+        #: ANA transition into a readable one: 'all paths went
+        #: inaccessible during Cutover' is a finding, 'all paths went
+        #: inaccessible at 09:31:02' is a timestamp."
+        #:
+        #: It matters most for split-brain. Both ends serving during the
+        #: cutover is the dangerous case; the same reading during
+        #: Validating, while the operator is still connecting target
+        #: paths and the source legitimately still serves, may be
+        #: ordinary. Without the phase the two are one finding.
+        self.phase = phase or ""
 
     @property
     def readable(self):
@@ -299,7 +314,8 @@ class AnaReport:
                 src = addrs & self.source_addrs
                 tgt = addrs & self.target_addrs
                 if src and tgt:
-                    self.split_brain.append((smp.at, nsid, src, tgt))
+                    self.split_brain.append(
+                        (smp.at, nsid, src, tgt, smp.phase))
 
     @property
     def unserved_by_target(self):
@@ -349,12 +365,13 @@ class AnaReport:
         out = []
         if not self.readable:
             return out
-        for at, nsid, src, tgt in self.split_brain[:3]:
+        for at, nsid, src, tgt, phase in self.split_brain[:3]:
             out.append(
                 f"namespace {nsid} was served by the SOURCE "
                 f"({', '.join(sorted(src))}) and the TARGET "
                 f"({', '.join(sorted(tgt))}) at the same instant "
-                f"(t+{at - self.readable[0].at:.1f}s"
+                f"({f'during {phase}, ' if phase else ''}"
+                f"t+{at - self.readable[0].at:.1f}s"
                 f"{f', {len(self.split_brain)} such samples' if len(self.split_brain) > 1 else ''}). "
                 f"A cutover is a handover: both ends answering at once "
                 f"means two nodes are writable for one namespace, and a "
@@ -418,6 +435,7 @@ class AnaWatcher:
         self.source_addrs = set(source_addrs or ())
         self.target_addrs = set(target_addrs or ())
         self.samples = []
+        self._phase = ""
         self._stop = threading.Event()
         self._thread = None
         self._errors = 0
@@ -443,10 +461,16 @@ class AnaWatcher:
                 out = ""
             by_ns, paths, serving, addrs = parse_probe(out)
             self.samples.append(
-                AnaSample(t, by_ns, paths, out, serving, addrs))
+                AnaSample(t, by_ns, paths, out, serving, addrs,
+                          phase=self._phase))
             # Wait the remainder of the interval, so a slow probe does not
             # stretch the sampling period and widen the measured window.
             self._stop.wait(max(0.0, self.interval - (time.time() - t)))
+
+    def set_phase(self, phase):
+        """Stamp subsequent samples with the migration's current step."""
+        self._phase = str(phase or "")
+        return self
 
     def start(self):
         if self._thread:
