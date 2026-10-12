@@ -788,11 +788,15 @@ def wait_control_plane_ready(timeout=1800):
             complained = True
         time.sleep(10)
 
+    dump_control_plane_state()
     raise RuntimeError(
         f"the control plane did not reach Available within {timeout}s "
         f"(last reading: {last or 'none -- nothing was ever read'}). "
         f"Approving now would deploy storage nodes against a control plane "
-        f"that cannot answer them. Check: kubectl -n {NS} get controlplane")
+        f"that cannot answer them. The state above was read at the moment "
+        f"this gave up; AwaitingFoundationDB holds until the "
+        f"FoundationDBCluster reports status.health.available, so start "
+        f"with its health line and the pods and claims under it.")
 
 
 #: How long the deadline may be pushed out in total while OpenShift is
@@ -823,6 +827,79 @@ def mco_updating():
         if len(parts) >= 4 and parts[3] == "True":
             rolling.append(parts[0])
     return rolling
+
+
+def dump_control_plane_state() -> None:
+    """Everything worth seeing when the control plane will not come up.
+
+    Written after run 38224849247 spent its full 1800s in
+    Installing/AwaitingFoundationDB and failed with one phase string and
+    "Check: kubectl -n simplyblock get controlplane" -- against a lab the
+    next run wipes, so by the time anyone looks there is nothing to check.
+    dump_stall_state already existed for exactly this reason on the
+    deployment wait; this is its counterpart on the step before.
+
+    AwaitingFoundationDB holds until the FoundationDBCluster reports
+    status.health.available (controlplane/foundationdb.go), so what matters
+    is that object, the operator that drives it, and the pods and claims it
+    needs -- in that order. A FoundationDB stuck without coordinators looks
+    identical from the ControlPlane's phase whether its pods are pending on
+    storage, crash-looping on a bad image, or waiting for an operator that
+    is not installed.
+
+    Reads only, each independent and best-effort: this runs on a failure
+    path and a dump that raises would replace the real error with its own.
+    """
+    def show(title, *args, limit=40):
+        log(f"---- {title}")
+        try:
+            out = kubectl(*args, check=False)
+        except Exception as exc:                       # noqa: BLE001
+            log(f"     (could not read: {str(exc)[:120]})")
+            return
+        lines = (out or "").strip().splitlines()
+        if not lines:
+            log("     (nothing)")
+            return
+        for line in lines[:limit]:
+            log(f"     {line}")
+        if len(lines) > limit:
+            log(f"     ... {len(lines) - limit} more line(s)")
+
+    log("")
+    log("state at the point the control plane stopped advancing:")
+    show("control plane", "get", "controlplane", "-o", "wide")
+    show("control plane status", "get", "controlplane", "-o",
+         "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"
+         "{.status.phase}{\"\\t\"}{.status.step.state}{\"\\t\"}"
+         "{.status.message}{\"\\n\"}{end}")
+    # The object the step is actually waiting on. Its health block is the
+    # condition: available is what releases the wait, fullReplication only
+    # downgrades it to a warning.
+    show("foundationdb cluster", "get", "foundationdbcluster", "-o", "wide")
+    show("foundationdb health", "get", "foundationdbcluster", "-o",
+         "jsonpath={range .items[*]}{.metadata.name}"
+         "{\"\\tavailable=\"}{.status.health.available}"
+         "{\"\\tfullReplication=\"}{.status.health.fullReplication}"
+         "{\"\\tdesired=\"}{.status.desiredProcessGroups}"
+         "{\"\\treconciled=\"}{.status.reconciledProcessGroups}{\"\\n\"}{end}")
+    # Without its operator the cluster object is inert and reports nothing,
+    # which from the ControlPlane's side is indistinguishable from slow.
+    show("foundationdb operator", "get", "deploy", "-A", "-l",
+         "app=fdb-kubernetes-operator", "-o", "wide", limit=10)
+    show("pods that are not Running", "get", "pods",
+         "--field-selector=status.phase!=Running", "-o", "wide")
+    show("pod restarts", "get", "pods", "--no-headers", "-o",
+         "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses"
+         "[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,"
+         "NODE:.spec.nodeName")
+    # A classic FoundationDB stall: process groups pending on storage that
+    # no StorageClass will bind.
+    show("claims that are not Bound", "get", "pvc",
+         "--field-selector=status.phase!=Bound", "-o", "wide", limit=20)
+    show("recent warnings", "get", "events", "--field-selector=type=Warning",
+         "--sort-by=.lastTimestamp", limit=30)
+    log("")
 
 
 def dump_stall_state(name: str) -> None:
