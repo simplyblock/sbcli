@@ -384,3 +384,55 @@ def test_f1_compression_precheck_gives_up_after_the_window():
             leader, 1, timeout_s=10, interval_s=2,
             sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0])
     assert t[0] <= 10
+
+
+# ---- ultra c2 interface: "stalled" self-fence, remote_jm_timeout_ms in status ----
+
+def test_stalled_self_fence_event_marks_every_lvs_fenced():
+    from simplyblock_core.arbitration import events as ev
+    sig = ev.NodeSignals()
+    for seq, vuid in ((1, 3), (2, 4)):
+        assert ev.apply(sig, {"instance": "i-a", "seq": seq, "status": "ha_self_fenced",
+                              "jm_vuid": vuid, "reason": "stalled", "ha_state": "fenced"})
+    assert sig.lvs_state == {3: LVS_FENCED, 4: LVS_FENCED}
+
+
+def test_frozen_node_that_fenced_itself_is_readmitted_while_its_peer_runs_solo(c2):
+    """02a with ultra c2: the frozen node wakes, fences every LVS ("stalled")
+    and does not abort; its peer was granted (DEGRADED). Once the woken node
+    has resynced, it is unfenced at the current epoch like a deadline self-fence."""
+    a, db, nodes, clock, readmitted = c2
+    a.renew_all()
+    nodes[A].ha = {3: (LVS_NORMAL, "healthy"), 4: (LVS_NORMAL, "healthy")}
+    tick(a, nodes)
+    nodes[B].down = True
+    clock.t += EXPIRED
+    a.renew_all()
+    assert tick(a, nodes).kind == d.V_DEGRADED and db.rec.state == ARB_DEGRADED
+    nodes[B].down = False                       # wakes
+    db.events = [event(B, 1, "ha_self_fenced", 3, reason="stalled", ha_state="fenced"),
+                 event(B, 2, "ha_self_fenced", 4, reason="stalled", ha_state="fenced")]
+    nodes[B].ha = {3: (LVS_FENCED, "unhealthy"), 4: (LVS_FENCED, "unhealthy")}
+    nodes[A].ha = {3: (LVS_SOLO, "unhealthy"), 4: (LVS_SOLO, "unhealthy")}
+    a.renew_all()
+    clock.t += constants.TWO_NODE_RECONCILE_MS
+    tick(a, nodes)
+    assert not calls(nodes[B], "jc_unfence")    # not reconnected yet
+    nodes[B].ha = {3: (LVS_FENCED, "healthy"), 4: (LVS_FENCED, "healthy")}
+    clock.t += constants.TWO_NODE_RECONCILE_MS
+    tick(a, nodes)
+    assert calls(nodes[B], "jc_unfence")[-1][1] == (db.rec.epoch, [3, 4])
+    assert readmitted == []
+
+
+def test_node_with_another_remote_jm_timeout_is_configured_again(c2):
+    a, db, nodes, clock, _ = c2
+    a.renew_all()
+    nodes[A].ha = {3: (LVS_NORMAL, "healthy")}
+    tick(a, nodes)
+    n_before = len(calls(nodes[A], "jc_set_dual_node"))
+    orig = nodes[A].ha_status
+    nodes[A].ha_status = lambda: dict(orig(), remote_jm_timeout_ms=5000)
+    clock.t += constants.TWO_NODE_RECONCILE_MS
+    tick(a, nodes)
+    assert len(calls(nodes[A], "jc_set_dual_node")) > n_before

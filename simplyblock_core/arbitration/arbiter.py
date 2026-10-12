@@ -401,6 +401,11 @@ class Arbiter:
         if status.get("arbitration") is False:
             # Something (an old restart flow) switched arbitration off.
             self.configured.pop(nid, None)
+        timeout = status.get("remote_jm_timeout_ms")
+        if timeout is not None and int(timeout) != int(constants.TWO_NODE_REMOTE_JM_TIMEOUT_MS):
+            # A node that reports the field runs another acknowledgement
+            # timeout than ours (campaign c2, F5): configure it again.
+            self.configured.pop(nid, None)
         return True
 
     def reconcile_due(self, nodes: list) -> None:

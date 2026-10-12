@@ -74,8 +74,13 @@ New fields are optional; existing callers (`{"enable": bool}`) keep working with
 `remote_jm_timeout_ms` (campaign c2, F5): a remote JM that has not acknowledged for this long
 counts as unavailable and the node starts holding. A frozen peer keeps its TCP connections, so
 connection loss alone (NVMe keep-alive 5 s, IO timeout 8 s) is detected too late for the 3 s
-budget. Nodes built before c2 reject the field; the CP then retries without it, and only then
-falls back to the plain flag (`arbitration.set_dual_node`).
+budget. The node clamps it below `hold_ms` and reports it in `jc_ha_status`; the arbiter
+configures a node again whose reported value differs. Should a node reject the field, the CP
+retries without it, and only then falls back to the plain flag (`arbitration.set_dual_node`).
+
+A node that wakes from a stall longer than its lease fences **every** LVS (normal and solo too)
+with `ha_self_fenced` reason `stalled`, treats its lease as expired and does not abort. The
+arbiter re-admits it like any self-fence (section 7.9).
 
 Result: `true`. `arbitration: false` (default for old callers) keeps today's behaviour
 (dual-node tolerance without hold); the CP sets it `true` only when the cluster flag
