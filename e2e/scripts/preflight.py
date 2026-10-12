@@ -308,6 +308,145 @@ def check_helper_kwargs():
     return True
 
 
+def check_bringup_document_against_crd():
+    """Every field the k8s bring-up emits must exist in the operator's CRD.
+
+    Two runs died on this and neither reached a test. The apiserver decodes
+    these documents STRICTLY, so one misplaced key rejects the whole thing
+    in a tenth of a second, three attempts in a row:
+
+        strict decoding error: unknown field
+        "spec.discover.deviceFilter.enablePartitionedDevices"
+
+    It is a one-level-too-deep mistake and it has now happened twice in the
+    same function, to two different fields -- enableLogicalBlockDevices
+    first, then enablePartitionedDevices. Both are "statements about the
+    run" that sit on spec.discover, next to a deviceFilter whose members
+    all narrow what is reported rather than widening it, which is exactly
+    the kind of distinction a reader gets wrong.
+
+    Strict decoding is doing us a favour: a tolerant apiserver would have
+    dropped the field and handed us a cluster that quietly ignored it. But
+    it only tells us at bring-up, after a lab has been wiped and an hour
+    spent. This asks the question offline.
+
+    Skips when the operator checkout is not beside us, because a developer
+    without it should not be blocked -- CI has it (the workflows check out
+    simplyblock-operator), which is where it matters.
+    """
+    import glob as _glob
+    import importlib.util as _ilu
+
+    print("=" * 68)
+    print("the k8s bring-up document validates against the operator CRD")
+    print("=" * 68)
+
+    crds = []
+    for root in (os.path.join("..", "..", "simplyblock-operator"),
+                 os.path.join("..", "simplyblock-operator"),
+                 os.environ.get("OPERATOR_REPO", "")):
+        if not root:
+            continue
+        crds += _glob.glob(os.path.join(
+            root, "operator", "config", "crd", "bases", "*operatorops*.yaml"))
+    if not crds:
+        print("  SKIPPED: no simplyblock-operator checkout found next to "
+              "this one, so there is no CRD to validate against. Set "
+              "OPERATOR_REPO to its path to enable this check.")
+        print()
+        return True
+
+    try:
+        import yaml as _yaml
+    except ImportError:
+        print("  SKIPPED: PyYAML is not available here")
+        print()
+        return True
+
+    with open(crds[0], encoding="utf-8") as fh:
+        crd = _yaml.safe_load(fh.read())
+    try:
+        schema = (crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]
+                  ["properties"]["spec"])
+    except (KeyError, IndexError, TypeError):
+        print(f"  SKIPPED: {crds[0]} is not shaped like a CRD")
+        print()
+        return True
+
+    path = os.path.join("scripts", "k8s_cluster_bringup.py")
+    if not os.path.exists(path):
+        path = os.path.join("e2e", "scripts", "k8s_cluster_bringup.py")
+    spec = _ilu.spec_from_file_location("_bringup", path)
+    bringup = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(bringup)
+    # Worker resolution is the only part that needs a live cluster.
+    bringup.resolve_workers = lambda names: list(names or ["worker-0"])
+
+    def unknown(node, sch, where="spec"):
+        bad, props = [], (sch or {}).get("properties") or {}
+        for key, val in (node or {}).items():
+            if key not in props:
+                bad.append(f"{where}.{key}")
+                continue
+            if isinstance(val, dict):
+                bad += unknown(val, props[key], f"{where}.{key}")
+        return bad
+
+    # The combinations that differ in which fields are emitted at all.
+    cases = (
+        ({"ENABLE_PARTITIONED": "true",
+          "DRIVE_SIZE_RANGE": "1500G-2000G"}, "nvme, partitioned waived"),
+        ({"ENABLE_PARTITIONED": "false"}, "nvme, partitioned refused"),
+        ({"DEVICE_MODE": "lblk",
+          "ENABLE_PARTITIONED": "true"}, "lblk, partitioned waived"),
+        ({"PCIE_MODEL": "SAMSUNG"}, "nvme, pcie model"),
+        ({}, "defaults"),
+    )
+    touched = ("ENABLE_PARTITIONED", "DRIVE_SIZE_RANGE", "DEVICE_MODE",
+               "PCIE_MODEL", "BLOCK_DEVICES", "WORKER_NODES")
+    saved = {k: os.environ.get(k) for k in touched}
+    bad_any = []
+    try:
+        for env, label in cases:
+            for key in touched:
+                os.environ.pop(key, None)
+            os.environ.update(env)
+            os.environ["WORKER_NODES"] = "worker-0,worker-1"
+            try:
+                body = bringup.build_discovery("preflight-check")
+            except Exception as exc:                  # noqa: BLE001
+                print(f"  {label}: could not build a document: "
+                      f"{str(exc)[:160]}")
+                bad_any.append((label, ["<build failed>"]))
+                continue
+            doc = body.get("spec", body)
+            bad = unknown(doc, schema)
+            print(f"  {label:26} {'OK' if not bad else 'UNKNOWN FIELDS'}")
+            if bad:
+                bad_any.append((label, bad))
+    finally:
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+    if bad_any:
+        print()
+        for label, bad in bad_any:
+            for field in bad:
+                print(f"  {label}: {field} is not in the CRD at that level")
+        print()
+        print("  The apiserver decodes these strictly, so this rejects the")
+        print("  whole document and every discovery attempt fails in a")
+        print("  tenth of a second. Check whether the field belongs one")
+        print("  level up -- spec.discover rather than its deviceFilter.")
+        print()
+        return False
+    print()
+    return True
+
+
 def main():
     ok = True
     ok &= run("CLI invocations match simplyblock_cli/cli.py",
@@ -318,6 +457,7 @@ def main():
     ok &= check_no_naive_error_checks()
     ok &= check_seed_writes_to_a_real_mount()
     ok &= check_helper_kwargs()
+    ok &= check_bringup_document_against_crd()
 
     print("=" * 68)
     if ok:

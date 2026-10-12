@@ -311,10 +311,6 @@ def build_discovery(name: str) -> dict:
         if model:
             device_filter["pcieModel"] = model
 
-    partitioned = env_bool("ENABLE_PARTITIONED")
-    if partitioned is not None:
-        device_filter["enablePartitionedDevices"] = partitioned
-
     discover: dict = {
         "configName": name,
         # A storage node is a data path; the default already declines
@@ -337,6 +333,22 @@ def build_discovery(name: str) -> dict:
     # lblk name.
     if lblk:
         discover["enableLogicalBlockDevices"] = True
+
+    # The same one-level-too-deep bug as above, and it stayed dormant
+    # because nothing set ENABLE_PARTITIONED until a k8s run needed it.
+    # Run 38224849247 failed all three discovery attempts in 0.13s each:
+    #   strict decoding error: unknown field
+    #   "spec.discover.deviceFilter.enablePartitionedDevices"
+    #
+    # It belongs on spec.discover for the reason the operator's own type
+    # gives: it "is a statement about the run rather than a member of
+    # DeviceFilter [...] it waives an availability condition for whichever
+    # class is scanned, and so widens what is reported, where every member
+    # of the filter narrows it" (api/v1alpha2/operatorops_types.go).
+    partitioned = env_bool("ENABLE_PARTITIONED")
+    if partitioned is not None:
+        discover["enablePartitionedDevices"] = partitioned
+
     if device_filter:
         discover["deviceFilter"] = device_filter
 
