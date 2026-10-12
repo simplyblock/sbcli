@@ -292,8 +292,7 @@ def create_snapshot():
 
     snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
-        cl_data['snapshot_name'],
-        backup=cl_data.get('backup', False))
+        cl_data['snapshot_name'])
     return utils.get_response(snapID, err, http_code=400)
 
 

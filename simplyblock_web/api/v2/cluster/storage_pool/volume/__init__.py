@@ -309,7 +309,6 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
 
 class _SnapshotParams(BaseModel):
     name: util.SnapshotName
-    backup: bool = False
 
 
 @instance_api.post('/snapshots', name='clusters:storage-pools:volumes:snapshots:create', status_code=201, responses={201: {"content": None}})
@@ -319,7 +318,7 @@ def create_snapshot(
         parameters: _SnapshotParams
 ) -> Response:
     snapshot_id, err_or_false = snapshot_controller.add(
-        volume.get_id(), parameters.name, backup=parameters.backup
+        volume.get_id(), parameters.name
     )
     if err_or_false:
         # FIXME: snapshot_controller.add() should raise a named exception directly
