@@ -504,3 +504,21 @@ def test_leadership_reconciliation_runs_only_when_steady(env):
     clock.t += constants.TWO_NODE_LEADERSHIP_RECONCILE_S * 1000
     a.tick_cluster(CL, [nodes[A], nodes[B]])
     assert len(db.leadership_calls) == count
+
+
+def test_ha_normal_demoted_event_resets_solo(env):
+    a, db, nodes, clock, _ = env
+    db.events = [event(A, 1, "ha_solo", 3, ha_state="solo"),
+                 event(A, 2, "ha_normal", 3, reason="demoted", ha_state="normal")]
+    a.consume_events(CL)
+    assert a.signals[A].lvs_state == {3: "normal"}
+
+
+def test_ha_status_without_a_preferred_field_is_reconciled(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[A].ha = {3: ("solo", "unhealthy")}
+    status = nodes[A].ha_status()
+    assert "preferred" not in status
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert a.signals[A].lvs_state == {3: "solo"}

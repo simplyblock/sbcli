@@ -29,6 +29,8 @@ _STATE_OF = {
     "ha_fenced": LVS_FENCED,
     "ha_self_fenced": LVS_FENCED,
     "ha_unfenced": LVS_NORMAL,
+    # A demotion resets solo -> normal (reason "demoted").
+    "ha_normal": LVS_NORMAL,
 }
 
 

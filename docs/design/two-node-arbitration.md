@@ -22,7 +22,7 @@ central control plane (CP) is the witness. Three-node and larger clusters are un
 | Lease | Time-limited permission a node holds from the arbiter; renewed by the CP. |
 | Holding | Node lost its peer's JM for an LVS and holds client writes awaiting a verdict. |
 | Solo | Node leads an LVS alone with the peer fenced, under a grant of the current epoch. |
-| Fenced | Node is non-leader for an LVS, its LVS client ports are blocked (never the hublvol port, section 6.1), held IO returned as a path error. |
+| Fenced | Node is non-leader for an LVS, its LVS client port is blocked (never the hublvol port, section 6.1), held IO returned as a path error. |
 | Lost | The CP has positive evidence that a node's SPDK is gone (section 7.6). |
 
 There is **no preferred node**. No node ever continues alone without a grant: at the hold
@@ -58,7 +58,7 @@ existing proxy path. Errors use JSON-RPC errors with `code` = negative errno and
 | --- | --- | --- |
 | `ESTALE` | -116 | `epoch` lower than the highest epoch the node has seen |
 | `EBUSY` | -16 | the LVS is fenced in this epoch (for `jc_grant_solo`) |
-| `EAGAIN` | -11 | resync not complete (for `jc_unfence`) |
+| `EAGAIN` | -11 | resync gate not passed (for `jc_unfence`, section 3.5) |
 | `ENOENT` | -2 | unknown `jm_vuid` |
 | `EINVAL` | -22 | malformed arguments; dual-node mode not enabled for HA RPCs |
 
@@ -79,8 +79,8 @@ Every call resets the omitted fields to their defaults. On a cluster with
 flow) therefore carries the full arbitration config (`arbitration.dual_node_params`); a call
 with only `enable` switches arbitration off on that node (campaign c1, B2). A node that rejects
 the fields (built without the protocol) still gets the plain `{"enable": true}`, which keeps the
-survivor from aborting. The CP never sends `preferred`; on nodes that still decode it, its default
-`false` is the only behaviour.
+survivor from aborting. `preferred` is deprecated: the node still accepts it, ignores it and logs
+a deprecation; the CP never sends it. `jc_ha_status` no longer reports it.
 
 ### 3.2 `jc_lease_renew`
 
@@ -112,8 +112,9 @@ alone. Idempotent within an epoch. Errors: `ESTALE`, `EBUSY`, `ENOENT`.
 {"epoch": 8, "lvs": [3]}
 ```
 
-Result: `{"fenced": [3]}`, returned only after the LVS is non-leader, its ports are blocked and
-all held IO has been returned. Idempotent. Errors: `ESTALE`, `ENOENT`.
+Result: `{"fenced": [3]}`, returned only after the LVS is non-leader, its client port is
+blocked and all held IO has been returned. The hublvol port is never blocked (section 6.1).
+Idempotent. Errors: `ESTALE`, `ENOENT`.
 
 ### 3.5 `jc_unfence`
 
@@ -122,7 +123,9 @@ all held IO has been returned. Idempotent. Errors: `ESTALE`, `ENOENT`.
 ```
 
 Result: `{"unfenced": [3]}`. The node may rejoin as secondary (the CP then runs the restart
-flow, section 8). Errors: `EAGAIN` until JC has resynced the remote JM, `ESTALE`, `ENOENT`.
+flow, section 8). Errors: `ESTALE`, `ENOENT`, and `EAGAIN` while the resync gate is not passed.
+The gate depends on the node's role for the LVS: on a **follower** it means "the remote JM has
+reconnected"; on the **leader** it means "the remote JM is in sync".
 
 ### 3.6 `jc_ha_status`
 
@@ -224,6 +227,7 @@ All events delivered by `jc_wait_events` share these fields:
 | `ha_self_fenced` | The LVS fenced itself (deadline or lease expired while holding). |
 | `ha_lease_expired` | The lease expired while holding. |
 | `ha_unfenced` | `jc_unfence` completed. |
+| `ha_normal` | The LVS went back to `normal` outside unfence; `reason` `demoted`: a demotion of the LVS reset `solo` to `normal`. |
 
 Existing consumers of `distr_status_events_get` keep receiving `remote_jm_unhealthy` and
 `remote_jm_healthy`; the new fields are additive.
@@ -233,20 +237,24 @@ Existing consumers of `distr_status_events_get` keep receiving `remote_jm_unheal
 | From | To | Trigger |
 | --- | --- | --- |
 | normal | holding | remote JM unhealthy, dual-node with arbitration |
-| holding | solo | `jc_grant_solo` of the current epoch before the deadline |
+| holding | solo | `jc_grant_solo` of the current epoch before the deadline; nothing else |
 | holding | fenced | `jc_fence`; or the hold deadline without a verdict (every node); or lease expired while holding |
-| solo | normal | the peer's `jc_unfence` completed and the remote JM is healthy again (after the explicit resync on the leader, section 8) |
+| solo | normal | the remote JM is healthy again (after the resync on the leader, section 8); or the LVS was demoted (`ha_normal`, reason `demoted`) |
 | fenced | normal | `jc_unfence` after the resync gate |
 | any | aborted | `abort` verdict or the existing network-outage abort (0 JMs left) |
+
+A JC error on an LVS that is holding or fenced does not abort the node: the LVS stays fenced
+until a grant or an unfence.
 
 ### 6.1 What a fence blocks
 
 A fence (`jc_fence`, self-fence at the deadline or on lease expiry) blocks only the LVS's
-**client** ports. It never blocks the LVS's hublvol port: the returning peer's restart flow needs
+**client** port. It never blocks the LVS's hublvol port: the returning peer's restart flow needs
 that port (`connect_to_hublvol`) to resync, and a blocked hublvol port deadlocks healing
 (campaign c1, B2: the restart failed with `connect_to_hublvol failed`, and `jc_unfence`
-answered `EAGAIN` until the peer's JM was healthy). The SPDK/ultra side implements this; the
-10 s rule-removal poller still never lifts the client-port rules of a fenced LVS (invariant 6).
+answered `EAGAIN` until the peer's JM was healthy). The 10 s rule-removal poller
+(`spdk_lvs_remove_rules_poller`) only lifts a hublvol-port rule; it never lifts the client-port
+rule of a fenced LVS (invariant 6).
 
 ## 7. Arbiter (sbcli)
 
@@ -355,20 +363,21 @@ runners' in-memory retry backoff, so a rebuild deferred on "not the leader" resu
 
 1. Both nodes report `remote_jm_healthy`; after `stable_for_s` the arbiter enters `healing`.
 2. Resync gate: JC replicates the missing journal to the returning JM; distrib rebuilds the
-   writes the fenced node missed. `jc_unfence` returns `EAGAIN` until both are complete.
+   writes the fenced node missed. `jc_unfence` returns `EAGAIN` until the gate passes (section
+   3.5: remote reconnected on a follower, in sync on the leader).
 3. Re-admission reuses the restart flow on the fenced node
    (`storage_node_ops.py`: `recreate_lvstore_on_non_leader` / `recreate_lvstore_on_sec`,
    hublvol reconnect, non-optimized ANA path), then `jc_unfence`. The fence leaves the hublvol
    port open (section 6.1), so the reconnect works while the survivor is fenced.
-4. Explicit resync on the leader. The survivor stays `solo` after its peer returns until JC
-   re-levels the recovered remote JM, which it does not start by itself (campaign c1, B1). At
-   the end of the restart flow the CP calls `jc_explicit_synchronization {"jm_vuid": v}` for each
-   LVS the surviving node reports `solo`, on that LVS's **leader** only (confirmed by its
-   `lvs leadership` right before the call). **Never on a follower**: explicit synchronization
-   makes the calling node's JC the journal writer, so on a follower it raises a `writer_conflict`
-   on the real leader, which drops LVS leadership and blocks its ports (B6). An LVS without a
-   confirmed leader is skipped (section 7.7). The call is idempotent; ultra may also start the
-   resync on its own.
+4. Resync on the leader. The survivor stays `solo` after its peer returns until JC re-levels
+   the recovered remote JM (campaign c1, B1). The node starts that resync by itself, on the LVS
+   leader only, and retries it every 20 s. As a harmless backup, the CP calls
+   `jc_explicit_synchronization {"jm_vuid": v}` at the end of the restart flow for each LVS the
+   surviving node still reports `solo`, on that LVS's **leader** only (confirmed by its
+   `lvs leadership` right before the call). **The CP never calls it on a follower**: explicit
+   synchronization makes the calling node's JC the journal writer, so on a follower it raises a
+   `writer_conflict` on the real leader, which drops LVS leadership and blocks its ports (B6). An
+   LVS without a confirmed leader is skipped (section 7.7). The call is idempotent.
 5. Optional failback as a planned handover with the acting-leader quiesce from #1439
    (`_presumed_acting_leader`: `jc_disable_replication`, `bdev_distrib_check_inflight_io`,
    set non-leader).
