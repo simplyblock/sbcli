@@ -468,17 +468,27 @@ class MigrationSoak(MigrationTestBase):
             prev = self._k8s_storage_class_name
             self._k8s_storage_class_name = sc
             try:
+                host = None
                 for name in names:
-                    _, vid = self._create_lvol_dual(name, self.VOL_SIZE)
+                    # Pinned after the first: a subsystem belongs to a
+                    # node, so max_namespace_per_subsys cannot pack
+                    # volumes the control plane put on different ones.
+                    _, vid = self._create_lvol_dual(name, self.VOL_SIZE,
+                                                    host_id=host)
                     self._mig_vols.append(name)
                     out.append({"name": name, "id": vid,
                                 "sums": self.seed(name)})
+                    if host is None:
+                        host = self.lvol_node(vid)
             finally:
                 self._k8s_storage_class_name = prev
         else:
+            host = None
             for i, name in enumerate(names):
                 extra = (f" --namespaced true --max-namespace-per-subsys {n + 2}"
                          if i == 0 else " --namespaced true")
+                if host:
+                    extra += f" --host-id {host}"
                 cmd = (f"{self.base_cmd} -d volume add {name} "
                        f"{self.VOL_SIZE} {self.pool_name}{extra} 2>&1")
                 o, e = self._cli(cmd)
@@ -490,6 +500,8 @@ class MigrationSoak(MigrationTestBase):
                 self._mig_vols.append(name)
                 out.append({"name": name, "id": vid,
                             "sums": self.seed(name)})
+                if host is None:
+                    host = self.lvol_node(vid)
 
         nqns = {self.lvol_nqn(v["id"]) for v in out}
         if len(nqns) != 1 or None in nqns:

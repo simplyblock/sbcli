@@ -44,6 +44,7 @@ class _BatchBase(MigrationTestBase):
         if self.k8s_test:
             return self._make_group_k8s(tag, stamp, members, seed_first)
         group = []
+        host = None
         for i in range(members):
             name = f"mig{tag}{stamp}n{i}"
             # --namespaced is what shares a subsystem: it adds the lvol as
@@ -53,6 +54,12 @@ class _BatchBase(MigrationTestBase):
             # member created with --namespaced in this pool".
             extra = (f" --namespaced true --max-namespace-per-subsys {members + 2}"
                      if i == 0 else " --namespaced true")
+            # --host-id for every member after the first, same reason as
+            # the k8s branch: --namespaced fills an existing subsystem of
+            # this pool ON THE NODE, so members the control plane put on
+            # other nodes cannot share one however high the ceiling is.
+            if host:
+                extra += f" --host-id {host}"
             out, err = self._cli(
                 f"{self.base_cmd} -d volume add {name} {self.VOL_SIZE} "
                 f"{self.pool_name}{extra} 2>&1")
@@ -68,6 +75,11 @@ class _BatchBase(MigrationTestBase):
             self._mig_vols.append(name)
             group.append({"name": name, "id": vid,
                           "ns_id": self._ns_id(vid)})
+            if host is None:
+                host = self.lvol_node(vid)
+                self.logger.info(
+                    "[MIG-B] pinning the rest of the group to %s, the node "
+                    "%s landed on -- a subsystem is per-node", host, name)
         self._group = group
         self._seeded = self._lead(group)
         self._sums = (self.seed(self._seeded["name"]) if seed_first
@@ -101,12 +113,32 @@ class _BatchBase(MigrationTestBase):
         self._k8s_storage_class_name = sc
         try:
             group = []
+            host = None
             for i in range(members):
                 name = f"mig{tag}{stamp}n{i}"
-                _, vid = self._create_lvol_dual(name, self.VOL_SIZE)
+                # Every member after the first is PINNED to the node the
+                # first one landed on, and without that a group cannot
+                # exist. A subsystem belongs to a node, so
+                # max_namespace_per_subsys only packs volumes that are
+                # already on the same one -- it cannot reach across nodes.
+                # Unpinned, the control plane spreads the members over the
+                # cluster and each lands in a subsystem of its own.
+                #
+                # Run 38248680886 showed it in every batch case, always one
+                # stray: 4 members in one subsystem and n1 in another, then
+                # n0 alone and 3 together, then 2 and 1. The precondition
+                # check below caught each one, which is how we know.
+                _, vid = self._create_lvol_dual(name, self.VOL_SIZE,
+                                                host_id=host)
                 self._mig_vols.append(name)
                 group.append({"name": name, "id": vid,
                               "ns_id": self._ns_id(vid)})
+                if host is None:
+                    host = self.lvol_node(vid)
+                    self.logger.info(
+                        "[MIG-B] pinning the rest of the group to %s, the "
+                        "node %s landed on -- a subsystem is per-node",
+                        host, name)
         finally:
             self._k8s_storage_class_name = prev_sc
 

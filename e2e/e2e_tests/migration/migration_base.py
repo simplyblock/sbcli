@@ -1640,6 +1640,40 @@ class MigrationTestBase(TestClusterBase):
         self.logger.info("[MIG] IO clean across %ds %s", seconds, context)
 
     # ── teardown ─────────────────────────────────────────────────────────
+    def teardown(self, *args, **kwargs):
+        """Drop this lane's cluster-scoped leftovers, pass or fail.
+
+        The StorageClasses a batch case creates are deleted by
+        cleanup_migrations, which runs at the END of run() -- so a case
+        that raises never reaches it. Cleanup that only happens on the
+        happy path is not cleanup, and here it does not merely leak: a
+        StoragePool cannot be deleted while a StorageClass is assigned to
+        it, so one failed batch case blocks the pool for every case after
+        it. Run 38248680886 showed exactly that, four classes deep:
+
+            StorageClassStillAssigned: this pool cannot be deleted while 4
+            storage classes are assigned to it; delete migbatch-flat-...,
+            migbatch-gaps-..., migbatch-neg-..., migbatch-tree-... and the
+            pool goes on its own
+
+        The framework calls teardown() after every test whatever the
+        outcome, which makes it the only place this belongs. Best effort
+        and never raising: a teardown that throws replaces the test's own
+        verdict with its own.
+        """
+        for sc in reversed(getattr(self, "_extra_scs", []) or []):
+            try:
+                self._ensure_k8s_utils().delete_storage_class(sc)
+                self.logger.info("[MIG] teardown removed StorageClass %s", sc)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[MIG] could NOT remove StorageClass %s: %s. The pool it "
+                    "is assigned to cannot be deleted until it goes, so the "
+                    "next case starts against a pool that will not clear.",
+                    sc, str(exc)[:160])
+        self._extra_scs = []
+        return super().teardown(*args, **kwargs)
+
     def cleanup_migrations(self):
         """Best effort. Never raises: teardown must not mask the result."""
         for mid in reversed(self._migrations):
