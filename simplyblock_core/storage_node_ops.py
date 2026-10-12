@@ -1345,7 +1345,7 @@ def _note_planned_loss(snode, reason):
 
 
 def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
-                                      interval_s=2.0, sleep=time.sleep, clock=time.monotonic):
+                                      interval_s=2.0, sleep=None, clock=None):
     """``jc_compression get_status`` on the LVS leader, retried while it fails.
 
     Campaign c2, F1: right after the returning node's SPDK is up, the leader
@@ -1354,15 +1354,23 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     used to abort on that one answer and kill the new SPDK. The failure is
     transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
     failure that outlasts that aborts the restart (the caller raises).
+
+    Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
+    number of rounds (timeout / interval), so a patched-out ``time.sleep``
+    cannot turn the retry into a busy loop.
     """
     if timeout_s is None:
         timeout_s = constants.RESTART_JC_COMPRESSION_RETRY_S
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
     deadline = clock() + timeout_s
+    rounds = max(1, int(timeout_s // interval_s))
     while True:
         try:
             return leader.rpc_client().jc_compression_get_status(jm_vuid)
         except Exception as e:                  # noqa: BLE001 - retried, then re-raised
-            if clock() + interval_s > deadline:
+            rounds -= 1
+            if rounds <= 0 or clock() + interval_s > deadline:
                 raise
             logger.warning("jc_compression status on leader %s failed (%s); retrying "
                            "(journal re-level in progress?)", leader.get_id(), e)
