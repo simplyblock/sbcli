@@ -26,6 +26,8 @@ class ClusterArbitration(BaseModel):
     cluster_id: str = ""
     epoch: int = 0
     state: str = ARB_STEADY
+    #: Deprecated, ignored: there is no preferred node any more (at the hold
+    #: deadline a node always fences itself). Kept so stored records load.
     preferred_node: str = ""
     #: When the current state was entered (ms since epoch).
     state_since: int = 0
@@ -42,6 +44,10 @@ class ClusterArbitration(BaseModel):
     #: Operator decision waiting to be applied: {"winner", "reason", "by", "at"}
     #: (CP API ``POST .../arbitration/override``; audited in the cluster log).
     override: dict = default_factory(dict)
+    #: When the arbiter last restored a lost LVS leadership (ms). Part of the
+    #: migration runners' backoff-reset key: a rebuild deferred on "not the
+    #: leader" is retried at once instead of after its backoff.
+    leadership_restored_at: int = 0
 
     def get_id(self):
         return self.cluster_id

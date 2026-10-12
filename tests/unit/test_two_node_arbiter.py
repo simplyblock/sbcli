@@ -8,7 +8,7 @@ from simplyblock_core import constants
 from simplyblock_core.arbitration import arbiter as arb
 from simplyblock_core.models.arbitration import ArbitrationEvent, ClusterArbitration
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCRemoteError
+from simplyblock_core.rpc_client import RPCHTTPError, RPCRemoteError
 
 A, B, CL = "node-a", "node-b", "cl-1"
 
@@ -30,11 +30,20 @@ class FakeRPC:
             self.node.calls.append((name, args, kwargs))
             if self.node.down:
                 raise ConnectionError("down")
+            if self.node.http500 and name != "supports_two_node_arbitration":
+                # the node's proxy runs, SPDK behind it does not
+                raise RPCHTTPError("HTTP 500 from remote", status_code=500)
             err = self.node.errors.get(name)
             if err:
                 raise err
             if name == "supports_two_node_arbitration":
                 return True
+            if name == "jc_ha_status":
+                if self.node.ha is None:
+                    raise RuntimeError("no status in this test")
+                return self.node.ha_status()
+            if name == "jc_set_dual_node":
+                return True, None
             return {}
         return call
 
@@ -47,6 +56,17 @@ class Node:
         self.status = StorageNode.STATUS_ONLINE
         self.remediation_fenced = False
         self.calls, self.errors, self.down = [], {}, False
+        self.http500 = False
+        #: jc_ha_status as the node reports it: None = not answered (the
+        #: event-driven view stays), else {jm_vuid: (state, remote_jm_health)}
+        self.ha = None
+        self.instance, self.seq, self.arbitration = "i-" + nid, 0, True
+
+    def ha_status(self):
+        return {"instance": self.instance, "seq": self.seq, "arbitration": self.arbitration,
+                "epoch": 0,
+                "lvs": [{"jm_vuid": v, "state": st, "remote_jm": {"health": h}}
+                        for v, (st, h) in sorted(self.ha.items())]}
 
     def get_id(self):
         return self.uuid
@@ -103,8 +123,16 @@ def env(monkeypatch):
     monkeypatch.setattr(ArbitrationEvent, "remove", lambda self, kv: None)
     clock = Clock()
     readmitted = []
+    db.leadership_calls = []
+
+    def reconcile_leadership(cluster_id, nodes_, skip_jm_vuids=(), confirmed=()):
+        db.leadership_calls.append((cluster_id, set(skip_jm_vuids), set(confirmed)))
+        return db.leadership_result
+
+    db.leadership_result = ([], [])
     a = arb.Arbiter(db, clock=clock, readmit=readmitted.append,
-                    log_event=lambda item, event: db.logged.append((item.node_id, event["status"])))
+                    log_event=lambda item, event: db.logged.append((item.node_id, event["status"])),
+                    reconcile_leadership=reconcile_leadership)
     return a, db, nodes, clock, readmitted
 
 
@@ -119,7 +147,7 @@ def calls(node, name):
     return [c for c in node.calls if c[0] == name]
 
 
-def test_partition_fences_then_grants_and_persists_before_rpcs(env):
+def test_partition_fences_both_and_persists_before_rpcs(env):
     a, db, nodes, clock, _ = env
     a.renew_all()
     db.events = [event(A, 1, "remote_jm_unhealthy", 3, ha_state="holding"),
@@ -130,10 +158,12 @@ def test_partition_fences_then_grants_and_persists_before_rpcs(env):
     assert v.kind == "partition"
     assert db.rec.state == "partitioned" and db.rec.epoch == 1
     assert db.rec.verdicts[-1]["epoch"] == 1
-    # each node leads its own LVS: A keeps 3, B keeps 4; each fenced for the other
-    assert calls(nodes[A], "jc_fence")[0][1] == (1, [4])
-    assert calls(nodes[A], "jc_grant_solo")[0][1][:2] == (1, [3])
-    assert calls(nodes[B], "jc_fence")[0][1] == (1, [3])
+    assert db.rec.verdicts[-1]["fence_all"] == {"3": [A, B], "4": [A, B]}
+    # fence_both: IO stops on a partition; both nodes fenced for both LVS, nobody granted
+    assert calls(nodes[A], "jc_fence")[0][1] == (1, [3, 4])
+    assert calls(nodes[B], "jc_fence")[0][1] == (1, [3, 4])
+    assert not calls(nodes[A], "jc_grant_solo") and not calls(nodes[B], "jc_grant_solo")
+    assert db.rec.taint_requests == []
 
 
 def test_degraded_waits_for_the_lease_then_grants_the_survivor(env):
@@ -150,16 +180,18 @@ def test_degraded_waits_for_the_lease_then_grants_the_survivor(env):
     assert calls(nodes[A], "jc_grant_solo")
 
 
-def test_failed_fence_withholds_the_grant_and_retries(env):
+def test_failed_fence_is_resent_until_it_lands(env):
     a, db, nodes, clock, _ = env
     a.renew_all()
     nodes[B].errors["jc_fence"] = RuntimeError("boom")
     db.events = [event(A, 1, "remote_jm_unhealthy", 3), event(B, 1, "remote_jm_unhealthy", 3)]
     a.tick_cluster(CL, [nodes[A], nodes[B]])
-    assert not calls(nodes[A], "jc_grant_solo")
+    assert CL in a.undelivered
     nodes[B].errors.clear()
     a.tick_cluster(CL, [nodes[A], nodes[B]])
-    assert calls(nodes[A], "jc_grant_solo")
+    assert CL not in a.undelivered
+    assert calls(nodes[B], "jc_fence")[-1][1] == (1, [3, 4])
+    assert not calls(nodes[A], "jc_grant_solo")
 
 
 def test_stale_epoch_on_renew_raises_the_epoch(env):
@@ -268,3 +300,225 @@ def test_legacy_copies_are_dropped_for_capable_nodes_and_never_reset_the_stream(
     a.consume_events(CL)
     assert a.signals[B].reports_peer_unhealthy() and a.signals[B].instance == ""
     assert (B, "remote_jm_unhealthy") not in db.logged
+
+
+# ---- campaign c1 fixes -------------------------------------------------------
+
+def test_no_preferred_node_anywhere(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert not db.rec.preferred_node
+    for n in nodes.values():
+        for _, args, kwargs in calls(n, "jc_set_dual_node"):
+            assert args == (True,)
+            assert kwargs == {"arbitration": True, "hold_ms": constants.TWO_NODE_HOLD_MS,
+                              "lease_ttl_ms": constants.TWO_NODE_LEASE_TTL_MS}
+
+
+def test_silent_peer_is_granted_after_its_lease_whichever_node_it_is(env):
+    """The old preferred-node rule withheld the grant when the silent peer was
+    the preferred node (01b/02b). Now any peer whose lease expired counts."""
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[A].down = True
+    db.events = [event(B, 1, "remote_jm_unhealthy", 4, ha_state="holding")]
+    a.renew_all()
+    clock.t += constants.TWO_NODE_LEASE_TTL_MS + constants.TWO_NODE_LEASE_MARGIN_MS + 1
+    v = a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert v.kind == "degraded" and v.winner == B
+
+
+def test_http500_twice_marks_the_node_lost_and_the_peer_is_granted_at_once(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()                       # B holds a valid lease from here
+    nodes[B].http500 = True             # SPDK died behind a running proxy
+    a.renew_all()
+    a.renew_all()
+    assert a.spdk_lost.get(B)
+    db.events = [event(A, 1, "remote_jm_unhealthy", 3, ha_state="holding")]
+    # no clock advance: B's lease is still valid, the 500 streak is the evidence
+    v = a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert v.kind == "degraded" and v.winner == A
+    assert calls(nodes[A], "jc_grant_solo")
+
+
+def test_a_single_transient_500_grants_nothing(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[B].http500 = True
+    a.renew_all()                       # one 500
+    nodes[B].http500 = False
+    a.renew_all()                       # answers again: the streak resets
+    nodes[B].http500 = True
+    a.renew_all()                       # one 500 again, not two in a row
+    nodes[B].http500 = False            # and the next poll answers
+    assert not a.spdk_lost.get(B)
+    db.events = [event(A, 1, "remote_jm_unhealthy", 3, ha_state="holding")]
+    v = a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert v.kind == "wait"
+    assert not calls(nodes[A], "jc_grant_solo")
+
+
+def test_a_node_lost_by_http500_is_fenced_when_it_comes_back(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[B].http500 = True
+    a.renew_all()
+    a.renew_all()
+    db.events = [event(A, 1, "remote_jm_unhealthy", 3, ha_state="holding")]
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    epoch = db.rec.epoch
+    nodes[A].ha = {3: ("solo", "unhealthy")}      # A leads LVS 3 alone now
+    nodes[B].http500 = False
+    nodes[B].ha = {}                              # answers again
+    nodes[B].calls.clear()
+    a.renew_all()
+    names = [c[0] for c in nodes[B].calls]
+    # fenced for A's solo LVS, at a new epoch, BEFORE it gets a lease again
+    assert names.index("jc_fence") < names.index("jc_lease_renew")
+    assert calls(nodes[B], "jc_fence")[0][1] == (epoch + 1, [3])
+    assert not a.spdk_lost.get(B)
+    assert a.signals[B].lvs_state[3] == "fenced"
+
+
+def test_no_epoch_is_raised_while_a_lost_node_stays_gone(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[B].http500 = True
+    a.renew_all()
+    a.renew_all()
+    nodes[A].ha = {3: ("solo", "unhealthy")}
+    epoch = db.rec.epoch
+    for _ in range(5):
+        a.renew_all()
+    assert db.rec.epoch == epoch and a.spdk_lost.get(B)
+    assert not calls(nodes[B], "jc_fence")
+    # once only
+    nodes[B].calls.clear()
+    a.renew_all()
+    assert not calls(nodes[B], "jc_fence")
+
+
+def test_a_lost_node_back_without_any_solo_peer_is_not_fenced(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[B].http500 = True
+    a.renew_all()
+    a.renew_all()
+    nodes[A].ha = {3: ("normal", "healthy")}
+    nodes[B].http500 = False
+    nodes[B].ha = {}
+    a.renew_all()
+    assert not calls(nodes[B], "jc_fence") and not a.spdk_lost.get(B)
+
+
+def test_view_is_reconciled_from_ha_status_never_append_only(env):
+    """08 run 1: an append-only view kept a stale "solo" and the arbiter fenced
+    the legitimate survivor. The node's own jc_ha_status replaces the view."""
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    db.events = [event(A, 1, "ha_solo", 3, ha_state="solo")]
+    a.consume_events(CL)
+    assert a.signals[A].lvs_state == {3: "solo"}
+    nodes[A].ha = {4: ("normal", "healthy")}
+    nodes[A].seq = 1
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert a.signals[A].lvs_state == {4: "normal"}
+    # every poll, not only once
+    nodes[A].ha = {4: ("fenced", "healthy")}
+    clock.t += constants.TWO_NODE_RECONCILE_MS
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert a.signals[A].lvs_state == {4: "fenced"}
+
+
+def test_instance_change_or_sequence_gap_forces_an_immediate_resync(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[A].ha = {3: ("normal", "healthy")}
+    nodes[A].seq = 1
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    nodes[A].calls.clear()
+    # a gap: seq 5 after 1 (events 2..4 lost)
+    db.events = [event(A, 5, "ha_solo", 3, ha_state="solo")]
+    nodes[A].seq = 5
+    a.tick_cluster(CL, [nodes[A], nodes[B]])      # inside the reconcile interval
+    assert calls(nodes[A], "jc_ha_status")
+    assert a.signals[A].lvs_state == {3: "normal"}
+    # a new instance (node restarted): resync and configure again
+    nodes[A].calls.clear()
+    nodes[A].instance, nodes[A].seq = "i-new", 1
+    e = event(A, 1, "remote_jm_healthy", 3)
+    e.instance = "i-new"
+    e.payload["instance"] = "i-new"
+    db.events = [e]
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert calls(nodes[A], "jc_ha_status") and calls(nodes[A], "jc_set_dual_node")
+
+
+def test_reconnect_forces_an_immediate_resync(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[A].ha = {3: ("normal", "healthy")}
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    nodes[A].down = True
+    a.renew_all()
+    nodes[A].down = False
+    a.renew_all()
+    assert A in a.needs_resync
+    nodes[A].calls.clear()
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert calls(nodes[A], "jc_ha_status") and A not in a.needs_resync
+
+
+def test_arbitration_switched_off_on_the_node_is_pushed_again(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[A].ha = {3: ("normal", "healthy")}
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    pushed = len(calls(nodes[A], "jc_set_dual_node"))
+    nodes[A].arbitration = False                  # e.g. an old restart flow
+    clock.t += constants.TWO_NODE_RECONCILE_MS
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert len(calls(nodes[A], "jc_set_dual_node")) == pushed + 1
+
+
+def test_leadership_reconciliation_runs_only_when_steady(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[A].ha = {3: ("normal", "healthy"), 4: ("solo", "healthy")}
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert db.leadership_calls and db.leadership_calls[-1][1] == {4}
+    # a second pass only after the interval; leaderless names carried over
+    db.leadership_result = ([], ["LVS_3"])
+    clock.t += constants.TWO_NODE_LEADERSHIP_RECONCILE_S * 1000
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    db.leadership_result = (["LVS_3"], ["LVS_3"])
+    clock.t += constants.TWO_NODE_LEADERSHIP_RECONCILE_S * 1000
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert db.leadership_calls[-1][2] == {"LVS_3"}
+    assert db.rec.leadership_restored_at == clock.t
+    # not while a verdict is in force
+    count = len(db.leadership_calls)
+    db.atomic_update(db.rec, lambda f: setattr(f, "state", "degraded"))
+    clock.t += constants.TWO_NODE_LEADERSHIP_RECONCILE_S * 1000
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert len(db.leadership_calls) == count
+
+
+def test_ha_normal_demoted_event_resets_solo(env):
+    a, db, nodes, clock, _ = env
+    db.events = [event(A, 1, "ha_solo", 3, ha_state="solo"),
+                 event(A, 2, "ha_normal", 3, reason="demoted", ha_state="normal")]
+    a.consume_events(CL)
+    assert a.signals[A].lvs_state == {3: "normal"}
+
+
+def test_ha_status_without_a_preferred_field_is_reconciled(env):
+    a, db, nodes, clock, _ = env
+    a.renew_all()
+    nodes[A].ha = {3: ("solo", "unhealthy")}
+    status = nodes[A].ha_status()
+    assert "preferred" not in status
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert a.signals[A].lvs_state == {3: "solo"}

@@ -1040,6 +1040,20 @@ TWO_NODE_WAIT_TIMEOUT_MS = 20000
 TWO_NODE_VERDICT_HISTORY = 50
 #: Arbiter decision loop period (events are folded and decided every tick).
 TWO_NODE_DECISION_TICK_MS = 100
+#: How often the arbiter re-reads each node's ``jc_ha_status`` and replaces its
+#: per-node, per-LVS view (holding/solo/fenced) with it. Also done at once after
+#: a reconnect and on an instance change or a sequence gap.
+TWO_NODE_RECONCILE_MS = 1000
+#: Consecutive HTTP 500 answers from a node's SPDK proxy that count as positive
+#: evidence that its SPDK is gone (the proxy runs, SPDK behind it does not).
+#: Two, not one: a single 500 can be a transient SPDK timeout.
+TWO_NODE_SPDK_DOWN_HTTP500_STREAK = 2
+#: Seconds between two leadership reconciliation passes, and how long an LVS
+#: must stay leaderless (two passes) before leadership is restored.
+TWO_NODE_LEADERSHIP_RECONCILE_S = 10
+#: Client keep-alive for clusters with two-node arbitration: hosts must detect
+#: a silent path within the hold window (hold_ms 2500 < KATO).
+TWO_NODE_CLIENT_KEEP_ALIVE_TO = 4
 #: The node RPCs a storage node must expose before the arbiter drives it.
 TWO_NODE_ARBITRATION_RPCS = (
     "jc_wait_events", "jc_ha_status", "jc_lease_renew",

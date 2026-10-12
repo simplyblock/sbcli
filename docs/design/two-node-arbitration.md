@@ -1,9 +1,12 @@
 # Two-node arbitration: implementation contract
 
-Status: approved for implementation (2026-10-09). Design rationale, diagrams and failure
-analysis: [`two-node-ha-design.pdf`](two-node-ha-design.pdf) (revision 2). This document is
-the binding contract between the work packages: ultra (JC, distrib), the SPDK fork (lvol,
-blobstore), sbcli (arbiter, Go event collector, API) and the simplyblock operator.
+Status: approved for implementation (2026-10-09); revised 2026-10-12 after the integration
+campaign c1 (no preferred node; bookkeeping, explicit-sync, fence-port, SPDK-down and client
+rules). Design rationale, diagrams and failure analysis:
+[`two-node-ha-design.pdf`](two-node-ha-design.pdf) (revision 2; where it describes a preferred
+node, this document wins). This document is the binding contract between the work packages:
+ultra (JC, distrib), the SPDK fork (lvol, blobstore), sbcli (arbiter, Go event collector, API)
+and the simplyblock operator.
 
 Scope: clusters whose storage-node membership is exactly two (`apply_jc_dual_node` in
 `simplyblock_core/storage_node_ops.py` already sets `jc_set_dual_node(true)` for them). The
@@ -19,18 +22,24 @@ central control plane (CP) is the witness. Three-node and larger clusters are un
 | Lease | Time-limited permission a node holds from the arbiter; renewed by the CP. |
 | Holding | Node lost its peer's JM for an LVS and holds client writes awaiting a verdict. |
 | Solo | Node leads an LVS alone with the peer fenced, under a grant of the current epoch. |
-| Fenced | Node is non-leader for an LVS, its LVS ports are blocked, held IO returned as a path error. |
-| Preferred node | The node allowed to continue alone when neither the CP nor the peer is reachable. |
+| Fenced | Node is non-leader for an LVS, its LVS client port is blocked (never the hublvol port, section 6.1), held IO returned as a path error. |
+| Lost | The CP has positive evidence that a node's SPDK is gone (section 7.6). |
+
+There is **no preferred node**. No node ever continues alone without a grant: at the hold
+deadline without a verdict a node always fences itself, so a full isolation (both links down,
+the CP reaches neither node) stops IO on both nodes.
 
 ## 2. Invariants
 
-1. A node leads an LVS alone only with a `jc_grant_solo` of the current epoch, or at the hold
-   deadline if it is the preferred node.
+1. A node leads an LVS alone only with a `jc_grant_solo` of the current epoch. At the hold
+   deadline without a verdict it fences itself; there is no exception for any node.
 2. The arbiter sends `jc_grant_solo` for an LVS only if the peer is fenced for it: the peer
-   acknowledged `jc_fence` in this epoch, or the peer's lease expired more than
-   `lease_ttl_ms + lease_margin_ms` ago while the peer was holding.
-3. The arbiter never grants the non-preferred node solo operation merely because the preferred
-   node went silent; that needs positive fencing (BMC fence or `out-of-service` taint).
+   acknowledged `jc_fence` in this epoch; or the peer's lease expired more than
+   `lease_ttl_ms + lease_margin_ms` ago (it fenced itself at its hold deadline or on lease
+   expiry while holding); or the peer is lost (section 7.6: its SPDK is gone); or there is
+   positive fencing evidence from the operator (BMC fence or `out-of-service` taint).
+3. A lost node that answers again is fenced, for every LVS its peer leads alone, before it gets
+   a lease again (section 7.6).
 4. A lease matters only while a node is holding. While the remote JM is healthy, an expired
    lease has no effect: missed renewals, WAN latency or a lost uplink never fence a healthy pair.
 5. A node rejects every verdict RPC whose epoch is lower than the highest epoch it has seen.
@@ -49,7 +58,7 @@ existing proxy path. Errors use JSON-RPC errors with `code` = negative errno and
 | --- | --- | --- |
 | `ESTALE` | -116 | `epoch` lower than the highest epoch the node has seen |
 | `EBUSY` | -16 | the LVS is fenced in this epoch (for `jc_grant_solo`) |
-| `EAGAIN` | -11 | resync not complete (for `jc_unfence`) |
+| `EAGAIN` | -11 | resync gate not passed (for `jc_unfence`, section 3.5) |
 | `ENOENT` | -2 | unknown `jm_vuid` |
 | `EINVAL` | -22 | malformed arguments; dual-node mode not enabled for HA RPCs |
 
@@ -58,13 +67,20 @@ existing proxy path. Errors use JSON-RPC errors with `code` = negative errno and
 New fields are optional; existing callers (`{"enable": bool}`) keep working with defaults.
 
 ```json
-{"enable": true, "preferred": false, "hold_ms": 2500, "lease_ttl_ms": 1500,
- "arbitration": true}
+{"enable": true, "hold_ms": 2500, "lease_ttl_ms": 1500, "arbitration": true}
 ```
 
 Result: `true`. `arbitration: false` (default for old callers) keeps today's behaviour
 (dual-node tolerance without hold); the CP sets it `true` only when the cluster flag
 `two_node_arbitration` is on.
+
+Every call resets the omitted fields to their defaults. On a cluster with
+`two_node_arbitration` **every** `jc_set_dual_node` call of the CP (arbiter, node add, restart
+flow) therefore carries the full arbitration config (`arbitration.dual_node_params`); a call
+with only `enable` switches arbitration off on that node (campaign c1, B2). A node that rejects
+the fields (built without the protocol) still gets the plain `{"enable": true}`, which keeps the
+survivor from aborting. `preferred` is deprecated: the node still accepts it, ignores it and logs
+a deprecation; the CP never sends it. `jc_ha_status` no longer reports it.
 
 ### 3.2 `jc_lease_renew`
 
@@ -96,8 +112,9 @@ alone. Idempotent within an epoch. Errors: `ESTALE`, `EBUSY`, `ENOENT`.
 {"epoch": 8, "lvs": [3]}
 ```
 
-Result: `{"fenced": [3]}`, returned only after the LVS is non-leader, its ports are blocked and
-all held IO has been returned. Idempotent. Errors: `ESTALE`, `ENOENT`.
+Result: `{"fenced": [3]}`, returned only after the LVS is non-leader, its client port is
+blocked and all held IO has been returned. The hublvol port is never blocked (section 6.1).
+Idempotent. Errors: `ESTALE`, `ENOENT`.
 
 ### 3.5 `jc_unfence`
 
@@ -106,7 +123,9 @@ all held IO has been returned. Idempotent. Errors: `ESTALE`, `ENOENT`.
 ```
 
 Result: `{"unfenced": [3]}`. The node may rejoin as secondary (the CP then runs the restart
-flow, section 8). Errors: `EAGAIN` until JC has resynced the remote JM, `ESTALE`, `ENOENT`.
+flow, section 8). Errors: `ESTALE`, `ENOENT`, and `EAGAIN` while the resync gate is not passed.
+The gate depends on the node's role for the LVS: on a **follower** it means "the remote JM has
+reconnected"; on the **leader** it means "the remote JM is in sync".
 
 ### 3.6 `jc_ha_status`
 
@@ -114,7 +133,7 @@ No arguments. Result:
 
 ```json
 {"instance": "6f1c2a90", "seq": 41, "dual_node": true, "arbitration": true,
- "preferred": false, "epoch": 8, "lease_left_ms": 1210,
+ "epoch": 8, "lease_left_ms": 1210,
  "lvs": [{"jm_vuid": 3, "state": "holding", "since_ms": 640, "held_ios": 17,
           "hold_left_ms": 1860,
           "remote_jm": {"name": "remote_jm_8f2", "health": "unhealthy",
@@ -122,7 +141,9 @@ No arguments. Result:
 ```
 
 `state` per LVS: `normal | holding | solo | fenced`. `reason`: `unavailable | blocked |
-out_of_sync`. Used for resync after a restart or a queue overflow (section 4).
+out_of_sync`. Used for resync after a restart or a queue overflow (section 4), and polled by
+the arbiter to reconcile its view (section 7.5). `seq` is the highest event sequence the node
+has pushed, so events with `seq` at or below it are already reflected in the status.
 
 ### 3.7 `jc_wait_events` (long-poll)
 
@@ -200,12 +221,13 @@ All events delivered by `jc_wait_events` share these fields:
 | `remote_jm_unhealthy` | The peer's JM became unusable (`reason`: `unavailable`, `blocked`, `out_of_sync`). |
 | `remote_jm_healthy` | The peer's JM is back in sync. |
 | `ha_hold_started` | The LVS froze and holds writes (dual-node with arbitration only). |
-| `ha_hold_expired` | The hold deadline passed without a verdict; `ha_state` tells the outcome. |
-| `ha_solo` | The LVS leads alone (grant, or preferred node at the deadline). |
+| `ha_hold_expired` | The hold deadline passed without a verdict; the LVS fenced itself (`ha_state` `fenced`). |
+| `ha_solo` | The LVS leads alone under a `jc_grant_solo`. |
 | `ha_fenced` | The LVS is fenced by `jc_fence`. |
 | `ha_self_fenced` | The LVS fenced itself (deadline or lease expired while holding). |
 | `ha_lease_expired` | The lease expired while holding. |
 | `ha_unfenced` | `jc_unfence` completed. |
+| `ha_normal` | The LVS went back to `normal` outside unfence; `reason` `demoted`: a demotion of the LVS reset `solo` to `normal`. |
 
 Existing consumers of `distr_status_events_get` keep receiving `remote_jm_unhealthy` and
 `remote_jm_healthy`; the new fields are additive.
@@ -215,11 +237,24 @@ Existing consumers of `distr_status_events_get` keep receiving `remote_jm_unheal
 | From | To | Trigger |
 | --- | --- | --- |
 | normal | holding | remote JM unhealthy, dual-node with arbitration |
-| holding | solo | `jc_grant_solo` of the current epoch before the deadline; or deadline and preferred node |
-| holding | fenced | `jc_fence`; or deadline without verdict (non-preferred); or lease expired while holding |
-| solo | normal | the peer's `jc_unfence` completed and the remote JM is healthy again |
+| holding | solo | `jc_grant_solo` of the current epoch before the deadline; nothing else |
+| holding | fenced | `jc_fence`; or the hold deadline without a verdict (every node); or lease expired while holding |
+| solo | normal | the remote JM is healthy again (after the resync on the leader, section 8); or the LVS was demoted (`ha_normal`, reason `demoted`) |
 | fenced | normal | `jc_unfence` after the resync gate |
 | any | aborted | `abort` verdict or the existing network-outage abort (0 JMs left) |
+
+A JC error on an LVS that is holding or fenced does not abort the node: the LVS stays fenced
+until a grant or an unfence.
+
+### 6.1 What a fence blocks
+
+A fence (`jc_fence`, self-fence at the deadline or on lease expiry) blocks only the LVS's
+**client** port. It never blocks the LVS's hublvol port: the returning peer's restart flow needs
+that port (`connect_to_hublvol`) to resync, and a blocked hublvol port deadlocks healing
+(campaign c1, B2: the restart failed with `connect_to_hublvol failed`, and `jc_unfence`
+answered `EAGAIN` until the peer's JM was healthy). The 10 s rule-removal poller
+(`spdk_lvs_remove_rules_poller`) only lifts a hublvol-port rule; it never lifts the client-port
+rule of a fenced LVS (invariant 6).
 
 ## 7. Arbiter (sbcli)
 
@@ -228,8 +263,9 @@ Existing consumers of `distr_status_events_get` keep receiving `remote_jm_unheal
 | From | To | Trigger and action |
 | --- | --- | --- |
 | steady | deciding | unhealthy, hold or lease-expiry event |
-| deciding | partitioned | both nodes report each other and both leases are valid: raise epoch, `jc_fence` the loser per LVS (the current leader wins), then `jc_grant_solo` the winner; request the storage-fenced taint for the loser |
-| deciding | degraded | one node silent with its lease expired while holding, or positively fenced: raise epoch, `jc_grant_solo` the survivor |
+| deciding | partitioned | both nodes report each other and the CP reaches both (a cut link, both alive and renewing): policy `fence_both`. Raise epoch, `jc_fence` every LVS on **both** nodes, grant nobody: IO stops |
+| deciding | degraded | one node silent with its lease expired, lost (section 7.6) or positively fenced: raise epoch, `jc_grant_solo` the survivor |
+| degraded | degraded | a lost node answers again: raise epoch, `jc_fence` it for every LVS its peer leads alone, before its next lease renewal |
 | partitioned, degraded | healing | both report `remote_jm_healthy` and stay healthy for `stable_for_s` |
 | healing | steady | resync gate passed, restart flow done, `jc_unfence` done, optional failback done; remove the taint |
 
@@ -242,8 +278,7 @@ re-sends the last verdict.
 One record per cluster, key `{cluster_id}`, model in `simplyblock_core/models/`:
 
 ```json
-{"cluster_id": "1102ec3c-...", "epoch": 8, "state": "partitioned",
- "preferred_node": "e40b4b28-...",
+{"cluster_id": "1102ec3c-...", "epoch": 8, "state": "degraded",
  "lvs": [{"jm_vuid": 3, "leader": "e40b4b28-...", "state": "solo",
           "fenced_node": "d5e8dc90-...", "since": 1760004902418}],
  "leases": {"e40b4b28-...": {"granted_at": 1760004902100, "ttl_ms": 1500},
@@ -252,7 +287,10 @@ One record per cluster, key `{cluster_id}`, model in `simplyblock_core/models/`:
                "winner": "e40b4b28-...", "signals": {"...": "events and reachability"}}]}
 ```
 
-`verdicts` keeps the last 50 entries.
+`verdicts` keeps the last 50 entries. A partition verdict lists both fenced nodes per LVS in
+`fence_all`. `leadership_restored_at` is the time of the last leadership reconciliation
+(section 7.7). `preferred_node` is deprecated: stored records keep loading, the field is
+ignored and never written.
 
 ### 7.3 Lease renewal
 
@@ -265,22 +303,85 @@ the node is reachable. A failed renewal is not a verdict: it only matters if the
 | Method | Path | Body / result | Use |
 | --- | --- | --- | --- |
 | GET | `/api/v2/clusters/{cluster_id}/arbitration` | the `ClusterArbitration` record plus live lease ages | console, operator, support |
-| PUT | `/api/v2/clusters/{cluster_id}/arbitration/preferred` | `{"node_id": "..."}` | choose the preferred node; pushed with `jc_set_dual_node` |
+| PUT | `/api/v2/clusters/{cluster_id}/arbitration/preferred` | `{"node_id": "..."}` | **deprecated, ignored**: answers 204 for older operators, stores and pushes nothing |
 | POST | `/api/v2/clusters/{cluster_id}/arbitration/override` | `{"winner": "node_id", "reason": "..."}` | operator decision when the arbiter cannot decide; audited in the cluster log |
 | PUT | `/api/v2/clusters/{cluster_id}` | `{"two_node_arbitration": true}` | feature flag (cluster field) |
+
+### 7.5 Bookkeeping: the arbiter's view is reconciled, never append-only
+
+The arbiter's per-node, per-LVS view (holding, solo, fenced, remote-JM health) is a mirror of the
+node, not a log of past events:
+
+- it is replaced from `jc_ha_status` every `reconcile_ms` (1 s), and at once after a reconnect
+  (a node that answers again after failed calls), after an `instance` change (node restarted) and
+  after a gap in the event sequence;
+- events between two polls update it in between; an event at or below the status `seq` is
+  dropped;
+- a status that shows `arbitration: false` makes the arbiter push its `jc_set_dual_node` again.
+
+Every verdict that depends on the view (fencing a returning node, grants after a peer fence,
+partition decisions) uses the reconciled state. An append-only view fenced the legitimate
+survivor after a link restore in the campaign (c1, 08 run 1).
+
+### 7.6 SPDK-down evidence (lost node)
+
+The CP reaches a node's SPDK through the storage node's HTTP proxy. When SPDK is gone but the
+proxy still runs, the proxy answers **HTTP 500** instead of refusing the connection (campaign c1,
+01b and 02b: the grant was withheld and the survivor fenced itself at the deadline). The arbiter
+treats HTTP 500 on the SPDK-facing calls it makes (`jc_lease_renew`, `jc_ha_status`) as loss of
+the node, like a refused connection:
+
+- it takes **2 consecutive** 500 answers (`spdk_down_http500_streak`; lease renewals and status
+  polls count alike, any other outcome resets the streak). The two-poll rule is the smaller of
+  the two options considered (the other was "within one lease TTL"): with renewals every 250 ms it
+  costs about 250 ms, and a single transient 500 never grants;
+- a lost node counts as fenced for invariant 2: its peer is granted at once, without waiting for
+  the lease to expire;
+- when a lost node answers again, it is fenced first (raise epoch, `jc_fence`) for every LVS its
+  peer leads alone according to the peer's fresh `jc_ha_status` (the record's grants only if the
+  peer cannot be read), and only then gets a lease again. A node that answers `ENOENT`/`EINVAL`
+  is a restarted SPDK that does not know the LVS and cannot be a stale writer; the restart flow
+  re-admits it.
+
+Caveat: the proxy also answers 500 when an SPDK RPC times out on the socket, so a stalled (not
+dead) SPDK that times out twice in a row is treated as lost. Its peer is then granted while it
+is alive; the returning-node fence closes that window at its next answer.
+
+### 7.7 Leadership reconciliation
+
+After fence -> resync -> unfence an LVS can be left without a leader on either node (campaign c1,
+B6). Every `leadership_reconcile_s` (10 s), while the cluster is `steady`, the arbiter checks
+each node's primary LVS. One whose primary is online and healthy, whose members are all online
+and answer, whose HA state is `normal` on both nodes, and that no member leads on two
+consecutive passes, is restored through the existing guarded leaderless-recovery path
+(`storage_node_ops._recover_leaderless_lvs`: single-flight lock with cooldown, no restart or
+port-allow task active, JM quorum on the primary, metadata reload before the grant, grant
+verified), never by ad-hoc RPCs. A restore, and every verdict epoch, resets the migration
+runners' in-memory retry backoff, so a rebuild deferred on "not the leader" resumes at once.
 
 ## 8. Healing and re-admission
 
 1. Both nodes report `remote_jm_healthy`; after `stable_for_s` the arbiter enters `healing`.
 2. Resync gate: JC replicates the missing journal to the returning JM; distrib rebuilds the
-   writes the fenced node missed. `jc_unfence` returns `EAGAIN` until both are complete.
+   writes the fenced node missed. `jc_unfence` returns `EAGAIN` until the gate passes (section
+   3.5: remote reconnected on a follower, in sync on the leader).
 3. Re-admission reuses the restart flow on the fenced node
    (`storage_node_ops.py`: `recreate_lvstore_on_non_leader` / `recreate_lvstore_on_sec`,
-   hublvol reconnect, non-optimized ANA path), then `jc_unfence`.
-4. Optional failback as a planned handover with the acting-leader quiesce from #1439
+   hublvol reconnect, non-optimized ANA path), then `jc_unfence`. The fence leaves the hublvol
+   port open (section 6.1), so the reconnect works while the survivor is fenced.
+4. Resync on the leader. The survivor stays `solo` after its peer returns until JC re-levels
+   the recovered remote JM (campaign c1, B1). The node starts that resync by itself, on the LVS
+   leader only, and retries it every 20 s. As a harmless backup, the CP calls
+   `jc_explicit_synchronization {"jm_vuid": v}` at the end of the restart flow for each LVS the
+   surviving node still reports `solo`, on that LVS's **leader** only (confirmed by its
+   `lvs leadership` right before the call). **The CP never calls it on a follower**: explicit
+   synchronization makes the calling node's JC the journal writer, so on a follower it raises a
+   `writer_conflict` on the real leader, which drops LVS leadership and blocks its ports (B6). An
+   LVS without a confirmed leader is skipped (section 7.7). The call is idempotent.
+5. Optional failback as a planned handover with the acting-leader quiesce from #1439
    (`_presumed_acting_leader`: `jc_disable_replication`, `bdev_distrib_check_inflight_io`,
    set non-leader).
-5. The arbiter asks the operator to remove the storage-fenced taint.
+6. The arbiter asks the operator to remove the storage-fenced taint.
 
 ## 9. Operator (simplyblock-operator, managed profile on the edge)
 
@@ -294,8 +395,24 @@ the node is reachable. A failed renewal is not a verdict: it only matters if the
   condition, `out-of-service` taint present, BMC fence done) on the StorageNode status; the
   arbiter reads it as positive fencing evidence.
 - **CR fields** on the cluster (managed profile): `spec.twoNode.arbitration: bool`,
-  `spec.twoNode.preferredNode: <k8s node name>`, `spec.twoNode.holdMs`, `spec.twoNode.leaseTtlMs`
-  (all optional; defaults below).
+  `spec.twoNode.holdMs`, `spec.twoNode.leaseTtlMs` (all optional; defaults below).
+  `spec.twoNode.preferredNode` is deprecated: accepted on stored objects, ignored.
+
+### 9.1 Client requirements
+
+Hosts connect over NVMe/TCP native multipath (iopolicy `numa`) with:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `--keep-alive-tmo` | 4 s | a silent path must be detected within the hold window (`hold_ms` 2500 < KATO) |
+| `--fast_io_fail_tmo` | 8 s | more than KATO + `hold_ms`: held IO is answered before the kernel fails it |
+| `--ctrl-loss-tmo` | 3600 s | a fenced path is retried, not dropped |
+| `--reconnect-delay` | 2 s | |
+
+The CP generates these connect parameters for clusters with `two_node_arbitration`
+(`utils/nvme.py`; other clusters keep keep-alive 8 s). Even so, a silent path loss stalls IO for
+KATO plus up to one keep-alive interval (about 5 s measured) before multipath fails over; no
+setting brings that below KATO.
 
 ## 10. Defaults
 
@@ -306,6 +423,10 @@ the node is reachable. A failed renewal is not a verdict: it only matters if the
 | `lease_renew_ms` | 250 | arbiter |
 | `lease_margin_ms` | 500 | arbiter, invariant 2 |
 | `stable_for_s` | 30 | arbiter, healing |
+| `reconcile_ms` | 1000 | arbiter, `jc_ha_status` reconciliation (section 7.5) |
+| `spdk_down_http500_streak` | 2 | arbiter, consecutive HTTP 500 answers that make a node lost (section 7.6) |
+| `leadership_reconcile_s` | 10 | arbiter, leadership reconciliation pass (section 7.7) |
+| client keep-alive | 4 s | connect parameters of arbitrated clusters (section 9.1) |
 | `wait_timeout_ms` | 20000 | collector, `jc_wait_events` |
 | event ring | 1024 events | node |
 | collector backoff | 100 ms doubling to 5 s | collector |
@@ -330,5 +451,7 @@ the node is reachable. A failed renewal is not a verdict: it only matters if the
 - SPDK team: return held IO as an ANA/path error instead of EIO on fence; confirm no timer
   re-promotes a fenced LVS.
 - Team: per-site defaults for `hold_ms`, `lease_ttl_ms`, `stable_for_s` over real edge WAN links;
-  how the preferred node is chosen; whether the arbiter runs in the CP task runner or as its own
-  deployment.
+  whether the arbiter runs in the CP task runner or as its own deployment.
+- After a `fence_both` partition both nodes are fenced and no LVS has a leader; healing relies on
+  `jc_unfence` passing its resync gate without a leader, then on leadership reconciliation
+  (section 7.7). Not yet verified on a bed (in c1 the fenced follower aborted, B7).

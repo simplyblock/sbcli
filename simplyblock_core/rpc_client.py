@@ -1732,8 +1732,7 @@ class RPCClient:
         }
         return self._request('bdev_lvol_connect_hublvol', **params)
 
-    def jc_set_dual_node(self, enable, *, preferred=None, hold_ms=None, lease_ttl_ms=None,
-                         arbitration=None):
+    def jc_set_dual_node(self, enable, *, hold_ms=None, lease_ttl_ms=None, arbitration=None):
         """Tell the journal component whether this is a DUAL-NODE cluster.
 
         The JC aborts its whole SPDK application when the number of reachable
@@ -1748,11 +1747,16 @@ class RPCClient:
 
         The two-node arbitration fields (docs/design/two-node-arbitration.md,
         section 3.1) are optional and sent only when given, so a node without
-        the protocol still accepts the call.
+        the protocol still accepts the call. A call without them resets the
+        node to its defaults (arbitration off), so callers on an arbitrated
+        cluster pass ``arbitration.dual_node_params``. There is no preferred
+        node: the node's own ``preferred`` field defaults to false and is never
+        sent.
+
+        Returns ``(result, error)`` like every ``_request2`` call; it does not
+        raise on a JSON-RPC error.
         """
         params: dict = {"enable": bool(enable)}
-        if preferred is not None:
-            params["preferred"] = bool(preferred)
         if hold_ms is not None:
             params["hold_ms"] = int(hold_ms)
         if lease_ttl_ms is not None:

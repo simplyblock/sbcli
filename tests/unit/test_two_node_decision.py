@@ -22,12 +22,12 @@ A, B = "node-a", "node-b"
 
 
 def nv(node_id, *, unhealthy=False, healthy=False, state=LVS_NORMAL, reachable=True,
-       lease_age=None, fenced=False, preferred=False):
+       lease_age=None, fenced=False, spdk_lost=False):
     """A NodeView with one LVS (jm_vuid 3). lease_age: ms since the lease was granted."""
     exp = 0 if lease_age is None else NOW - lease_age + TTL
     return d.NodeView(node_id, reports_peer_unhealthy=unhealthy, reports_peer_healthy=healthy,
                       lvs_state={3: state}, reachable=reachable, lease_expires_at=exp,
-                      positively_fenced=fenced, preferred=preferred)
+                      positively_fenced=fenced, spdk_lost=spdk_lost)
 
 
 def snap(a, b, state=ARB_STEADY, leaders=None, healthy_since=0, healing_done=False):
@@ -43,9 +43,9 @@ def snap(a, b, state=ARB_STEADY, leaders=None, healthy_since=0, healing_done=Fal
     # uplink lost (CP reaches neither), JMs healthy: nothing (invariant 4)
     (nv(A, reachable=False, lease_age=10_000), nv(B, reachable=False, lease_age=10_000),
      d.V_NONE, ARB_STEADY, ""),
-    # partition: both report, both reachable -> leader of LVS 3 (A) wins
+    # partition: both report, both reachable -> fence_both, nobody wins
     (nv(A, unhealthy=True, state=LVS_HOLDING), nv(B, unhealthy=True, state=LVS_HOLDING),
-     d.V_PARTITION, ARB_PARTITIONED, A),
+     d.V_PARTITION, ARB_PARTITIONED, ""),
     # B down, lease expired beyond the margin -> grant A
     (nv(A, unhealthy=True, state=LVS_HOLDING),
      nv(B, reachable=False, lease_age=TTL + MARGIN + 1),
@@ -55,12 +55,19 @@ def snap(a, b, state=ARB_STEADY, leaders=None, healthy_since=0, healing_done=Fal
      d.V_WAIT, ARB_DECIDING, ""),
     # B reachable but its report not in yet -> wait, never half a picture
     (nv(A, unhealthy=True, state=LVS_HOLDING), nv(B), d.V_WAIT, ARB_DECIDING, ""),
-    # preferred B silent with expired lease -> wait for positive fencing (invariant 3)
+    # no preferred node: any silent peer with an expired lease -> grant A
     (nv(A, unhealthy=True, state=LVS_HOLDING),
-     nv(B, reachable=False, lease_age=60_000, preferred=True), d.V_WAIT, ARB_DECIDING, ""),
-    # preferred B positively fenced -> grant A
+     nv(B, reachable=False, lease_age=60_000), d.V_DEGRADED, ARB_DEGRADED, A),
+    # B positively fenced -> grant A
     (nv(A, unhealthy=True, state=LVS_HOLDING),
-     nv(B, reachable=False, lease_age=60_000, preferred=True, fenced=True),
+     nv(B, reachable=False, lease_age=60_000, fenced=True),
+     d.V_DEGRADED, ARB_DEGRADED, A),
+    # B's SPDK known gone (proxy HTTP 500 streak): grant A at once, lease still valid
+    (nv(A, unhealthy=True, state=LVS_HOLDING),
+     nv(B, reachable=False, lease_age=100, spdk_lost=True), d.V_DEGRADED, ARB_DEGRADED, A),
+    # ... even when B's last report before it died said its peer was unhealthy
+    (nv(A, unhealthy=True, state=LVS_HOLDING),
+     nv(B, unhealthy=True, reachable=False, lease_age=100, spdk_lost=True),
      d.V_DEGRADED, ARB_DEGRADED, A),
     # both links down: nobody reachable -> the nodes' deadline rule applies
     (nv(A, unhealthy=True, state=LVS_HOLDING, reachable=False),
@@ -74,14 +81,25 @@ def test_matrix(a, b, kind, state, winner):
     assert v.raise_epoch == (kind in (d.V_PARTITION, d.V_DEGRADED))
 
 
-def test_partition_fences_before_it_grants_and_splits_by_leader():
+def test_partition_fences_both_nodes_and_grants_nobody():
     a = d.NodeView(A, reports_peer_unhealthy=True, lvs_state={3: LVS_HOLDING, 4: LVS_HOLDING})
     b = d.NodeView(B, reports_peer_unhealthy=True, lvs_state={3: LVS_HOLDING, 4: LVS_HOLDING})
     v = d.decide(snap(a, b, leaders={3: A, 4: B}))
-    assert v.grant == {3: A, 4: B}
-    assert v.fence == {3: B, 4: A}
-    # two winners: no single cluster-level loser to taint
+    assert v.grant == {} and v.fence == {}
+    assert v.fence_all == {3: [A, B], 4: [A, B]}
     assert v.winner == "" and v.loser == ""
+
+
+def test_hold_deadline_has_no_preferred_survivor():
+    # both links down: the CP reaches neither; it never grants, the nodes fence
+    # themselves at the deadline (a full isolation stops IO on both)
+    v = d.decide(snap(nv(A, unhealthy=True, state=LVS_HOLDING, reachable=False, lease_age=60_000),
+                      nv(B, unhealthy=True, state=LVS_HOLDING, reachable=False, lease_age=60_000)))
+    assert v.kind == d.V_WAIT and v.grant == {}
+
+
+def test_nodeview_has_no_preferred_field():
+    assert "preferred" not in d.NodeView.__dataclass_fields__
 
 
 def test_degraded_never_grants_the_silent_node():
