@@ -629,6 +629,99 @@ def ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id,
     return final_backup_id
 
 
+#: Prefix on the name of the snapshot `backup_lvol` creates for itself.
+#: Fixed, and never influenced by a caller: a later cleanup pass that wants
+#: to find and prune a direct backup's own snapshot only gets to rely on a
+#: name shaped like this if nothing but `backup_lvol` ever produces one.
+DIRECT_BACKUP_SNAPSHOT_PREFIX = "_backup_"
+
+
+def _create_snapshot_and_back_up(lvol, snap_name: str) -> str:
+    """Create ``snap_name`` on ``lvol``, then back up its whole unbacked ancestry.
+
+    The shared core of `backup_lvol` (a direct user-requested backup) and
+    `backup.policy._auto_backup_lvol` (the scheduler's auto-backups): both
+    want "create a snapshot of this volume, then back it up" and nothing
+    more. The cluster is always the volume's own node's cluster -- derived
+    here, never taken from a caller -- so nothing can record this backup
+    under a cluster other than the one the snapshot actually lives in.
+    Refuses up front, via `chain_would_be_restorable`, if the chain the new
+    snapshot would join could never be restorable -- before taking it, so a
+    refusal never leaves an orphaned snapshot behind. The snapshot it creates
+    is then handed to `ensure_snapshot_chain_backed_up`, the function that
+    backs up an existing snapshot, rather than re-deriving that walk here: a
+    caller that already has a snapshot calls `backup_snapshot` directly and
+    this function is never on its path.
+
+    Takes the snapshot's name rather than generating one, because the two
+    callers use different, non-overridable naming schemes to stay tellable
+    apart afterwards (`auto_*` vs `DIRECT_BACKUP_SNAPSHOT_PREFIX`); neither
+    exposes this parameter to anything outside this package.
+
+    Returns the id of the backup covering the new snapshot.
+
+    Raises:
+        PreconditionError: the volume's node or cluster cannot be found or
+            used, or the chain would not be restorable.
+        RuntimeError: the snapshot itself could not be created -- a
+            data-plane failure, not a precondition, since every precondition
+            on taking it was already checked above.
+    """
+    from simplyblock_core.controllers import snapshot_controller
+
+    try:
+        node_id = lvol.node_id
+        snode = db_controller.get_storage_node_by_id(node_id)
+        if snode.status != StorageNode.STATUS_ONLINE:
+            raise PreconditionError(f"Node {node_id} is not online (status: {snode.status})")
+
+        cluster_id = snode.cluster_id
+
+        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
+        chain_would_be_restorable(
+            lvol, location, what=f"The backup chain of volume {lvol.lvol_name}")
+    except (KeyError, ValueError) as e:
+        raise PreconditionError(str(e)) from e
+
+    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
+    if error:
+        raise RuntimeError(error)
+
+    try:
+        snapshot = db_controller.get_snapshot_by_id(snap_id)
+    except KeyError as e:
+        raise RuntimeError(f"Snapshot {snap_id} not found right after creation: {e}") from e
+
+    return ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id, location)
+
+
+def backup_lvol(lvol_id) -> str:
+    """Create a backup directly from a volume, without an existing snapshot.
+
+    The snapshot taken to do this is named here, under
+    `DIRECT_BACKUP_SNAPSHOT_PREFIX`, and a caller has no way to influence that
+    name -- unlike a snapshot a user takes directly, this one exists purely
+    to serve this backup, and a future cleanup pass needs to be able to find
+    and prune it by that marker alone. The cluster it backs up into is
+    likewise never a caller's choice: it is always the volume's own node's
+    cluster (see `_create_snapshot_and_back_up`).
+
+    Returns the id of the backup covering the new snapshot.
+
+    Raises:
+        PreconditionError: the volume, its node or its cluster cannot be
+            found or used, or the chain would not be restorable.
+        RuntimeError: the snapshot itself could not be created.
+    """
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        raise PreconditionError(str(e)) from e
+
+    snap_name = f"{DIRECT_BACKUP_SNAPSHOT_PREFIX}{lvol.lvol_name}_{int(time.time())}"
+    return _create_snapshot_and_back_up(lvol, snap_name)
+
+
 def backup_snapshot(snapshot_id, cluster_id=None):
     """Create a backup from an existing snapshot.
 
