@@ -54,13 +54,13 @@ def _applied(db, obj):
 
 class TestGet:
 
-    def test_creates_the_record_with_the_lowest_node_id_preferred(self, client, db, two_nodes):
+    def test_creates_the_record_without_a_preferred_node(self, client, db, two_nodes):
         db.get_cluster_arbitration.return_value = None
         with patch.object(ClusterArbitration, 'write_to_db') as write:
             response = client.get(f'{BASE}/')
         assert response.status_code == 200
         body = response.json()
-        assert body['preferred_node'] == NODE_A
+        assert not body.get('preferred_node')
         assert body['fenced_taint'] == constants.TWO_NODE_FENCED_TAINT
         assert 'lease_age_ms' in body and 'enabled' in body
         write.assert_called_once()
@@ -79,13 +79,13 @@ class TestGet:
 
 class TestPreferred:
 
-    def test_sets_the_preferred_node_and_audits(self, client, db, record, audit):
+    def test_is_accepted_but_ignored(self, client, db, record, audit):
+        # Deprecated: there is no preferred node. Older operators still call
+        # it, so it answers 204 but stores and audits nothing.
         response = client.put(f'{BASE}/preferred', json={'node_id': NODE_B})
         assert response.status_code == 204
-        fresh = ClusterArbitration(record.to_dict())
-        _applied(db, fresh)
-        assert fresh.preferred_node == NODE_B
-        audit.assert_called_once()
+        db.atomic_update.assert_not_called()
+        audit.assert_not_called()
 
     def test_refuses_a_non_member(self, client, db, record):
         assert client.put(f'{BASE}/preferred', json={'node_id': 'node-x'}).status_code == 422

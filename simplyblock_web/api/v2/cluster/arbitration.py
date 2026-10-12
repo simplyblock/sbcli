@@ -30,7 +30,6 @@ def _record(cluster_id: str) -> ClusterArbitration:
             raise HTTPException(409, "Arbitration applies only to two-node clusters")
         rec = ClusterArbitration()
         rec.cluster_id = cluster_id
-        rec.preferred_node = nodes[0].get_id()
         rec.write_to_db(db.kv_store)
     return rec
 
@@ -52,17 +51,14 @@ class _Preferred(BaseModel):
     node_id: str
 
 
-@api.put('/preferred', name='clusters:arbitration:preferred', status_code=204)
+@api.put('/preferred', name='clusters:arbitration:preferred', status_code=204, deprecated=True)
 def set_preferred(cluster: Cluster, body: _Preferred) -> None:
-    """Choose the node that continues alone when neither the CP nor the peer is
-    reachable. Pushed to the nodes by the arbiter with ``jc_set_dual_node``."""
+    """Deprecated, ignored: there is no preferred node any more. At the hold
+    deadline without a verdict a node always fences itself, and a partition
+    fences both nodes. Accepted (204) so older operators keep working; nothing
+    is stored and nothing is pushed to the nodes."""
     if body.node_id not in {n.get_id() for n in _members(cluster.get_id())}:
         raise HTTPException(422, "node_id is not a member of this cluster")
-    rec = _record(cluster.get_id())
-    db.atomic_update(rec, lambda fresh: setattr(fresh, "preferred_node", body.node_id))
-    events_controller.log_event_cluster(
-        cluster.get_id(), events_controller.DOMAIN_CLUSTER, "TWO_NODE_PREFERRED", cluster,
-        events_controller.CAUSED_BY_API, f"Preferred node set to {body.node_id}")
 
 
 class _Override(BaseModel):

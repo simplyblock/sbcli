@@ -17,17 +17,19 @@ from collections.abc import Callable
 
 from simplyblock_core import constants
 from simplyblock_core.arbitration import decision as dec
+from simplyblock_core.arbitration import dual_node_params
 from simplyblock_core.arbitration import events as ev
 from simplyblock_core.models.arbitration import (
     ARB_HEALING,
     ARB_STEADY,
     LVS_FENCED,
     LVS_NORMAL,
+    LVS_SOLO,
     ArbitrationEvent,
     ClusterArbitration,
 )
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCRemoteError
+from simplyblock_core.rpc_client import RPCHTTPError, RPCRemoteError
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +48,13 @@ class Arbiter:
 
     def __init__(self, db, clock: Callable[[], int] = _now_ms,
                  readmit: Callable[[StorageNode], None] | None = None,
-                 log_event: Callable[[ArbitrationEvent, dict], None] | None = None):
+                 log_event: Callable[[ArbitrationEvent, dict], None] | None = None,
+                 reconcile_leadership: Callable | None = None):
         self.db = db
         self.clock = clock
         self.readmit = readmit or default_readmit
         self.log_event = log_event or default_log_event
+        self.reconcile_leadership = reconcile_leadership or default_reconcile_leadership
         #: node_id -> NodeSignals
         self.signals: dict = {}
         #: node_id -> ms of the last successful lease renewal
@@ -67,6 +71,20 @@ class Arbiter:
         self.undelivered: dict = {}
         #: clusters whose record was checked after this process started
         self.resumed: set = set()
+        #: node_id -> consecutive HTTP 500 answers from its SPDK proxy
+        self.http500_streak: dict = {}
+        #: node_id -> True once its SPDK is positively known gone (HTTP 500
+        #: streak); cleared only after the returning node has been fenced
+        self.spdk_lost: dict = {}
+        #: node_id -> ms of the last jc_ha_status reconciliation
+        self.reconciled_at: dict = {}
+        #: node ids whose view must be resynced from jc_ha_status at once
+        #: (reconnect, instance change, sequence gap)
+        self.needs_resync: set = set()
+        #: cluster_id -> ms of the last leadership reconciliation pass
+        self.leadership_checked_at: dict = {}
+        #: cluster_id -> LVS names seen leaderless on the previous pass
+        self.leaderless_seen: dict = {}
 
     # ---- membership ---------------------------------------------------------
 
@@ -87,7 +105,6 @@ class Arbiter:
         if rec is None:
             rec = ClusterArbitration()
             rec.cluster_id = cluster_id
-            rec.preferred_node = nodes[0].get_id()
             rec.state_since = self.clock()
             rec.write_to_db(self.db.kv_store)
         return rec
@@ -109,6 +126,14 @@ class Arbiter:
             event = dict(item.payload)
             event["instance"] = item.instance
             event.setdefault("seq", item.seq)
+            if not legacy and event.get("status") != ev.ST_RESYNC:
+                # The view is a mirror of the node, never an append-only log:
+                # a new instance or a gap in the sequence means events were
+                # lost (or the node restarted), so resync from jc_ha_status.
+                seq = int(event.get("seq") or 0)
+                if (sig.instance and item.instance != sig.instance) or \
+                        (sig.last_seq and seq > sig.last_seq + 1):
+                    self.needs_resync.add(item.node_id)
             # Legacy events were logged by the Python distr collector already.
             if ev.apply(sig, event) and not legacy:
                 self.log_event(item, event)
@@ -143,7 +168,7 @@ class Arbiter:
             reachable=self.reachable.get(nid, True),
             lease_expires_at=expires,
             positively_fenced=bool(node.remediation_fenced),
-            preferred=(nid == rec.preferred_node),
+            spdk_lost=bool(self.spdk_lost.get(nid)),
         )
 
     def snapshot(self, rec: ClusterArbitration, nodes: list) -> dec.Snapshot:
@@ -170,37 +195,195 @@ class Arbiter:
 
     def configure(self, rec: ClusterArbitration, node: StorageNode) -> None:
         """Push ``jc_set_dual_node`` with the arbitration fields once per node
-        instance (a restarted node comes back with defaults)."""
+        instance (a restarted node comes back with defaults), and again when
+        the node's ``jc_ha_status`` shows arbitration off (``reconcile``)."""
         nid = node.get_id()
         instance = (self.signals.get(nid) or ev.NodeSignals()).instance
         if self.configured.get(nid) == instance and nid in self.configured:
             return
-        node.rpc_client(timeout=3, retry=0).jc_set_dual_node(
-            True, preferred=(nid == rec.preferred_node),
-            hold_ms=constants.TWO_NODE_HOLD_MS, lease_ttl_ms=constants.TWO_NODE_LEASE_TTL_MS,
-            arbitration=True)
+        ret = node.rpc_client(timeout=3, retry=0).jc_set_dual_node(True, **dual_node_params(True))
+        if isinstance(ret, tuple) and len(ret) == 2 and ret[1]:
+            raise RuntimeError("jc_set_dual_node rejected: %s" % (ret[1],))
         self.configured[nid] = instance
 
-    def renew(self, rec: ClusterArbitration, node: StorageNode) -> None:
-        """One lease renewal. A failure only marks the node unreachable: it is
-        not a verdict (invariant 4)."""
+    def renew(self, rec: ClusterArbitration, node: StorageNode,
+              peer: StorageNode | None = None) -> None:
+        """One lease renewal. A transport failure only marks the node
+        unreachable: it is not a verdict (invariant 4). HTTP 500 from the
+        node's proxy is different: repeated, it is positive evidence that SPDK
+        is gone (``note_answer``).
+
+        A node marked lost that answers again is fenced for every LVS its peer
+        leads alone BEFORE it gets a lease again (``fence_returning_node``)."""
         nid = node.get_id()
+        if self.spdk_lost.get(nid) and not self.fence_returning_node(rec, node, peer):
+            return
         try:
             node.rpc_client(timeout=1, retry=0).jc_lease_renew(
                 rec.epoch, constants.TWO_NODE_LEASE_TTL_MS)
             self.lease_granted_at[nid] = self.clock()
-            self.reachable[nid] = True
+            self._mark_reachable(nid)
+            self.note_answer(nid, http500=False)
         except RPCRemoteError as e:
-            self.reachable[nid] = True
+            self._mark_reachable(nid)
+            self.note_answer(nid, http500=False)
             if e.code == -errno.ESTALE:
                 # The node saw a higher epoch than our record (arbiter failover
                 # mid-verdict): move past it before sending anything else.
                 self.raise_epoch(rec.cluster_id, at_least=self._seen_epoch(nid) + 1)
             else:
                 logger.warning("Lease renewal on %s failed: %s", nid, e)
+        except RPCHTTPError as e:
+            self.reachable[nid] = False
+            self.note_answer(nid, http500=(e.status_code == 500))
+            logger.debug("Lease renewal on %s: HTTP %s", nid, e.status_code)
         except Exception as e:                      # noqa: BLE001 - transport
             self.reachable[nid] = False
+            self.note_answer(nid, http500=False)
             logger.debug("Lease renewal on %s: node unreachable (%s)", nid, e)
+
+    def _mark_reachable(self, nid: str) -> None:
+        if self.reachable.get(nid) is False:
+            # Reconnected: whatever happened meanwhile, the view is resynced.
+            self.needs_resync.add(nid)
+        self.reachable[nid] = True
+
+    def note_answer(self, nid: str, http500: bool) -> None:
+        """Track HTTP 500 answers of a node's SPDK proxy.
+
+        The proxy answers 500 when it cannot reach SPDK on its socket, i.e. a
+        dead SPDK behind a running proxy (campaign c1: 01b, 02b). That is loss
+        of the node, like positive fencing: the peer may be granted at once.
+        One 500 alone can be a transient SPDK timeout (the proxy answers 500 on
+        those too), so it takes ``TWO_NODE_SPDK_DOWN_HTTP500_STREAK``
+        consecutive 500 answers (lease renewals and status polls alike); any
+        other outcome resets the streak.
+        """
+        if not http500:
+            self.http500_streak[nid] = 0
+            return
+        streak = self.http500_streak.get(nid, 0) + 1
+        self.http500_streak[nid] = streak
+        if streak >= int(constants.TWO_NODE_SPDK_DOWN_HTTP500_STREAK) and not self.spdk_lost.get(nid):
+            self.spdk_lost[nid] = True
+            logger.warning("Node %s: SPDK proxy answered HTTP 500 %d times in a row; "
+                           "SPDK counts as down (node lost)", nid, streak)
+
+    def fence_returning_node(self, rec: ClusterArbitration, node: StorageNode,
+                             peer: StorageNode | None) -> bool:
+        """A node marked lost (``spdk_lost``) answers again: before anything
+        else, fence it for every LVS its peer leads alone.
+
+        The LVS set comes from the peer's own, fresh ``jc_ha_status`` (never
+        from an accumulated view); only if the peer cannot be read, from the
+        solo grants in force in the record. Returns True when the node may be
+        treated as an ordinary member again: fenced; nothing to fence (a
+        transient 500 that never led to a grant); or a fresh SPDK that does not
+        know the LVS (ENOENT/EINVAL: restarted, so it cannot be a stale writer;
+        the restart flow re-admits it).
+        """
+        nid = node.get_id()
+        try:
+            # Cheap probe first: while the node is still gone, nothing else is
+            # done (no epoch is raised every renewal period).
+            node.rpc_client(timeout=1, retry=0).jc_ha_status()
+        except RPCRemoteError:
+            pass                                    # SPDK answers (e.g. EINVAL on a fresh one)
+        except Exception as e:                      # noqa: BLE001 - still gone
+            logger.debug("Lost node %s still not answering: %s", nid, e)
+            return False
+        vuids = self._peer_solo_lvs(rec, nid, peer)
+        if vuids:
+            fresh = self.raise_epoch(rec.cluster_id)
+            try:
+                node.rpc_client(timeout=5, retry=0).jc_fence(fresh.epoch, vuids)
+            except RPCRemoteError as e:
+                if e.code == -errno.ESTALE:
+                    self.raise_epoch(rec.cluster_id, at_least=self._seen_epoch(nid) + 1)
+                    return False
+                if e.code not in (-errno.ENOENT, -errno.EINVAL):
+                    logger.warning("Fencing returning node %s failed: %s", nid, e)
+                    return False
+                logger.info("Returning node %s does not know LVS %s (%s): restarted, "
+                            "nothing to fence", nid, vuids, e)
+            except Exception as e:                  # noqa: BLE001 - still gone
+                logger.debug("Returning node %s not reachable for the fence: %s", nid, e)
+                return False
+            else:
+                logger.warning("Returning node %s fenced for LVS %s at epoch %s (its peer "
+                               "leads them alone)", nid, vuids, fresh.epoch)
+
+                def put(f):
+                    for v in vuids:
+                        f.lvs_entry(v)["fenced_node"] = nid
+                self.db.atomic_update(fresh, put)
+                sig = self.signals.setdefault(nid, ev.NodeSignals())
+                for v in vuids:
+                    sig.lvs_state[v] = LVS_FENCED
+        self.spdk_lost.pop(nid, None)
+        self.http500_streak[nid] = 0
+        self.needs_resync.add(nid)
+        return True
+
+    def _peer_solo_lvs(self, rec: ClusterArbitration, nid: str, peer: StorageNode | None) -> list:
+        if peer is not None:
+            try:
+                status = peer.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
+                return sorted(int(x["jm_vuid"]) for x in status.get("lvs", [])
+                              if x.get("state") == LVS_SOLO)
+            except Exception as e:                  # noqa: BLE001 - fall back to the record
+                logger.debug("jc_ha_status on %s failed (%s); using the record", peer.get_id(), e)
+        peer_id = peer.get_id() if peer is not None else None
+        return sorted(int(e["jm_vuid"]) for e in rec.lvs
+                      if e.get("state") == LVS_SOLO and e.get("leader")
+                      and e.get("leader") != nid and (peer_id is None or e.get("leader") == peer_id))
+
+    def reconcile(self, node: StorageNode) -> bool:
+        """Replace this node's per-LVS view (holding/solo/fenced and remote-JM
+        health) with its ``jc_ha_status``.
+
+        Bookkeeping requirement (campaign c1, 08 run 1): the view is a mirror of
+        the node, never an append-only log of past events; an append-only view
+        fenced a legitimate survivor. Called every ``TWO_NODE_RECONCILE_MS``,
+        and at once after a reconnect, an instance change or a sequence gap.
+        Returns True when the view was replaced."""
+        nid = node.get_id()
+        try:
+            status = node.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
+        except RPCHTTPError as e:
+            self.note_answer(nid, http500=(e.status_code == 500))
+            return False
+        except Exception as e:                      # noqa: BLE001 - next poll retries
+            self.note_answer(nid, http500=False)
+            logger.debug("jc_ha_status on %s failed: %s", nid, e)
+            return False
+        self.note_answer(nid, http500=False)
+        sig = self.signals.setdefault(nid, ev.NodeSignals())
+        before = (sig.instance, dict(sig.lvs_state))
+        ev.apply(sig, {"status": ev.ST_RESYNC, "instance": str(status.get("instance", "")),
+                       "seq": int(status.get("seq", 0) or 0), "ha_status": status})
+        self.reconciled_at[nid] = self.clock()
+        self.needs_resync.discard(nid)
+        if before[1] != sig.lvs_state:
+            logger.info("Two-node view of %s reconciled from jc_ha_status: %s -> %s",
+                        nid, before[1], sig.lvs_state)
+        if before[0] and before[0] != sig.instance:
+            # New SPDK instance: it comes back with defaults, configure again.
+            self.configured.pop(nid, None)
+        if status.get("arbitration") is False:
+            # Something (an old restart flow) switched arbitration off.
+            self.configured.pop(nid, None)
+        return True
+
+    def reconcile_due(self, nodes: list) -> None:
+        now = self.clock()
+        for node in nodes:
+            nid = node.get_id()
+            if not self.capable.get(nid) or self.spdk_lost.get(nid):
+                continue
+            due = now - self.reconciled_at.get(nid, 0) >= int(constants.TWO_NODE_RECONCILE_MS)
+            if due or nid in self.needs_resync:
+                self.reconcile(node)
 
     def _seen_epoch(self, node_id: str) -> int:
         return (self.signals.get(node_id) or ev.NodeSignals()).epoch_seen
@@ -238,6 +421,9 @@ class Arbiter:
                 entry = fresh.lvs_entry(vuid)
                 entry.update(leader=winner, state="solo",
                              fenced_node=verdict.fence.get(vuid, ""), since=now)
+            for vuid, fenced in verdict.fence_all.items():
+                entry = fresh.lvs_entry(vuid)
+                entry.update(leader="", state="fenced", fenced_node=",".join(fenced), since=now)
             if verdict.loser and verdict.kind == dec.V_PARTITION:
                 if verdict.loser not in fresh.taint_requests:
                     fresh.taint_requests.append(verdict.loser)
@@ -247,6 +433,7 @@ class Arbiter:
                      "winner": verdict.winner, "loser": verdict.loser,
                      "grant": {str(k): v for k, v in verdict.grant.items()},
                      "fence": {str(k): v for k, v in verdict.fence.items()},
+                     "fence_all": {str(k): list(v) for k, v in verdict.fence_all.items()},
                      "reason": verdict.reason,
                      "signals": {"a": vars(snap.a), "b": vars(snap.b)}},
                     constants.TWO_NODE_VERDICT_HISTORY)
@@ -259,6 +446,10 @@ class Arbiter:
         fences: dict = {}
         for vuid, nid in verdict.fence.items():
             fences.setdefault(nid, []).append(int(vuid))
+        for vuid, nids in verdict.fence_all.items():
+            for nid in nids:
+                if int(vuid) not in fences.setdefault(nid, []):
+                    fences[nid].append(int(vuid))
         for nid, vuids in fences.items():
             try:
                 by_id[nid].rpc_client(timeout=5, retry=0).jc_fence(rec.epoch, sorted(vuids))
@@ -331,7 +522,8 @@ class Arbiter:
             rec = self.record(cluster.get_id(), nodes)
             for node in nodes:
                 if self.probe(node):
-                    self.renew(rec, node)
+                    peer = nodes[1] if node is nodes[0] else nodes[0]
+                    self.renew(rec, node, peer)
 
     def tick(self) -> None:
         for cluster in self.db.get_clusters():
@@ -345,6 +537,9 @@ class Arbiter:
     def tick_cluster(self, cluster_id: str, nodes: list) -> dec.Verdict | None:
         rec = self.record(cluster_id, nodes)
         self.consume_events(cluster_id)
+        # The per-node view is reconciled from jc_ha_status before anything
+        # decides on it (bookkeeping requirement, campaign c1).
+        self.reconcile_due(nodes)
         for node in nodes:
             if self.capable.get(node.get_id()):
                 try:
@@ -390,7 +585,48 @@ class Arbiter:
         if rec.state == ARB_HEALING:
             self.heal(rec, nodes)
         self.persist_leases(rec)
+        self.maybe_reconcile_leadership(cluster_id, nodes)
         return verdict
+
+    def maybe_reconcile_leadership(self, cluster_id: str, nodes: list) -> None:
+        """B6: restore a lost LVS leadership once the pair is steady again.
+
+        After fence -> resync -> unfence an LVS can be left without a leader on
+        either node; the restart/creation/activation flows are the only other
+        places that restore it. Every ``TWO_NODE_LEADERSHIP_RECONCILE_S``,
+        while the arbitration state is steady (no verdict in force, no healing
+        under way), each node's primary LVS is checked; one found leaderless on
+        two consecutive passes is handed to ``reconcile_leadership`` (the
+        guarded leaderless-recovery path in storage_node_ops), never to an
+        ad-hoc leadership RPC. A primary whose own HA state for the LVS is
+        fenced or holding, or whose peer leads it solo, is left alone."""
+        now = self.clock()
+        last = self.leadership_checked_at.get(cluster_id, 0)
+        if now - last < int(constants.TWO_NODE_LEADERSHIP_RECONCILE_S) * 1000:
+            return
+        self.leadership_checked_at[cluster_id] = now
+        rec = self.db.get_cluster_arbitration(cluster_id)
+        if rec is None or rec.state != ARB_STEADY:
+            self.leaderless_seen.pop(cluster_id, None)
+            return
+        blocked = set()
+        for node in nodes:
+            sig = self.signals.get(node.get_id()) or ev.NodeSignals()
+            for vuid, state in sig.lvs_state.items():
+                if state != LVS_NORMAL:
+                    blocked.add(int(vuid))
+        try:
+            restored, leaderless = self.reconcile_leadership(
+                cluster_id, nodes, skip_jm_vuids=blocked,
+                confirmed=self.leaderless_seen.get(cluster_id, set()))
+        except Exception as e:                      # noqa: BLE001 - next pass retries
+            logger.warning("Leadership reconciliation for %s failed: %s", cluster_id, e)
+            return
+        self.leaderless_seen[cluster_id] = set(leaderless) - set(restored)
+        if restored:
+            def put(fresh):
+                fresh.leadership_restored_at = now
+            self.db.atomic_update(rec, put)
 
     def apply_override(self, rec: ClusterArbitration, nodes: list) -> dec.Verdict:
         """The operator decided (section 7.4): the named node leads every LVS.
@@ -437,6 +673,7 @@ class Arbiter:
             winner=last.get("winner", ""), loser=last.get("loser", ""),
             grant={int(k): v for k, v in (last.get("grant") or {}).items()},
             fence={int(k): v for k, v in (last.get("fence") or {}).items()},
+            fence_all={int(k): list(v) for k, v in (last.get("fence_all") or {}).items()},
             reason="re-sent after arbiter restart")
         fresh = self.raise_epoch(rec.cluster_id)
         logger.warning("Arbiter resumed cluster %s in %s; re-sending verdict at epoch %s",
@@ -484,6 +721,13 @@ def default_readmit(node: StorageNode) -> None:
     storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE,
                                      caused_by="two-node-arbiter")
     tasks_controller.add_node_to_auto_restart(node)
+
+
+def default_reconcile_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=()):
+    """See ``storage_node_ops.reconcile_lvs_leadership``."""
+    from simplyblock_core import storage_node_ops
+    return storage_node_ops.reconcile_lvs_leadership(
+        cluster_id, nodes, skip_jm_vuids=skip_jm_vuids, confirmed=confirmed)
 
 
 #: Events that mean the node lost its peer or stopped serving; logged as warnings.

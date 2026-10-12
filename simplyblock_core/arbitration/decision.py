@@ -44,8 +44,10 @@ class NodeView:
     lease_expires_at: int = 0
     #: Positive fencing evidence from the operator (BMC fence, out-of-service taint).
     positively_fenced: bool = False
-    #: The node is the cluster's preferred node.
-    preferred: bool = False
+    #: Positive evidence that the node's SPDK is gone: its proxy answered HTTP
+    #: 500 on ``TWO_NODE_SPDK_DOWN_HTTP500_STREAK`` consecutive calls (the proxy
+    #: runs, the SPDK socket behind it does not). Counts as loss of the node.
+    spdk_lost: bool = False
 
     def holding(self) -> bool:
         return any(s == LVS_HOLDING for s in self.lvs_state.values())
@@ -80,6 +82,8 @@ class Verdict:
     grant: dict = field(default_factory=dict)
     #: jm_vuid -> node to fence.
     fence: dict = field(default_factory=dict)
+    #: jm_vuid -> [node ids] to fence; a partition (fence_both) fences both.
+    fence_all: dict = field(default_factory=dict)
     reason: str = ""
 
 
@@ -93,14 +97,14 @@ def _lease_expired(node: NodeView, now_ms: int, margin_ms: int) -> bool:
 def _peer_is_fenced(peer: NodeView, now_ms: int, margin_ms: int) -> bool:
     """May the OTHER node be granted solo operation?
 
-    Invariant 3: the preferred node going silent is never enough -- only
-    positive fencing counts for it. For the non-preferred node an expired lease
-    (it must have fenced itself at its hold deadline) is enough.
+    There is no preferred node: every node fences itself at its hold deadline
+    without a verdict, and on lease expiry while holding. So the peer counts as
+    fenced once its lease has run out (plus the margin), at once when its SPDK
+    is positively known to be gone (``spdk_lost``), or on positive fencing
+    evidence from the operator.
     """
-    if peer.positively_fenced:
+    if peer.positively_fenced or peer.spdk_lost:
         return True
-    if peer.preferred:
-        return False
     return (not peer.reachable) and _lease_expired(peer, now_ms, margin_ms)
 
 
@@ -111,25 +115,17 @@ def _all_lvs(snap: Snapshot) -> list:
 
 def _partition_verdict(snap: Snapshot) -> Verdict:
     """Both nodes report each other and both are reachable: a cut link between
-    them. Per LVS the current leader wins (default rule); the loser of each LVS
-    is fenced before the winner is granted."""
-    grant, fence = {}, {}
-    nodes = {snap.a.node_id, snap.b.node_id}
-    for vuid in _all_lvs(snap):
-        leader = snap.leaders.get(vuid) or snap.leaders.get(str(vuid))
-        if leader not in nodes:
-            # Unknown leader: prefer the preferred node, else node a (stable).
-            leader = snap.a.node_id if snap.a.preferred or not snap.b.preferred else snap.b.node_id
-        other = snap.b.node_id if leader == snap.a.node_id else snap.a.node_id
-        grant[vuid] = leader
-        fence[vuid] = other
-    winners = set(grant.values())
-    winner = winners.pop() if len(winners) == 1 else ""
-    loser = ""
-    if winner:
-        loser = snap.b.node_id if winner == snap.a.node_id else snap.a.node_id
-    return Verdict(V_PARTITION, ARB_PARTITIONED, raise_epoch=True, winner=winner, loser=loser,
-                   grant=grant, fence=fence, reason="both nodes report each other; both reachable")
+    them, both alive and both still renewing.
+
+    Policy ``fence_both`` (user decision, campaign c1): IO stops on a
+    partition. Every LVS is fenced on BOTH nodes and nobody is granted; there
+    is no preferred node and no leader-wins rule. Healing (section 8) brings
+    the pair back once the link is healthy again."""
+    vuids = _all_lvs(snap)
+    fence_all = {v: [snap.a.node_id, snap.b.node_id] for v in vuids}
+    return Verdict(V_PARTITION, ARB_PARTITIONED, raise_epoch=True,
+                   fence_all=fence_all,
+                   reason="both nodes report each other; both reachable: fence_both")
 
 
 def _degraded_verdict(snap: Snapshot, survivor: NodeView, dead: NodeView, reason: str) -> Verdict:
@@ -154,22 +150,24 @@ def _deciding(snap: Snapshot) -> Verdict:
 
     # Only one side speaks: the silent one is down or isolated.
     for survivor, dead in ((a, b), (b, a)):
-        if survivor.reports_peer_unhealthy and survivor.reachable and not dead.reports_peer_unhealthy:
+        # A node whose SPDK is known gone reports nothing any more; what it
+        # reported before it died is stale.
+        dead_reports = dead.reports_peer_unhealthy and not dead.spdk_lost
+        if survivor.reports_peer_unhealthy and survivor.reachable and not dead_reports:
             if _peer_is_fenced(dead, now, margin):
                 why = ("positive fencing" if dead.positively_fenced
+                       else "peer SPDK down (proxy HTTP 500)" if dead.spdk_lost
                        else "peer silent and its lease expired")
                 return _degraded_verdict(snap, survivor, dead, why)
             if dead.reachable:
                 # Reachable but not (yet) reporting: its event may still be on
                 # the way. Wait for it, never decide on half the picture.
                 return Verdict(V_WAIT, ARB_DECIDING, reason="peer reachable; its report is pending")
-            if dead.preferred:
-                return Verdict(V_WAIT, ARB_DECIDING,
-                               reason="preferred node silent; waiting for positive fencing")
             return Verdict(V_WAIT, ARB_DECIDING, reason="waiting for the peer's lease to expire")
 
     # Nobody reachable that reports: both links (or the CP's uplink) are down.
-    # The preferred-node rule runs on the nodes themselves at the hold deadline.
+    # The nodes fence themselves at the hold deadline: a full isolation stops
+    # IO on both nodes.
     return Verdict(V_WAIT, ARB_DECIDING,
                    reason="no reachable node reports; the nodes apply the hold-deadline rule")
 
