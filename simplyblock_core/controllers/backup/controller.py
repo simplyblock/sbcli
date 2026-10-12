@@ -633,7 +633,43 @@ def ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id,
 #: Fixed, and never influenced by a caller: a later cleanup pass that wants
 #: to find and prune a direct backup's own snapshot only gets to rely on a
 #: name shaped like this if nothing but `backup_lvol` ever produces one.
+#: Leading underscore so it cannot collide with a name a user supplies -- see
+#: `is_reserved_snapshot_name`, which every entry point taking a
+#: user-supplied snapshot name checks to enforce that.
 DIRECT_BACKUP_SNAPSHOT_PREFIX = "_backup_"
+
+#: Prefix on the name of the snapshot the scheduler's auto-backups create for
+#: themselves (`backup.policy._auto_backup_lvol`). Reserved for the same
+#: reason as `DIRECT_BACKUP_SNAPSHOT_PREFIX`.
+SCHEDULED_BACKUP_SNAPSHOT_PREFIX = "auto_"
+
+#: Every prefix a user-supplied snapshot name must not start with.
+RESERVED_SNAPSHOT_NAME_PREFIXES = (
+    DIRECT_BACKUP_SNAPSHOT_PREFIX,
+    SCHEDULED_BACKUP_SNAPSHOT_PREFIX,
+)
+
+#: Shared wording for every entry point's rejection of a reserved name, so
+#: the message is one string to update rather than one per entry point.
+RESERVED_SNAPSHOT_NAME_ERROR = (
+    f"Snapshot name must not start with any of {RESERVED_SNAPSHOT_NAME_PREFIXES} "
+    "(reserved for backups created by the system)"
+)
+
+
+def is_reserved_snapshot_name(name: str) -> bool:
+    """Whether ``name`` collides with a prefix reserved for the backup
+    subsystem's own snapshots.
+
+    A predicate, not a check: an entry point that takes a snapshot name from
+    a caller (CLI, v1, v2) decides what to do with a collision itself -- a
+    printed error, an HTTP response, a pydantic validator -- rather than this
+    function raising the same way for all of them. Never consulted inside
+    `snapshot_controller.add` itself, since the subsystem's own internal
+    callers (`backup_lvol`, `backup.policy._auto_backup_lvol`) go through
+    that same function to create exactly these reserved names.
+    """
+    return name.startswith(RESERVED_SNAPSHOT_NAME_PREFIXES)
 
 
 def _create_snapshot_and_back_up(lvol, snap_name: str) -> str:

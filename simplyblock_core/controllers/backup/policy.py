@@ -302,7 +302,7 @@ def _auto_backup_lvol(lvol):
     entry point, which pins a different, non-overridable name of its own.
     See its docstring for the restorability pre-check and chain walk.
     """
-    snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
+    snap_name = f"{backup_controller.SCHEDULED_BACKUP_SNAPSHOT_PREFIX}{lvol.lvol_name}_{int(time.time())}"
     try:
         backup_controller._create_snapshot_and_back_up(lvol, snap_name)
     except (PreconditionError, RuntimeError) as e:
