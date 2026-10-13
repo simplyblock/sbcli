@@ -1078,6 +1078,21 @@ TWO_NODE_JM_RECONNECT_S = 30
 TWO_NODE_PARTITION_RESTART_AFTER_S = 120
 #: How often the link between the two nodes is probed while partitioned.
 TWO_NODE_LINK_PROBE_S = 10
+#: Campaign c3 (02a): lease renewals and jc_ha_status polls run on a bounded
+#: pool, one call per node in flight, so a frozen node (each call blocks for
+#: its full timeout) never delays the renewal of, or a decision about, its
+#: peer. The decision itself stays on the decision loop.
+TWO_NODE_RPC_WORKERS = 4
+#: How long a tick waits for the status polls it started before it decides on
+#: what has arrived; a poll still running is applied on a later tick.
+TWO_NODE_POLL_WAIT_MS = 150
+#: Campaign c3 (F10): after a node is re-admitted (it was fenced while its
+#: peer may have written alone), the arbiter schedules the data rebuild and
+#: checks every this many seconds whether it has finished ...
+TWO_NODE_REBUILD_CHECK_S = 5
+#: ... and schedules it again this often while nothing was queued (e.g. the
+#: node was not ONLINE yet).
+TWO_NODE_REBUILD_SCHEDULE_RETRY_S = 30
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60

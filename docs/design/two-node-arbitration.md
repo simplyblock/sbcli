@@ -268,6 +268,21 @@ answered `EAGAIN` until the peer's JM was healthy). The 10 s rule-removal poller
 (`spdk_lvs_remove_rules_poller`) only lifts a hublvol-port rule; it never lifts the client-port
 rule of a fenced LVS (invariant 6).
 
+Who lifts the client-port block (campaign c3, F8 and 03):
+
+- The fence records the block it owns, and `jc_unfence` lifts it (SPDK #76). A block the CP set
+  before the fence is kept. A block the CP sets while the LVS is **already fenced** is
+  indistinguishable from the fence's own and is lifted by the unfence.
+- The CP restart flow therefore never unblocks a port on a two-node peer whose own HA state for
+  that LVS is fenced or holding: the fence owns it (`storage_node_ops._may_unblock_peer_port`,
+  at the abort, attach-retry, success and recreate unblock sites). Unknown HA state keeps the
+  port blocked.
+- On its failure paths (restart abort, attach-retry gap, the defensive unblock after a failed
+  recreate) it also keeps the port of a peer marked for a data rebuild (section 7.10) blocked.
+  In c3/03 the defensive unblock opened the stale node's port 4426; 70 ms later that node took
+  over LVS_6 on new IO, could not read an md stripe and aborted. The successful restart's own
+  unblock still opens it: the up-to-date node is then back.
+
 ## 7. Arbiter (sbcli)
 
 ### 7.1 State machine (per cluster)
@@ -282,7 +297,8 @@ rule of a fenced LVS (invariant 6).
 | degraded | degraded | a lost node answers again: raise epoch, `jc_fence` it for every LVS its peer leads alone, before its next lease renewal |
 | partitioned, degraded | healing | both report `remote_jm_healthy` and stay healthy for `stable_for_s` |
 | partitioned | partitioned | link between the nodes answers again but the remote JMs stay unavailable: reconnect them, then hand one node to the restart flow (section 7.9) |
-| healing | steady | resync gate passed, restart flow done, `jc_unfence` done, optional failback done; remove the taint |
+| healing | steady | resync gate passed, restart flow done, `jc_unfence` done, **data rebuild finished** (section 7.10), optional failback done; remove the taint |
+| any | (unchanged) | the only up-to-date node is lost while its peer's data rebuild is pending: verdict `unavailable`, **nobody is granted** (section 7.10) |
 
 The arbiter writes the new epoch and the verdict to FDB in one transaction **before** sending
 any verdict RPC. On restart or CP failover it reloads `ClusterArbitration`, raises the epoch and
@@ -306,14 +322,26 @@ One record per cluster, key `{cluster_id}`, model in `simplyblock_core/models/`:
 `fence_all`. `leadership_restored_at` is the time of the last leadership reconciliation
 (section 7.7). `planned_loss` holds the CP-initiated losses in progress (section 7.8):
 `{node_id: {"at": ms, "instance": "...", "reason": "restart"}}`. Each verdict records the state
-it was decided in (`from_state`); the heal uses it (section 8). `preferred_node` is deprecated: stored records keep loading, the field is
-ignored and never written.
+it was decided in (`from_state`); the heal uses it (section 8). `rebuild` lists the nodes whose
+data rebuild is pending (section 7.10): `{node_id: {"reason": "...", "since": ms,
+"scheduled_at": ms, "queued": bool}}`; `data_unavailable` is set while the only up-to-date
+node is lost: `{"node": stale node, "since": ms, "reason": "..."}`. `preferred_node` is
+deprecated: stored records keep loading, the field is ignored and never written.
 
 ### 7.3 Lease renewal
 
 The arbiter renews each node's lease every `lease_renew_ms` with `jc_lease_renew`, as long as
 the node is reachable. A failed renewal is not a verdict: it only matters if the node is holding
 (invariant 4).
+
+Renewals and `jc_ha_status` polls run on a bounded pool (`rpc_workers`), at most one call per
+node in flight (campaign c3, 02a). Every call to a frozen node blocks for its whole timeout;
+made in turn, they delayed the renewal of, and the decision about, its peer (02a: grant at
++2.66 s instead of about +1.9 s). A tick waits at most `poll_wait_ms` for the polls it started
+and applies, in node order and on the decision loop, the answers that have arrived; a poll still
+running is applied on a later tick and never started twice. The capability probe runs on the
+pool too. Decisions stay single-threaded and deterministic. Expected grant for a frozen peer:
+last renewal + `lease_ttl_ms` + `lease_margin_ms`, plus at most one decision tick.
 
 ### 7.4 CP API
 
@@ -427,12 +455,48 @@ Rules:
   the second member) to the restart flow, once per partition. Probes and reconnects run off the
   decision loop. Healthy remote JMs then lead to the ordinary heal (section 8).
 
+### 7.10 Data rebuild after re-admission (campaign c3, F10)
+
+In c3, 02b re-admitted the frozen node by `jc_unfence` alone; no rebuild task was queued, so the
+stripes its peer wrote alone existed on the peer only. In 03 the peer rebooted, the stale node
+took over its LVS on new IO, could not read an md stripe and aborted: EIO on the client.
+
+- **Mark.** When the arbiter grants a survivor (`degraded` verdict), the loser is marked in
+  `rebuild`: from that moment the winner writes alone, so the loser lacks those writes whichever
+  way it comes back (unfence after the heal, self-fence re-admission in section 7.9, restart
+  flow). Every re-admission marks the node as well (idempotent). A partition (`fence_both`)
+  grants nobody and marks nobody.
+- **Queue.** Once the marked node is back (ONLINE in the DB, reachable, no LVS fenced or holding)
+  the arbiter queues the rebuild a node restart queues
+  (`tasks_controller.add_device_mig_task_for_node`). Never earlier: a rebuild that runs while the
+  node is still away would finish before the writes it is meant to copy have stopped. Tasks the
+  restart flow already queued count as queued.
+- **Finish.** The mark is cleared only when tasks were queued (or found open) and none is open any
+  more; "no open tasks" alone is not "rebuilt" (that is what made c3's 02b heal report "rebuild
+  complete" without ever starting one). Nothing queued: retried every `rebuild_schedule_retry_s`.
+  Progress is checked every `rebuild_check_s`.
+- **Not redundant meanwhile.** Until the mark is cleared:
+  - the marked node is **never granted solo**. If the up-to-date node is lost meanwhile, the
+    verdict is `unavailable`: nobody is granted, the stale node fences itself at its hold
+    deadline, `data_unavailable` is recorded and logged as an error once per episode, and the
+    volumes stay unavailable until the up-to-date node returns. This is a double fault inside
+    the rebuild window (beyond FTT 1); availability is traded for never serving reads the stale
+    node cannot answer.
+  - `healing` does not finish; the leadership reconciliation (section 7.7) also runs in
+    `healing` while only the rebuild is outstanding, because the rebuild runners defer on "not
+    the leader".
+  - `GET .../arbitration` reports `rebuild_pending` (node ids) and `redundant: false`.
+
+The restart flow itself queues the same rebuild after a restart; the mark adds the gate (no grant,
+no finished heal) that the restart flow does not have.
+
 ## 8. Healing and re-admission
 
 1. Both nodes report `remote_jm_healthy`; after `stable_for_s` the arbiter enters `healing`.
-2. Resync gate: JC replicates the missing journal to the returning JM; distrib rebuilds the
-   writes the fenced node missed. `jc_unfence` returns `EAGAIN` until the gate passes (section
-   3.5: remote reconnected on a follower, in sync on the leader).
+2. Resync gate: JC replicates the missing journal to the returning JM. `jc_unfence` returns
+   `EAGAIN` until the gate passes (section 3.5: remote reconnected on a follower, in sync on the
+   leader). The data the fenced node missed is rebuilt by the rebuild tasks the arbiter queues
+   once it is back (section 7.10); the heal finishes only after they have.
 3. After a **partition** (`fence_both`, the heal verdict's `from_state`), nobody was granted and
    no node wrote alone: the heal is `jc_unfence` on both (the leader re-levels its journal by
    itself, step 4) and the leadership reconciliation in `steady` (section 7.7); no node goes
@@ -512,6 +576,10 @@ setting brings that below KATO.
 | `jm_reconnect_s` | 30 | arbiter, remote JM reconnect while partitioned (section 7.9) |
 | `partition_restart_after_s` | 120 | arbiter, link up but JMs unavailable before the restart flow (section 7.9) |
 | `jc_compression` precheck retry | 60 s | restart flow, while the leader re-levels the returning JM (section 8.1) |
+| `rpc_workers` | 4 | arbiter, pool for renewals and status polls (section 7.3) |
+| `poll_wait_ms` | 150 | arbiter, longest wait of a tick for its status polls (section 7.3) |
+| `rebuild_check_s` | 5 | arbiter, rebuild progress check (section 7.10) |
+| `rebuild_schedule_retry_s` | 30 | arbiter, re-queue when nothing was queued (section 7.10) |
 | client keep-alive | 4 s | connect parameters of arbitrated clusters (section 9.1) |
 | `wait_timeout_ms` | 20000 | collector, `jc_wait_events` |
 | event ring | 1024 events | node |

@@ -12617,7 +12617,9 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             logger.error("Failed to kill SPDK during abort: %s", ke)
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
                         caused_by="restart_cleanup")
-        if leader_port_blocked:
+        if leader_port_blocked and _may_unblock_peer_port(
+                leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                "Restart abort"):
             try:
                 port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=0.5, retry=2)
                 _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
@@ -12976,7 +12978,9 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                         "unblock leader, wait %ds, re-block and retry",
                         attempt, ATTACH_MAX_ATTEMPTS, snode.get_id(),
                         primary_node.lvstore, ATTACH_RETRY_GAP_SEC)
-                    if leader_port_blocked:
+                    if leader_port_blocked and _may_unblock_peer_port(
+                            leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                            "Attach-retry gap"):
                         try:
                             port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
                             _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
@@ -13008,6 +13012,13 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             # serve client IO on that LVS. Retry until it lands; schedule a
             # port_allow task as a fallback if we still can't reach the leader
             # after our attempts so another retry loop keeps trying.
+            if leader_port_blocked and not _may_unblock_peer_port(
+                    leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                    "Restart done", rebuild_too=False):
+                # The leader's LVS is fenced: the fence owns the block and the
+                # unfence lifts it (two-node, F8); no port_allow task either.
+                leader_port_blocked = False
+                _mark_leader_unblocked()
             if leader_port_blocked:
                 unblocked = False
                 attempts = 3
@@ -13118,6 +13129,58 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             pass
 
 
+def _two_node_peer_port_must_stay_blocked(peer, jm_vuid, db_controller, rebuild_too=True):
+    """Why a defensive unblock must not open ``peer``'s LVS port, or "".
+
+    Two-node arbitration only (campaign c3, 03: the restart flow's defensive
+    unblock opened the stale node's port 4426; 70 ms later it took over LVS_6
+    on new IO, could not read an md stripe and aborted, and the client got
+    EIO). The port stays blocked while:
+
+    - the arbiter has the peer marked for a data rebuild (``rebuild``): it
+      lacks writes its partner took alone and must not serve them;
+    - the peer's own HA state for the LVS is fenced or holding: the block
+      belongs to the fence (``spdk_lvs_ha_unfence`` lifts it), not to the
+      restart flow.
+
+    Unknown state (no record, the status call fails) leaves the port blocked on
+    an arbitrated cluster: opening it is what is unsafe.
+
+    ``rebuild_too=False`` (a restart that succeeded, so the up-to-date node is
+    back): only the fence check applies. A block the restart flow set while the
+    LVS was already fenced is lifted by ``spdk_lvs_ha_unfence`` (SPDK #76, F8),
+    so skipping the unblock here never strands it."""
+    try:
+        cluster = db_controller.get_cluster_by_id(peer.cluster_id)
+    except Exception:                               # noqa: BLE001 - not arbitrated then
+        return ""
+    if getattr(cluster, "two_node_arbitration", False) is not True:
+        return ""
+    try:
+        rec = db_controller.get_cluster_arbitration(peer.cluster_id)
+    except Exception as e:                          # noqa: BLE001
+        return "arbitration record unreadable (%s)" % (e,)
+    if rebuild_too and rec is not None and peer.get_id() in (rec.rebuild or {}):
+        return "data rebuild after re-admission pending"
+    try:
+        status = peer.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
+    except Exception as e:                          # noqa: BLE001
+        return "HA state unknown (%s)" % (e,)
+    for entry in status.get("lvs") or []:
+        if jm_vuid and int(entry.get("jm_vuid", -1)) == int(jm_vuid)                 and entry.get("state") in ("fenced", "holding"):
+            return "LVS %s is %s on the peer" % (jm_vuid, entry.get("state"))
+    return ""
+
+
+def _may_unblock_peer_port(peer, port, jm_vuid, db_controller, why, rebuild_too=True):
+    """False (and a warning) when a two-node peer's port must stay blocked."""
+    keep = _two_node_peer_port_must_stay_blocked(peer, jm_vuid, db_controller, rebuild_too)
+    if keep:
+        logger.warning("%s: port %s on %s left blocked: %s", why, port, peer.get_id(), keep)
+        return False
+    return True
+
+
 def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
     """Best-effort release of an LVS subsystem port on every replica peer.
 
@@ -13146,6 +13209,10 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
         try:
             peer = db_controller.get_storage_node_by_id(pid)
             if not peer or peer.status != StorageNode.STATUS_ONLINE:
+                continue
+            if not _may_unblock_peer_port(peer, port, lvs_node.jm_vuid, db_controller,
+                                          "Defensive unblock after failed recreate of %s"
+                                          % lvs_node.lvstore):
                 continue
             port_block.set_port(peer, port, block=False, timeout=0.5, retry=2)
             tcp_ports_events.port_allowed(peer, port)
@@ -13617,6 +13684,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         other peers can still be unblocked."""
         if peer in blocked_peers:
             _warn_if_unblocking_a_non_leader(peer)
+        if not _may_unblock_peer_port(peer, snode_lvs_port, snode.jm_vuid, db_controller,
+                                      "Recreate LVS", rebuild_too=False):
+            try:
+                blocked_peers.remove(peer)
+            except ValueError:
+                pass
+            return
         try:
             port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))

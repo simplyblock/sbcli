@@ -44,6 +44,10 @@ def get(cluster: Cluster) -> dict:
     out["lease_age_ms"] = {nid: now - int(lease.get("granted_at", 0))
                            for nid, lease in rec.leases.items()}
     out["fenced_taint"] = constants.TWO_NODE_FENCED_TAINT
+    # Campaign c3, F10: a node re-admitted after a fence is not a full replica
+    # until its data rebuild has finished.
+    out["rebuild_pending"] = sorted(rec.rebuild or {})
+    out["redundant"] = not rec.rebuild and not rec.data_unavailable
     return out
 
 

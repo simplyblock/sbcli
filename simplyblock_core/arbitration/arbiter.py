@@ -15,6 +15,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ALL_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from simplyblock_core import constants
 from simplyblock_core.arbitration import decision as dec
@@ -26,6 +27,7 @@ from simplyblock_core.models.arbitration import (
     ARB_PARTITIONED,
     ARB_STEADY,
     LVS_FENCED,
+    LVS_HOLDING,
     LVS_NORMAL,
     LVS_SOLO,
     ArbitrationEvent,
@@ -35,6 +37,28 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCHTTPError, RPCRemoteError
 
 logger = logging.getLogger(__name__)
+
+
+class InlinePool:
+    """Runs a submitted call at once, in the caller's thread.
+
+    The default for ``Arbiter(rpc_pool=...)``: deterministic, so unit tests see
+    every renewal and status poll complete before ``tick`` decides. The service
+    passes ``rpc_pool()`` (a bounded thread pool) instead."""
+
+    def submit(self, fn, *args, **kwargs) -> Future:
+        fut: Future = Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except Exception as e:                      # noqa: BLE001 - delivered via the future
+            fut.set_exception(e)
+        return fut
+
+
+def rpc_pool() -> ThreadPoolExecutor:
+    """The bounded pool the service runs node RPCs on (campaign c3, 02a)."""
+    return ThreadPoolExecutor(max_workers=int(constants.TWO_NODE_RPC_WORKERS),
+                              thread_name_prefix="arbiter-rpc")
 
 
 def _now_ms() -> int:
@@ -55,7 +79,10 @@ class Arbiter:
                  reconcile_leadership: Callable | None = None,
                  link_probe: Callable | None = None,
                  reconnect_jms: Callable | None = None,
-                 run_async: Callable | None = None):
+                 run_async: Callable | None = None,
+                 rpc_pool=None,
+                 schedule_rebuild: Callable | None = None,
+                 open_rebuild_tasks: Callable | None = None):
         self.db = db
         self.clock = clock
         self.readmit = readmit or default_readmit
@@ -68,6 +95,17 @@ class Arbiter:
         self.reconnect_jms = reconnect_jms or default_reconnect_jms
         #: Runs slow recovery work (pings, reconnects) off the decision loop.
         self.run_async = run_async or _run_in_thread
+        #: Runs lease renewals and status polls; one call per node in flight
+        #: (campaign c3, 02a). InlinePool by default (deterministic tests).
+        self.rpc_pool = rpc_pool or InlinePool()
+        #: (kind, node_id) -> Future of a renewal or status poll still running
+        self.inflight: dict = {}
+        #: node -> bool: queue the data rebuild after a re-admission (F10)
+        self.schedule_rebuild = schedule_rebuild or default_schedule_rebuild
+        #: cluster_id -> number of open data-rebuild (migration) tasks
+        self.open_rebuild_tasks = open_rebuild_tasks or default_open_rebuild_tasks
+        #: cluster_id -> ms of the last rebuild progress check
+        self.rebuild_checked_at: dict = {}
         #: node_id -> NodeSignals
         self.signals: dict = {}
         #: node_id -> ms of the last successful lease renewal
@@ -206,6 +244,7 @@ class Arbiter:
             healing_done=self._healing_done(rec, nodes, cid),
             winner=(rec.verdicts[-1].get("winner", "")
                     if rec.state == ARB_DEGRADED and rec.verdicts else ""),
+            stale_nodes=tuple(sorted(rec.rebuild or {})),
         )
 
     # ---- node configuration and leases ---------------------------------------
@@ -375,16 +414,31 @@ class Arbiter:
         fenced a legitimate survivor. Called every ``TWO_NODE_RECONCILE_MS``,
         and at once after a reconnect, an instance change or a sequence gap.
         Returns True when the view was replaced."""
-        nid = node.get_id()
+        return self.apply_status(node, self.fetch_status(node))
+
+    @staticmethod
+    def fetch_status(node: StorageNode) -> tuple:
+        """The RPC half of ``reconcile``: no arbiter state is touched, so it
+        may run on the RPC pool. ("ok", status) | ("http", code) | ("err", e)."""
         try:
-            status = node.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
+            return "ok", node.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
         except RPCHTTPError as e:
-            self.note_answer(nid, http500=(e.status_code == 500))
-            return False
+            return "http", e.status_code
         except Exception as e:                      # noqa: BLE001 - next poll retries
-            self.note_answer(nid, http500=False)
-            logger.debug("jc_ha_status on %s failed: %s", nid, e)
+            return "err", e
+
+    def apply_status(self, node: StorageNode, result: tuple) -> bool:
+        """The bookkeeping half of ``reconcile``; decision-loop thread only."""
+        nid = node.get_id()
+        kind, value = result
+        if kind == "http":
+            self.note_answer(nid, http500=(value == 500))
             return False
+        if kind == "err":
+            self.note_answer(nid, http500=False)
+            logger.debug("jc_ha_status on %s failed: %s", nid, value)
+            return False
+        status = value
         self.note_answer(nid, http500=False)
         sig = self.signals.setdefault(nid, ev.NodeSignals())
         before = (sig.instance, dict(sig.lvs_state))
@@ -409,14 +463,39 @@ class Arbiter:
         return True
 
     def reconcile_due(self, nodes: list) -> None:
+        """Poll ``jc_ha_status`` of every node that is due, concurrently.
+
+        Campaign c3 (02a): each call to a frozen node blocks for its whole
+        timeout, and polled in turn it delayed the decision about its peer by
+        that much (grant at +2.66 s instead of about +1.9 s). Polls now run on
+        the RPC pool, at most one per node; the tick waits up to
+        ``TWO_NODE_POLL_WAIT_MS`` and applies, in node order, what has arrived.
+        A poll still running is applied on a later tick, never started twice."""
         now = self.clock()
+        by_id = {n.get_id(): n for n in nodes}
         for node in nodes:
             nid = node.get_id()
             if not self.capable.get(nid) or self.spdk_lost.get(nid):
                 continue
             due = now - self.reconciled_at.get(nid, 0) >= int(constants.TWO_NODE_RECONCILE_MS)
-            if due or nid in self.needs_resync:
-                self.reconcile(node)
+            if (due or nid in self.needs_resync) and ("status", nid) not in self.inflight:
+                self.inflight[("status", nid)] = self.rpc_pool.submit(self.fetch_status, node)
+        pending = {k: f for k, f in self.inflight.items() if k[0] == "status" and k[1] in by_id}
+        if not pending:
+            return
+        if not all(f.done() for f in pending.values()):
+            wait(list(pending.values()), timeout=int(constants.TWO_NODE_POLL_WAIT_MS) / 1000.0,
+                 return_when=ALL_COMPLETED)
+        for key in sorted(pending):
+            fut = pending[key]
+            if not fut.done():
+                continue
+            del self.inflight[key]
+            try:
+                result = fut.result()
+            except Exception as e:                  # noqa: BLE001 - next poll retries
+                result = ("err", e)
+            self.apply_status(by_id[key[1]], result)
 
     def _seen_epoch(self, node_id: str) -> int:
         return (self.signals.get(node_id) or ev.NodeSignals()).epoch_seen
@@ -523,7 +602,8 @@ class Arbiter:
         follows in steady are the whole heal. The restart flow re-admits only
         a node that lost while its peer ran solo (DEGRADED)."""
         done = self.readmitted.setdefault(rec.cluster_id, set())
-        if self._healing_from(rec) == ARB_PARTITIONED:
+        from_partition = self._healing_from(rec) == ARB_PARTITIONED
+        if from_partition:
             done.update(n.get_id() for n in nodes)
         for node in nodes:
             nid = node.get_id()
@@ -543,6 +623,10 @@ class Arbiter:
                     continue
                 for v in fenced:
                     sig.lvs_state[v] = LVS_NORMAL
+                if not from_partition:
+                    # Its peer ran alone meanwhile (F10): rebuild before the
+                    # pair counts as redundant again.
+                    self.mark_rebuild(rec, node, "re-admitted after a degraded verdict")
                 if nid not in done:
                     self.readmit(node)
                     done.add(nid)
@@ -643,6 +727,10 @@ class Arbiter:
             self.needs_resync.add(nid)
             logger.warning("Self-fenced node %s re-admitted for LVS %s at epoch %s "
                            "(remote JM healthy again)", nid, vuids, rec.epoch)
+            # Campaign c3, F10: the unfence alone left the writes its peer took
+            # meanwhile on the peer only (02b -> 03: EIO). Rebuild first.
+            self.mark_rebuild(rec, node, "re-admitted after a self-fence (%s)" % ",".join(
+                str(v) for v in vuids))
 
     # ---- partition recovery (campaign c2, F6) ----------------------------------
 
@@ -744,8 +832,126 @@ class Arbiter:
             fresh = self.db.get_storage_node_by_id(node.get_id())
             if fresh.status != StorageNode.STATUS_ONLINE:
                 return False
-        return True
+        # Campaign c3, F10: healed means redundant again, i.e. rebuilt.
+        return not (rec.rebuild or {})
 
+
+    # ---- data rebuild after re-admission (campaign c3, F10) -------------------
+
+    def mark_rebuild(self, rec: ClusterArbitration, node: StorageNode, reason: str) -> None:
+        """Record that ``node`` lacks the writes its peer took while it was
+        fenced. ``progress_rebuild`` queues the rebuild and clears the mark once
+        it has finished; until then the node is never granted solo
+        (``decision._degraded_verdict``) and healing does not finish."""
+        nid, now = node.get_id(), self.clock()
+
+        def put(fresh):
+            if nid in (fresh.rebuild or {}):
+                return False
+            fresh.rebuild = dict(fresh.rebuild or {})
+            fresh.rebuild[nid] = {"reason": reason, "since": now, "scheduled_at": 0,
+                                  "queued": False}
+        self.db.atomic_update(self.db.get_cluster_arbitration(rec.cluster_id) or rec, put)
+        self.rebuild_checked_at.pop(rec.cluster_id, None)
+        logger.warning("Node %s %s: data rebuild required before the pair is redundant again",
+                       nid, reason)
+
+    def progress_rebuild(self, rec: ClusterArbitration, nodes: list) -> ClusterArbitration:
+        """Queue the rebuild of every marked node once it is ONLINE, and clear
+        the mark when the rebuild tasks it queued have all finished.
+
+        The rebuild is the same one a node restart queues
+        (``tasks_controller.add_device_mig_task_for_node``). It is cleared only
+        after tasks were actually queued (or found open) and none is open any
+        more: "no open tasks" alone is what made c3's 02b heal report "rebuild
+        complete" without ever starting one."""
+        marks = dict(rec.rebuild or {})
+        if not marks:
+            return rec
+        cid, now = rec.cluster_id, self.clock()
+        if now - self.rebuild_checked_at.get(cid, 0) < int(constants.TWO_NODE_REBUILD_CHECK_S) * 1000:
+            return rec
+        self.rebuild_checked_at[cid] = now
+        by_id = {n.get_id(): n for n in nodes}
+        try:
+            open_tasks = int(self.open_rebuild_tasks(cid))
+        except Exception as e:                      # noqa: BLE001 - next check retries
+            logger.warning("Cannot read the rebuild tasks of %s: %s", cid, e)
+            return rec
+        changed: dict = {}
+        finished = []
+        for nid, mark in marks.items():
+            mark = dict(mark)
+            node = by_id.get(nid)
+            if node is None:
+                finished.append(nid)                # removed from the cluster
+                continue
+            retry = int(constants.TWO_NODE_REBUILD_SCHEDULE_RETRY_S) * 1000
+            if not mark.get("queued") and now - int(mark.get("scheduled_at") or 0) >= retry:
+                # Only once the node is back and serving: a rebuild queued while
+                # it is still fenced, holding or down would run (and finish)
+                # before the writes it is meant to copy have stopped coming.
+                fresh = self.db.get_storage_node_by_id(nid)
+                sig = self.signals.get(nid) or ev.NodeSignals()
+                back = (fresh.status == StorageNode.STATUS_ONLINE
+                        and self.reachable.get(nid, True) and not self.spdk_lost.get(nid)
+                        and not any(st in (LVS_FENCED, LVS_HOLDING)
+                                    for st in sig.lvs_state.values()))
+                if back:
+                    try:
+                        queued = bool(self.schedule_rebuild(fresh))
+                    except Exception as e:          # noqa: BLE001 - retried
+                        logger.warning("Queueing the rebuild of %s failed: %s", nid, e)
+                        queued = False
+                    # Tasks already open (the restart flow queued them, so the
+                    # call above found duplicates) cover the node as well.
+                    queued = queued or bool(open_tasks)
+                    mark["scheduled_at"] = now
+                    if queued:
+                        mark["queued"] = True
+                        logger.info("Data rebuild queued for re-admitted node %s", nid)
+                    else:
+                        logger.warning("Data rebuild for %s not queued (nothing to queue now); "
+                                       "retrying in %ss", nid,
+                                       constants.TWO_NODE_REBUILD_SCHEDULE_RETRY_S)
+                    changed[nid] = mark
+                    continue
+            if mark.get("queued") and not open_tasks:
+                finished.append(nid)
+            elif mark != marks[nid]:
+                changed[nid] = mark
+        if not changed and not finished:
+            return rec
+
+        def put(fresh):
+            cur = dict(fresh.rebuild or {})
+            for nid, mark in changed.items():
+                if nid in cur:
+                    cur[nid] = mark
+            for nid in finished:
+                cur.pop(nid, None)
+            fresh.rebuild = cur
+            if finished and fresh.data_unavailable.get("node") in finished:
+                fresh.data_unavailable = {}
+        rec = self.db.atomic_update(rec, put)
+        for nid in finished:
+            logger.info("Data rebuild of %s finished; the pair is redundant again", nid)
+        return rec
+
+    def report_unavailable(self, rec: ClusterArbitration, verdict: dec.Verdict,
+                           nodes: list) -> None:
+        """The only up-to-date node is lost while its peer is not rebuilt: no
+        grant (``V_UNAVAILABLE``). Recorded once per episode and logged as an
+        error; the stale survivor fences itself at its hold deadline."""
+        stale = next((n.get_id() for n in nodes if n.get_id() != verdict.loser), "")
+        if (rec.data_unavailable or {}).get("node") == stale:
+            return
+        now = self.clock()
+
+        def put(fresh):
+            fresh.data_unavailable = {"node": stale, "since": now, "reason": verdict.reason}
+        self.db.atomic_update(rec, put)
+        logger.error("Cluster %s: %s", rec.cluster_id, verdict.reason)
 
     # ---- the loop -----------------------------------------------------------
 
@@ -757,9 +963,24 @@ class Arbiter:
                 continue
             rec = self.record(cluster.get_id(), nodes)
             for node in nodes:
-                if self.probe(node):
-                    peer = nodes[1] if node is nodes[0] else nodes[0]
-                    self.renew(rec, node, peer)
+                if self.capable.get(node.get_id()) is False:
+                    continue
+                # One renewal per node in flight, on the RPC pool: a frozen
+                # node's 1 s timeout never delays its peer's renewal (c3, 02a).
+                # The capability probe runs there too, for the same reason.
+                key = ("renew", node.get_id())
+                fut = self.inflight.get(key)
+                if fut is not None and not fut.done():
+                    continue
+                peer = nodes[1] if node is nodes[0] else nodes[0]
+                self.inflight[key] = self.rpc_pool.submit(self._renew_safely, rec, node, peer)
+
+    def _renew_safely(self, rec: ClusterArbitration, node: StorageNode, peer: StorageNode) -> None:
+        try:
+            if self.probe(node):
+                self.renew(rec, node, peer)
+        except Exception:                           # noqa: BLE001 - next round renews
+            logger.exception("Lease renewal of %s failed", node.get_id())
 
     def tick(self) -> None:
         for cluster in self.db.get_clusters():
@@ -810,11 +1031,26 @@ class Arbiter:
             rec = self.commit(rec, verdict, snap)
             logger.warning("Two-node verdict %s epoch %s for cluster %s: %s",
                            verdict.kind, rec.epoch, cluster_id, verdict.reason)
+            if verdict.kind == dec.V_DEGRADED and verdict.loser:
+                # Campaign c3, F10: from now on the winner writes alone, so the
+                # loser lacks those writes whichever way it comes back (unfence,
+                # self-fence re-admit, restart). Marked here, queued once it is
+                # back (progress_rebuild).
+                loser = next((n for n in nodes if n.get_id() == verdict.loser), None)
+                if loser is not None:
+                    self.mark_rebuild(rec, loser, "lost while %s ran alone (epoch %s)"
+                                      % (verdict.winner, rec.epoch))
             if not self.send(rec, verdict, nodes):
                 self.undelivered[cluster_id] = verdict
+        elif verdict.kind == dec.V_UNAVAILABLE:
+            self.report_unavailable(rec, verdict, nodes)
+            if verdict.new_state != rec.state:
+                self.commit(rec, verdict, snap)
         elif verdict.kind == dec.V_HEAL:
             rec = self.commit(rec, verdict, snap)
             self.readmitted[cluster_id] = set()
+            if rec.data_unavailable:
+                self.db.atomic_update(rec, lambda fresh: setattr(fresh, "data_unavailable", {}))
         elif verdict.kind == dec.V_DONE:
             self._finish_healing(rec)
         elif verdict.new_state != rec.state:
@@ -824,6 +1060,7 @@ class Arbiter:
         if rec.state == ARB_HEALING:
             self.heal(rec, nodes)
         self.readmit_self_fenced(rec, nodes)
+        self.progress_rebuild(self.db.get_cluster_arbitration(cluster_id), nodes)
         self.recover_partition(rec, nodes)
         self.persist_leases(rec)
         self.maybe_reconcile_leadership(cluster_id, nodes)
@@ -835,10 +1072,13 @@ class Arbiter:
         After fence -> resync -> unfence an LVS can be left without a leader on
         either node; the restart/creation/activation flows are the only other
         places that restore it. Every ``TWO_NODE_LEADERSHIP_RECONCILE_S``,
-        while the arbitration state is steady (no verdict in force, no healing
-        under way), each node's primary LVS is checked; one found leaderless on
-        two consecutive passes is handed to ``reconcile_leadership`` (the
-        guarded leaderless-recovery path in storage_node_ops), never to an
+        while the arbitration state is steady (no verdict in force), or healing
+        and only waiting for the data rebuild (campaign c3, F10: the rebuild
+        runners defer on "not the leader", so the rebuild could never finish
+        behind a leaderless LVS), each node's primary LVS is checked; one found
+        leaderless on two consecutive passes is handed to
+        ``reconcile_leadership`` (the guarded leaderless-recovery path in
+        storage_node_ops, which also requires every member ONLINE), never to an
         ad-hoc leadership RPC. A primary whose own HA state for the LVS is
         fenced or holding, or whose peer leads it solo, is left alone."""
         now = self.clock()
@@ -847,7 +1087,8 @@ class Arbiter:
             return
         self.leadership_checked_at[cluster_id] = now
         rec = self.db.get_cluster_arbitration(cluster_id)
-        if rec is None or rec.state != ARB_STEADY:
+        rebuild_only = rec is not None and rec.state == ARB_HEALING and bool(rec.rebuild)
+        if rec is None or (rec.state != ARB_STEADY and not rebuild_only):
             self.leaderless_seen.pop(cluster_id, None)
             return
         blocked = set()
@@ -962,6 +1203,22 @@ def default_readmit(node: StorageNode) -> None:
     storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE,
                                      caused_by="two-node-arbiter")
     tasks_controller.add_node_to_auto_restart(node)
+
+
+def default_schedule_rebuild(node: StorageNode) -> bool:
+    """Queue the data rebuild a node restart queues (campaign c3, F10)."""
+    from simplyblock_core.controllers import tasks_controller
+    return bool(tasks_controller.add_device_mig_task_for_node(node.get_id()))
+
+
+def default_open_rebuild_tasks(cluster_id: str) -> int:
+    from simplyblock_core.db_controller import DBController
+    from simplyblock_core.models.job_schedule import JobSchedule
+    kinds = {JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG,
+             JobSchedule.FN_BALANCING_AFTER_NODE_RESTART}
+    return sum(1 for t in DBController().get_job_tasks(cluster_id)
+               if t.function_name in kinds and t.status != JobSchedule.STATUS_DONE
+               and not t.canceled)
 
 
 def _run_in_thread(fn) -> None:
