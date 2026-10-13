@@ -24,6 +24,7 @@ import time
 from e2e_tests.migration.migration_base import (
     MigrationTestBase,
 )
+from exceptions.custom_exception import SkippedTestsException
 from utils.common_utils import cli_failed, sleep_n_sec
 
 
@@ -182,7 +183,8 @@ class MigrationNegativeCapacity(MigrationTestBase):
                 "(%s), so the out-of-space condition could not be created.",
                 huge, (out + err).strip()[:200])
             self.cleanup_migrations()
-            return
+            raise SkippedTestsException(
+                "MIG-N-005: the cluster refused the capacity filler, so the target was never actually full")
         self._mig_vols.append(filler)
         sleep_n_sec(20)
 
@@ -194,7 +196,8 @@ class MigrationNegativeCapacity(MigrationTestBase):
                 "[MIG-N-005] SKIPPED: cluster capacity could not be read, so "
                 "there is no way to confirm the target is actually full.")
             self.cleanup_migrations()
-            return
+            raise SkippedTestsException(
+                "MIG-N-005: cluster capacity could not be read, so a full target cannot be confirmed")
         if free_after > 0:
             self.logger.warning(
                 "[MIG-N-005] SKIPPED: the %s filler was accepted but "
@@ -205,7 +208,8 @@ class MigrationNegativeCapacity(MigrationTestBase):
                 "it, which is a different and much longer test than this.",
                 huge, free_after)
             self.cleanup_migrations()
-            return
+            raise SkippedTestsException(
+                "MIG-N-005: the filler was accepted but free space did not fall, so the target is thin-provisioned")
         self.logger.info("[MIG-N-005] target is genuinely out of space "
                          "(size_free=0); the migration below must not land "
                          "there")
@@ -271,7 +275,8 @@ class MigrationUnderReplication(MigrationTestBase):
                 "needs the two-cluster lab the replication lane builds "
                 "(e2e/scripts/replication_lab_setup.sh), then a policy "
                 "attached before it runs.")
-            return
+            raise SkippedTestsException(
+                "MIG-N-006: no replication target on this cluster -- needs the two-cluster lab")
 
         target = self._get(rows[0], "name", "id", "uuid")
         stamp = int(time.time()) % 100000
@@ -428,7 +433,8 @@ class MigrationProtectionGuards(MigrationTestBase):
                 "has no lineage to make the migration slow enough to "
                 "interrupt.")
             self.cleanup_migrations()
-            return
+            raise SkippedTestsException(
+                "MIG-N-008: no snapshot could be taken, so the guards have no lineage to protect")
 
         tgt = self.pick_target(src, "no-overlap")
         self.logger.info("[MIG-N-008] migrating %s (%d snapshots) %s -> %s, "
@@ -456,7 +462,8 @@ class MigrationProtectionGuards(MigrationTestBase):
             self.await_migration(vol_id=vol_id, migration_id=mid,
                                  what="MIG-N-008 settle")
             self.cleanup_migrations()
-            return
+            raise SkippedTestsException(
+                "MIG-N-008: the migration finished before the guarded operations could be attempted")
 
         # -- MIG-N-008 delete, mid-migration -----------------------------
         out, err = self._cli(f"{self.base_cmd} -d volume delete {vol_id} "
