@@ -538,7 +538,29 @@ class MigrationRetryAfterTargetReboot(_FaultBase):
             # loses the IO this case is watching for corruption -- the
             # reboot is meant to reload the TARGET's lvstore from disk,
             # not to end the workload.
-            self._ensure_k8s_utils().reboot_node(ip, drain=True)
+            #
+            # And UNCORDON afterwards, which is not optional: draining
+            # cordons the node and reboot_node says so in as many words,
+            # "the caller uncordons once the node is Ready again". Without
+            # it the node comes back but nothing can be scheduled onto it,
+            # so its storage pod never returns and the StorageNode sits
+            # unreachable forever. That is how run 20261013-143016 failed
+            # this case at its full 1200s and then took the two cases
+            # after it down with "Pre-test health check FAILED -- 1
+            # storage node(s) not healthy": one missing uncordon, three
+            # red classes.
+            k8s = self._ensure_k8s_utils()
+            k8s.reboot_node(ip, drain=True)
+            try:
+                k8s.wait_node_condition(ip, ready=True, timeout=900)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[MIG-F-013] %s did not report Ready after the reboot "
+                    "(%s); uncordoning anyway, because leaving it cordoned "
+                    "is worse than uncordoning a node that is still "
+                    "settling", ip, str(exc)[:140])
+            k8s.cordon_node(ip, cordon=False)
+            self.logger.info("[MIG-F-013] uncordoned %s", ip)
         else:
             self.ssh_obj.reboot_node(node_ip=ip)
         deadline = time.time() + 1200

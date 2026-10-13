@@ -1476,10 +1476,29 @@ class MigrationTestBase(TestClusterBase):
     def snap_id(self, name):
         """The backend snapshot uuid for a snapshot NAME, or None.
 
-        Works on both backends: snapshot list answers the same inside the
-        admin pod. Separate from make_snapshot's return, which on k8s is a
-        VolumeSnapshot name rather than a uuid.
+        NOT the same lookup on both backends, though it reads like it
+        should be. On docker the control plane holds the snapshot under
+        the name it was asked for, so `snapshot list` finds it. On k8s
+        the snapshot is a VolumeSnapshot and the CSI driver names the
+        backend object itself -- the logical name appears nowhere in
+        `snapshot list`, so matching on it returns None for a snapshot
+        that exists perfectly well.
+
+        That is not hypothetical: it took MigrationSnapshotCloneTrees out
+        of run 20261013-092206 before it built its tree, with
+        "could not resolve the snapshot migtsnap28074
+        (handle='migtsnap28074', id=None)". The id was there the whole
+        time, in the VolumeSnapshot's snapshotHandle, which
+        _get_snapshot_id_dual reads.
         """
+        if self.k8s_test:
+            try:
+                return self._get_snapshot_id_dual(name)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[MIG] could not resolve the backend id of snapshot "
+                    "%s from its VolumeSnapshot: %s", name, str(exc)[:160])
+                return None
         data = self._cli_json(f"{self.base_cmd} snapshot list")
         for s in (data.get("results", data) if isinstance(data, dict)
                   else data) or []:

@@ -163,6 +163,29 @@ class _BatchBase(MigrationTestBase):
         self.logger.info("[MIG-B] %d PVCs share subsystem %s",
                          members, next(iter(by_nqn)))
 
+        # UNPIN, now that they are placed. The pin is what put them on one
+        # node and so into one subsystem, and it is also what stops them
+        # moving: "volume pvc-... is pinned to storage node ..., and a
+        # pinned volume cannot be moved; change or remove the pin on its
+        # claim instead" is how the operator refused every batch case in
+        # run 20261013-095030. The subsystem is decided at creation, so
+        # removing the pin afterwards keeps the grouping and restores the
+        # one thing the group exists to exercise.
+        for g in group:
+            reg = self._volume_registry.get(g["name"]) or {}
+            pvc = reg.get("pvc_name")
+            if pvc:
+                k8s.unpin_pvc(pvc)
+        still = [g["name"] for g in group
+                 if k8s.pvc_pin((self._volume_registry.get(g["name"]) or {})
+                                .get("pvc_name", ""))]
+        if still:
+            raise MigrationPreconditionError(
+                f"[MIG-B] these claims are still pinned after unpinning: "
+                f"{still}. A pinned volume cannot be migrated, so the "
+                f"group would fail every case with the operator's refusal "
+                f"rather than anything about batching.")
+
         self._group = group
         self._seeded = self._lead(group)
         self._sums = (self.seed(self._seeded["name"]) if seed_first

@@ -503,6 +503,16 @@ class MigrationSoak(MigrationTestBase):
                 if host is None:
                     host = self.lvol_node(vid)
 
+        # Unpin before anything tries to move them: the pin is what put
+        # them on one node, and a pinned volume cannot be migrated.
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            for v in out:
+                pvc = (self._volume_registry.get(v["name"]) or {}).get(
+                    "pvc_name")
+                if pvc:
+                    k8s.unpin_pvc(pvc)
+
         nqns = {self.lvol_nqn(v["id"]) for v in out}
         if len(nqns) != 1 or None in nqns:
             raise MigrationPreconditionError(

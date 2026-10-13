@@ -2071,6 +2071,48 @@ class K8sUtils:
             f"mode={volume_mode or 'Filesystem'} node={node_id or 'auto'}")
         self.apply_yaml(yaml_content, namespace=ns)
 
+    #: Every spelling of the pin, because the operator normalises between
+    #: them: a claim created with the legacy simplybk/host-id comes back
+    #: carrying storage.simplyblock.io/selected-storage-node, and removing
+    #: only the one that was written leaves the claim pinned.
+    PIN_ANNOTATIONS = (
+        "storage.simplyblock.io/selected-storage-node",
+        "simplyblock.io/selected-storage-node",
+        "simplybk/host-id",
+    )
+
+    def unpin_pvc(self, pvc_name: str, namespace: str | None = None):
+        """Remove the storage-node pin from a claim.
+
+        A pinned volume CANNOT BE MIGRATED. The operator refuses the
+        operation outright -- "volume pvc-... is pinned to storage node
+        ..., and a pinned volume cannot be moved; change or remove the pin
+        on its claim instead" -- so anything that pins a claim in order to
+        place it has to unpin before it can move it.
+
+        That is not hypothetical: pinning is the only way to get several
+        claims onto ONE node, which is the only way to get them into one
+        NVMe-oF subsystem, which is what a batch case needs. Build the
+        group pinned, then unpin, then migrate.
+        """
+        ns = namespace or self.namespace
+        keys = " ".join(f"{a}-" for a in self.PIN_ANNOTATIONS)
+        out, err = self._exec_kubectl(
+            f"kubectl annotate pvc {pvc_name} -n {ns} {keys} "
+            f"--overwrite 2>&1 || true", supress_logs=True)
+        self.logger.info("[K8sUtils] unpinned PVC %s", pvc_name)
+        return (out or "") + (err or "")
+
+    def pvc_pin(self, pvc_name: str, namespace: str | None = None) -> str:
+        """The node a claim is pinned to, or "" when it is not pinned."""
+        ns = namespace or self.namespace
+        res = self.get_resource_json("pvc", pvc_name, namespace=ns)
+        ann = ((res.get("metadata") or {}).get("annotations") or {})
+        for a in self.PIN_ANNOTATIONS:
+            if ann.get(a):
+                return str(ann[a])
+        return ""
+
     def create_raw_device_pod(self, pod_name: str, pvc_name: str,
                               device_path: str = "/dev/rawlblk",
                               namespace: str | None = None,
