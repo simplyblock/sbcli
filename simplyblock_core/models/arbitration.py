@@ -48,6 +48,12 @@ class ClusterArbitration(BaseModel):
     #: migration runners' backoff-reset key: a rebuild deferred on "not the
     #: leader" is retried at once instead of after its backoff.
     leadership_restored_at: int = 0
+    #: CP-initiated loss of a node (restart/shutdown, campaign c2 F3), written
+    #: by the restart flow BEFORE it stops SPDK: {node_id: {"at": ms,
+    #: "instance": SPDK instance at that time ("" if unknown), "reason": str}}.
+    #: The arbiter treats the node as gone (its peer may be granted at once)
+    #: until it comes back with a new instance.
+    planned_loss: dict = default_factory(dict)
 
     def get_id(self):
         return self.cluster_id

@@ -105,7 +105,8 @@ def test_dual_node_on_an_arbitrated_cluster_carries_the_full_config(pair):
         (name, args, kwargs), = _calls(n, "jc_set_dual_node")
         assert args == (True,)
         assert kwargs == {"arbitration": True, "hold_ms": constants.TWO_NODE_HOLD_MS,
-                          "lease_ttl_ms": constants.TWO_NODE_LEASE_TTL_MS}
+                          "lease_ttl_ms": constants.TWO_NODE_LEASE_TTL_MS,
+                          "remote_jm_timeout_ms": constants.TWO_NODE_REMOTE_JM_TIMEOUT_MS}
         assert "preferred" not in kwargs
 
 
@@ -128,7 +129,10 @@ def test_a_node_without_the_protocol_still_gets_the_plain_flag(pair):
     a.handlers["jc_set_dual_node"] = reject_the_arbitration_fields
     storage_node_ops.apply_jc_dual_node("CL")
     sent = [c[2] for c in _calls(a, "jc_set_dual_node")]
-    assert sent[0]["arbitration"] is True and sent[1] == {}
+    # full config, then without remote_jm_timeout_ms (pre-c2 build), then plain
+    assert sent[0]["arbitration"] is True and "remote_jm_timeout_ms" in sent[0]
+    assert "remote_jm_timeout_ms" not in sent[1] and sent[1]["arbitration"] is True
+    assert sent[2] == {}
 
 
 def test_rpc_client_has_no_preferred_parameter():

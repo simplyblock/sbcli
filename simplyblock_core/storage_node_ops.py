@@ -336,6 +336,7 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
     whatever comes next; the node should still be marked OFFLINE so it stops
     being treated as in_restart.
     """
+    _note_planned_loss(snode, "spdk kill")
     snode_api = snode.client(timeout=5, retry=5)
     # Each attempt is bounded BOTH ways, and needs both. The wall-clock deadline
     # is what keeps the documented ``max_attempts * poll_per_attempt_sec`` cap
@@ -1298,7 +1299,7 @@ def apply_jc_dual_node(cluster_id):
     (built without the protocol) still gets the plain dual-node flag: that one
     keeps the survivor from aborting and must never be lost.
     """
-    from simplyblock_core.arbitration import dual_node_params
+    from simplyblock_core.arbitration import dual_node_params, set_dual_node
 
     db_controller = DBController()
     members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
@@ -1310,26 +1311,70 @@ def apply_jc_dual_node(cluster_id):
         arbitrated = bool(getattr(cluster, "two_node_arbitration", False))
     except Exception as e:                      # noqa: BLE001 - best effort
         logger.warning("Could not read cluster %s for the arbitration flag: %s", cluster_id, e)
-    extra = dual_node_params(enable) if arbitrated else {}
     for node in members:
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            rpc = node.rpc_client()
-            try:
-                rpc.jc_set_dual_node(enable, **extra)
-            except RPCRemoteError as e:
-                if not extra:
-                    raise
-                logger.warning("Node %s rejected the arbitration fields of jc_set_dual_node "
-                               "(%s); applying the plain dual-node flag", node.get_id(), e)
-                rpc.jc_set_dual_node(enable)
+            err, level = set_dual_node(node.rpc_client(), enable, arbitrated)
+            if err:
+                logger.warning("Could not set JC dual-node=%s on %s: %s",
+                               enable, node.get_id(), err)
+                continue
+            if arbitrated and level != "full":
+                logger.warning("Node %s rejected part of the arbitration fields of "
+                               "jc_set_dual_node; applied %s", node.get_id(), level)
             logger.info("JC dual-node=%s applied on %s (cluster membership %d, arbitration %s)",
                         enable, node.get_id(), len(members),
-                        extra.get("arbitration", "not managed"))
+                        dual_node_params(enable)["arbitration"] if arbitrated else "not managed")
         except Exception as e:                  # noqa: BLE001 - best effort
             logger.warning("Could not set JC dual-node=%s on %s: %s",
                            enable, node.get_id(), e)
+
+
+def _note_planned_loss(snode, reason):
+    """Two-node arbitration (campaign c2, F3): announce that the control plane
+    is about to stop this node's SPDK, so the arbiter grants its peer at once
+    instead of letting it fence itself at the hold deadline. Never raises."""
+    from simplyblock_core.arbitration.planned import note_planned_loss
+    try:
+        db = DBController()
+    except Exception as e:                      # noqa: BLE001 - best effort
+        logger.debug("No DB for the planned-loss marker of %s: %s", snode.get_id(), e)
+        return
+    note_planned_loss(snode, reason, db=db)
+
+
+def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
+                                      interval_s=2.0, sleep=None, clock=None):
+    """``jc_compression get_status`` on the LVS leader, retried while it fails.
+
+    Campaign c2, F1: right after the returning node's SPDK is up, the leader
+    re-levels the returning journal on its own (the B1 auto-resync). While it
+    does, ``jc_compression`` answers "Compression request failed"; the restart
+    used to abort on that one answer and kill the new SPDK. The failure is
+    transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
+    failure that outlasts that aborts the restart (the caller raises).
+
+    Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
+    number of rounds (timeout / interval), so a patched-out ``time.sleep``
+    cannot turn the retry into a busy loop.
+    """
+    if timeout_s is None:
+        timeout_s = constants.RESTART_JC_COMPRESSION_RETRY_S
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + timeout_s
+    rounds = max(1, int(timeout_s // interval_s))
+    while True:
+        try:
+            return leader.rpc_client().jc_compression_get_status(jm_vuid)
+        except Exception as e:                  # noqa: BLE001 - retried, then re-raised
+            rounds -= 1
+            if rounds <= 0 or clock() + interval_s > deadline:
+                raise
+            logger.warning("jc_compression status on leader %s failed (%s); retrying "
+                           "(journal re-level in progress?)", leader.get_id(), e)
+            sleep(interval_s)
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
@@ -8485,6 +8530,7 @@ def _restart_storage_node_impl(
         # A restart must actually bounce SPDK: see ensure_spdk_stopped.
         # snode.api_endpoint is already rewritten to node_address above when
         # restarting onto a new host, so snode.client() targets the right one.
+        _note_planned_loss(snode, "restart")
         ensure_spdk_stopped(
             snode.client, snode.rpc_port, snode.cluster_id)
         results, err = snode_api.spdk_process_start(
@@ -9962,6 +10008,7 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     # that's also true for --force today and is the design contract for
     # kill.
     logger.info("Stopping SPDK")
+    _note_planned_loss(snode, "shutdown")
     try:
         snode.client(**kill_client_kwargs(force)).spdk_process_kill(
             snode.rpc_port, snode.cluster_id)
@@ -12563,6 +12610,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         _release_hub_lock()
         try:
             storage_events.snode_restart_failed(snode)
+            _note_planned_loss(snode, "restart abort")
             snode_api = snode.client(timeout=5, retry=5)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         except Exception as ke:
@@ -13395,7 +13443,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         # Check compression and replication only on the current leader
         if current_leader:
             try:
-                jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(lvs_jm_vuid)
+                jc_compression_is_active = _jc_compression_status_with_retry(current_leader, lvs_jm_vuid)
                 retries = 10
                 while jc_compression_is_active:
                     if retries <= 0:
@@ -13415,8 +13463,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     # be compressing. Incident 2026-05-06: 70850783 was
                     # acting leader of LVS_4450 *and* configured primary of
                     # LVS_5676; jm_vuid=5676 stayed active → 5 min hang.
-                    jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
-                        lvs_jm_vuid)
+                    jc_compression_is_active = _jc_compression_status_with_retry(
+                        current_leader, lvs_jm_vuid)
             except Exception as e:
                 raise Exception(
                     f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
