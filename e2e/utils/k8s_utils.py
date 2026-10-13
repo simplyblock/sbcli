@@ -3933,78 +3933,309 @@ class K8sUtils:
 
     # ── StorageBackup CRD operations ─────────────────────────────────────────
 
+    # ── backup, the v1alpha2 way ─────────────────────────────────────────
+    #
+    # On-demand backup is a Kubernetes operation again. It was not, for a
+    # while: v1alpha2's StorageBackup arrived as {clusterRef, backupID} --
+    # a record of a backup that already existed -- and the only kind that
+    # acted was StorageBackupOps, whose action enum held nothing but
+    # Restore. create_storage_backup raised NotImplementedError through
+    # that period rather than write a document that could not work.
+    #
+    # Manohar Reddy, 2026-10-13: "the changes related to on demand backups
+    # is merged now". StorageBackup.spec.source is the request --
+    # "Source asks for a new backup of a claim, the way a VolumeSnapshot
+    # asks" -- and storagebackup_controller.go now exists to serve it.
+    #
+    # THREE SHAPES THAT DO NOT MATCH EACH OTHER, and getting one wrong is
+    # a strict-decoding rejection rather than a warning:
+    #
+    #   StorageBackup.spec.clusterRef        STRING  (just the name)
+    #   StorageBackupPolicy.spec.clusterRef  STRING  (just the name)
+    #   StorageBackupOps.spec.clusterRef     OBJECT  {name, namespace}
+    #   StorageBackupOps.spec.backupRef      OBJECT  {name, namespace}
+    #
+    # The old BackupRestore / BackupPolicy / BackupImport kinds still
+    # exist and are still reconciled, but their controllers are named
+    # legacy_* in the operator now. New work uses the three above.
+
+    SB_KIND = "storagebackups.storage.simplyblock.io"
+    SBOPS_KIND = "storagebackupops.storage.simplyblock.io"
+    SBPOLICY_KIND = "storagebackuppolicies.storage.simplyblock.io"
+
     def create_storage_backup(self, name: str, pvc_name: str,
                               cluster_name: str = "simplyblock-cluster",
                               namespace: str | None = None):
-        """Refuse, because no CR takes a backup any more.
+        """Ask for a backup of a claim. Namespaced, and any namespace does.
 
-        This wrote a v1alpha1 StorageBackup with clusterName and pvcRef and
-        relied on the operator reading that as "back this PVC up now". Two
-        separate things stop it.
-
-        StorageBackup is served at both versions with v1alpha2 as the storage
-        version and conversion strategy Webhook, and these installs deploy no
-        webhook -- it is the one backup kind in that position, which is why
-        BackupImport, BackupRestore and BackupPolicy still work untouched: each
-        is served at v1alpha1 only, so nothing converts and nothing needs the
-        webhook. So this apply fails with
-
-            service "simplyblock-operator-conversion-webhook-service" not found
-
-        And porting the document does not help, because v1alpha2's StorageBackup
-        is not a renamed version of this one. It is {clusterRef, backupID}, and
-        the CRD describes backupID as "the identifier the store holds the backup
-        under" in "the StorageCluster whose store this backup was found in" --
-        an object describing a backup that already exists, not a request to take
-        one. StorageBackupOps is the only kind that acts, and its action enum is
-        exactly one value, Restore
-        (+kubebuilder:validation:Enum=Restore).
-
-        So taking a backup is no longer a Kubernetes operation at all. What
-        remains is StorageBackupPolicy, which takes them on a schedule against a
-        claimSelector, and sbcli, which the docker lane already drives with
-        `snapshot add --backup` and `snapshot backup <snapshot_id>`.
-
-        Raising beats writing a document that cannot work: the caller gets the
-        reason here instead of a webhook error 300 seconds later, and the choice
-        of replacement stays a decision about the backup lane rather than one
-        made silently in a helper.
+        ``spec.source.claimName`` names a PVC in THIS object's namespace,
+        so the backup is raised beside the claim it backs up. Only
+        policy-created backups behave differently: those always land in
+        the operator's own namespace, whatever the claim's, which dev
+        called out explicitly -- so a test that looks for a policy's
+        output in the application namespace will not find it.
         """
-        raise NotImplementedError(
-            f"cannot take a backup of PVC '{pvc_name}' by creating a "
-            f"StorageBackup: v1alpha2 StorageBackup is {{clusterRef, backupID}} "
-            f"and describes a backup the store already holds. No CR takes one "
-            f"-- StorageBackupOps only does Restore.\n"
-            f"    Use StorageBackupPolicy for scheduled backups, or drive sbcli "
-            f"the way the docker lane does:\n"
-            f"      sbcli snapshot add <lvol_id> <name> --backup\n"
-            f"      sbcli snapshot backup <snapshot_id>")
+        ns = namespace or self.namespace
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: StorageBackup\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            # A bare string. The Ops kind wants an object for the same
+            # word, which is the trap in this API.
+            f"  clusterRef: {cluster_name}\n"
+            "  source:\n"
+            f"    claimName: {pvc_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] StorageBackup '{name}' in {ns}: backing up claim "
+            f"'{pvc_name}' on cluster '{cluster_name}'")
+        return self.apply_yaml(yaml_content, namespace=ns)
+
+    #: What a finished backup looks like. Not "Done" -- the enum is
+    #: Pending/Creating/Available/Failed, and waiting for a phase the CRD
+    #: cannot produce times out after the full budget while the backup sat
+    #: Available the whole time.
+    SB_READY = "Available"
 
     def wait_storage_backup_done(self, name: str, timeout: int = 300,
-                                  namespace: str | None = None) -> dict:
-        """Poll until StorageBackup phase is ``Done``.  Returns resource JSON."""
+                                 namespace: str | None = None) -> dict:
+        """Poll until the StorageBackup reports Available."""
         ns = namespace or self.namespace
         deadline = time.time() + timeout
+        phase = ""
         while time.time() < deadline:
-            res = self.get_resource_json("storagebackup", name, namespace=ns)
-            status = res.get("status", {})
-            phase = (status.get("phase") or "").lower()
-            if phase == "done":
-                self.logger.info(f"[K8sUtils] StorageBackup '{name}' is Done")
+            res = self.get_resource_json(self.SB_KIND, name, namespace=ns)
+            status = res.get("status") or {}
+            phase = str(status.get("phase") or "")
+            if phase == self.SB_READY:
+                bid = ((status.get("backup") or {}).get("backupID") or "?")
+                self.logger.info(
+                    f"[K8sUtils] StorageBackup '{name}' is {phase} "
+                    f"(backupID={bid})")
                 return res
-            if phase == "failed":
+            if phase == "Failed":
                 self._dump_backup_diagnostics(name, ns)
                 raise AssertionError(
-                    f"StorageBackup '{name}' failed: {status}")
+                    f"StorageBackup '{name}' failed: "
+                    f"{status.get('message') or status}")
             self.logger.info(
                 f"[K8sUtils] Waiting for StorageBackup '{name}' "
-                f"(phase={status.get('phase', 'unknown')})"
-            )
+                f"(phase={phase or 'none yet'})")
             time.sleep(10)
         self._dump_backup_diagnostics(name, ns)
         raise TimeoutError(
-            f"StorageBackup '{name}' not Done within {timeout}s"
+            f"StorageBackup '{name}' did not reach {self.SB_READY} within "
+            f"{timeout}s (last phase={phase or 'none'})")
+
+    def get_storage_backup_id(self, name: str,
+                              namespace: str | None = None) -> str:
+        """The control plane's id for a completed backup, or ""."""
+        res = self.get_resource_json(self.SB_KIND, name,
+                                     namespace=namespace or self.namespace)
+        return str(((res.get("status") or {}).get("backup")
+                    or {}).get("backupID") or "")
+
+    def list_storage_backups(self, namespace: str | None = None) -> list:
+        """Every StorageBackup in a namespace, or in all of them.
+
+        ``namespace="--all-namespaces"`` is worth having here: a policy
+        writes its backups into the operator's namespace rather than the
+        claim's, so a caller looking only where it put the claim finds
+        nothing.
+        """
+        ns = namespace or self.namespace
+        scope = ("--all-namespaces" if ns == "--all-namespaces"
+                 else f"-n {ns}")
+        out, _ = self._exec_kubectl(
+            f"kubectl get {self.SB_KIND} {scope} -o json 2>/dev/null || true",
+            supress_logs=True)
+        try:
+            return json.loads((out or "").strip() or "{}").get("items", [])
+        except Exception:                             # noqa: BLE001
+            return []
+
+    def delete_storage_backup(self, name: str, namespace: str | None = None):
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {self.SB_KIND} {name} -n {ns} "
+            f"--ignore-not-found --wait=false")
+
+    def create_storage_backup_ops_restore(
+            self, name: str, backup_name: str, claim_name: str,
+            target_pool: str, backup_namespace: str | None = None,
+            cluster_name: str = "simplyblock-cluster",
+            cluster_namespace: str | None = None,
+            namespace: str | None = None,
+            claim_labels: dict | None = None,
+            claim_annotations: dict | None = None):
+        """Restore a backup into a NEW claim, in this object's namespace.
+
+        The restore lands where the StorageBackupOps lives, which is what
+        makes cross-namespace restore expressible: the backup is named
+        with its own namespace in ``backupRef``, and the claim is created
+        in the operation's.
+
+        ``clusterRef`` and ``backupRef`` are OBJECTS here even though
+        StorageBackup spells the same word as a plain string. Passing a
+        string is worse than an error: the operator's own startup check
+        treats a string ref as "the old format", refuses to start the
+        StorageBackupOps controller at all, and logs
+        "StorageBackupOps controller not started: these operations use the
+        old string..." -- so one stale object disables every restore in
+        the cluster, not just its own.
+        """
+        ns = namespace or self.namespace
+        b_ns = backup_namespace or ns
+        c_ns = cluster_namespace or self.namespace
+
+        def _block(label, d):
+            if not d:
+                return ""
+            out = f"    {label}:\n"
+            for k, v in d.items():
+                out += f"      {k}: \"{v}\"\n"
+            return out
+
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: StorageBackupOps\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            "  action: Restore\n"
+            "  clusterRef:\n"
+            f"    name: {cluster_name}\n"
+            f"    namespace: {c_ns}\n"
+            "  backupRef:\n"
+            f"    name: {backup_name}\n"
+            f"    namespace: {b_ns}\n"
+            "  restore:\n"
+            f"    claimName: {claim_name}\n"
+            f"    targetPool: {target_pool}\n"
+            + _block("claimLabels", claim_labels)
+            + _block("claimAnnotations", claim_annotations)
         )
+        self.logger.info(
+            f"[K8sUtils] StorageBackupOps '{name}' in {ns}: restore "
+            f"{b_ns}/{backup_name} -> claim '{claim_name}' in pool "
+            f"'{target_pool}'")
+        return self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_storage_backup_ops_done(self, name: str, timeout: int = 600,
+                                     namespace: str | None = None) -> dict:
+        """Poll until a StorageBackupOps reports Succeeded."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        phase = ""
+        while time.time() < deadline:
+            res = self.get_resource_json(self.SBOPS_KIND, name, namespace=ns)
+            status = res.get("status") or {}
+            phase = str(status.get("phase") or "")
+            step = str((status.get("step") or {}).get("state") or "")
+            if phase == "Succeeded":
+                self.logger.info(
+                    f"[K8sUtils] StorageBackupOps '{name}' Succeeded "
+                    f"(claim={status.get('claimName')}, "
+                    f"pv={status.get('persistentVolumeName')})")
+                return res
+            if phase in ("Failed", "Aborted"):
+                self._dump_backup_diagnostics(name, ns)
+                raise AssertionError(
+                    f"StorageBackupOps '{name}' {phase}: "
+                    f"{status.get('message') or status}")
+            self.logger.info(
+                f"[K8sUtils] Waiting for StorageBackupOps '{name}' "
+                f"(phase={phase or 'none yet'}, step={step or '-'})")
+            time.sleep(10)
+        self._dump_backup_diagnostics(name, ns)
+        raise TimeoutError(
+            f"StorageBackupOps '{name}' did not succeed within {timeout}s "
+            f"(last phase={phase or 'none'})")
+
+    def delete_storage_backup_ops(self, name: str,
+                                  namespace: str | None = None):
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {self.SBOPS_KIND} {name} -n {ns} "
+            f"--ignore-not-found --wait=false")
+
+    def legacy_storage_backup_ops(self) -> list:
+        """Ops written in the OLD string-ref format, which disable restore.
+
+        The operator refuses to start its StorageBackupOps controller when
+        any of these exist, cluster-wide. One left behind by an older run
+        means every restore in the next run hangs in Pending with nothing
+        obviously wrong, so a lane should check for them and say so rather
+        than wait out its timeout.
+        """
+        out, _ = self._exec_kubectl(
+            f"kubectl get {self.SBOPS_KIND} --all-namespaces -o json "
+            f"2>/dev/null || true", supress_logs=True)
+        try:
+            items = json.loads((out or "").strip() or "{}").get("items", [])
+        except Exception:                             # noqa: BLE001
+            return []
+        bad = []
+        for it in items:
+            spec = it.get("spec") or {}
+            if isinstance(spec.get("backupRef"), str) or \
+                    isinstance(spec.get("clusterRef"), str):
+                m = it.get("metadata") or {}
+                bad.append(f"{m.get('namespace')}/{m.get('name')}")
+        return bad
+
+    def create_storage_backup_policy(
+            self, name: str, cluster_name: str = "simplyblock-cluster",
+            schedule: str | None = None, max_versions: int | None = None,
+            max_age: str | None = None,
+            match_labels: dict | None = None,
+            namespace: str | None = None):
+        """A scheduled policy over a claim SELECTOR, not a named claim.
+
+        Two differences from the legacy BackupPolicy that a test has to
+        know. The policy picks its claims with ``claimSelector`` rather
+        than being annotated onto one; and whatever namespace the claims
+        live in, the StorageBackups it produces are created in the
+        OPERATOR's namespace. Dev, 2026-10-13: "the StorageBackup created
+        by backup policies behaviour is unchanged, they are always getting
+        created in operator namespace which is: simplyblock".
+        """
+        ns = namespace or self.namespace
+        body = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: StorageBackupPolicy\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            f"  clusterRef: {cluster_name}\n"
+        )
+        if schedule:
+            body += f"  schedule: \"{schedule}\"\n"
+        if max_versions is not None:
+            body += f"  maxVersions: {max_versions}\n"
+        if max_age:
+            body += f"  maxAge: \"{max_age}\"\n"
+        if match_labels:
+            body += "  claimSelector:\n    matchLabels:\n"
+            for k, v in match_labels.items():
+                body += f"      {k}: \"{v}\"\n"
+        self.logger.info(
+            f"[K8sUtils] StorageBackupPolicy '{name}': schedule={schedule} "
+            f"maxVersions={max_versions} maxAge={max_age} "
+            f"selector={match_labels}")
+        return self.apply_yaml(body, namespace=ns)
+
+    def delete_storage_backup_policy(self, name: str,
+                                     namespace: str | None = None):
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {self.SBPOLICY_KIND} {name} -n {ns} "
+            f"--ignore-not-found --wait=false")
 
     def _dump_backup_diagnostics(self, backup_name: str,
                                   namespace: str) -> None:
@@ -4066,110 +4297,91 @@ class K8sUtils:
         except Exception as e:
             self.logger.warning(f"[backup-diag] tasks pod logs failed: {e}")
 
-    def get_storage_backup_id(self, name: str,
-                               namespace: str | None = None) -> str:
-        """Return the backupId from a StorageBackup's status field."""
-        ns = namespace or self.namespace
-        res = self.get_resource_json("storagebackup", name, namespace=ns)
-        return res.get("status", {}).get("backupId", "")
+    def find_storage_backup_by_id(self, backup_id: str) -> tuple:
+        """(name, namespace) of the StorageBackup holding *backup_id*.
 
-    def list_storage_backups(self, namespace: str | None = None) -> list:
-        """List all StorageBackup resources.  Returns list of resource dicts."""
-        ns = namespace or self.namespace
-        out, _ = self._exec_kubectl(
-            f"kubectl get storagebackup -n {ns} -o json 2>/dev/null || true",
-            supress_logs=True,
-        )
-        try:
-            data = json.loads(out.strip()) if out.strip() else {}
-            return data.get("items", [])
-        except Exception:
-            return []
+        Searched across ALL namespaces on purpose. A backup taken on
+        demand lives beside its claim, but one a policy took lives in the
+        operator's namespace whatever the claim's -- so looking only where
+        the claim is finds half of them.
 
-    def delete_storage_backup(self, name: str, namespace: str | None = None):
-        """Delete a StorageBackup CRD."""
-        ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting StorageBackup '{name}'")
-        self.delete_resource("storagebackup", name, namespace=ns)
-
-    # ── BackupRestore CRD operations ─────────────────────────────────────────
+        Returns (None, None) when nothing matches, which is the caller's
+        cue that the id is a control-plane id with no Kubernetes object
+        behind it: backups taken through sbcli, or through a policy on a
+        cluster this operator did not import, have none.
+        """
+        for item in self.list_storage_backups(namespace="--all-namespaces"):
+            st = item.get("status") or {}
+            if str((st.get("backup") or {}).get("backupID") or "") == str(backup_id):
+                m = item.get("metadata") or {}
+                return m.get("name"), m.get("namespace")
+        return None, None
 
     def create_backup_restore(self, name: str, backup_ref_name: str,
-                              pvc_name: str, pvc_size: str,
+                              pvc_name: str, pvc_size: str = "",
                               cluster_name: str = "simplyblock-cluster",
                               storage_class: str | None = None,
                               target_pool: str | None = None,
                               namespace: str | None = None):
-        """Create a BackupRestore CRD to restore a backup into a new PVC."""
-        ns = namespace or self.namespace
-        sc_line = ""
-        if storage_class:
-            sc_line = f"      storageClassName: {storage_class}\n"
-        pool_line = ""
-        if target_pool:
-            pool_line = f"  targetPool: {target_pool}\n"
-        yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: BackupRestore\n"
-            f"metadata:\n"
-            f"  name: {name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
-            f"{pool_line}"
-            f"  backupRef:\n"
-            f"    name: {backup_ref_name}\n"
-            f"  pvcTemplate:\n"
-            f"    metadata:\n"
-            f"      name: {pvc_name}\n"
-            f"    spec:\n"
-            f"      accessModes:\n"
-            f"      - ReadWriteOnce\n"
-            f"      resources:\n"
-            f"        requests:\n"
-            f"          storage: {pvc_size}\n"
-            f"{sc_line}"
-        )
-        self.logger.info(
-            f"[K8sUtils] Creating BackupRestore '{name}' from backup "
-            f"'{backup_ref_name}' -> PVC '{pvc_name}'"
-        )
-        self.apply_yaml(yaml_content, namespace=ns)
+        """Restore a backup into a new claim. Now a StorageBackupOps.
 
-    def wait_backup_restore_done(self, name: str, timeout: int = 300,
-                                  namespace: str | None = None) -> dict:
-        """Poll until BackupRestore phase is ``Done``.
+        The signature is the old BackupRestore one and the call sites are
+        unchanged, but the object written is the v1alpha2 kind. Three
+        things do not map one-to-one and are handled here rather than at
+        fourteen call sites:
 
-        Phases: InProgress -> PVCBinding -> Done
-        Returns resource JSON.
+        * ``backup_ref_name`` is passed a control-plane backup ID by every
+          caller in this suite, while StorageBackupOps.backupRef names a
+          StorageBackup OBJECT. An id is looked up; a name is used as
+          given.
+        * ``pvc_size`` and ``storage_class`` have no counterpart. The
+          operator creates the claim itself, sized from the backup. They
+          are accepted and ignored so the call sites keep compiling, and
+          logged once so nobody thinks they took effect.
+        * ``target_pool`` is now REQUIRED by the CRD. A restore without
+          one is refused at admission rather than failing later.
         """
         ns = namespace or self.namespace
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            res = self.get_resource_json("backuprestore", name, namespace=ns)
-            phase = (res.get("status", {}).get("phase") or "").lower()
-            if phase == "done":
-                self.logger.info(f"[K8sUtils] BackupRestore '{name}' is Done")
-                return res
-            if phase == "failed":
-                raise AssertionError(
-                    f"BackupRestore '{name}' failed: {res.get('status')}")
+        if not target_pool:
+            raise ValueError(
+                f"restore '{name}': target_pool is required by "
+                f"StorageBackupOps.spec.restore and has no default -- the "
+                f"operator will not guess which pool to restore into")
+        if pvc_size or storage_class:
             self.logger.info(
-                f"[K8sUtils] Waiting for BackupRestore '{name}' "
-                f"(phase={res.get('status', {}).get('phase', 'unknown')})"
-            )
-            time.sleep(10)
-        raise TimeoutError(
-            f"BackupRestore '{name}' not Done within {timeout}s"
-        )
+                "[K8sUtils] restore '%s': pvc_size=%r and storage_class=%r "
+                "are ignored; the operator sizes the claim from the backup "
+                "and places it with targetPool", name, pvc_size,
+                storage_class)
+
+        backup_name, backup_ns = backup_ref_name, ns
+        found, found_ns = self.find_storage_backup_by_id(backup_ref_name)
+        if found:
+            backup_name, backup_ns = found, found_ns
+            self.logger.info(
+                "[K8sUtils] restore '%s': backup id %s is StorageBackup "
+                "%s/%s", name, backup_ref_name, found_ns, found)
+        else:
+            self.logger.info(
+                "[K8sUtils] restore '%s': no StorageBackup carries id %r, "
+                "treating it as an object name in %s. If this is a "
+                "control-plane id with no Kubernetes object behind it -- an "
+                "sbcli backup, say -- the operation will not resolve it.",
+                name, backup_ref_name, ns)
+
+        return self.create_storage_backup_ops_restore(
+            name=name, backup_name=backup_name, claim_name=pvc_name,
+            target_pool=target_pool, backup_namespace=backup_ns,
+            cluster_name=cluster_name, namespace=ns)
+
+    def wait_backup_restore_done(self, name: str, timeout: int = 300,
+                                 namespace: str | None = None) -> dict:
+        """Wait for a restore. Now a StorageBackupOps, same signature."""
+        return self.wait_storage_backup_ops_done(
+            name, timeout=timeout, namespace=namespace)
 
     def delete_backup_restore(self, name: str, namespace: str | None = None):
-        """Delete a BackupRestore CRD."""
-        ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting BackupRestore '{name}'")
-        self.delete_resource("backuprestore", name, namespace=ns)
-
-    # ── BackupImport CRD operations ──────────────────────────────────────────
+        return self.delete_storage_backup_ops(name, namespace=namespace)
 
     def create_backup_import(self, name: str,
                               source_cluster_name: str,
