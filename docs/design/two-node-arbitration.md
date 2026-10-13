@@ -268,6 +268,21 @@ answered `EAGAIN` until the peer's JM was healthy). The 10 s rule-removal poller
 (`spdk_lvs_remove_rules_poller`) only lifts a hublvol-port rule; it never lifts the client-port
 rule of a fenced LVS (invariant 6).
 
+Who lifts the client-port block (campaign c3, F8 and 03):
+
+- The fence records the block it owns, and `jc_unfence` lifts it (SPDK #76). A block the CP set
+  before the fence is kept. A block the CP sets while the LVS is **already fenced** is
+  indistinguishable from the fence's own and is lifted by the unfence.
+- The CP restart flow therefore never unblocks a port on a two-node peer whose own HA state for
+  that LVS is fenced or holding: the fence owns it (`storage_node_ops._may_unblock_peer_port`,
+  at the abort, attach-retry, success and recreate unblock sites). Unknown HA state keeps the
+  port blocked.
+- On its failure paths (restart abort, attach-retry gap, the defensive unblock after a failed
+  recreate) it also keeps the port of a peer marked for a data rebuild (section 7.10) blocked.
+  In c3/03 the defensive unblock opened the stale node's port 4426; 70 ms later that node took
+  over LVS_6 on new IO, could not read an md stripe and aborted. The successful restart's own
+  unblock still opens it: the up-to-date node is then back.
+
 ## 7. Arbiter (sbcli)
 
 ### 7.1 State machine (per cluster)

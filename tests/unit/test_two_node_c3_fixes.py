@@ -298,3 +298,85 @@ def test_degraded_record_lists_the_stale_node_in_the_snapshot(env):  # noqa: F81
     _b_frozen_and_granted(a, db, nodes, clock)
     s = a.snapshot(db.rec, [nodes[A], nodes[B]])
     assert s.stale_nodes == (B,) and db.rec.state == ARB_DEGRADED
+
+
+# ---- restart flow: defensive unblock (c3, 03) -------------------------------------
+
+class _Peer:
+    def __init__(self, nid, ha=None, err=None):
+        self.uuid, self.cluster_id, self.status = nid, CL, StorageNode.STATUS_ONLINE
+        self.ha, self.err, self.calls = ha or [], err, []
+
+    def get_id(self):
+        return self.uuid
+
+    def rpc_client(self, **_):
+        peer = self
+
+        class R:
+            def jc_ha_status(self):
+                peer.calls.append("jc_ha_status")
+                if peer.err:
+                    raise peer.err
+                return {"lvs": peer.ha}
+        return R()
+
+
+class _DB:
+    def __init__(self, arbitrated=True, rebuild=None, peers=()):
+        from simplyblock_core.models.arbitration import ClusterArbitration
+        self.arbitrated = arbitrated
+        self.rec = ClusterArbitration()
+        self.rec.rebuild = dict(rebuild or {})
+        self.peers = {p.get_id(): p for p in peers}
+
+    def get_cluster_by_id(self, _):
+        return type("C", (), {"two_node_arbitration": self.arbitrated})()
+
+    def get_cluster_arbitration(self, _):
+        return self.rec
+
+    def get_storage_node_by_id(self, nid):
+        return self.peers.get(nid)
+
+
+@pytest.mark.parametrize("name,peer,db_kw,blocked", [
+    ("not arbitrated: unblock as before", _Peer(B), {"arbitrated": False}, False),
+    ("arbitrated, peer normal: unblock", _Peer(B, [{"jm_vuid": 4, "state": "normal"}]), {}, False),
+    ("peer marked for a rebuild: keep", _Peer(B, [{"jm_vuid": 4, "state": "normal"}]),
+     {"rebuild": {B: {"queued": True}}}, True),
+    ("peer's LVS fenced: keep (the fence owns it)",
+     _Peer(B, [{"jm_vuid": 4, "state": "fenced"}]), {}, True),
+    ("peer's LVS holding: keep", _Peer(B, [{"jm_vuid": 4, "state": "holding"}]), {}, True),
+    ("another LVS fenced only: unblock",
+     _Peer(B, [{"jm_vuid": 3, "state": "fenced"}, {"jm_vuid": 4, "state": "normal"}]), {}, False),
+    ("HA state unknown on an arbitrated cluster: keep",
+     _Peer(B, err=ConnectionError("down")), {}, True),
+])
+def test_defensive_unblock_guard(name, peer, db_kw, blocked):
+    from simplyblock_core import storage_node_ops as sno
+    reason = sno._two_node_peer_port_must_stay_blocked(peer, 4, _DB(**db_kw))
+    assert bool(reason) == blocked, (name, reason)
+
+
+def test_defensive_unblock_skips_the_stale_peer_only(monkeypatch):
+    from simplyblock_core import storage_node_ops as sno
+    survivor = _Peer(A, [{"jm_vuid": 4, "state": "solo"}])
+    stale = _Peer(B, [{"jm_vuid": 4, "state": "normal"}])
+    db = _DB(rebuild={B: {"queued": True}}, peers=(survivor, stale))
+    opened = []
+    monkeypatch.setattr(sno.port_block, "set_port",
+                        lambda node, port, block, **kw: opened.append((node.get_id(), port, block)))
+    monkeypatch.setattr(sno.tcp_ports_events, "port_allowed", lambda *a, **k: None)
+
+    class LvsNode:
+        lvstore, jm_vuid = "LVS_6", 4
+        secondary_node_id, tertiary_node_id = A, ""
+
+        def get_id(self):
+            return B
+
+        def get_lvol_subsys_port(self, _):
+            return 4426
+    sno._release_lvs_subsys_port_on_peers(LvsNode(), "restarting-node", db)
+    assert opened == [(A, 4426, False)]           # B (stale) stays blocked
