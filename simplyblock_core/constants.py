@@ -1040,6 +1040,10 @@ TWO_NODE_WAIT_TIMEOUT_MS = 20000
 TWO_NODE_VERDICT_HISTORY = 50
 #: Arbiter decision loop period (events are folded and decided every tick).
 TWO_NODE_DECISION_TICK_MS = 100
+#: With no cluster that has ``two_node_arbitration`` on, the arbiter (and the
+#: Go event collector) re-scan the cluster list only this often instead of every
+#: tick, so deployments without two-node clusters carry almost no FDB load.
+TWO_NODE_IDLE_RESCAN_S = 30
 #: How often the arbiter re-reads each node's ``jc_ha_status`` and replaces its
 #: per-node, per-LVS view (holding/solo/fenced) with it. Also done at once after
 #: a reconnect and on an instance change or a sequence gap.

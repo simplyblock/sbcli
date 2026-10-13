@@ -196,7 +196,7 @@ def test_sync_tolerates_nodes_without_the_ha_status_rpc(pair, monkeypatch):
 def test_restart_paths_run_the_solo_resync():
     import inspect
     src = inspect.getsource(storage_node_ops._restart_storage_node_impl)
-    assert src.count("_resync_solo_lvs_after_restart(snode)") == 2
+    assert src.count("_resync_solo_lvs_after_restart(snode, cluster)") == 2
 
 
 # ---- B6: leadership reconciliation ---------------------------------------------

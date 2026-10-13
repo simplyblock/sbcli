@@ -1299,18 +1299,29 @@ def apply_jc_dual_node(cluster_id):
     (built without the protocol) still gets the plain dual-node flag: that one
     keeps the survivor from aborting and must never be lost.
     """
-    from simplyblock_core.arbitration import dual_node_params, set_dual_node
-
     db_controller = DBController()
     members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
                if n.status != StorageNode.STATUS_REMOVED]
     enable = len(members) == 2
-    arbitrated = False
-    try:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        arbitrated = bool(getattr(cluster, "two_node_arbitration", False))
-    except Exception as e:                      # noqa: BLE001 - best effort
-        logger.warning("Could not read cluster %s for the arbitration flag: %s", cluster_id, e)
+    # Arbitration exists only on a 2-member cluster: every other cluster (and a
+    # 2-member cluster without arbitration) takes the original path below,
+    # unchanged, with no cluster read.
+    arbitrated = enable and _cluster_two_node_arbitrated(cluster_id)
+    if not arbitrated:
+        for node in members:
+            if node.status != StorageNode.STATUS_ONLINE:
+                continue
+            try:
+                node.rpc_client().jc_set_dual_node(enable)
+                logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
+                            enable, node.get_id(), len(members))
+            except Exception as e:                  # noqa: BLE001 - best effort
+                logger.warning("Could not set JC dual-node=%s on %s: %s",
+                               enable, node.get_id(), e)
+        return
+
+    from simplyblock_core.arbitration import dual_node_params, set_dual_node
+
     for node in members:
         if node.status != StorageNode.STATUS_ONLINE:
             continue
@@ -1334,7 +1345,15 @@ def apply_jc_dual_node(cluster_id):
 def _note_planned_loss(snode, reason):
     """Two-node arbitration (campaign c2, F3): announce that the control plane
     is about to stop this node's SPDK, so the arbiter grants its peer at once
-    instead of letting it fence itself at the hold deadline. Never raises."""
+    instead of letting it fence itself at the hold deadline. Never raises.
+
+    Non-arbitrated clusters return at once, without a DB read when the flow
+    remembered its cluster (``_remember_cluster_arbitration``)."""
+    try:
+        if not _cluster_two_node_arbitrated(snode.cluster_id):
+            return
+    except Exception:                           # noqa: BLE001 - best effort
+        return
     from simplyblock_core.arbitration.planned import note_planned_loss
     try:
         db = DBController()
@@ -1344,8 +1363,44 @@ def _note_planned_loss(snode, reason):
     note_planned_loss(snode, reason, db=db)
 
 
+# Two-node arbitration flag per cluster, remembered from the cluster object the
+# restart and shutdown flows already read (``_remember_cluster_arbitration``),
+# so their two-node gates cost regular clusters no extra FDB read.
+_ARBITRATION_FLAG: dict = {}                    # cluster id -> (flag, monotonic time)
+_ARBITRATION_FLAG_TTL_S = 120.0
+
+
+def _remember_cluster_arbitration(cluster) -> bool:
+    """Record ``cluster.two_node_arbitration`` from a cluster object a flow
+    already holds; returns the flag."""
+    flag = getattr(cluster, "two_node_arbitration", False) is True
+    try:
+        _ARBITRATION_FLAG[cluster.get_id()] = (flag, time.monotonic())
+    except Exception:                               # noqa: BLE001 - a cache only
+        pass
+    return flag
+
+
+def _cluster_two_node_arbitrated(cluster_id, cluster=None, db=None) -> bool:
+    """True only for a cluster with ``two_node_arbitration`` on.
+
+    Uses the given cluster object, else the flag the current flow remembered
+    (fresh for ``_ARBITRATION_FLAG_TTL_S``), else reads the cluster. Unreadable
+    cluster: False, i.e. the regular-cluster behaviour."""
+    if cluster is not None:
+        return _remember_cluster_arbitration(cluster)
+    hit = _ARBITRATION_FLAG.get(cluster_id)
+    if hit is not None and time.monotonic() - hit[1] < _ARBITRATION_FLAG_TTL_S:
+        return hit[0]
+    try:
+        cluster = (db or DBController()).get_cluster_by_id(cluster_id)
+    except Exception:                               # noqa: BLE001 - regular behaviour then
+        return False
+    return _remember_cluster_arbitration(cluster)
+
+
 def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
-                                      interval_s=2.0, sleep=None, clock=None):
+                                      interval_s=2.0, sleep=None, clock=None, arbitrated=None):
     """``jc_compression get_status`` on the LVS leader, retried while it fails.
 
     Campaign c2, F1: right after the returning node's SPDK is up, the leader
@@ -1355,17 +1410,32 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
     failure that outlasts that aborts the restart (the caller raises).
 
+    Two-node arbitration only: on every other cluster this is exactly the
+    previous single call, and a failure is re-raised at once (the restart
+    aborts immediately, as before). The arbitration flag is read only after a
+    failed first call, so the success path does no extra work.
+
     Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
     number of rounds (timeout / interval), so a patched-out ``time.sleep``
     cannot turn the retry into a busy loop.
     """
+    try:
+        return leader.rpc_client().jc_compression_get_status(jm_vuid)
+    except Exception as e:                      # noqa: BLE001 - re-raised unless arbitrated
+        if arbitrated is None:
+            arbitrated = _cluster_two_node_arbitrated(leader.cluster_id)
+        if not arbitrated:
+            raise
+        logger.warning("jc_compression status on leader %s failed (%s); retrying "
+                       "(journal re-level in progress?)", leader.get_id(), e)
     if timeout_s is None:
         timeout_s = constants.RESTART_JC_COMPRESSION_RETRY_S
     sleep = sleep or time.sleep
     clock = clock or time.monotonic
     deadline = clock() + timeout_s
-    rounds = max(1, int(timeout_s // interval_s))
+    rounds = max(1, int(timeout_s // interval_s)) - 1  # the first call above was one
     while True:
+        sleep(interval_s)
         try:
             return leader.rpc_client().jc_compression_get_status(jm_vuid)
         except Exception as e:                  # noqa: BLE001 - retried, then re-raised
@@ -1374,7 +1444,6 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
                 raise
             logger.warning("jc_compression status on leader %s failed (%s); retrying "
                            "(journal re-level in progress?)", leader.get_id(), e)
-            sleep(interval_s)
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
@@ -3530,6 +3599,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
     # re-activation used to accept because a suspended cluster is not ACTIVE.
     try:
         _cluster = db_controller.get_cluster_by_id(cluster_id)
+        _remember_cluster_arbitration(_cluster)
     except KeyError:
         logger.error("Cluster not found: %s", cluster_id)
         return False
@@ -8217,6 +8287,7 @@ def _restart_storage_node_impl(
         if force is False:
             return False
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    _remember_cluster_arbitration(cluster)
     if cluster.status == Cluster.STATUS_IN_ACTIVATION:
         logger.error("Cluster is in activation status, can not restart node")
         return False
@@ -8975,7 +9046,7 @@ def _restart_storage_node_impl(
             logger.info(f"Starting migration task for node {snode.get_id()}")
             tasks_controller.add_device_mig_task_for_node(snode.get_id())
 
-        _resync_solo_lvs_after_restart(snode)
+        _resync_solo_lvs_after_restart(snode, cluster)
         return True
 
     else:
@@ -9120,7 +9191,7 @@ def _restart_storage_node_impl(
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
         logger.info(f"Found {len(lvol_list)} lvols")
 
-        _resync_solo_lvs_after_restart(snode)
+        _resync_solo_lvs_after_restart(snode, cluster)
         return True
 
 
@@ -9839,6 +9910,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         _cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     except KeyError:
         _cluster = None
+    if _cluster is not None:
+        _remember_cluster_arbitration(_cluster)
     if _cluster is not None and _cluster.status == Cluster.STATUS_IN_EXPANSION:
         logger.error(
             f"Cluster {snode.cluster_id} is in expansion; node shutdown is "
@@ -11318,7 +11391,14 @@ def resync_solo_lvs_on_leaders(snode):
     return synced
 
 
-def _resync_solo_lvs_after_restart(snode):
+def _resync_solo_lvs_after_restart(snode, cluster=None):
+    """Two-node arbitration only (campaign c1, B1); a no-op on every other
+    cluster, decided from the restart flow's own cluster object."""
+    try:
+        if not _cluster_two_node_arbitrated(snode.cluster_id, cluster=cluster):
+            return
+    except Exception:                               # noqa: BLE001 - never fails a restart
+        return
     try:
         resync_solo_lvs_on_leaders(snode)
     except Exception as e:                          # noqa: BLE001 - never fails a restart
@@ -13150,11 +13230,8 @@ def _two_node_peer_port_must_stay_blocked(peer, jm_vuid, db_controller, rebuild_
     back): only the fence check applies. A block the restart flow set while the
     LVS was already fenced is lifted by ``spdk_lvs_ha_unfence`` (SPDK #76, F8),
     so skipping the unblock here never strands it."""
-    try:
-        cluster = db_controller.get_cluster_by_id(peer.cluster_id)
-    except Exception:                               # noqa: BLE001 - not arbitrated then
-        return ""
-    if getattr(cluster, "two_node_arbitration", False) is not True:
+    # Regular clusters: the remembered flag answers, no DB read (restart flow).
+    if not _cluster_two_node_arbitrated(peer.cluster_id, db=db_controller):
         return ""
     try:
         rec = db_controller.get_cluster_arbitration(peer.cluster_id)
