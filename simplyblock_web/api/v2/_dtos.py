@@ -101,6 +101,12 @@ SyncReplicationRole = Literal["primary", "secondary"]
 #: Sync replication: the cluster-wide state, the worst over every LVS.
 SyncReplicationState = Literal["healthy", "degraded", "resyncing"]
 
+# Every JobSchedule.FN_* value the scheduler can persist must appear here, or a
+# single task of a missing type makes the whole /tasks list (and its SSE watch)
+# 500 with a pydantic literal_error. This is a hand-maintained duplicate of the
+# FN_* constants and drifts the moment one is added without the matching entry
+# (2026-10: a sync_promote task crashed every /tasks watch); test_task_endpoints'
+# test_serializes_every_task_function_name is the guard.
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -108,6 +114,7 @@ TaskFunctionName = Literal[
     "failed_device_migration",
     "new_device_migration",
     "node_add",
+    "node_removal",
     "port_allow",
     "balancing_on_restart",
     "balancing_on_dev_rem",
@@ -115,10 +122,17 @@ TaskFunctionName = Literal[
     "jc_comp_resume",
     "snapshot_replication",
     "lvol_sync_del",
+    "lvol_sync_op",
     "lvol_migration",
+    "lvol_batch_migration",
     "s3_backup",
     "s3_backup_restore",
     "s3_backup_merge",
+    "cluster_expand",
+    "replication_final",
+    "fdb_backup",
+    "sync_promote",
+    "sync_resync",
 ]
 
 
