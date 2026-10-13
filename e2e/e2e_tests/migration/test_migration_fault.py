@@ -550,6 +550,12 @@ class MigrationRetryAfterTargetReboot(_FaultBase):
             # storage node(s) not healthy": one missing uncordon, three
             # red classes.
             k8s = self._ensure_k8s_utils()
+            # Registered BEFORE the reboot, not after. If the reboot
+            # itself raises, the node may already be cordoned -- drain
+            # cordons first -- and teardown has to know about it even
+            # then. Registering afterwards would miss exactly the case
+            # that matters.
+            self._cordoned.add(ip)
             k8s.reboot_node(ip, drain=True)
             try:
                 k8s.wait_node_condition(ip, ready=True, timeout=900)
@@ -560,6 +566,7 @@ class MigrationRetryAfterTargetReboot(_FaultBase):
                     "is worse than uncordoning a node that is still "
                     "settling", ip, str(exc)[:140])
             k8s.cordon_node(ip, cordon=False)
+            self._cordoned.discard(ip)
             self.logger.info("[MIG-F-013] uncordoned %s", ip)
         else:
             self.ssh_obj.reboot_node(node_ip=ip)

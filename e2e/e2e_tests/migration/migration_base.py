@@ -275,6 +275,10 @@ class MigrationTestBase(TestClusterBase):
         #: shared-subsystem group -- leaks a cluster-scoped object into
         #: every later run unless it is tracked here.
         self._extra_scs = []
+        #: Worker nodes this lane cordoned. A cordon outlives the case
+        #: that made it and makes the node unschedulable for every case
+        #: after it, so it is undone in teardown, not inline.
+        self._cordoned = set()
 
     # ── CLI ──────────────────────────────────────────────────────────────
     def _cli(self, command):
@@ -1716,6 +1720,29 @@ class MigrationTestBase(TestClusterBase):
         and never raising: a teardown that throws replaces the test's own
         verdict with its own.
         """
+        # UNCORDON FIRST, and from teardown rather than from the case.
+        #
+        # reboot_node(drain=True) cordons, and says so: "the caller
+        # uncordons once the node is Ready again". Doing that inline at
+        # the end of the case is not enough -- anything that raises
+        # between the reboot and that line leaves the node cordoned, its
+        # storage pod unschedulable, and every later case failing its
+        # pre-test health check on a node nothing is wrong with. That is
+        # how run 20261013-143016 lost three classes to one reboot, and
+        # an undo at the end of run() would have covered only the case
+        # where it was never needed.
+        for ip in sorted(getattr(self, "_cordoned", set()) or set()):
+            try:
+                self._ensure_k8s_utils().cordon_node(ip, cordon=False)
+                self.logger.info("[MIG] teardown uncordoned %s", ip)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[MIG] could NOT uncordon %s: %s. Until someone does, "
+                    "nothing schedules there, its storage node stays down, "
+                    "and every later case fails its health check on a node "
+                    "with nothing wrong with it.", ip, str(exc)[:160])
+        self._cordoned = set()
+
         for sc in reversed(getattr(self, "_extra_scs", []) or []):
             try:
                 self._ensure_k8s_utils().delete_storage_class(sc)
