@@ -120,6 +120,11 @@ class GroupBackup(BaseModel):
 
     _WATCHED = True
 
+    def __eq__(self, other):
+        if not isinstance(other, GroupBackup):
+            return NotImplemented
+        return self.model_dump() == other.model_dump()
+
     _INDEXES: ClassVar[tuple] = (
         # uuid: a caller holding only the uuid (the mirror, a restore) can point
         # read. consistency_group_id: "the group backups of this group" (listing,
