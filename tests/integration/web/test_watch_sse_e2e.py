@@ -1,9 +1,10 @@
 """End-to-end SSE watch: real app in a real uvicorn server on a real FDB.
 
-Runs the actual ``simplyblock_web.app:app`` (including AccessLogMiddleware —
-the BaseHTTPMiddleware whose interaction with streaming responses this pins)
-in a background uvicorn thread and consumes the stream over a real socket
-with ``requests``, so client-disconnect semantics are exercised for real.
+Runs the actual ``simplyblock_web.app:app`` (including ``AccessLogMiddleware``
+and ``RequestTimeoutMiddleware`` — this pins that neither cuts off a
+long-lived streaming response once it has started; see SFAM-2821) in a
+background uvicorn thread and consumes the stream over a real socket with
+``requests``, so client-disconnect semantics are exercised for real.
 """
 
 import json

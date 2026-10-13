@@ -65,6 +65,18 @@ class Settings(BaseSettings):
         AfterValidator(_check_api_versions),
     ] = {1, 2}
     enable_cluster_secret_auth: bool = True
+    request_timeout_seconds: Annotated[
+        int,
+        Field(
+            gt=0,
+            description=(
+                "Seconds a request may run before it sends its first response byte. "
+                "Bounds a stuck request to a single failed (504) request instead of "
+                "tying up a worker slot indefinitely. A response that has already "
+                "started (e.g. an SSE watch stream) is never cut off by this."
+            ),
+        ),
+    ] = 60
     k8s_admin_service_accounts: Annotated[
         list[str],
         Field(

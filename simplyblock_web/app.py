@@ -1,16 +1,17 @@
 
 import logging
+import math
 import os
 import ssl
 import sys
 import time
 
+import anyio
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from prometheus_fastapi_instrumentator import Instrumentator
-from starlette.middleware.base import BaseHTTPMiddleware
 from uvicorn.config import Config
 
 from simplyblock_core import constants
@@ -45,34 +46,126 @@ access_logger.propagate = False
 core_utils.init_sentry_sdk()
 
 
-class AccessLogMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        client_ip = request.client.host if request.client else '-'
-        request_size = request.headers.get('content-length', '-')
+class AccessLogMiddleware:
+    """One line per served HTTP request, in place of uvicorn's access log.
+
+    Pure ASGI, not a ``starlette.middleware.base.BaseHTTPMiddleware``
+    subclass: that base class buffers the downstream response through an
+    internal anyio memory-object-stream plus a nested per-request task group
+    so it can hand ``dispatch()`` a real ``Response`` object. A cancellation
+    race in that machinery (SFAM-2821 — a client disconnect or timeout racing
+    the internal receive_event) can leave a request's task stuck forever
+    awaiting an event nothing will ever set, wedging every future request
+    behind it without the process crashing or even logging again. Plain ASGI
+    middleware only wraps ``send``; no concurrent task reads the body
+    independently, so it carries none of that risk.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        client = scope.get('client')
+        client_ip = client[0] if client else '-'
+        request_size = '-'
+        for name, value in scope.get('headers', ()):
+            if name == b'content-length':
+                request_size = value.decode('latin-1')
+                break
 
         # Query strings can carry credentials (?secret=…, ?token=…) and have
         # no type info to mask by, so log the path only.
-        path = request.url.path
+        path = scope['path']
+        method = scope['method']
+
+        status_code = 500
+        response_size = '-'
+
+        async def logging_send(message):
+            nonlocal status_code, response_size
+            if message['type'] == 'http.response.start':
+                status_code = message['status']
+                for name, value in message.get('headers', ()):
+                    if name == b'content-length':
+                        response_size = value.decode('latin-1')
+                        break
+            await send(message)
 
         start = time.monotonic()
-        response = await call_next(request)
-        duration_ms = (time.monotonic() - start) * 1000
+        try:
+            await self.app(scope, receive, logging_send)
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            access_logger.info(
+                '%s %s',
+                method,
+                path,
+                extra={
+                    'client_ip': client_ip,
+                    'request_size': request_size,
+                    'status_code': status_code,
+                    'response_size': response_size,
+                    'duration_ms': duration_ms,
+                },
+            )
 
-        response_size = response.headers.get('content-length', '-')
 
-        access_logger.info(
-            '%s %s',
-            request.method,
-            path,
-            extra={
-                'client_ip': client_ip,
-                'request_size': request_size,
-                'status_code': response.status_code,
-                'response_size': response_size,
-                'duration_ms': duration_ms,
-            },
-        )
-        return response
+class RequestTimeoutMiddleware:
+    """Bound how long a request may run before it sends its first response byte.
+
+    SFAM-2821: a cancellation race deep in anyio/Starlette's request
+    machinery can leave a request's task permanently stuck awaiting an event
+    that is never set, without crashing or otherwise disturbing the rest of
+    the event loop — every other in-flight and future request then just
+    queues up behind a worker slot that never frees, until something notices
+    the API stopped answering. Bounding time-to-first-byte here turns that
+    into a single failed (504) request instead of a silent, permanent outage.
+
+    The guard is lifted the moment headers are sent, so a long-lived response
+    (the SSE watch endpoints in api/v2) is unaffected once it starts
+    streaming — only the time to *start* responding is bounded.
+    """
+
+    def __init__(self, app, timeout_seconds):
+        self.app = app
+        self.timeout_seconds = timeout_seconds
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def guarded_send(message):
+            nonlocal response_started
+            if message['type'] == 'http.response.start':
+                response_started = True
+                cancel_scope.deadline = math.inf
+            await send(message)
+
+        with anyio.CancelScope() as cancel_scope:
+            cancel_scope.deadline = anyio.current_time() + self.timeout_seconds
+            await self.app(scope, receive, guarded_send)
+
+        if cancel_scope.cancelled_caught and not response_started:
+            logger.warning(
+                "Request timed out after %ss with no response: %s %s",
+                self.timeout_seconds, scope.get('method'), scope.get('path'),
+            )
+            await send({
+                'type': 'http.response.start',
+                'status': 504,
+                'headers': [(b'content-type', b'application/json')],
+            })
+            await send({
+                'type': 'http.response.body',
+                'body': b'{"error":"Request timed out"}',
+            })
 
 
 app: FastAPI = FastAPI()
@@ -107,6 +200,7 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
 
 _web_settings = WebSettings()
 
+app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=_web_settings.request_timeout_seconds)
 app.add_middleware(AccessLogMiddleware)
 
 if 2 in _web_settings.api_versions:

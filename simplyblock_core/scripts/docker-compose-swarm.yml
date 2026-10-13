@@ -135,6 +135,21 @@ services:
       FLASK_DEBUG: "False"
       FLASK_ENV: "production"
       FLASK_PORT: 5000
+    # SFAM-2821: the container can stay up (and `docker stats`/the process's
+    # own memory usage look perfectly healthy) while its event loop is
+    # wedged and it has stopped answering any request. Nothing before this
+    # detected that failure mode short of a human noticing the 504s. The
+    # metrics endpoint is always registered regardless of SB_API_VERSIONS,
+    # so it's a safe, cheap liveness probe; `-k`/the http fallback cover the
+    # cluster both with and without SB_TLS_SERVE.
+    healthcheck:
+      test: >-
+        curl -skf https://localhost:5000/_meta/metrics -o /dev/null ||
+        curl -sf http://localhost:5000/_meta/metrics -o /dev/null
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   StorageNodeMonitor:
     <<: *service-base
