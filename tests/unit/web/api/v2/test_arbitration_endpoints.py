@@ -65,6 +65,18 @@ class TestGet:
         assert 'lease_age_ms' in body and 'enabled' in body
         write.assert_called_once()
 
+    def test_reports_a_pending_rebuild_as_not_redundant(self, client, db, two_nodes):
+        # campaign c3, F10: a re-admitted node is not a full replica until rebuilt
+        rec = ClusterArbitration()
+        rec.cluster_id = CLUSTER_ID
+        db.get_cluster_arbitration.return_value = rec
+        body = client.get(f'{BASE}/').json()
+        assert body['redundant'] is True and body['rebuild_pending'] == []
+        rec.rebuild = {NODE_B: {"reason": "re-admitted", "since": 1, "scheduled_at": 0,
+                                "queued": False}}
+        body = client.get(f'{BASE}/').json()
+        assert body['redundant'] is False and body['rebuild_pending'] == [NODE_B]
+
     def test_refuses_a_cluster_that_is_not_two_nodes(self, client, db, cluster):
         db.get_cluster_arbitration.return_value = None
         db.get_storage_nodes_by_cluster_id.return_value = [_node(NODE_A)]
