@@ -19,7 +19,7 @@ and one regression scenario per finding, in CI:
 | the arbiter's default helpers: leadership restore, device check, rebuild-task bookkeeping, the leaderless reconcile and its probe | the network (storage link, management link, client link, lossy link) |
 | every `RPCClient` wrapper — only `RPCClient._request` is routed to the simulated node | the client's NVMe multipath IO (KATO 4 s, fast_io_fail 8 s) |
 | the guards the flows consult: `_single_peer_jm_is_complete`, `_two_node_fence_holds_ports`, `_may_unblock_peer_port`, `_jc_compression_status_with_retry`, `_failover_primary_ana`, `_failback_primary_ana`, `_set_lvol_ana_on_node` | the outer shell of the flows the arbiter does not own: monitor (offline, auto-restart, stale-port remediation), restart runner, port-allow runner, migration runner, shutdown flow. Each keeps the real guard calls and models only the RPC-heavy work |
-| `tasks_controller` task records, `set_node_status`, all FDB reads and writes (real FoundationDB, as the integration tier requires) | the Go event collector (same contract: in order per node, `ha_resync` on a new instance) |
+| `tasks_controller` task records, `set_node_status`, all FDB reads and writes (real FoundationDB, as the integration tier requires) | the event collector (same contract: in order per node, `ha_resync` on a new instance) |
 
 Time is virtual (`vclock.py`): `time.time`/`monotonic`/`sleep` and the
 arbiter's clock read one clock; nothing sleeps or waits on the wall clock. A

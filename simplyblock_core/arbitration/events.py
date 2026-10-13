@@ -128,8 +128,8 @@ def forward_legacy_jm_event(db, cluster, node_id: str, event_dict: dict) -> bool
     the Python distr collector to the arbiter.
 
     The distr event queue is consumed destructively by that collector
-    (``distr_status_events_discard_then_get``), so the Go collector must not
-    read it as well; this is the fallback path instead. The events carry no
+    (``distr_status_events_discard_then_get``), so the two-node event collector
+    must not read it as well; this is the fallback path instead. The events carry no
     sequence, so the receive time in ns orders and identifies them.
     Returns True when the event was a remote-JM event (handled here).
     """
