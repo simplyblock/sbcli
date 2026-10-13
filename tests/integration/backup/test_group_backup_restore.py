@@ -84,11 +84,13 @@ def test_restore_forms_a_new_group_from_all_members(db):
 
     with patch(RESTORE_BACKUP, side_effect=["rv-db", "rv-data"]) as restore, \
             patch(BACKUP_CHAIN):
-        group_id, lvol_ids, err = group_backup.restore_group_backup(
+        group_id, members, err = group_backup.restore_group_backup(
             gb.get_id(), "restored-cg", "pool-1")
 
     assert err is None
-    assert lvol_ids == ["rv-db", "rv-data"]
+    assert members == [
+        {"lvol_id": "rv-db", "member_name": "db"},
+        {"lvol_id": "rv-data", "member_name": "data"}]
     # The second member is pinned to the first member's node, not auto-placed.
     assert restore.call_args_list[1].kwargs["target_node_id"] == "node-1"
 

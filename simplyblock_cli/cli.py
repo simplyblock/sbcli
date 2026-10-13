@@ -1315,6 +1315,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_group_backup__get(subparser)
         self.init_group_backup__restore(subparser)
         self.init_group_backup__delete(subparser)
+        self.init_group_backup__export(subparser)
+        self.init_group_backup__discover(subparser)
+        self.init_group_backup__import(subparser)
 
 
     def init_group_backup__list(self, subparser):
@@ -1339,6 +1342,34 @@ class CLIWrapper(CLIWrapperBase):
     def init_group_backup__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete a consistency-group backup: its group manifest and record. Member backups follow per-volume retention.')
         subcommand.add_argument('group_backup_id', help='Group backup id (or uuid).', type=str)
+
+    def init_group_backup__export(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'export', 'Export a consistency-group backup\'s manifests as a unit, to a JSON file for cross-cluster restore.')
+        subcommand.add_argument('group_backup_id', help='Group backup id (or uuid).', type=str)
+        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('-o', '--output', help='The output file path.', type=str, dest='output')
+
+    def init_group_backup__discover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'discover', 'List the consistency-group backups a bucket contains, reading its group manifests. Needs no cluster.')
+        subcommand.add_argument('--bucket', help='The bucket holding the group backups.', type=str, dest='bucket', required=True)
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
+
+    def init_group_backup__import(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'import', 'Register the consistency-group backups held in a bucket, or in an export file, into this cluster.')
+        subcommand.add_argument('--cluster-id', help='The target cluster to import into (required for cross-cluster restore).', type=str, dest='cluster_id')
+        subcommand.add_argument('--bucket', help='Import every group backup in this bucket. Give this or --from-file, not both.', type=str, dest='bucket')
+        subcommand.add_argument('--from-file', help='Import the group backup in this file, from \'group-backup export\'. It records which bucket its members live in, so --bucket is neither needed nor accepted.', type=str, dest='from_file')
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
 
 
     def init_qos(self):
@@ -1907,6 +1938,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.group_backup__restore(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.group_backup__delete(sub_command, args)
+                elif sub_command in ['export']:
+                    ret = self.group_backup__export(sub_command, args)
+                elif sub_command in ['discover']:
+                    ret = self.group_backup__discover(sub_command, args)
+                elif sub_command in ['import']:
+                    ret = self.group_backup__import(sub_command, args)
                 else:
                     self.parser.print_help()
 

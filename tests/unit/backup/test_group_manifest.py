@@ -11,13 +11,22 @@ import pytest
 
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.manifest import (
+    GROUP_EXPORT_SCHEMA_VERSION,
     GROUP_MANIFEST_SCHEMA_VERSION,
+    BackupExport,
+    BackupManifest,
+    GroupBackupExport,
     GroupBackupManifest,
     GroupManifestMember,
     GroupManifestMembership,
     GroupManifestSource,
+    LocatedManifests,
+    ManifestDataPlane,
     ManifestError,
+    ManifestSource,
+    ManifestVolume,
 )
+from simplyblock_core.models.backup_config import BackupLocation
 
 
 def _id(name: str) -> UUID:
@@ -127,3 +136,84 @@ class TestParse:
     def test_names_the_key_it_could_not_read(self):
         with pytest.raises(ManifestError, match="groups/gb-9.json"):
             backup_manifest._parse_group(b"{not json", "groups/gb-9.json")
+
+
+def _backup_manifest(name):
+    """A single-volume member manifest for the member named *name*."""
+    return BackupManifest(
+        backup_id=_id("b-" + name),
+        s3_id=zlib.crc32(name.encode()),
+        created_at=100,
+        completed_at=200,
+        size=4096,
+        source=ManifestSource(cluster_id=CLUSTER_ID, node_id=_id("node")),
+        volume=ManifestVolume(
+            lvol_id=_id(name), lvol_name=name,
+            snapshot_id=_id("snap-" + name), snapshot_name="snap", size=4096),
+        dataplane=ManifestDataPlane(),
+    )
+
+
+LOCATION = BackupLocation(bucket_name="backups", region="eu-central-1")
+
+
+def _group_export(**overrides):
+    """A group export: the group manifest plus its member backup manifests."""
+    members = overrides.pop("members", [_backup_manifest("db"), _backup_manifest("data")])
+    fields = {
+        "group_manifest": _group_manifest(),
+        "members": BackupExport(groups=[
+            LocatedManifests(location=LOCATION, manifests=members)]),
+    }
+    fields.update(overrides)
+    return GroupBackupExport(**fields)
+
+
+class TestGroupExportSchema:
+    """GroupBackupExport is the unit of transfer: the group manifest together with
+    the member backup manifests it names (design §6.5)."""
+
+    def test_round_trip(self):
+        original = _group_export()
+        restored = backup_manifest.parse_group_export(
+            original.model_dump_json().encode(), "k")
+        assert restored == original
+
+    def test_carries_the_group_manifest_and_the_member_manifests(self):
+        export = _group_export()
+        assert export.group_manifest.source.consistency_group_name == "gitea"
+        assert [m.volume.lvol_name for m in export.members.groups[0].manifests] == [
+            "db", "data"]
+
+    def test_names_where_the_members_live(self):
+        """Unlike a manifest, an export records a location -- it is not stored in
+        the bucket it describes, so the reader has nothing else to go on."""
+        export = _group_export()
+        assert export.members.groups[0].location.bucket_name == "backups"
+
+    def test_unknown_field_is_rejected(self):
+        with pytest.raises(ValueError):
+            GroupBackupExport.model_validate({
+                **json.loads(_group_export().model_dump_json()), "extra": 1})
+
+
+class TestParseGroupExport:
+    def test_rejects_a_newer_schema_version(self):
+        data = json.loads(_group_export().model_dump_json())
+        data["schema_version"] = GROUP_EXPORT_SCHEMA_VERSION + 1
+        with pytest.raises(ManifestError, match="group export schema version"):
+            backup_manifest.parse_group_export(json.dumps(data).encode(), "file.json")
+
+    def test_rejects_invalid_json(self):
+        with pytest.raises(ManifestError, match="not valid JSON"):
+            backup_manifest.parse_group_export(b"{not json", "file.json")
+
+    def test_rejects_a_malformed_export(self):
+        with pytest.raises(ManifestError, match="malformed"):
+            backup_manifest.parse_group_export(
+                json.dumps({"schema_version": GROUP_EXPORT_SCHEMA_VERSION}).encode(),
+                "file.json")
+
+    def test_names_the_source_it_could_not_read(self):
+        with pytest.raises(ManifestError, match="file.json"):
+            backup_manifest.parse_group_export(b"{not json", "file.json")

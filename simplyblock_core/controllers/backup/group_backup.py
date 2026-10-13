@@ -373,7 +373,9 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     volumes already created are torn down so a failed group restore leaves no
     half-group.
 
-    Returns ``(new_group_id, lvol_ids, None)`` or ``(None, None, error_message)``.
+    Returns ``(new_group_id, members, None)`` or ``(None, None, error_message)``,
+    where ``members`` is ``[{"lvol_id", "member_name"}, ...]``, one per restored
+    volume, in member order.
     """
     from simplyblock_core import db_controller
     from simplyblock_core.controllers import consistency_group_controller as cg
@@ -427,7 +429,8 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     # The first restore may auto-select a node; the rest are pinned to it, which
     # add_member_to_group then enforces (design §3.5).
     pin_node = target_node_id
-    created: list = []
+    created_ids: list = []
+    members_out: list = []
     for backup in member_backups:
         lvol_name = f"{into_group_name}_{backup.lvol_name}"
         try:
@@ -435,10 +438,14 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
                 backup.uuid, lvol_name, pool_id_or_name,
                 target_node_id=pin_node, s3_credentials=s3_credentials)
         except (PreconditionError, RuntimeError, ValueError) as e:
-            _unwind_restored(created)
+            _unwind_restored(created_ids)
             return None, None, (
                 f"member {backup.lvol_name} could not be restored: {e}")
-        created.append(lvol_id)
+        created_ids.append(lvol_id)
+        # member_name is the source member's volume name, which the caller forms
+        # the restored claim's name from (the operator names it
+        # <claimName>-<member_name>) and uses to tell the members apart.
+        members_out.append({"lvol_id": lvol_id, "member_name": backup.lvol_name})
         if pin_node is None:
             pin_node = db.get_lvol_by_id(lvol_id).node_id
 
@@ -447,18 +454,18 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     # which the unwind then cleans up (design §6.4). The group we just created is
     # removed on failure too, so the half-formed name does not block a retry.
     group = cg.ensure_group(cluster_id, into_group_name)
-    for lvol_id in created:
+    for lvol_id in created_ids:
         try:
             group = cg.add_member_to_group(group, db.get_lvol_by_id(lvol_id))
         except (cg.ConsistencyGroupError, KeyError) as e:
-            _unwind_restored(created)
+            _unwind_restored(created_ids)
             db.get_consistency_group_by_id(group.get_id()).remove(db.kv_store)
             return None, None, (
                 f"restored volumes could not form group {into_group_name}: {e}")
 
     logger.info("Restored group backup %s into consistency group %s (%d members)",
-                group_backup.uuid, into_group_name, len(created))
-    return group.get_id(), created, None
+                group_backup.uuid, into_group_name, len(created_ids))
+    return group.get_id(), members_out, None
 
 
 def delete_group_backup(group_backup_id):
@@ -490,3 +497,279 @@ def delete_group_backup(group_backup_id):
                        group_backup.uuid, e)
     group_backup.remove(db.kv_store)
     return True, None
+
+
+def export_group_backup(group_backup_id, cluster_id=None):
+    """Export a group backup's manifests as a unit, for import into another
+    cluster (design §6.5).
+
+    Emits the group manifest together with the member backup chains it names, as
+    one :class:`backup_manifest.GroupBackupExport`. The member chains are grouped
+    by the location they live in exactly as the single-volume
+    :func:`controller.export_backups` groups its manifests, so the same import
+    machinery lands the member ``Backup`` records; the group manifest is what ties
+    them back into a ``GroupBackup`` on the way in.
+
+    The member manifests are each member's whole restorable chain, not just the
+    member backup itself: an import has to land every ancestor for the group to be
+    restorable, the unit ``export_backups(backup_id=...)`` produces for one volume.
+
+    Args:
+        cluster_id: scopes the backup population the chains are walked over, as in
+            :func:`controller.export_backups`. The group backup's own cluster by
+            construction; passed through so a caller can state it.
+
+    Returns a :class:`backup_manifest.GroupBackupExport`.
+
+    Raises:
+        PreconditionError: the group backup is unknown, is not a committed unit, a
+            member backup record is missing, or a member's chain is broken.
+        ValueError: one of the selected backups records no usable location, so it
+            cannot be described.
+    """
+    from simplyblock_core import db_controller
+    from simplyblock_core.controllers.backup import controller as backup_controller
+    from simplyblock_core.controllers.backup.chain import BackupChain
+
+    db = db_controller.DBController()
+    try:
+        group_backup = db.get_group_backup_by_id(group_backup_id)
+    except KeyError as e:
+        raise PreconditionError(str(e)) from e
+
+    # Only a committed group backup is a unit worth exporting: an in-progress or
+    # failed one has no published group manifest and is not crash-consistent
+    # (design §3.3), the same rule that gates restore.
+    if group_backup.status != GroupBackup.STATUS_COMPLETED:
+        raise PreconditionError(
+            f"group backup {group_backup_id} is {group_backup.status}, not "
+            f"completed; only a committed group backup can be exported")
+
+    member_by_id = {}
+    for entry in group_backup.members:
+        try:
+            backup = db.get_backup_by_id(entry["backup_id"])
+        except KeyError as e:
+            raise PreconditionError(
+                f"a member backup of group backup {group_backup_id} is "
+                f"missing: {e}") from e
+        member_by_id[backup.get_id()] = backup
+
+    group_manifest = build_group_manifest(group_backup, member_by_id)
+
+    # Each member's whole chain, collected and deduplicated across members: an
+    # import lands every ancestor so the group is restorable, the unit
+    # export_backups(backup_id=...) produces for one volume.
+    all_backups = db.get_backups(cluster_id)
+    chain_records = {}
+    for backup in member_by_id.values():
+        try:
+            chain = BackupChain.of_backups(UUID(backup.uuid), all_backups)
+        except ValueError as e:
+            raise PreconditionError(str(e)) from e
+        for record in chain.records():
+            chain_records[record.uuid] = record
+
+    return backup_manifest.GroupBackupExport(
+        group_manifest=group_manifest,
+        members=backup_controller._group_by_location(chain_records.values()),
+    )
+
+
+def discover_group_backups(config):
+    """Every group backup in a bucket, read from its group manifests alone
+    (design §6.5).
+
+    The disaster-recovery entry point for group backups, parallel to the
+    single-volume :func:`controller.discover_backups`: given a bucket and
+    credentials for it, this answers "what group backups are in here" with no
+    reference to any cluster, live or dead. Reads the ``groups/`` prefix through
+    :func:`backup_manifest.list_all_groups`.
+
+    Raises:
+        ManifestError: the bucket could not be listed, or one of its group
+            manifests could not be parsed.
+    """
+    return backup_manifest.list_all_groups(config)
+
+
+def _group_location(export) -> dict:
+    """Where a group export's members live, as a serialized ``BackupLocation``.
+
+    A group backup is homogeneous: its members share one location (design §3.4),
+    which is also where its group manifest lives. The group manifest never records
+    it -- a manifest describes objects, not where they are -- so it is recovered
+    from the member export, which does.
+
+    Raises:
+        ValueError: the export carries no member manifests, so there is no
+            location to recover.
+    """
+    for group in export.members.groups:
+        if group.manifests:
+            return group.location.model_dump(mode="json")
+    raise ValueError("group export carries no member manifests")
+
+
+def import_group_backup(export, cluster_id=None):
+    """Register a group backup described by a ``GroupBackupExport`` into this
+    cluster, preserving ids and all-or-nothing across the group (design §6.5).
+
+    Recreates both the member ``Backup`` records AND the ``GroupBackup`` record
+    that ties them together, keeping every id: the member uuids and s3_ids (which
+    name the objects in the bucket and so cannot be reassigned), the group
+    backup's own uuid, and the generation. The whole group imports or none of it
+    does -- a group id collision, a member id collision, or a broken member chain
+    refuses the batch before the group record is written.
+
+    The member backups go in through the single-volume
+    :func:`controller.import_backups`, which is where the chain validation and the
+    member-id-collision rule live; this adds the group record on top and stamps
+    each imported member with the group backup id and generation that the member
+    manifests do not themselves carry.
+
+    Args:
+        export: a validated :class:`backup_manifest.GroupBackupExport`, from
+            :func:`export_group_backup`, a bucket read, or a file parsed into one.
+        cluster_id: the cluster to import into, so the records are visible in its
+            namespace. The group manifest's own source cluster when omitted.
+
+    Returns the imported group backup's composite ``cluster_id/uuid`` id.
+
+    Raises:
+        PreconditionError: the group backup id is already known, or the member
+            import's own preconditions fail (a member id collision, a broken or
+            over-long chain).
+        ValueError: the group names a member whose manifest the export does not
+            carry, so the group would import incomplete.
+    """
+    from simplyblock_core import db_controller
+    from simplyblock_core.controllers.backup import controller as backup_controller
+
+    db = db_controller.DBController()
+    group_manifest = export.group_manifest
+    target_cluster = cluster_id or str(group_manifest.source.cluster_id)
+    uuid = str(group_manifest.group_backup_id)
+    composite_id = f"{target_cluster}/{uuid}"
+
+    # Reject a group id collision before writing anything -- the group analog of
+    # import_backups' per-backup collision check. Group-backup lookups resolve by
+    # uuid, so a reused uuid would make either record unaddressable.
+    try:
+        existing = db.get_group_backup_by_id(composite_id)
+    except KeyError:
+        pass
+    else:
+        raise PreconditionError(
+            f"Group backup {uuid} already exists in cluster {existing.cluster_id}")
+
+    # Every member the group names has to be present in the export: a group that
+    # imported without one of its members would be a torn generation that looks
+    # complete in `group-backup list` and fails only at restore.
+    exported = {
+        manifest.backup_id
+        for group in export.members.groups for manifest in group.manifests
+    }
+    missing = [member.backup_id for member in group_manifest.members
+               if member.backup_id not in exported]
+    if missing:
+        raise ValueError(
+            "group export is missing member manifests for "
+            + ", ".join(str(b) for b in missing))
+
+    # The homogeneous members' location, recovered before anything is written so a
+    # malformed export is refused up front.
+    location = _group_location(export)
+
+    # Land the member backups all-or-nothing (chains, id collisions) on the
+    # single-volume path. Nothing above this wrote a record, so a refusal here
+    # leaves the import empty.
+    backup_controller.import_backups(export.members, cluster_id=target_cluster)
+
+    # Stamp each imported member with the group it belongs to -- the member
+    # manifests do not carry it, so import_backups left it blank -- and the
+    # generation, both preserved from the group manifest.
+    members = []
+    for member in group_manifest.members:
+        backup = db.get_backup_by_id(str(member.backup_id))
+        backup.group_backup_id = composite_id
+        backup.group_seq = group_manifest.source.generation
+        backup.write_to_db()
+        members.append({"lvol_id": str(member.lvol_id), "backup_id": backup.get_id()})
+
+    # Recreate the GroupBackup record, preserving its uuid and generation. It is
+    # imported COMPLETED: only a committed group backup is exportable, so what
+    # arrives is always a committed one.
+    group_backup = GroupBackup()
+    group_backup.uuid = uuid
+    group_backup.cluster_id = target_cluster
+    group_backup.consistency_group_id = group_manifest.source.consistency_group_id
+    group_backup.consistency_group_name = group_manifest.source.consistency_group_name
+    group_backup.group_seq = group_manifest.source.generation
+    group_backup.members = members
+    group_backup.location = location
+    group_backup.encrypted = group_manifest.encrypted
+    group_backup.size = group_manifest.size
+    group_backup.created_at = group_manifest.created_at
+    group_backup.completed_at = group_manifest.completed_at
+    group_backup.status = GroupBackup.STATUS_COMPLETED
+    group_backup.write_to_db()
+
+    return group_backup.get_id()
+
+
+def import_group_backup_from_bucket(config, cluster_id=None):
+    """Import every group backup a bucket holds (design §6.5).
+
+    The disaster-recovery path: given a bucket and credentials for it, read its
+    group manifests and the member manifests they name, and import each group
+    backup. Reuses the single-volume bucket read for the member manifests, since a
+    group's members live in the same bucket (§3.4), and walks each member's chain
+    over them so a group imports exactly its own members' chains rather than every
+    backup the bucket happens to hold.
+
+    Each group backup is imported atomically (:func:`import_group_backup`); a
+    collision or broken chain refuses that group backup, and the ones imported
+    before it remain.
+
+    Returns the composite ids of the group backups imported.
+
+    Raises:
+        ManifestError: the bucket could not be read.
+        PreconditionError: a group backup it holds cannot be imported.
+        ValueError: a group manifest names a member the bucket does not hold.
+    """
+    from simplyblock_core.controllers.backup.chain import BackupChain
+
+    group_manifests = backup_manifest.list_all_groups(config)
+    member_manifests = backup_manifest.list_all(config)
+    location = config.location()
+    by_id = {manifest.backup_id: manifest for manifest in member_manifests}
+
+    imported = []
+    for group_manifest in group_manifests:
+        # Each named member's whole chain, gathered from the bucket's member
+        # manifests. Walked rather than taking every manifest in the bucket, which
+        # would pull in other group backups' and standalone backups' chains.
+        chain_manifests = {}
+        for member in group_manifest.members:
+            head = by_id.get(member.backup_id)
+            if head is None:
+                raise ValueError(
+                    f"group backup {group_manifest.group_backup_id} names member "
+                    f"backup {member.backup_id}, which the bucket does not hold")
+            # of_manifests builds its links from manifests; the isinstance narrows
+            # the Backup|BackupManifest link type back to the manifest it is.
+            for link in BackupChain.of_manifests(head, member_manifests, location).links:
+                if isinstance(link, backup_manifest.BackupManifest):
+                    chain_manifests[link.backup_id] = link
+
+        export = backup_manifest.GroupBackupExport(
+            group_manifest=group_manifest,
+            members=backup_manifest.BackupExport(groups=[
+                backup_manifest.LocatedManifests(
+                    location=location, manifests=list(chain_manifests.values()))]),
+        )
+        imported.append(import_group_backup(export, cluster_id=cluster_id))
+
+    return imported

@@ -655,3 +655,55 @@ def _parse_group(body: bytes, key: str) -> GroupBackupManifest:
         return GroupBackupManifest.model_validate(data)
     except ValueError as e:
         raise ManifestError(f"Group manifest {key} is malformed: {e}") from e
+
+
+GROUP_EXPORT_SCHEMA_VERSION = 1
+
+
+class GroupBackupExport(BaseModel):
+    """A group backup carried out of a cluster in a file: the group manifest plus
+    the member backup manifests it names, as one unit (design §6.5).
+
+    This is to the group manifest what ``BackupExport`` is to a single-volume
+    manifest -- the one document that does record a location, because it is not
+    stored in the bucket it describes. The group manifest names the generation's
+    members; ``members`` carries each member's whole restorable chain, grouped by
+    the location it lives in exactly as a single-volume export groups its
+    manifests. A group backup is homogeneous -- its members share one location
+    (§3.4) -- so there is one group in practice, but reusing ``BackupExport`` keeps
+    the member records on the single-volume import path and describes a member's
+    chain the same way everywhere.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = GROUP_EXPORT_SCHEMA_VERSION
+    group_manifest: GroupBackupManifest
+    members: BackupExport
+
+
+def parse_group_export(body: bytes, source: str) -> GroupBackupExport:
+    """Read a group export document, naming *source* in anything it rejects.
+
+    The group analog of :func:`parse_export`.
+
+    Raises:
+        ManifestError: It is not valid JSON, states a schema version this build
+            does not understand, or is not shaped like a group export.
+    """
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise ManifestError(f"{source} is not valid JSON") from e
+
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if version != GROUP_EXPORT_SCHEMA_VERSION:
+        # Refused rather than guessed at, for the reason `_parse` refuses a
+        # manifest: the field names may not mean the same thing.
+        raise ManifestError(
+            f"{source} has group export schema version {version}, "
+            f"this build understands {GROUP_EXPORT_SCHEMA_VERSION}")
+
+    try:
+        return GroupBackupExport.model_validate(data)
+    except ValueError as e:
+        raise ManifestError(f"{source} is malformed: {e}") from e

@@ -5,16 +5,71 @@ controller) and the database are mocked, so these assert the HTTP contract: whic
 controller call a request makes, and how a controller result or error maps to a
 status code.
 """
+from typing import Any
+
+from simplyblock_core.controllers.backup.manifest import GroupBackupExport
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
+    BACKUP_ID,
     CLUSTER_ID,
     CONSISTENCY_GROUP_ID,
     GROUP_BACKUP_ID,
+    SNAPSHOT_ID,
+    STORAGE_NODE_ID,
     VOLUME_ID,
 )
 
 BASE = f'/api/v2/clusters/{CLUSTER_ID}/group-backups'
 CG_BASE = f'/api/v2/clusters/{CLUSTER_ID}/consistency-groups/{CONSISTENCY_GROUP_ID}'
+
+#: The source consistency group, as the group manifest spells it.
+CG_COMPOSITE = f'{CLUSTER_ID}/{CONSISTENCY_GROUP_ID}'
+
+#: A member backup manifest, the shape a single-volume export carries.
+_MEMBER_MANIFEST: dict[str, Any] = {
+    'schema_version': 1,
+    'backup_id': BACKUP_ID,
+    's3_id': 7,
+    'created_at': 100,
+    'completed_at': 200,
+    'size': 4096,
+    'source': {'cluster_id': CLUSTER_ID, 'node_id': STORAGE_NODE_ID},
+    'volume': {'lvol_id': VOLUME_ID, 'lvol_name': 'vol',
+               'snapshot_id': SNAPSHOT_ID, 'snapshot_name': 'snap',
+               'size': 4096},
+    'dataplane': {},
+}
+
+#: The group manifest, naming the member above.
+_GROUP_MANIFEST: dict[str, Any] = {
+    'schema_version': 1,
+    'group_backup_id': GROUP_BACKUP_ID,
+    'created_at': 100,
+    'completed_at': 200,
+    'size': 4096,
+    'source': {'cluster_id': CLUSTER_ID, 'consistency_group_id': CG_COMPOSITE,
+               'consistency_group_name': 'app-group-cg', 'generation': 7},
+    'members': [{'lvol_id': VOLUME_ID, 'lvol_name': 'vol',
+                 'backup_id': BACKUP_ID, 's3_id': 7}],
+    'membership': {'expected_lvol_ids': [VOLUME_ID]},
+    'encrypted': False,
+}
+
+_LOCATION: dict[str, str] = {'bucket_name': 'backups', 'region': 'eu-central-1'}
+
+
+def _group_export() -> dict[str, Any]:
+    return {
+        'schema_version': 1,
+        'group_manifest': _GROUP_MANIFEST,
+        'members': {'schema_version': 1, 'groups': [
+            {'location': _LOCATION, 'manifests': [_MEMBER_MANIFEST]}]},
+    }
+
+
+def _group_export_model() -> GroupBackupExport:
+    """A real export model, for the export endpoint's response_model to render."""
+    return GroupBackupExport.model_validate(_group_export())
 
 
 class TestListGroupBackups:
@@ -41,10 +96,12 @@ class TestGetGroupBackup:
 
 
 class TestRestoreGroupBackup:
-    def test_restores_into_a_new_group_and_returns_the_ids(
+    def test_restores_into_a_new_group_and_returns_the_members(
             self, client, db, group_backup, group_backup_controller):
+        members = [{'lvol_id': 'lvol-a', 'member_name': 'db'},
+                   {'lvol_id': 'lvol-b', 'member_name': 'data'}]
         group_backup_controller.restore_group_backup.return_value = (
-            f'{CLUSTER_ID}/new-cg', ['lvol-a', 'lvol-b'], None)
+            f'{CLUSTER_ID}/new-cg', members, None)
 
         response = client.post(
             f'{BASE}/{GROUP_BACKUP_ID}/restore',
@@ -52,7 +109,7 @@ class TestRestoreGroupBackup:
 
         assert response.status_code == 202
         assert response.json() == {
-            'group_id': f'{CLUSTER_ID}/new-cg', 'lvol_ids': ['lvol-a', 'lvol-b']}
+            'group_id': f'{CLUSTER_ID}/new-cg', 'members': members}
         args, kwargs = group_backup_controller.restore_group_backup.call_args
         assert args[0] == group_backup.get_id()
         assert args[1] == 'restored-cg'
@@ -116,3 +173,130 @@ class TestCreateGroupBackupUnderGroup:
         response = client.post(f'{CG_BASE}/backups', json={'group_seq': 3})
         assert response.status_code == 422
         assert 'no member snapshots' in response.json()['detail']
+
+
+class TestExportGroupBackup:
+    def test_exports_the_group_backup_as_a_unit(
+            self, client, db, group_backup, group_backup_controller):
+        group_backup_controller.export_group_backup.return_value = _group_export_model()
+
+        response = client.get(f'{BASE}/export?group_backup_id={GROUP_BACKUP_ID}')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['group_manifest']['group_backup_id'] == GROUP_BACKUP_ID
+        assert [m['backup_id'] for m in body['members']['groups'][0]['manifests']] == [
+            BACKUP_ID]
+        group_backup_controller.export_group_backup.assert_called_once_with(
+            group_backup.get_id(), cluster_id=CLUSTER_ID)
+
+    def test_404_for_an_unknown_group_backup(self, client, db, cluster):
+        db.get_group_backup_by_id.side_effect = KeyError('nope')
+        response = client.get(f'{BASE}/export?group_backup_id={GROUP_BACKUP_ID}')
+        assert response.status_code == 404
+
+    def test_404_when_the_group_backup_belongs_to_another_cluster(
+            self, client, db, cluster):
+        db.get_group_backup_by_id.return_value = factories.make_group_backup(
+            cluster_id='00000000-0000-0000-0000-000000000000')
+        response = client.get(f'{BASE}/export?group_backup_id={GROUP_BACKUP_ID}')
+        assert response.status_code == 404
+
+
+class TestImportGroupBackup:
+    """The body is a union of two shapes, as the single-volume import is."""
+
+    def test_inline_export_is_validated_by_the_body_type(
+            self, client, db, cluster, group_backup_controller):
+        group_backup_controller.import_group_backup.return_value = f'{CLUSTER_ID}/{GROUP_BACKUP_ID}'
+
+        response = client.post(f'{BASE}/import', json={'metadata': _group_export()})
+
+        assert response.status_code == 200
+        assert response.json() == {
+            'imported': 1, 'group_backup_ids': [f'{CLUSTER_ID}/{GROUP_BACKUP_ID}']}
+        (export,), kwargs = group_backup_controller.import_group_backup.call_args
+        assert str(export.group_manifest.group_backup_id) == GROUP_BACKUP_ID
+        assert kwargs['cluster_id'] == CLUSTER_ID
+
+    def test_a_bucket_reads_the_group_backups_itself(
+            self, client, db, cluster, group_backup_controller):
+        group_backup_controller.import_group_backup_from_bucket.return_value = [
+            f'{CLUSTER_ID}/gb-a', f'{CLUSTER_ID}/gb-b']
+
+        response = client.post(f'{BASE}/import', json={'bucket': _LOCATION})
+
+        assert response.status_code == 200
+        assert response.json()['imported'] == 2
+        group_backup_controller.import_group_backup.assert_not_called()
+
+    def test_naming_both_sources_is_rejected(
+            self, client, db, cluster, group_backup_controller):
+        response = client.post(f'{BASE}/import', json={
+            'metadata': _group_export(), 'bucket': _LOCATION})
+        assert response.status_code == 422
+
+    def test_naming_neither_source_is_rejected(
+            self, client, db, cluster, group_backup_controller):
+        response = client.post(f'{BASE}/import', json={})
+        assert response.status_code == 422
+
+    def test_an_unreadable_bucket_is_a_bad_request(
+            self, client, db, cluster, group_backup_controller):
+        from simplyblock_core.controllers.backup.manifest import ManifestError
+        group_backup_controller.import_group_backup_from_bucket.side_effect = \
+            ManifestError('no such bucket')
+
+        response = client.post(f'{BASE}/import', json={'bucket': _LOCATION})
+
+        assert response.status_code == 400
+        assert 'no such bucket' in response.json()['detail']
+
+    def test_a_torn_export_is_a_bad_request(
+            self, client, db, cluster, group_backup_controller):
+        group_backup_controller.import_group_backup.side_effect = ValueError(
+            'group export is missing member manifests')
+
+        response = client.post(f'{BASE}/import', json={'metadata': _group_export()})
+
+        assert response.status_code == 400
+        assert 'missing member manifests' in response.json()['detail']
+
+    def test_a_precondition_error_is_not_mapped_here(
+            self, client, db, cluster, group_backup_controller):
+        """app.py maps PreconditionError to 400 for the whole API; the endpoint
+        lets it through rather than mapping it a second, disagreeing way."""
+        import pytest
+
+        from simplyblock_core.exceptions import PreconditionError
+        group_backup_controller.import_group_backup.side_effect = PreconditionError(
+            'already exists')
+
+        with pytest.raises(PreconditionError):
+            client.post(f'{BASE}/import', json={'metadata': _group_export()})
+
+
+class TestDiscoverGroupBackups:
+    def test_returns_the_group_backups_the_bucket_holds(
+            self, client, db, group_backup_controller):
+        from simplyblock_core.controllers.backup.manifest import GroupBackupManifest
+        group_backup_controller.discover_group_backups.return_value = [
+            GroupBackupManifest.model_validate(_GROUP_MANIFEST)]
+
+        response = client.post(f'{BASE}/discover', json=_LOCATION)
+
+        assert response.status_code == 200
+        assert [g['group_backup_id'] for g in response.json()] == [GROUP_BACKUP_ID]
+
+    def test_credentials_are_masked_in_a_failure_response(
+            self, client, db, group_backup_controller):
+        from simplyblock_core.controllers.backup.manifest import ManifestError
+        group_backup_controller.discover_group_backups.side_effect = \
+            ManifestError('unreachable')
+
+        response = client.post(f'{BASE}/discover', json={
+            **_LOCATION,
+            'credentials': {'access_key_id': 'AKIA', 'secret_access_key': 's3cr3t'}})
+
+        assert response.status_code == 400
+        assert 's3cr3t' not in response.text

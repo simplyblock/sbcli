@@ -7,7 +7,12 @@ from fastapi import Request
 from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
-from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
+from simplyblock_core.controllers.backup.manifest import (
+    BackupExport,
+    BackupManifest,
+    GroupBackupExport,
+    GroupBackupManifest,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
 from simplyblock_core.models.backup_config import (
@@ -703,6 +708,15 @@ class BackupDTO(BaseModel):
     completed_at: int
     encrypted: bool
 
+    #: The group backup this copy is a member of, when it belongs to a
+    #: consistency-group backup; null for a standalone single-volume backup. The
+    #: id is the group backup's composite ``cluster_id/uuid``, and ``group_seq``
+    #: is its generation. The operator mirrors these onto
+    #: ``StorageBackup.status.source.group`` so the members of one generation are
+    #: legible as a unit.
+    group_backup_id: str | None = None
+    group_seq: int = 0
+
     @staticmethod
     def from_model(model: Backup):
         return BackupDTO(
@@ -719,7 +733,20 @@ class BackupDTO(BaseModel):
             created_at=model.created_at,
             completed_at=model.completed_at,
             encrypted=model.encrypted,
+            group_backup_id=model.group_backup_id or None,
+            group_seq=model.group_seq,
         )
+
+
+#: A group backup's self-describing document as the API exchanges it: the body of
+#: the group-backups export GET and of an inline group-backups import. An alias
+#: for the same reason ``BackupExportDTO`` is one -- the wire form and the stored
+#: form are one shape, and naming it here still lets the API diverge later.
+GroupBackupExportDTO = GroupBackupExport
+
+#: A group backup's manifest as discover returns it, read from a bucket's
+#: ``groups/`` prefix with no cluster reference. An alias like ``BackupManifestDTO``.
+GroupBackupManifestDTO = GroupBackupManifest
 
 
 class GroupBackupMemberDTO(BaseModel):

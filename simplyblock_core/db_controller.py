@@ -1686,3 +1686,22 @@ class DBController(metaclass=Singleton):
             except KeyError:
                 return None
         return None
+
+    def get_policy_for_group(self, group) -> BackupPolicy | None:
+        """The backup policy attached to a consistency group, or None.
+
+        A group is backed up as one unit, so its policy attaches to the group
+        directly rather than to a pool or an lvol (design-consistency-group-backup.md
+        §7.1).
+        """
+        policy_id = next(
+            (att.policy_id for att in self.query(
+                BackupPolicyAttachment, 'target_type+target_id',
+                'consistency_group', group.get_id())),
+            None)
+        if policy_id:
+            try:
+                return self.get_backup_policy_by_id(policy_id)
+            except KeyError:
+                return None
+        return None
