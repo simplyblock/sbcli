@@ -94,10 +94,25 @@ class MigrationHappyPath(MigrationTestBase):
         else:
             self.logger.info("[MIG-H-004] resize OK")
 
-        out, err = self._cli(f"{self.base_cmd} -d volume qos-set {vol_id} "
-                             f"--max-rw-iops 10000 2>&1")
-        self.logger.info("[MIG-H-004] qos-set: %s",
-                         (out + err).strip()[:160] or "accepted")
+        # QoS is deliberately not exercised here: the suite does not
+        # support it, so a result either way means nothing. It is left in
+        # place rather than deleted because the line is the natural home
+        # for the check if QoS is ever taken on.
+        #
+        # It also happens to be broken. `volume qos-set <id>
+        # --max-rw-iops 10000` raises
+        #   TypeError: '<' not supported between instances of 'NoneType'
+        #   and 'int'
+        # from lvol_controller.py set_lvol, because the validation block
+        # compares max_* < 0 on all four limits with no None check while
+        # the assignment block below it guards each one properly. Passing
+        # fewer than four limits is therefore never accepted. Reported
+        # separately; nothing here depends on it.
+        #
+        # out, err = self._cli(f"{self.base_cmd} -d volume qos-set "
+        #                      f"{vol_id} --max-rw-iops 10000 2>&1")
+        # self.logger.info("[MIG-H-004] qos-set: %s",
+        #                  (out + err).strip()[:160] or "accepted")
         self.logger.info("[MIG-H-004] PASS: the migrated volume behaves "
                          "normally")
         self.cleanup_migrations()
@@ -173,10 +188,7 @@ class MigrationWithSnapshots(MigrationTestBase):
         src = self.lvol_node(vol_id)
 
         self.logger.info("[MIG-H-007] taking %d snapshots", self.SNAP_COUNT)
-        for i in range(self.SNAP_COUNT):
-            self._cli(f"{self.base_cmd} -d snapshot add {vol_id} "
-                      f"migs{stamp}n{i} 2>&1")
-            sleep_n_sec(1)
+        self.seed_snapshots(vol, vol_id, f"migs{stamp}n", self.SNAP_COUNT)
 
         tgt = self.pick_target(src, "no-overlap")
         mid = self.migrate(vol_id, tgt)

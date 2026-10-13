@@ -41,9 +41,9 @@ class _FaultBase(MigrationTestBase):
         self._vol = f"mig{tag}{stamp}"
         self._vol_id, self._sums = self.make_volume(self._vol)
         self._src = self.lvol_node(self._vol_id)
-        for i in range(snaps):
-            self._cli(f"{self.base_cmd} -d snapshot add {self._vol_id} "
-                      f"{tag}s{stamp}n{i} 2>&1")
+        if snaps:
+            self.seed_snapshots(self._vol, self._vol_id,
+                                f"{tag}s{stamp}n", snaps)
         self._tgt = self.pick_target(self._src, "no-overlap")
         return self._vol_id
 

@@ -421,9 +421,8 @@ class MigrationBatchWithTrees(_BatchBase):
     def run(self):
         group = self._make_group("tree")
         for m in group:
-            for i in range(self.SNAPS_EACH):
-                self._cli(f"{self.base_cmd} -d snapshot add {m['id']} "
-                          f"{m['name']}s{i} 2>&1")
+            self.seed_snapshots(m["name"], m["id"], f"{m['name']}s",
+                                self.SNAPS_EACH)
         self.logger.info("[MIG-B-007] %d members, %d snapshots each",
                          len(group), self.SNAPS_EACH)
 

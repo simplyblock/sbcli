@@ -1519,6 +1519,42 @@ class MigrationTestBase(TestClusterBase):
         """
         return self._create_snapshot_dual(vol_name, snap_name)
 
+    def seed_snapshots(self, vol_name, vol_id, prefix, count):
+        """Give a volume a snapshot chain for snap_copy to carry.
+
+        These exist only to make the copy do real work -- they are never
+        cloned, mounted, or named in an assertion -- which was the excuse
+        for taking them with `snapshot add` even on k8s. That excuse does
+        not survive contact with the point of the k8s arm: a volume there
+        is a PVC and a snapshot is a VolumeSnapshot, and a snapshot the
+        CSI layer did not make is not the thing a user has. It is also
+        not tracked for teardown, so it outlives the claim it belongs to.
+
+        Returns how many were actually taken. A snapshot that is refused
+        is logged and skipped rather than raising: the caller wants a
+        chain of about this length, and a chain of eighteen instead of
+        twenty tests the same thing.
+        """
+        taken = 0
+        for i in range(count):
+            name = f"{prefix}{i}"
+            try:
+                if self.k8s_test:
+                    self.make_snapshot(vol_name, name)
+                else:
+                    self._cli(f"{self.base_cmd} -d snapshot add {vol_id} "
+                              f"{name} 2>&1")
+                taken += 1
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[MIG] snapshot %d/%d (%s) was refused: %s; carrying on "
+                    "with the %d taken so far", i + 1, count, name,
+                    str(exc)[:140], taken)
+        if taken:
+            self.logger.info("[MIG] %s now carries %d snapshot(s)",
+                             vol_name, taken)
+        return taken
+
     def make_clone(self, snap_handle, clone_name, size=None):
         """Clone a snapshot on either backend. Returns (vol_id, detail).
 

@@ -175,17 +175,24 @@ class MigrationNegativeCapacity(MigrationTestBase):
         free_before = self._free_bytes()
         filler = f"migfill{stamp}"
         huge = os.environ.get("MIG_FILLER_SIZE", "10T")
-        out, err = self._cli(f"{self.base_cmd} -d volume add {filler} {huge} "
-                             f"{self.pool_name} --host-id {tgt} 2>&1")
-        if cli_failed(out, err):
+        # A PVC on k8s, not `volume add`. A volume this lane creates has
+        # to be the kind a Kubernetes user gets -- the whole point of the
+        # k8s arm -- and a CLI-created lvol has no PersistentVolume, so it
+        # is invisible to everything the operator does and would not be
+        # cleaned up with the claims either.
+        refused = ""
+        try:
+            self.make_volume(filler, size=huge, host_id=tgt, seed=False)
+        except Exception as exc:                      # noqa: BLE001
+            refused = str(exc)[:200]
+        if refused:
             self.logger.warning(
                 "[MIG-N-005] SKIPPED: the cluster refused the %s filler "
                 "(%s), so the out-of-space condition could not be created.",
-                huge, (out + err).strip()[:200])
+                huge, refused)
             self.cleanup_migrations()
             raise SkippedTestsException(
                 "MIG-N-005: the cluster refused the capacity filler, so the target was never actually full")
-        self._mig_vols.append(filler)
         sleep_n_sec(20)
 
         free_after = self._free_bytes()
