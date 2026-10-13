@@ -2230,7 +2230,7 @@ commands:
             dest: host_nqn
             type: str
           - name: "--site"
-            help: "Site to connect from (sync-replication clusters, required there): only the paths of that site's triplet."
+            help: "Site whose paths to print (sync-replication clusters only, optional): defaults to the site the volume's LVS is led from; only the paths of that site's triplet."
             dest: site
             type: str
       - name: resize

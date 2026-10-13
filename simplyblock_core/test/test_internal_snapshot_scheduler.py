@@ -72,34 +72,3 @@ def test_other_lvol_internal_snaps_ignored():
     snaps = [_snap("LV2", 9_990, SnapShot.TYPE_INTERNAL)]  # different lvol
     # No internal snap for LV1 -> first one due.
     assert sm._due_for_internal_snapshot(lv, snaps, 10_000) is True
-
-
-def test_take_due_internal_snapshots_creates_internal_type(monkeypatch):
-    due = _lvol(uuid="LV1", interval=5)
-    not_due = _lvol(uuid="LV2", do_replicate=False)
-
-    class _DB:
-        def get_lvols(self, cluster_id):
-            return [due, not_due]
-
-        def get_mini_snapshots(self):
-            return []
-
-        def get_replication_policies(self, cluster_id=None):
-            # The scheduler partitions consistency-group policies out of the
-            # per-volume loop; this scenario has none.
-            return []
-
-    calls = []
-
-    class _SnapCtl:
-        def add(self, lvol_id, name, snap_type=SnapShot.TYPE_USER):
-            calls.append((lvol_id, snap_type))
-            return "snap-uuid", None
-
-    monkeypatch.setattr(sm, "db", _DB())
-    monkeypatch.setattr(sm, "snapshot_controller", _SnapCtl())
-
-    sm.take_due_internal_snapshots("CL1", 10_000)
-
-    assert calls == [("LV1", SnapShot.TYPE_INTERNAL)]

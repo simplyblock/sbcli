@@ -61,7 +61,8 @@ class JobSchedule(BaseModel):
     # (the LVS whose leadership hand-off has started). While such a task is
     # active with a live lease it owns the move: no leaderless recovery grants
     # for those LVS, and an LVS it left at ``moving:<site>`` is reconciled
-    # only afterwards (storage_node_ops.reconcile_lvs_move). Its runner grants
+    # only afterwards (storage_node_ops.reconcile_lvs_move). Its runner hands
+    # the leadership off (without a grant: the taker leads from its first IO)
     # only through storage_node_ops.move_lvs_leadership, and on failure /
     # cancel records the task DONE BEFORE settling its markers (the previous
     # site written back before any hand-off, reconcile_lvs_move after one).

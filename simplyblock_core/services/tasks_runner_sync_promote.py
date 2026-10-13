@@ -16,7 +16,10 @@ Per LVS the task may move (``owners``), led from the other site T:
    restarted pass resumes) - failing now writes the previous site back;
 4. the fenced leadership hand-off to the primary of the S triplet
    (storage_node_ops.move_lvs_leadership), recorded in ``transferring``
-   before it starts; the marker then settles on S.
+   before it starts; the marker then settles on S. The hand-off grants
+   nothing: the old leader, if there is one, is demoted, the S primary gets
+   its role and takes the leadership itself on the first client IO - until
+   then the LVS has no leader.
 
 Then, after one more live gate, every volume of the request is opened on S
 under the site-rule lock: the strict ANA open first, ``sync_active_site = S``
@@ -376,10 +379,17 @@ def _transfer(task, lvs_name, site):
     if owner.lvs_active_site != moving:
         raise _PromoteFailed(f"LVS {lvs_name}: lvs_active_site changed to {owner.lvs_active_site!r}")
     taker_id = sync_ctl.lvs_site_triplet(owner, site)[0]
-    leader, _ = storage_node_ops.find_leader_with_failover([owner], lvs_name)
+    # Without recovery: a promote never makes a leader. The marker read above
+    # does not guarantee that by itself - the lookup first reconciles a move
+    # its task no longer owns (canceled, lease stale) and can settle the
+    # marker, and a recovering lookup would then grant on the settled one.
+    leader, _ = storage_node_ops.find_leader_with_failover([owner], lvs_name, recover=False)
     _save(task, lambda t: _add_transferring(t, lvs_name))
+    # A hand-off that completed before an earlier pass ended shows in one of
+    # two ways. The taker leads already: only the marker is left. Nobody leads
+    # (no IO has reached the taker yet): the hand-off below runs again - it
+    # can be repeated on the same taker.
     if leader is not None and leader.get_id() == taker_id:
-        # A hand-off that granted before the pass ended: only the marker.
         if not storage_node_ops.set_lvs_active_site(owner_id, site, expect=moving):
             raise _PromoteFailed(f"LVS {lvs_name}: marker changed")
         return
@@ -390,7 +400,8 @@ def _transfer(task, lvs_name, site):
     except (storage_node_ops.LVSMoveChangedError, storage_node_ops.LeadershipTransferError,
             PreconditionError) as e:
         raise _PromoteFailed(f"LVS {lvs_name}: leadership transfer to {taker_id} failed: {e}") from e
-    logger.info("Sync promote task %s: LVS %s led from %s", task.uuid, lvs_name, site)
+    logger.info("Sync promote task %s: LVS %s handed off to %s on site %s, leadership follows "
+                "the first IO", task.uuid, lvs_name, taker_id, site)
 
 
 #: A volume in these states is never opened: it is not fully created, or its

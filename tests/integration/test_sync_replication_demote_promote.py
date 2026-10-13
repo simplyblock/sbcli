@@ -68,16 +68,19 @@ def _gate_fails(*_args, **_kwargs):
 
 
 class _Moves:
-    """The hand-off boundary: find_leader_with_failover answers ``leader``,
-    move_lvs_leadership records its call and settles the marker as the real
-    one does (compare-and-set) unless ``fail`` is set."""
+    """The hand-off boundary: find_leader_with_failover answers ``leader``
+    and records the ``recover`` it was asked with, move_lvs_leadership records
+    its call and settles the marker as the real one does (compare-and-set)
+    unless ``fail`` is set."""
 
     def __init__(self):
         self.leader = {}
         self.calls = []
+        self.lookups: list = []
         self.fail: dict = {}
 
-    def find(self, nodes, lvs_name):
+    def find(self, nodes, lvs_name, *, recover=True):
+        self.lookups.append((lvs_name, recover))
         return self.leader.get(lvs_name), []
 
     def move(self, owner_id, moving_value, final_site, *, current_leader_id=None, taker_id):
@@ -394,6 +397,8 @@ class TestPromoteRunner:
         assert task.status == JobSchedule.STATUS_DONE and task.function_result.startswith("promoted")
         assert task.function_params["moves"] == {"LVS_1": ""}
         assert moves.calls == [("LVS_1", owner.get_id(), b[0].get_id(), MOVING_B, SITE_B)]
+        # the runner looks the leader up without recovery: a promote never makes one
+        assert moves.lookups == [("LVS_1", False)]
         assert gate.call_count == 3          # before the marker, the hand-off, the opening
         assert _fresh(db, owner).lvs_active_site == SITE_B
         fresh = db.get_lvol_by_id(vol.get_id())

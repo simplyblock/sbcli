@@ -28,6 +28,7 @@ from tests.integration import test_sync_replication_lvs_stack as stack
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 db = stack.db
 rpcs = stack.rpcs
+env = stack.env
 
 DISTRIBS = ["distrib_11", "distrib_12"]
 ERROR_REPLICA_SYNC = 1 << 11
@@ -437,6 +438,32 @@ class TestWaits:
         with patch.object(runner.storage_node_ops, "find_leader_with_failover",
                           return_value=(None, [])):
             self._assert_waiting(db, rpcs, task, a, b, "no leader")
+
+    def test_a_leaderless_lvs_is_waited_for_and_never_given_a_leader(self, db, rpcs, env, clock):
+        # the real lookup: led from site B, nobody leads (as between a promote
+        # and the first client IO), and a recovery WOULD grant on b0 - its
+        # journal is ready and a grant on it takes
+        cluster, a, b, _ = _layout(db, active_site=SITE_B)
+        rpc = rpcs[b[0].get_id()]
+        rpc.jc_get_jm_status.return_value = {"jm_x": True, "remote_jm_yn1": True}
+        rpc.bdev_lvol_set_leader.side_effect = lambda *args, **kwargs: rpcs.lead(b[0])
+        catchup = _Catchup(rpc)
+        _desync(b[0], status="primary_zone_unavailable")
+        task = _task(db, cluster)
+        with patch.object(runner.storage_node_ops.time, "sleep"):
+            self._assert_waiting(db, rpcs, task, a, b, "no leader")
+        for node in (*a, *b):
+            rpcs[node.get_id()].bdev_lvol_update_lvstore.assert_not_called()
+            rpcs[node.get_id()].bdev_lvol_set_leader.assert_not_called()
+
+        # the first IO made the active primary the leader: the next pass
+        # starts the catch-up on it
+        rpcs.lead(b[0])
+        assert _pass(task) is False
+        assert catchup.starts() == DISTRIBS
+        started = _fresh_task(db, task)
+        assert started.status == JobSchedule.STATUS_RUNNING
+        assert started.function_params["resync"]["leader_id"] == b[0].get_id()
 
 
 # ---------------------------------------------------------------------------

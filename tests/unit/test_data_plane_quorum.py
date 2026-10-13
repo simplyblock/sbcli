@@ -219,6 +219,23 @@ class TestDataPlaneDisconnectedPredicates(unittest.TestCase):
         self.assertFalse(absolute)
         self.assertFalse(quorum)
 
+    def test_fresh_takes_the_votes_now_and_refreshes_the_cache(self):
+        from simplyblock_core.services import storage_node_monitor as mod
+        target = _target()
+        for predicate, expected in ((mod.is_node_data_plane_disconnected, False),
+                                    (mod.is_node_data_plane_disconnected_quorum, True)):
+            with self.subTest(predicate=predicate.__name__), \
+                    patch.object(mod, "_count_data_plane_votes_uncached", return_value=(2, 3)) as now:
+                # votes cached before the node lost two of its three peers
+                mod._status_probe_cache.put(("dp_votes", target.get_id()), (0, 3))
+                self.assertFalse(predicate(target))
+                now.assert_not_called()
+                self.assertEqual(predicate(target, fresh=True), expected)
+                now.assert_called_once_with(target)
+                # a cached reader gets the new votes, without asking again
+                self.assertEqual(mod._count_data_plane_votes(target), (2, 3))
+                now.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

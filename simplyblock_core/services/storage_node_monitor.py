@@ -1250,6 +1250,17 @@ def set_node_unreachable(node):
         logger.error("Data-plane check for unreachable node %s failed: %s", node.get_id(), e)
 
 
+def _data_plane_votes(node, fresh):
+    """The ``(disconnected, total)`` votes about *node*'s JM: the cached ones
+    (_count_data_plane_votes) or, with ``fresh``, taken now - which also
+    refreshes the cache."""
+    if not fresh:
+        return _count_data_plane_votes(node)
+    votes = _count_data_plane_votes_uncached(node)
+    _status_probe_cache.put(("dp_votes", node.get_id()), votes)
+    return votes
+
+
 def is_node_data_plane_disconnected(node, *, fresh=False):
     """Return True if all other online nodes report *node*'s remote JM as disconnected.
 
@@ -1258,21 +1269,19 @@ def is_node_data_plane_disconnected(node, *, fresh=False):
     fences a site on the answer must not reuse a vote up to
     _DP_QUORUM_PROBE_TTL_SEC old.
     """
-    if fresh:
-        votes = _count_data_plane_votes_uncached(node)
-        _status_probe_cache.put(("dp_votes", node.get_id()), votes)
-        disconnected, total = votes
-    else:
-        disconnected, total = _count_data_plane_votes(node)
+    disconnected, total = _data_plane_votes(node, fresh)
     return total > 0 and disconnected == total
 
 
-def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None):
+def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None, *, fresh=False):
     """Return True if a majority of online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
+    ``fresh`` bypasses the vote cache (and refreshes it), as in
+    is_node_data_plane_disconnected: a leadership granted on the answer
+    must not reuse a vote taken before the grant waited for its locks.
     """
-    disconnected, total = _count_data_plane_votes(node)
+    disconnected, total = _data_plane_votes(node, fresh)
     return total > 0 and disconnected > total // 2
 
 

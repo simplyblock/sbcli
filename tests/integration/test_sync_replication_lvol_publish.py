@@ -46,6 +46,7 @@ db = stack.db
 rpcs = stack.rpcs
 hub = stack.hub
 env = stack.env
+adopt = stack.adopt
 
 
 @pytest.fixture(autouse=True)
@@ -939,7 +940,7 @@ class TestRestart:
         assert _ana_calls(rpc, vol.nqn) == [(1, "inaccessible")]
 
     @pytest.mark.parametrize("member, window, state", [
-        (1, 4000, "non_optimized"), (0, 3000, "optimized")])
+        (1, 4000, "non_optimized")])
     def test_after_a_switchover_the_active_remote_members(
             self, db, rpcs, hub, env, attached, member, window, state):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
@@ -952,6 +953,24 @@ class TestRestart:
         rpc = rpcs[b[member].get_id()]
         assert _min_cntlid(rpc, vol.nqn) == [window]
         assert _ana_calls(rpc, vol.nqn) == [(1, state)]
+
+    def test_after_a_switchover_the_active_remote_primary_comes_back_as_the_leader(
+            self, db, rpcs, hub, env, attached, adopt):
+        # The real leader rebuild, taking the LVS back from its secondary.
+        cluster, a, b, owner = _layout(db, active_site=SITE_B)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B,
+                      demoted=[SITE_A])
+        _leads(rpcs, b[1])
+        stack._transfer_ready(rpcs, b[1])
+        stack._grant_takes(rpcs, b[0])
+        _absent_until_created(rpcs[b[0].get_id()], vol.nqn)
+        _examines(rpcs[b[0].get_id()], vol)
+        ret, leader_rebuilds = stack._restart_for_real(db, b[0])
+        assert ret is True and leader_rebuilds == [(b[0].get_id(), owner.get_id())]
+        rpc = rpcs[b[0].get_id()]
+        rpc.bdev_lvol_set_leader.assert_called_once_with("LVS_1", leader=True)
+        assert _min_cntlid(rpc, vol.nqn) == [3000]
+        assert _ana_calls(rpc, vol.nqn) == [(1, "optimized")]
 
     def test_after_a_switchover_the_home_primary_comes_back_fenced_in_window_0(
             self, db, rpcs, hub, env, attached):
@@ -1156,6 +1175,22 @@ class TestConnect:
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
         assert _connect_ips(db, vol.get_id()) == [_ip(n) for n in b]
 
+    @pytest.mark.parametrize("promoted", [False, True])
+    def test_v2_connect_takes_no_site_and_returns_the_led_sites_paths(self, db, web_client, promoted):
+        """The v2 route names no site (it used to answer 400 "site is
+        required"): its entries are the paths of the site the LVS is led from,
+        on the home site and after a promote to the other one."""
+        cluster, a, b, owner = _layout(db, active_site=SITE_B if promoted else "")
+        pool = _pool(db, cluster)
+        vol = _volume(db, cluster, owner, pool, ns_id=1,
+                      active_site=SITE_B if promoted else SITE_A)
+        response = web_client.get(
+            f"/api/v2/clusters/{cluster.get_id()}/storage-pools/{pool.get_id()}"
+            f"/volumes/{vol.get_id()}/connect")
+        assert response.status_code == 200, response.text
+        led = b if promoted else a[:3]
+        assert [entry["ip"] for entry in response.json()] == [_ip(n) for n in led]
+
     def test_an_unknown_site_raises(self, db):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
@@ -1341,16 +1376,6 @@ class TestRefused:
         assert response.status_code == 200, response.text
         assert response.json() is True
         assert rpcs[owner.get_id()].nvmf_subsystem_listener_set_ana_state.called
-
-    def test_v2_connect_without_a_site_is_a_client_error(self, db, web_client):
-        cluster, a, b, owner = _layout(db)
-        pool = _pool(db, cluster)
-        vol = _volume(db, cluster, owner, pool, ns_id=1)
-        response = web_client.get(
-            f"/api/v2/clusters/{cluster.get_id()}/storage-pools/{pool.get_id()}"
-            f"/volumes/{vol.get_id()}/connect")
-        assert response.status_code == 400, response.text
-        assert "site is required" in response.text
 
 
 def _uuid_node(db, cluster):

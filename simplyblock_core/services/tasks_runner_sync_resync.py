@@ -16,6 +16,11 @@ a non-converging one: the task is SUSPENDED with ``retry`` + 1 and re-run on a
 later pass after a backoff, once the lagging zone is up again. Never an
 in-place sleep. After ``SYNC_RESYNC_ALERT_RUNS`` such runs one alert is
 raised; the task itself is unbounded (``max_retry=-1``).
+
+The runner never makes a leader: its lookup runs without recovery
+(``find_leader_with_failover(recover=False)``). An LVS nobody leads - the
+normal state between a promote and the first client IO - is waited for, and
+the wait is not a run.
 """
 import time
 from datetime import UTC, datetime
@@ -236,7 +241,7 @@ def task_runner(task):
         if down:
             return _wait(task, f"waiting for the lagging zone(s) {zones} to be up: {down}")
 
-    leader, _ = storage_node_ops.find_leader_with_failover([owner], lvs_name)
+    leader, _ = storage_node_ops.find_leader_with_failover([owner], lvs_name, recover=False)
     if leader is None:
         return _wait(task, f"no leader of {lvs_name} in its active triplet, waiting")
     rpc = leader.rpc_client(timeout=5, retry=2)

@@ -183,17 +183,21 @@ def set_snap_offline(snap):
     sn.write_to_db()
 
 
-# Rate-limited leaderless diagnostics: lvs_name -> (last_warn_monotonic,
-# suppressed_count). Run 20260725: the per-snapshot "Failed to get leader
-# node" raise fired 244,072 times in one hour — one line per in-deletion
-# snapshot per cycle — while phase-2 work that needed no leader sat undone.
+# Rate-limited leaderless diagnostics: (lvs_name, deferred work) ->
+# (last_warn_monotonic, suppressed_count). Run 20260725: the per-snapshot
+# "Failed to get leader node" raise fired 244,072 times in one hour — one line
+# per in-deletion snapshot per cycle — while phase-2 work that needed no
+# leader sat undone.
 _leaderless_warn_memo: dict = {}
 _LEADERLESS_WARN_INTERVAL_SEC = 60
 
 
-def _warn_leaderless(lvs_name):
+def _warn_leaderless(lvs_name, deferred="snapshot deletes needing phase-1"):
+    """Rate-limited "no leader, ``deferred`` are deferred" for ``lvs_name``.
+    Each kind of deferred work has its own line and its own count."""
     now = time.monotonic()
-    entry = _leaderless_warn_memo.get(lvs_name)
+    key = (lvs_name, deferred)
+    entry = _leaderless_warn_memo.get(key)
     # An unseen lvs must warn NOW. Seeding "last" with 0.0 instead suppressed
     # the FIRST warning whenever monotonic() itself was still under the
     # interval — i.e. for the first 60s after boot, which is exactly when a
@@ -201,12 +205,12 @@ def _warn_leaderless(lvs_name):
     if entry is None or now - entry[0] >= _LEADERLESS_WARN_INTERVAL_SEC:
         suppressed = entry[1] if entry else 0
         logger.warning(
-            f"No confirmed leader for {lvs_name} — snapshot deletes needing "
-            f"phase-1 are deferred ({suppressed} similar messages suppressed "
+            f"No confirmed leader for {lvs_name} — {deferred} are deferred "
+            f"({suppressed} similar messages suppressed "
             f"in the last {_LEADERLESS_WARN_INTERVAL_SEC}s)")
-        _leaderless_warn_memo[lvs_name] = (now, 0)
+        _leaderless_warn_memo[key] = (now, 0)
     else:
-        _leaderless_warn_memo[lvs_name] = (entry[0], entry[1] + 1)
+        _leaderless_warn_memo[key] = (entry[0], entry[1] + 1)
 
 
 def _poll_delete_status(node, bdev_name):
@@ -605,6 +609,35 @@ def partition_by_group(pairs):
     return grouped, ungrouped
 
 
+def _cadence_waits_for_leader(node_id, lvs_name, leaderless):
+    """Whether a cadence snapshot on the LVS ``lvs_name`` of ``node_id`` (its
+    owner) has to wait because nobody leads the LVS. Sync replication only.
+
+    Between a promote and the first client IO a sync LVS has no leader, and
+    that is not a fault. The snapshot's own lookup (snapshot_controller.add,
+    create_group_snapshot_for_group) would answer it with the leaderless
+    recovery - an RPC grant. A timer must never make a leader, so it asks
+    first, without recovery (find_leader_with_failover ``recover=False``).
+
+    ``leaderless`` is the tick's memo of "nobody leads", keyed like
+    process_snap_delete's leader cache: by the owner's lvs_active_site, read
+    fresh for every snapshot, and never while the leadership is being moved.
+    A leader found is not remembered at all: a promote can complete between
+    two volumes of one tick."""
+    from simplyblock_core.storage_node_ops import LVS_MOVING_PREFIX, find_leader_with_failover
+    owner = db.get_storage_node_by_id(node_id)
+    active_site = owner.lvs_active_site
+    key = None if active_site.startswith(LVS_MOVING_PREFIX) else (node_id, active_site)
+    if key is None or key not in leaderless:
+        leader, _ = find_leader_with_failover([owner], lvs_name, recover=False)
+        if leader is not None:
+            return False
+        if key is not None:
+            leaderless.add(key)
+    _warn_leaderless(lvs_name, "scheduled snapshots")
+    return True
+
+
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -614,12 +647,20 @@ def take_due_internal_snapshots(cluster_id, now_ts):
     everything ``_due_for_internal_snapshot`` reads (lvol id, snap_type,
     created_at). The previous unconditional full-SnapShot scan here ran twice
     per monitor cycle and was a steady multi-second FDB load at 10k+
-    snapshots (mass-snapshot run 2026-07-21) with zero replicated volumes."""
+    snapshots (mass-snapshot run 2026-07-21) with zero replicated volumes.
+
+    Sync replication: a volume or a consistency group whose LVS nobody leads
+    is deferred to a later tick (_cadence_waits_for_leader), checked right
+    before each snapshot. The check and the snapshot's own leader lookup are
+    two lookups: a promote that completes between them still reaches the
+    leaderless recovery of the snapshot."""
     repl_lvols = [lv for lv in db.get_lvols(cluster_id)
                   if lv.do_replicate and lv.replication_interval_min > 0]
     if not repl_lvols:
         return
     all_snaps = db.get_mini_snapshots()
+    sync = db.get_cluster_by_id(cluster_id).sync_replication
+    leaderless: set = set()
 
     # Members of a consistency group snapshot together as ONE crash-consistent
     # generation — a single group-snapshot call per tick, never per-volume.
@@ -676,6 +717,9 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     group_id, blocked[0].get_id(), blocked[1].get_id())
                 continue
             group = db.get_consistency_group_by_id(group_id)
+            # A group is pinned to one LVS: one lookup defers it as a whole.
+            if sync and _cadence_waits_for_leader(group.node_id, group.lvs_name, leaderless):
+                continue
             logger.info("Taking consistency-group snapshot for group %s "
                         "(%d members)", group_id, len(members))
             _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
@@ -697,6 +741,8 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     "previous one (%s, taken %ss ago) has not replicated yet",
                     lvol.get_id(), outstanding.get_id(),
                     max(0, now_ts - outstanding.created_at))
+                continue
+            if sync and _cadence_waits_for_leader(lvol.node_id, lvol.lvs_name, leaderless):
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")

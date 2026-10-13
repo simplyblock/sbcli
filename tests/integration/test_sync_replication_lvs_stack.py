@@ -1,8 +1,9 @@
 """The LVS stack on the remote triplet of a sync-replication cluster, against
 the real FoundationDB: creation of the six (FTT1: five) instances, the
 non-leader rebuild of a remote-triplet member and of a lost site's nodes on
-restart, the hublvol site rule, the senders facing a distrib that is not built
-yet, and node removal (phase 3a teardown, phase 3d build). Storage nodes (RPC)
+restart, the node such a rebuild stands behind, the hublvol site rule, the
+senders facing a distrib that is not built yet, and node removal (phase 3a
+teardown, phase 3d build). Storage nodes (RPC)
 and the hublvol / port-block side effects are mocked; the database never is.
 The pure rules are in tests/unit/test_sync_replication_lvs_stack.py.
 """
@@ -69,6 +70,12 @@ def hub():
                for name in names}
 
 
+@pytest.fixture()
+def adopt():
+    with patch.object(StorageNode, "adopt_hublvol", autospec=True, return_value="nqn") as m:
+        yield m
+
+
 class _Env:
     def __init__(self):
         self.down: set = set()
@@ -90,7 +97,7 @@ def env():
             patch.object(ops, "_connect_to_remote_jm_devs", return_value=[]), \
             patch.object(ops.distr_controller, "send_cluster_map_to_distr", return_value=True), \
             patch.object(ops, "_check_peer_disconnected",
-                         side_effect=lambda node, lvs_peer_ids=None: node.get_id() in e.down), \
+                         side_effect=lambda node, lvs_peer_ids=None, fresh=False: node.get_id() in e.down), \
             patch.object(ops.port_block, "set_port", e.set_port), \
             patch.object(ops, "tcp_ports_events"), \
             patch.object(ops, "storage_events"), \
@@ -219,6 +226,35 @@ def _hub_callers(hub, name):
 
 def _took_leadership(rpc):
     return any(c.kwargs.get("leader") for c in rpc.bdev_lvol_set_leader.call_args_list)
+
+
+def _grant_takes(rpcs, node):
+    """A set_leader(True) on ``node`` makes it report the leadership."""
+    rpc = rpcs[node.get_id()]
+
+    def _set_leader(lvs_name, leader=False, **kwargs):
+        if leader:
+            rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        return True
+    rpc.bdev_lvol_set_leader.side_effect = _set_leader
+
+
+def _transfer_ready(rpcs, leader):
+    rpcs.lead(leader)
+    rpc = rpcs[leader.get_id()]
+    rpc.jc_get_jm_status.return_value = {"jm_x": True}
+    rpc.jc_disable_replication.return_value = True
+    rpc.bdev_distrib_check_inflight_io.return_value = False
+
+
+def _goes_silent(rpcs, node, answer):
+    """``node`` stops answering the leadership probe: it raises ``answer`` or
+    returns it (None / an empty list)."""
+    probe = rpcs[node.get_id()].bdev_lvol_get_lvstores
+    if isinstance(answer, Exception):
+        probe.side_effect = answer
+    else:
+        probe.return_value = answer
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +386,24 @@ def _restart(db, node):
     return ret
 
 
+def _restart_for_real(db, node):
+    """Restart dispatch of ``node`` with every rebuild real. Returns the
+    outcome and the leader rebuilds the dispatch ran, as ``(node id, owner
+    id)``. The one call answered here is Step 1 of a node that owns no LVS:
+    the layouts have such nodes, a cluster does not."""
+    real = ops.recreate_lvstore
+    leader_rebuilds = []
+
+    def _rebuild(snode, force=False, lvs_primary=None, activation_mode=False):
+        if lvs_primary is None and not snode.lvstore:
+            return True
+        leader_rebuilds.append((snode.get_id(), (lvs_primary or snode).get_id()))
+        return real(snode, force=force, lvs_primary=lvs_primary, activation_mode=activation_mode)
+
+    with patch.object(ops, "recreate_lvstore", side_effect=_rebuild):
+        return ops.recreate_all_lvstores(_fresh(db, node)), leader_rebuilds
+
+
 class TestRemoteMemberRestart:
 
     def test_rebuilt_as_non_leader_behind_a_quiesced_home_leader(self, db, rpcs, hub, env):
@@ -376,11 +430,22 @@ class TestRemoteMemberRestart:
         assert _restart(db, b[2]) is True
         assert env.blocked() == [a[1].get_id()]
 
-    def test_no_leader_among_reachable_members_builds_nothing(self, db, rpcs, hub, env):
+    def test_nobody_reports_the_leadership_the_member_is_rebuilt_behind_the_home_primary(
+            self, db, rpcs, hub, env):
+        # An LVS waiting for its first IO has no leader: that blocks no restart.
         _, a, b, owner_a = _one_owner_layout(db)
-        assert _restart(db, b[2]) is False
-        rpcs[b[2].get_id()].bdev_distrib_create.assert_not_called()
-        assert env.blocked() == []
+        assert _restart(db, b[2]) is True
+        rpc = rpcs[b[2].get_id()]
+        assert {c.kwargs["name"] for c in rpc.bdev_distrib_create.call_args_list} == {
+            "distrib_11", "distrib_12"}
+        rpc.bdev_examine.assert_called_once_with("raid0_1")
+        assert _roles(rpc) == ["tertiary"]
+        assert env.blocked() == [owner_a.get_id()] and owner_a.get_id() in env.unblocked()
+        for node in (*a, *b):
+            assert not _took_leadership(rpcs[node.get_id()]), node.get_id()
+            rpcs[node.get_id()].bdev_lvol_update_lvstore.assert_not_called()
+        for name, mock in hub.items():
+            assert not mock.called, name
         assert _fresh(db, owner_a).lvstore_status == "ready"
 
     def test_home_triplet_all_down_rebuilds_without_quiesce_and_never_takes_over(
@@ -424,7 +489,7 @@ class TestRemoteMemberRestart:
             return True
 
         with patch.object(ops, "_recreate_lvstore_on_non_leader_impl", side_effect=_impl), \
-                patch.object(ops, "_non_leader_rebuild_leader", return_value=owner_a):
+                patch.object(ops, "_rebuild_anchor", return_value=owner_a):
             threads = [threading.Thread(target=ops._rebuild_remote_instance, args=(_fresh(db, m), owner_a))
                        for m in (b[1], b[2])]
             for t in threads:
@@ -471,7 +536,7 @@ class TestSameSiteRemoteLeader:
         env.down.update(n.get_id() for n in a)
         rpcs.lead(b[0])
         member = _fresh(db, b[1])
-        leader = ops._non_leader_rebuild_leader(_fresh(db, owner_a), member, db)
+        leader = ops._rebuild_anchor(_fresh(db, owner_a), member, db)
         assert leader.get_id() == b[0].get_id()
         assert ops.recreate_lvstore_on_non_leader(member, leader, _fresh(db, owner_a)) is True
         site_b = {n.get_id() for n in b}
@@ -500,6 +565,109 @@ class TestSameSiteRemoteLeader:
         calls = coordinator.return_value.reconcile.call_args_list
         assert calls[0].args == (tert, owner, [leader, peer])
         assert calls[1].args == (tert, leader, [leader, peer])
+
+
+# ---------------------------------------------------------------------------
+# the node a non-leader rebuild stands behind
+# ---------------------------------------------------------------------------
+
+class TestRebuildAnchor:
+    """ops._rebuild_anchor by direct calls. Members are numbered a0 a1 a2 b0
+    b1 b2 = 0..5; a0 owns LVS_1, b0 b1 b2 are its remote triplet."""
+
+    def _layout(self, db, active_site=""):
+        _, a, b, owner = _one_owner_layout(db)
+        if active_site:
+            owner = _update(db, owner, lvs_active_site=active_site)
+        return [*a, *b], owner
+
+    def _anchor(self, db, owner, node):
+        return ops._rebuild_anchor(_fresh(db, owner), _fresh(db, node), db).get_id()
+
+    @pytest.mark.parametrize("answer", [RPCException("no answer"), None, []])
+    @pytest.mark.parametrize("reporter", [None, 0, 2])
+    def test_a_connected_candidate_that_does_not_answer_is_never_read_as_not_leading(
+            self, db, rpcs, env, answer, reporter):
+        # ... not even next to a candidate that reports the leadership: the
+        # silent one may lead as well.
+        members, owner = self._layout(db)
+        _goes_silent(rpcs, members[1], answer)
+        if reporter is not None:
+            rpcs.lead(members[reporter])
+        with pytest.raises(ops.LVSLeaderUnknownError, match="did not answer"):
+            self._anchor(db, owner, members[4])
+
+    def test_two_candidates_reporting_the_leadership_is_unknown(self, db, rpcs, env):
+        members, owner = self._layout(db)
+        rpcs.lead(members[0])
+        rpcs.lead(members[1])
+        with pytest.raises(ops.LVSLeaderUnknownError, match="more than one"):
+            self._anchor(db, owner, members[4])
+
+    @pytest.mark.parametrize("active_site, restarting, leader", [
+        ("", 4, 0),                       # home-led: the primary
+        ("", 4, 1),                       # ... its secondary, next to a connected non-leading primary
+        ("", 2, 1),
+        (SITE_B, 1, 3),                   # led from B
+        (SITE_B, 1, 4),
+        (SITE_B, 5, 4),
+        ("moving:" + SITE_B, 1, 4),       # a move in flight: either triplet
+        ("moving:" + SITE_A, 4, 2),
+    ])
+    def test_the_one_candidate_that_reports_the_leadership(
+            self, db, rpcs, env, active_site, restarting, leader):
+        members, owner = self._layout(db, active_site)
+        rpcs.lead(members[leader])
+        assert self._anchor(db, owner, members[restarting]) == members[leader].get_id()
+
+    @pytest.mark.parametrize("active_site, restarting, anchor", [
+        ("", 4, 0), ("", 1, 0),
+        (SITE_B, 1, 3), (SITE_B, 5, 3), (SITE_B, 0, 3),
+    ])
+    def test_nobody_leads_the_active_primary(self, db, rpcs, env, active_site, restarting, anchor):
+        members, owner = self._layout(db, active_site)
+        assert self._anchor(db, owner, members[restarting]) == members[anchor].get_id()
+        # every other member of the active triplet was asked, nobody else
+        asked = {n.get_id() for n in members if rpcs[n.get_id()].bdev_lvol_get_lvstores.called}
+        active = members[3:] if active_site else members[:3]
+        assert asked == {n.get_id() for n in active} - {members[restarting].get_id()}
+
+    def test_nobody_leads_and_the_active_primary_is_disconnected_the_active_secondary(
+            self, db, rpcs, env):
+        members, owner = self._layout(db)
+        env.down.add(members[0].get_id())
+        # a disconnected candidate is not asked, so its silence is no "unknown"
+        _goes_silent(rpcs, members[0], None)
+        assert self._anchor(db, owner, members[4]) == members[1].get_id()
+        rpcs[members[0].get_id()].bdev_lvol_get_lvstores.assert_not_called()
+
+    def test_nobody_connected_the_first_candidate_and_no_probe(self, db, rpcs, env):
+        members, owner = self._layout(db)
+        env.down.update(n.get_id() for n in members[:3])
+        assert self._anchor(db, owner, members[4]) == members[0].get_id()
+        for node in members:
+            assert rpcs[node.get_id()].method_calls == [], node.get_id()
+
+    @pytest.mark.parametrize("target, restarting, anchor", [
+        (SITE_B, 4, 0),       # moving to B: the source is the home triplet
+        (SITE_A, 1, 3),       # moving back: the source is the remote triplet
+        (SITE_B, 0, 1),       # the source primary itself: the next of its triplet
+        (SITE_A, 3, 4),
+    ])
+    def test_a_move_in_flight_nobody_leads_the_source_triplets_primary(
+            self, db, rpcs, env, target, restarting, anchor):
+        members, owner = self._layout(db, "moving:" + target)
+        assert self._anchor(db, owner, members[restarting]) == members[anchor].get_id()
+        # both triplets were asked
+        asked = {n.get_id() for n in members if rpcs[n.get_id()].bdev_lvol_get_lvstores.called}
+        assert asked == {n.get_id() for n in members} - {members[restarting].get_id()}
+
+    def test_outside_sync_replication_the_owner_without_a_probe(self, db, rpcs, env):
+        members, owner = self._layout(db)
+        owner = _fresh(db, owner)
+        owner.site = ""
+        assert ops._leader_for_non_leader_rebuild(owner, _fresh(db, members[1]), db) is owner
+        assert rpcs[members[0].get_id()].method_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +716,27 @@ class TestLostSiteRestart:
         if not stamp:
             env.set_node_status.assert_any_call(a[1].get_id(), StorageNode.STATUS_OFFLINE,
                                                 caused_by="restart_cleanup")
+
+    def test_a_local_secondary_is_rebuilt_behind_the_remote_primary_when_nobody_leads(
+            self, db, rpcs, hub, env):
+        # A forced promote to B that no client IO followed: LVS_1 has no leader
+        # yet, and the returning site's nodes come back all the same.
+        _, a, b, owner_a, _ = _two_owner_layout(db, lost_site=SITE_A)
+        env.down.update(n.get_id() for n in a if n.get_id() != a[1].get_id())
+        with patch.object(ops, "recreate_lvstore") as takeover, \
+                patch.object(ops, "_rebuild_remote_instance", return_value=True):
+            assert ops.recreate_all_lvstores(_fresh(db, a[1])) is True
+        takeover.assert_not_called()
+        rpc = rpcs[a[1].get_id()]
+        assert {c.kwargs["name"] for c in rpc.bdev_distrib_create.call_args_list} == {
+            "distrib_11", "distrib_12"}
+        assert _roles(rpc) == ["secondary"]
+        assert env.blocked() == [b[0].get_id()] and b[0].get_id() in env.unblocked()
+        for node in (*a, *b):
+            assert not _took_leadership(rpcs[node.get_id()]), node.get_id()
+            rpcs[node.get_id()].bdev_lvol_update_lvstore.assert_not_called()
+        for name, mock in hub.items():
+            assert not mock.called, name
 
     def test_a_raw_failure_reopens_the_surviving_leader(self, db, rpcs, env):
         _, a, b, owner_a, _ = _two_owner_layout(db, lost_site=SITE_A)

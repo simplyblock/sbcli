@@ -274,10 +274,11 @@ def connect_lvol(uuid):
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
     if cluster.sync_replication:
-        # A sync-replication volume is connected per site; v1 has no site.
+        # A sync-replication volume is connected through the site its LVS is
+        # led from; only the v2 route resolves that.
         return utils.get_response_error(
             "lvol connect is not supported on a sync-replication cluster by the v1 API: "
-            "use the v2 volume connect with a site", 400)
+            "use the v2 volume connect", 400)
 
     host_nqn = request.args.get('host_nqn')
     ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)

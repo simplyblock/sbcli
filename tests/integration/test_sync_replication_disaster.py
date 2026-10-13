@@ -506,6 +506,27 @@ class TestLostSiteRestart:
             assert [c for c in mock.call_args_list if c.args[0].site == SITE_A] == [], name
         assert _fresh(db, owner_a1).lvs_active_site == ""
 
+    def test_a_whole_site_comes_back_while_the_failed_over_lvs_has_no_leader(self, db, rpcs, hub, env):
+        # A forced promote to B that no client IO followed: nobody leads LVS_1.
+        # Every node of A rebuilds its instance behind b0, the primary of the
+        # active triplet, and the restart completes.
+        cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db, lost_site=SITE_A)
+        _update(db, owner_b, lvs_active_site=SITE_A)        # S-home, led from its triplet on A
+        env.down.update(n.get_id() for n in a)
+        for node in a:
+            env.down.discard(node.get_id())
+            env.set_port.reset_mock()
+            assert ops.recreate_all_lvstores(_fresh(db, node)) is True, node.get_id()
+            rpc = rpcs[node.get_id()]
+            assert "raid0_1" in [c.args[0] for c in rpc.bdev_examine.call_args_list]
+            assert env.blocked() == [b[0].get_id()] and b[0].get_id() in env.unblocked()
+        for node in (*a, *b):
+            assert not stack._took_leadership(rpcs[node.get_id()]), node.get_id()
+            rpcs[node.get_id()].bdev_lvol_update_lvstore.assert_not_called()
+        for name, mock in hub.items():
+            assert [c for c in mock.call_args_list if c.args[0].site == SITE_A] == [], name
+        assert _fresh(db, owner_a).lvs_active_site == SITE_B
+
 
 # ---------------------------------------------------------------------------
 # the election on the returned site
@@ -880,6 +901,20 @@ class TestActivation:
             assert not stack._took_leadership(rpcs[node.get_id()])
         assert _fresh(db, owner_a).lvstore_status == "ready"
 
+    def test_the_rebuild_clears_the_pending_mark_of_the_remote_primary(self, db, rpcs, hub, env, adopt):
+        # b0 leads LVS_1 from now on: the mark's readers must not take it for absent.
+        _, a, b, owner_a, _ = stack._two_owner_layout(db)
+        owner_a = _update(db, owner_a, lvs_active_site=SITE_B,
+                          remote_instances_pending=[b[0].get_id(), b[1].get_id()])
+
+        def _set_leader(*args, leader=False, **kwargs):
+            if leader:
+                rpcs.lead(b[0])
+            return True
+        rpcs[b[0].get_id()].bdev_lvol_set_leader.side_effect = _set_leader
+        assert ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=owner_a, activation_mode=True) is True
+        assert _fresh(db, owner_a).remote_instances_pending == [b[1].get_id()]
+
     def test_only_the_active_remote_primary_may_build_it(self, db, rpcs, env):
         _, a, b, owner_a, _ = stack._two_owner_layout(db)
         owner_a = _update(db, owner_a, lvs_active_site=SITE_B)
@@ -887,9 +922,16 @@ class TestActivation:
             with pytest.raises(ops.LVSLeadershipElsewhereError):
                 ops.recreate_lvstore(_fresh(db, b[1]), lvs_primary=owner_a, activation_mode=True)
             assert ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=owner_a, activation_mode=True)
-        assert impl.call_count == 1
-        with pytest.raises(ops.LVSLeadershipElsewhereError):
-            ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=owner_a, activation_mode=False)
+            assert impl.call_count == 1
+            # outside activation - its restart - the active primary builds it too
+            assert ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=owner_a, activation_mode=False)
+            assert impl.call_count == 2
+            # led from home, nobody of the remote triplet builds it, in either mode
+            _update(db, owner_a, lvs_active_site="")
+            for activation in (True, False):
+                with pytest.raises(ops.LVSLeadershipElsewhereError):
+                    ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=owner_a, activation_mode=activation)
+        assert impl.call_count == 2
 
 
 
