@@ -298,6 +298,15 @@ class RunnerSpec:
     # cadence otherwise. ``interval`` stays the fallback and the unit of retry
     # backoff.
     dynamic_interval: Callable[[Sequence[JobSchedule]], float] | None = None
+    # Optional per-cluster "has the state my tasks wait on changed?" key,
+    # computed once per cycle. When it differs from the previous cycle's, the
+    # in-memory retry backoff of every task of that cluster is dropped, so a
+    # task that failed on e.g. "not the leader" is retried at once when
+    # leadership or a node status changes instead of after up to
+    # RESTART_TASK_EXEC_INTERVAL_MAX_SEC (two-node campaign c1, B6: rebuilds
+    # resumed only after a forced service restart). A failing key is logged
+    # and ignored.
+    backoff_reset_key: Callable[[Any], Any] | None = None
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -319,6 +328,7 @@ class TaskRunner:
         self._inflight: set = set()
         self._inflight_keys: dict = {}   # exclusion key -> task uuid
         self._next_attempt: dict = {}     # task uuid -> earliest retry timestamp
+        self._reset_keys: dict = {}       # cluster id -> last backoff_reset_key
 
     # -- public entrypoint --------------------------------------------------
 
@@ -335,6 +345,7 @@ class TaskRunner:
                 for cl in clusters:
                     cluster_tasks = db.get_job_tasks(cl.get_id(), reverse=False)
                     seen.extend(cluster_tasks)
+                    self._maybe_reset_backoff(cl, cluster_tasks)
                     for task in cluster_tasks:
                         if task.function_name not in self.spec.function_names:
                             continue
@@ -344,6 +355,26 @@ class TaskRunner:
                         self._dispatch(task, cl, cluster_tasks)
                     self._run_cycle_hook(cl)
             time.sleep(self._interval_for(seen))
+
+    def _maybe_reset_backoff(self, cluster: Any, tasks: Sequence[JobSchedule]) -> None:
+        if self.spec.backoff_reset_key is None:
+            return
+        try:
+            key = self.spec.backoff_reset_key(cluster)
+        except Exception as e:  # noqa: BLE001 - a reset is an optimisation
+            logger.warning(f"{self.spec.name}: backoff reset key for cluster "
+                           f"{cluster.get_id()} failed: {e}")
+            return
+        cid = cluster.get_id()
+        previous = self._reset_keys.get(cid)
+        self._reset_keys[cid] = key
+        if previous is None or previous == key:
+            return
+        with self._lock:
+            dropped = [t.uuid for t in tasks if self._next_attempt.pop(t.uuid, None) is not None]
+        if dropped:
+            logger.info(f"{self.spec.name}: cluster {cid} state changed (leadership or "
+                        f"node status); retrying {len(dropped)} backed-off task(s) now")
 
     def _interval_for(self, tasks: Sequence[JobSchedule]) -> float:
         if self.spec.dynamic_interval is None:
