@@ -121,9 +121,14 @@ class GroupBackup(BaseModel):
     _WATCHED = True
 
     def __eq__(self, other):
+        if self is other:
+            return True
         if not isinstance(other, GroupBackup):
             return NotImplemented
-        return self.model_dump() == other.model_dump()
+        return self.cluster_id == other.cluster_id and self.uuid == other.uuid
+
+    def __hash__(self):
+        return hash((self.cluster_id, self.uuid))
 
     _INDEXES: ClassVar[tuple] = (
         # uuid: a caller holding only the uuid (the mirror, a restore) can point
