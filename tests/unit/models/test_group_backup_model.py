@@ -1,0 +1,70 @@
+"""The GroupBackup model and the group fields on Backup.
+
+A GroupBackup ties the N per-member Backup records of one consistency-group
+generation together as one all-or-nothing unit
+(design-consistency-group-backup.md §4). This test pins its field shape, its
+serialization round-trip, the non-shared mutable default, and the group fields
+added to Backup.
+"""
+from simplyblock_core.models.backup import Backup, GroupBackup
+
+
+def _group_backup():
+    gb = GroupBackup()
+    gb.uuid = "gb-1"
+    gb.cluster_id = "cl-1"
+    gb.consistency_group_id = "cl-1/cg-1"
+    gb.consistency_group_name = "gitea"
+    gb.group_seq = 7
+    gb.members = [
+        {"lvol_id": "lv-db", "backup_id": "cl-1/b-db"},
+        {"lvol_id": "lv-data", "backup_id": "cl-1/b-data"},
+    ]
+    gb.location = {"bucket_name": "backups", "region": "us-east-1"}
+    gb.encrypted = False
+    gb.size = 3 * 1024 ** 3
+    return gb
+
+
+def test_group_backup_round_trips():
+    gb = _group_backup()
+    restored = GroupBackup(gb.to_dict())
+    assert restored.uuid == "gb-1"
+    assert restored.get_id() == "cl-1/gb-1"
+    assert restored.consistency_group_id == "cl-1/cg-1"
+    assert restored.group_seq == 7
+    assert restored.members == gb.members
+    assert restored.member_backup_ids() == ["cl-1/b-db", "cl-1/b-data"]
+    assert restored.encrypted is False
+
+
+def test_group_backup_members_default_is_not_shared():
+    a, b = GroupBackup(), GroupBackup()
+    assert a.members is not b.members
+    a.members.append({"lvol_id": "x", "backup_id": "y"})
+    assert b.members == []
+
+
+def test_group_backup_has_its_own_statuses_and_does_not_merge():
+    assert GroupBackup.STATUS_PENDING in GroupBackup._STATUS_CODE_MAP
+    assert GroupBackup.STATUS_COMPLETED in GroupBackup._STATUS_CODE_MAP
+    # A group backup does not merge: merging is a per-member single-volume
+    # concern on Backup, not a group one.
+    assert not hasattr(GroupBackup, "STATUS_MERGING")
+
+
+def test_backup_gains_group_fields_defaulting_to_standalone():
+    b = Backup()
+    assert b.group_backup_id == ""     # standalone single-volume backup by default
+    assert b.group_seq == 0
+    b.group_backup_id = "cl-1/gb-1"
+    b.group_seq = 7
+    restored = Backup(b.to_dict())
+    assert restored.group_backup_id == "cl-1/gb-1"
+    assert restored.group_seq == 7
+
+
+def test_backup_indexes_group_backup_id():
+    # The blank group_backup_id of a standalone backup is auto-dropped by the
+    # index, so only group members are indexed (models/indices.py Index).
+    assert "group_backup_id" in [ix.name for ix in Backup._INDEXES]
