@@ -12,7 +12,7 @@ consult (``_single_peer_jm_is_complete``, ``_two_node_fence_holds_ports``,
 all FDB reads and writes.
 
 What is modelled: the nodes (``simnode``), the network, the client's
-multipath IO, the Go event collector, and the outer shell of the flows the
+multipath IO, the event collector, and the outer shell of the flows the
 arbiter does not own -- the monitor's status/restart trigger, the restart
 runner, the migration runner, the port-allow runner and the monitor's
 stale-port remediation. Each modelled flow keeps the real decision points
@@ -520,7 +520,7 @@ class World:
         interval = constants.TWO_NODE_LEASE_RENEW_MS / 1000.0
         self.vt.after(max(interval, ctx.elapsed), self.lease_tick)
 
-    # ---- the Go collector ----------------------------------------------------------------------
+    # ---- the event collector -------------------------------------------------------------------
 
     def collector_tick(self):
         from simplyblock_core.arbitration import events as ev
