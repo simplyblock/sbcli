@@ -1570,7 +1570,13 @@ class DBController(metaclass=Singleton):
     def get_backups_by_group_backup_id(self, group_backup_id: str) -> list[Backup]:
         """The member backups of a group backup. A standalone backup's blank
         group_backup_id is dropped by the index, so only members are returned
-        (design-consistency-group-backup.md §4.1)."""
+        (design-consistency-group-backup.md §4.1).
+
+        A blank id names no group backup, so it has no members: return empty
+        rather than querying the index, which rejects a blank component (a blank
+        is never indexed, so it could only ever match nothing)."""
+        if not group_backup_id:
+            return []
         return self.query(Backup, 'group_backup_id', group_backup_id)
 
     def get_group_backups(self, cluster_id: str | None = None) -> list[GroupBackup]:
