@@ -1028,3 +1028,56 @@ REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
 # successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
 # clone-entry/blob-id-reuse defect is fixed.
 REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False
+
+# ---- Two-node arbitration (docs/design/two-node-arbitration.md, section 10) ----
+# Hold deadline on the node; must stay below the hosts' KATO.
+TWO_NODE_HOLD_MS = 2500
+TWO_NODE_LEASE_TTL_MS = 1500
+TWO_NODE_LEASE_RENEW_MS = 250
+TWO_NODE_LEASE_MARGIN_MS = 500
+TWO_NODE_STABLE_FOR_S = 30
+TWO_NODE_WAIT_TIMEOUT_MS = 20000
+TWO_NODE_VERDICT_HISTORY = 50
+#: Arbiter decision loop period (events are folded and decided every tick).
+TWO_NODE_DECISION_TICK_MS = 100
+#: How often the arbiter re-reads each node's ``jc_ha_status`` and replaces its
+#: per-node, per-LVS view (holding/solo/fenced) with it. Also done at once after
+#: a reconnect and on an instance change or a sequence gap.
+TWO_NODE_RECONCILE_MS = 1000
+#: Consecutive HTTP 500 answers from a node's SPDK proxy that count as positive
+#: evidence that its SPDK is gone (the proxy runs, SPDK behind it does not).
+#: Two, not one: a single 500 can be a transient SPDK timeout.
+TWO_NODE_SPDK_DOWN_HTTP500_STREAK = 2
+#: Seconds between two leadership reconciliation passes, and how long an LVS
+#: must stay leaderless (two passes) before leadership is restored.
+TWO_NODE_LEADERSHIP_RECONCILE_S = 10
+#: Client keep-alive for clusters with two-node arbitration: hosts must detect
+#: a silent path within the hold window (hold_ms 2500 < KATO).
+TWO_NODE_CLIENT_KEEP_ALIVE_TO = 4
+#: The node RPCs a storage node must expose before the arbiter drives it.
+TWO_NODE_ARBITRATION_RPCS = (
+    "jc_wait_events", "jc_ha_status", "jc_lease_renew",
+    "jc_grant_solo", "jc_fence", "jc_unfence",
+)
+#: Taint the edge operator applies to the Kubernetes node of a fenced storage node.
+TWO_NODE_FENCED_TAINT = "storage.simplyblock.io/fenced"
+#: ``jc_set_dual_node`` field: a remote JM that has not acknowledged for this
+#: long counts as unavailable and the node starts holding (campaign c2, F5: a
+#: frozen peer keeps its TCP connections, so connection loss alone is too late).
+TWO_NODE_REMOTE_JM_TIMEOUT_MS = 1000
+#: Minimum interval between two unfence attempts of a self-fenced node (F4).
+TWO_NODE_SELF_FENCE_READMIT_MS = 2000
+#: A planned loss (CP-initiated restart/shutdown, F3) ends when the node comes
+#: back with a new SPDK instance, at the latest after this many seconds.
+TWO_NODE_PLANNED_LOSS_MAX_S = 900
+#: Partitioned pair (F6): with the node-to-node link answering again, the
+#: arbiter reconnects the remote JMs every this many seconds ...
+TWO_NODE_JM_RECONNECT_S = 30
+#: ... and after this long with the link up but remote JMs still unavailable,
+#: hands one node to the restart flow (the manual c1/c2 remedy).
+TWO_NODE_PARTITION_RESTART_AFTER_S = 120
+#: How often the link between the two nodes is probed while partitioned.
+TWO_NODE_LINK_PROBE_S = 10
+#: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
+#: retried while it fails (a journal re-level in progress) before the restart aborts.
+RESTART_JC_COMPRESSION_RETRY_S = 60

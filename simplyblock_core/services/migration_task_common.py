@@ -258,6 +258,44 @@ def qos_high_priority(cluster_id):
     return db.get_cluster_by_id(cluster_id).is_qos_set()
 
 
+def needs_relaxed_placement(member_nodes, ndcs, npcs):
+    """Whether a migration on a cluster of ``member_nodes`` must run relaxed.
+
+    Strict placement puts every chunk of a stripe on a different node. A
+    1- or 2-node cluster, or one with fewer nodes than chunks per stripe,
+    has no such placement, so a strict migration has nowhere to move data
+    and never completes; relocation then needs a third node. ultra already
+    relaxes writes in that case on its own, but migrations only relax when
+    asked (``relaxed_mode``, default false).
+    """
+    return member_nodes <= 2 or member_nodes < ndcs + npcs
+
+
+def migration_relaxed(cluster_id):
+    cluster = db.get_cluster_by_id(cluster_id)
+    members = [n for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    return needs_relaxed_placement(len(members), cluster.distr_ndcs, cluster.distr_npcs)
+
+
 def sibling_eligibility(task, cluster):
     """Spec-shaped wrapper of :func:`no_sibling_migration`."""
     return no_sibling_migration(task)
+
+
+def backoff_reset_key(cluster):
+    """What a deferred migration waits on: node statuses and LVS leadership.
+
+    Used as the migration runners' ``RunnerSpec.backoff_reset_key``: a change
+    drops the in-memory retry backoff, so a rebuild that failed on "not the
+    leader" or on a node being down resumes as soon as that changes. On a
+    two-node arbitrated cluster the arbitration record's epoch (every verdict)
+    and ``leadership_restored_at`` (leadership reconciliation) stand for
+    leadership changes that come without a node status change.
+    """
+    nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+    statuses = tuple(sorted((n.get_id(), n.status) for n in nodes))
+    rec = db.get_cluster_arbitration(cluster.get_id()) if getattr(
+        cluster, "two_node_arbitration", False) else None
+    leadership = (rec.epoch, rec.leadership_restored_at) if rec is not None else ()
+    return statuses, leadership
