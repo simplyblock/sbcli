@@ -1753,8 +1753,8 @@ class RPCClient:
         node: the node's own ``preferred`` field defaults to false and is never
         sent.
 
-        Returns ``(result, error)`` like every ``_request2`` call; it does not
-        raise on a JSON-RPC error.
+        Raises ``RPCRemoteError`` when the node rejects the call, for example
+        because it was built without the arbitration fields.
         """
         params: dict = {"enable": bool(enable)}
         if hold_ms is not None:

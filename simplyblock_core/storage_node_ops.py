@@ -1316,28 +1316,20 @@ def apply_jc_dual_node(cluster_id):
             continue
         try:
             rpc = node.rpc_client()
-            _, err = _unpack_rpc2(rpc.jc_set_dual_node(enable, **extra))
-            if err and extra:
+            try:
+                rpc.jc_set_dual_node(enable, **extra)
+            except RPCRemoteError as e:
+                if not extra:
+                    raise
                 logger.warning("Node %s rejected the arbitration fields of jc_set_dual_node "
-                               "(%s); applying the plain dual-node flag", node.get_id(), err)
-                _, err = _unpack_rpc2(rpc.jc_set_dual_node(enable))
-            if err:
-                logger.warning("Could not set JC dual-node=%s on %s: %s",
-                               enable, node.get_id(), err)
-                continue
+                               "(%s); applying the plain dual-node flag", node.get_id(), e)
+                rpc.jc_set_dual_node(enable)
             logger.info("JC dual-node=%s applied on %s (cluster membership %d, arbitration %s)",
                         enable, node.get_id(), len(members),
                         extra.get("arbitration", "not managed"))
         except Exception as e:                  # noqa: BLE001 - best effort
             logger.warning("Could not set JC dual-node=%s on %s: %s",
                            enable, node.get_id(), e)
-
-
-def _unpack_rpc2(ret):
-    """``(result, error)`` of a ``_request2`` call; tolerates a bare result."""
-    if isinstance(ret, tuple) and len(ret) == 2:
-        return ret
-    return ret, None
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):

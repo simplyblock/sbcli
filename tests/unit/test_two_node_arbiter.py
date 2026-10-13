@@ -43,7 +43,7 @@ class FakeRPC:
                     raise RuntimeError("no status in this test")
                 return self.node.ha_status()
             if name == "jc_set_dual_node":
-                return True, None
+                return True
             return {}
         return call
 

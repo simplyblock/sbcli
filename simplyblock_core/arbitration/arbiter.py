@@ -201,9 +201,9 @@ class Arbiter:
         instance = (self.signals.get(nid) or ev.NodeSignals()).instance
         if self.configured.get(nid) == instance and nid in self.configured:
             return
-        ret = node.rpc_client(timeout=3, retry=0).jc_set_dual_node(True, **dual_node_params(True))
-        if isinstance(ret, tuple) and len(ret) == 2 and ret[1]:
-            raise RuntimeError("jc_set_dual_node rejected: %s" % (ret[1],))
+        # A rejection raises RPCRemoteError, and the node stays unconfigured
+        # until a later tick succeeds.
+        node.rpc_client(timeout=3, retry=0).jc_set_dual_node(True, **dual_node_params(True))
         self.configured[nid] = instance
 
     def renew(self, rec: ClusterArbitration, node: StorageNode,

@@ -20,6 +20,7 @@ from simplyblock_core import constants, storage_node_ops
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services import migration_task_common as mig
 from simplyblock_core.services import task_runner_base as trb
 from simplyblock_core.utils.nvme import build_nvme_connect_entry
@@ -98,7 +99,7 @@ def pair(monkeypatch):
 def test_dual_node_on_an_arbitrated_cluster_carries_the_full_config(pair):
     a, b, _ = pair
     for n in (a, b):
-        n.handlers["jc_set_dual_node"] = lambda *x, **k: (True, None)
+        n.handlers["jc_set_dual_node"] = lambda *x, **k: True
     storage_node_ops.apply_jc_dual_node("CL")
     for n in (a, b):
         (name, args, kwargs), = _calls(n, "jc_set_dual_node")
@@ -117,8 +118,14 @@ def test_dual_node_without_arbitration_sends_only_enable(pair):
 
 def test_a_node_without_the_protocol_still_gets_the_plain_flag(pair):
     a, b, _ = pair
-    a.handlers["jc_set_dual_node"] = (
-        lambda enable, **k: (None, {"code": -32603, "message": "decode failed"}) if k else (True, None))
+
+    def reject_the_arbitration_fields(enable, **k):
+        # RPCClient._request raises a JSON-RPC error rather than returning it.
+        if k:
+            raise RPCRemoteError(code=-32603, message="decode failed")
+        return True
+
+    a.handlers["jc_set_dual_node"] = reject_the_arbitration_fields
     storage_node_ops.apply_jc_dual_node("CL")
     sent = [c[2] for c in _calls(a, "jc_set_dual_node")]
     assert sent[0]["arbitration"] is True and sent[1] == {}
