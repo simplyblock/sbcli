@@ -266,7 +266,7 @@ class TestResolveLblkEntries(unittest.TestCase):
     def test_name_fallback_when_serial_unknown(self):
         # Host reports a different serial for sdb (e.g. synthetic drift);
         # the stored name is the last-resort match.
-        host = [_blk("sdb", serial="OTHER"), _blk("sdc", serial="S2")]
+        host = [_blk("sdb", serial="OTHER", size=100), _blk("sdc", serial="S2")]
         resolved, missing = utils.resolve_lblk_entries(self.CONFIGURED, host)
         self.assertEqual(missing, [])
         names = {e["name"] for e in resolved}
@@ -288,6 +288,94 @@ class TestResolveLblkEntries(unittest.TestCase):
         self.assertEqual(entry["size"], 999)
         self.assertEqual(entry["numa"], 1)
         self.assertTrue(entry["has_partitions"])
+
+
+class TestResolveLblkEntriesOnAnotherHost(unittest.TestCase):
+    """A node restarted onto a different host (a migration) re-resolves its
+    stored devices against disks whose serials, kernel names, and boot layout
+    are all the new host's own.
+
+    Regression: 2026-10-13-lblk-restart-journal-on-boot-disk -- disks that
+    report no hardware serial get a synthetic one hashed with the hostname, so
+    nothing stored on the origin host matched on the target and every entry fell
+    through to the stored kernel name. The origin's journal disk (sdb, 30 GiB)
+    resolved to the target's sdb, which is the boot disk, and the restart tried
+    to build the journal on a mounted, partitioned root disk: SPDK answered
+    ``Bad address`` and the node went offline on every retry.
+    """
+
+    TIB = 1 << 40
+    GIB = 1 << 30
+
+    # The origin host: the boot disk (sdd) is not part of the node.
+    CONFIGURED: ClassVar[list] = [
+        {"name": "sda", "serial": "SYN-origin-a", "size": int(1.5 * TIB), "numa": -1,
+         "by_id": "/dev/disk/by-id/scsi-QEMU_drive-scsi1"},
+        {"name": "sdb", "serial": "SYN-origin-j", "size": 30 * GIB, "numa": -1,
+         "by_id": "/dev/disk/by-id/scsi-QEMU_drive-scsi3", "journal": True},
+        {"name": "sdc", "serial": "SYN-origin-c", "size": int(1.5 * TIB), "numa": -1,
+         "by_id": "/dev/disk/by-id/scsi-QEMU_drive-scsi2"},
+    ]
+
+    def _target_host(self):
+        """The target: same hardware layout, different kernel enumeration. Its
+        sdb is the boot disk and the 30 GiB disk is sdd."""
+        return [
+            _blk("sda", serial="SYN-target-a", size=int(1.5 * self.TIB), synthetic=True,
+                 by_id="/dev/disk/by-id/scsi-QEMU_drive-scsi1"),
+            _blk("sdb", serial="SYN-target-boot", size=120 * self.GIB, synthetic=True,
+                 by_id="/dev/disk/by-id/scsi-QEMU_drive-scsi0",
+                 parts=True, mounted=True),
+            _blk("sdc", serial="SYN-target-c", size=int(1.5 * self.TIB), synthetic=True,
+                 by_id="/dev/disk/by-id/scsi-QEMU_drive-scsi2"),
+            _blk("sdd", serial="SYN-target-j", size=30 * self.GIB, synthetic=True,
+                 by_id="/dev/disk/by-id/scsi-QEMU_drive-scsi3"),
+        ]
+
+    def test_journal_resolves_to_its_own_disk_not_the_targets_boot_disk(self):
+        resolved, missing = utils.resolve_lblk_entries(self.CONFIGURED, self._target_host())
+
+        journal = next(e for e in resolved if e.get("journal"))
+        self.assertEqual(journal["name"], "sdd")
+        self.assertEqual(journal["by_id"], "/dev/disk/by-id/scsi-QEMU_drive-scsi3")
+        self.assertEqual(missing, [])
+
+    def test_no_entry_resolves_onto_the_boot_disk(self):
+        resolved, _ = utils.resolve_lblk_entries(self.CONFIGURED, self._target_host())
+
+        self.assertNotIn("sdb", {e["name"] for e in resolved})
+
+    def test_a_name_match_on_a_mounted_disk_is_missing_rather_than_resolved(self):
+        # Nothing on the target shares a serial or a by-id path with the journal
+        # entry, and the only thing named sdb is mounted and partitioned.
+        host = [h for h in self._target_host() if h["name"] != "sdd"]
+        resolved, missing = utils.resolve_lblk_entries(self.CONFIGURED, host)
+
+        self.assertEqual([e["serial"] for e in missing], ["SYN-origin-j"])
+        self.assertNotIn("sdb", {e["name"] for e in resolved})
+
+    def test_a_name_match_of_a_different_size_is_missing(self):
+        # A clean disk with the stored name but not the stored size is another
+        # disk, not the same one with a drifted serial.
+        host = [_blk("sda", serial="SYN-target-a", size=int(1.5 * self.TIB)),
+                _blk("sdb", serial="SYN-target-x", size=50 * self.GIB),
+                _blk("sdc", serial="SYN-target-c", size=int(1.5 * self.TIB))]
+        resolved, missing = utils.resolve_lblk_entries(self.CONFIGURED, host)
+
+        self.assertNotIn("sdb", {e["name"] for e in resolved})
+        self.assertEqual([e["serial"] for e in missing], ["SYN-origin-j"])
+
+    def test_one_live_disk_is_never_resolved_for_two_entries(self):
+        configured = [
+            {"name": "sdb", "serial": "S1", "size": 100 << 30,
+             "by_id": "/dev/disk/by-id/acme-sdb"},
+            {"name": "sdb", "serial": "S2", "size": 100 << 30,
+             "by_id": "/dev/disk/by-id/acme-sdb"},
+        ]
+        resolved, missing = utils.resolve_lblk_entries(configured, [_blk("sdb", serial="X")])
+
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(len(missing), 1)
 
 
 class TestNodeConfigHelpers(unittest.TestCase):
