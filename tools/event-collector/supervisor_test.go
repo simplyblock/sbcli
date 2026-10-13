@@ -46,3 +46,32 @@ func TestSupervisorStartsStopsAndRestartsWorkers(t *testing.T) {
 		t.Fatalf("workers %d", s.Workers())
 	}
 }
+
+// Without an arbitrated cluster the supervisor scans rarely; with workers it
+// returns to Interval.
+func TestSupervisorWaitsLongerWhileIdle(t *testing.T) {
+	st := newMemStore()
+	s := &Supervisor{Store: st, Interval: 5 * time.Second, NewCaller: func(Node) Caller { return &scripted{} }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := s.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.nextWait(); got != 30*time.Second {
+		t.Fatalf("idle wait %v, want 30s", got)
+	}
+	st.clusters = []Cluster{{UUID: "cl", TwoNodeArbitration: true}}
+	st.nodes["cl"] = []Node{{UUID: "a", ClusterID: "cl", MgmtIP: "10.0.0.1", RPCPort: 8080}}
+	if err := s.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.nextWait(); got != 5*time.Second {
+		t.Fatalf("active wait %v, want 5s", got)
+	}
+	st.clusters = nil
+	_ = s.Reconcile(ctx)
+	if got := s.nextWait(); got != 30*time.Second {
+		t.Fatalf("idle again: wait %v, want 30s", got)
+	}
+}

@@ -100,6 +100,8 @@ class Arbiter:
         self.rpc_pool = rpc_pool or InlinePool()
         #: (kind, node_id) -> Future of a renewal or status poll still running
         self.inflight: dict = {}
+        #: No arbitrated cluster at the last scan: clock (ms) of the next scan.
+        self._idle_until_ms = 0
         #: node -> bool: queue the data rebuild after a re-admission (F10)
         self.schedule_rebuild = schedule_rebuild or default_schedule_rebuild
         #: cluster_id -> number of open data-rebuild (migration) tasks
@@ -955,9 +957,24 @@ class Arbiter:
 
     # ---- the loop -----------------------------------------------------------
 
+    def arbitrated_clusters(self) -> list:
+        """The clusters with ``two_node_arbitration`` on.
+
+        With none, the cluster list is read again only after
+        ``TWO_NODE_IDLE_RESCAN_S`` instead of on every renewal and tick, so a
+        deployment without two-node clusters is left almost untouched. Once one
+        appears, every call reads the list again (the fast loops)."""
+        now = self.clock()
+        if now < self._idle_until_ms:
+            return []
+        clusters = [c for c in self.db.get_clusters()
+                    if getattr(c, "two_node_arbitration", False) is True]
+        self._idle_until_ms = 0 if clusters else now + int(constants.TWO_NODE_IDLE_RESCAN_S * 1000)
+        return clusters
+
     def renew_all(self) -> None:
         """Lease loop body: every ``TWO_NODE_LEASE_RENEW_MS``."""
-        for cluster in self.db.get_clusters():
+        for cluster in self.arbitrated_clusters():
             nodes = self.eligible(cluster)
             if not nodes:
                 continue
@@ -983,7 +1000,7 @@ class Arbiter:
             logger.exception("Lease renewal of %s failed", node.get_id())
 
     def tick(self) -> None:
-        for cluster in self.db.get_clusters():
+        for cluster in self.arbitrated_clusters():
             nodes = self.eligible(cluster)
             if nodes:
                 try:

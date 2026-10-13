@@ -117,6 +117,12 @@ def queue_event(db, cluster_id: str, node_id: str, instance: str, seq: int,
     item.write_to_db(db.kv_store)
 
 
+def is_legacy_jm_event(event_dict: dict) -> bool:
+    """A JC ``remote_jm_*`` health event (only dual-node nodes send them).
+    Cheap, no I/O: the distr collector checks it before reading the cluster."""
+    return event_dict.get("status") in LEGACY_JM_STATUSES and "jm_vuid" in event_dict
+
+
 def forward_legacy_jm_event(db, cluster, node_id: str, event_dict: dict) -> bool:
     """For nodes without ``jc_wait_events``: hand a ``remote_jm_*`` event read by
     the Python distr collector to the arbiter.
@@ -128,7 +134,7 @@ def forward_legacy_jm_event(db, cluster, node_id: str, event_dict: dict) -> bool
     Returns True when the event was a remote-JM event (handled here).
     """
     import time
-    if event_dict.get("status") not in LEGACY_JM_STATUSES or "jm_vuid" not in event_dict:
+    if not is_legacy_jm_event(event_dict):
         return False
     if getattr(cluster, "two_node_arbitration", False):
         now_ns = time.time_ns()

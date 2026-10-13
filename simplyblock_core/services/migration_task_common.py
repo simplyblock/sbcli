@@ -292,7 +292,14 @@ def backoff_reset_key(cluster):
     two-node arbitrated cluster the arbitration record's epoch (every verdict)
     and ``leadership_restored_at`` (leadership reconciliation) stand for
     leadership changes that come without a node status change.
+
+    Small clusters only (single-node, or two-node with arbitration): on every
+    other cluster this returns None without reading anything, so the runners
+    keep their previous behaviour and FDB load (no reset, no node-list read).
     """
+    if not (getattr(cluster, "two_node_arbitration", False) is True
+            or getattr(cluster, "is_single_node", False) is True):
+        return None
     nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
     statuses = tuple(sorted((n.get_id(), n.status) for n in nodes))
     rec = db.get_cluster_arbitration(cluster.get_id()) if getattr(

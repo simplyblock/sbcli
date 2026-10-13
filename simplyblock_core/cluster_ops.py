@@ -1173,6 +1173,7 @@ def activation_minimum_devices(cluster, single_node_cluster) -> int:
 
 def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
+    storage_node_ops._remember_cluster_arbitration(cluster)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")

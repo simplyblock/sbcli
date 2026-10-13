@@ -16,7 +16,10 @@ type Supervisor struct {
 	TLS      TLSConfig
 	Client   *http.Client
 	Interval time.Duration
-	Log      *slog.Logger
+	// IdleInterval is the period while no cluster has arbitration on (no
+	// workers): deployments without two-node clusters are scanned rarely.
+	IdleInterval time.Duration
+	Log          *slog.Logger
 	// NewCaller is replaceable in tests.
 	NewCaller func(Node) Caller
 
@@ -103,17 +106,30 @@ func (s *Supervisor) Workers() int {
 	return len(s.running)
 }
 
-// Run reconciles every Interval until ctx ends, then stops all workers.
-func (s *Supervisor) Run(ctx context.Context) {
+// nextWait is Interval while workers run, IdleInterval while none do.
+func (s *Supervisor) nextWait() time.Duration {
 	interval := s.Interval
 	if interval == 0 {
 		interval = 5 * time.Second
 	}
+	idle := s.IdleInterval
+	if idle == 0 {
+		idle = 30 * time.Second
+	}
+	if s.Workers() == 0 && idle > interval {
+		return idle
+	}
+	return interval
+}
+
+// Run reconciles every Interval (IdleInterval with no arbitrated cluster) until ctx
+// ends, then stops all workers.
+func (s *Supervisor) Run(ctx context.Context) {
 	for {
 		if err := s.Reconcile(ctx); err != nil {
 			s.log().Warn("reconcile failed", "err", err)
 		}
-		if sleepCtx(ctx, interval) != nil {
+		if sleepCtx(ctx, s.nextWait()) != nil {
 			break
 		}
 	}
