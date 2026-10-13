@@ -490,6 +490,61 @@ took over its LVS on new IO, could not read an md stripe and aborted: EIO on the
 The restart flow itself queues the same rebuild after a restart; the mark adds the gate (no grant,
 no finished heal) that the restart flow does not have.
 
+### 7.11 Devices of a re-admitted node, and stuck rebuilds (campaign c4, F12)
+
+In c4, 02a froze sn1 for 4 s. On waking it fenced itself (`stalled`, section 6) as designed, but
+its alceml stuck-IO watchdog counted the frozen time as device IO age and shut both data devices
+down (`bdev_get_bdevs alceml_...` → `-19`). The control plane, every distrib cluster map and the
+NVMe controllers kept showing the devices online; the unfence re-admitted a node without data
+devices, and the rebuild queued for it (section 7.10) failed `mig error: 8` / `520` for 25 min.
+`mig error` is a bit field, `1 << EMigrationError` (ultra `alg_migration.hpp`): 8 is
+`DST_NOT_AVAILABLE`, 520 is `RESHUFFLE | DST_NOT_AVAILABLE`.
+
+- **Device check before every unfence-based re-admission** (heal, section 8; self-fence
+  re-admission, section 7.9): every data device the control plane counts as serving must be
+  `online`, and its alceml bdev must exist on the node (`bdev_get_bdevs` by name). Removed,
+  failed, migrated, new and JM devices are skipped. Missing or not online: the node is **not**
+  unfenced; it is handed to the restart flow (`readmit`), which recreates its devices and queues
+  the rebuild. Could not ask (timeout): the re-admission waits for the next attempt.
+- **Stuck rebuild.** While a marked node's rebuild has open tasks whose last result is a `mig
+  error` with `SRC_NOT_AVAILABLE` or `DST_NOT_AVAILABLE` set for `rebuild_stuck_s` (120 s), the
+  mark gets `stuck: true` (`stuck_error`), the event `TWO_NODE_REBUILD_STUCK` is logged and the
+  node is handed to the restart flow. Other migration errors keep retrying as before.
+- **Recorded.** Every hand-over is recorded in `device_recovery` (`{node: {reason, at}}`) and
+  logged as `TWO_NODE_DEVICE_RECOVERY`; at most one per node per `device_recovery_retry_s`
+  (300 s). `GET .../arbitration` reports `rebuild_stuck` and `device_recovery`.
+
+The node-side fix (alceml not counting a detected process stall as IO age) is ultra's; this
+check also covers a device lost for any other reason during the fence.
+
+### 7.12 Survivor promotion after a grant (campaign c4, F13)
+
+In c4, 02b froze sn2, the primary of vol1's LVS. sn1 was granted solo at +2.4 s, but kept
+redirecting vol1 IO over the hublvol to the fenced sn2: the fence leaves the hublvol port open
+(section 6.1), so the redirect never failed and sn1 never became leader. IO stalled 52 s, until
+the leaderless recovery (section 7.7) put leadership back on sn2.
+
+When a `degraded` verdict's grant has landed and the loser is the **primary** of an LVS granted to
+the winner, the arbiter makes the winner that LVS's leader at once, off the decision loop, once per
+loss: `bdev_lvol_update_lvstore` (metadata reloaded from disk first, as the leaderless recovery
+does), then `bdev_lvol_set_leader(leader=true)`, verified within `promote_verify_s`, then the
+primary's volumes go ANA optimized on the winner (`_failover_primary_ana`). The fenced primary is
+already ANA inaccessible (SPDK fence) and its IO-triggered takeover is latched off until the
+control plane sets its leadership again.
+
+- **No split-brain.** It runs only after fence-then-grant has landed at the new epoch, i.e. the
+  loser is fenced or positively lost (section 3); the survivor is the only writer.
+- **Not during a handoff.** Skipped while a restart or port-allow task moves leadership on either
+  node (planned loss, section 7.8): that flow owns it.
+- **Recorded** in `promoted` (`{lvs: {node, epoch, at, ok}}`), cleared when healing finishes. A
+  failed promotion is logged; the leaderless recovery stays the fallback, and the next grant retries.
+- The leaderless recovery itself (`_recover_leaderless_lvs`) is not called: its hublvol repair and
+  its wait for a self-promotion through redirected IO are what fails against a fenced primary, and
+  it is a shared path of every cluster, left unchanged.
+
+After the re-admission the LVS stays led by the former secondary; failback to the primary is the
+restart flow's (as after any failover).
+
 ## 8. Healing and re-admission
 
 1. Both nodes report `remote_jm_healthy`; after `stable_for_s` the arbiter enters `healing`.
@@ -580,6 +635,9 @@ setting brings that below KATO.
 | `poll_wait_ms` | 150 | arbiter, longest wait of a tick for its status polls (section 7.3) |
 | `rebuild_check_s` | 5 | arbiter, rebuild progress check (section 7.10) |
 | `rebuild_schedule_retry_s` | 30 | arbiter, re-queue when nothing was queued (section 7.10) |
+| `rebuild_stuck_s` | 120 | arbiter, rebuild failing on unavailable devices before recovery (section 7.11) |
+| `device_recovery_retry_s` | 300 | arbiter, at most one device recovery per node (section 7.11) |
+| `promote_verify_s` | 3 | arbiter, survivor leadership confirmation (section 7.12) |
 | client keep-alive | 4 s | connect parameters of arbitrated clusters (section 9.1) |
 | `wait_timeout_ms` | 20000 | collector, `jc_wait_events` |
 | event ring | 1024 events | node |

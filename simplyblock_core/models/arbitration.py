@@ -65,6 +65,14 @@ class ClusterArbitration(BaseModel):
     #: until the up-to-date node returns: {"node": stale id, "since": ms,
     #: "reason": str}. Empty otherwise.
     data_unavailable: dict = default_factory(dict)
+    #: Campaign c4, F12. Nodes the arbiter handed to the restart flow because
+    #: their data devices were missing at re-admission, or their rebuild was
+    #: stuck on unavailable devices: {node_id: {"reason": str, "at": ms}}.
+    device_recovery: dict = default_factory(dict)
+    #: Campaign c4, F13. LVS whose leadership the arbiter moved to the
+    #: survivor right after a grant: {lvs_name: {"node": id, "epoch": int,
+    #: "at": ms, "ok": bool}}.
+    promoted: dict = default_factory(dict)
 
     def get_id(self):
         return self.cluster_id
