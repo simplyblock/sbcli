@@ -1037,6 +1037,11 @@ TWO_NODE_LEASE_RENEW_MS = 250
 TWO_NODE_LEASE_MARGIN_MS = 500
 TWO_NODE_STABLE_FOR_S = 30
 TWO_NODE_WAIT_TIMEOUT_MS = 20000
+#: jc_wait_events max events per answer (contract section 3.7).
+TWO_NODE_COLLECTOR_MAX_EVENTS = 256
+#: How often the collector re-reads cluster/node topology to start or stop
+#: per-node collector threads.
+TWO_NODE_COLLECTOR_RECONCILE_S = 5
 TWO_NODE_VERDICT_HISTORY = 50
 #: Arbiter decision loop period (events are folded and decided every tick).
 TWO_NODE_DECISION_TICK_MS = 100
