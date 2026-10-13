@@ -1545,7 +1545,7 @@ def resolve_lblk_entries(configured_entries, host_devices):
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
                    if d.get("partuuid")}
-    by_id = {}
+    by_id: dict[str, dict] = {}
     for dev in host_devices:
         for path in (dev.get("by_id_paths") or [dev.get("by_id_path")]):
             if path:
