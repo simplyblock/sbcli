@@ -4454,65 +4454,84 @@ class K8sUtils:
 
     # ── BackupPolicy CRD operations ──────────────────────────────────────────
 
+    #: The label a policy selects its claims by. The API has no opinion --
+    #: claimSelector is a plain label selector and the published example
+    #: uses "backup: nightly" -- so the suite fixes one key and puts the
+    #: policy's own name in the value. That keeps attach/detach a one-line
+    #: label edit and keeps two policies in one namespace from selecting
+    #: each other's claims.
+    BACKUP_POLICY_LABEL = "backup"
+
     def create_backup_policy(self, name: str,
                              cluster_name: str = "simplyblock-cluster",
                              max_versions: int = 0, max_age: str = "",
                              schedule: str = "", namespace: str | None = None):
-        """Create a BackupPolicy CRD."""
-        ns = namespace or self.namespace
-        spec_lines = f"  clusterName: {cluster_name}\n"
-        if max_versions:
-            spec_lines += f"  maxVersions: {max_versions}\n"
-        if max_age:
-            spec_lines += f'  maxAge: "{max_age}"\n'
-        if schedule:
-            spec_lines += f'  schedule: "{schedule}"\n'
-        yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: BackupPolicy\n"
-            f"metadata:\n"
-            f"  name: {name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"{spec_lines}"
-        )
-        self.logger.info(f"[K8sUtils] Creating BackupPolicy '{name}'")
-        self.apply_yaml(yaml_content, namespace=ns)
+        """Create a backup policy. Now a v1alpha2 StorageBackupPolicy.
 
-    def delete_backup_policy(self, name: str, namespace: str | None = None):
-        """Delete a BackupPolicy CRD."""
-        ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting BackupPolicy '{name}'")
-        self.delete_resource("backuppolicy", name, namespace=ns)
+        Same signature as the legacy BackupPolicy helper, so the call
+        sites are unchanged, but three things about the new kind change
+        what a test can do with it:
 
-    # ── PVC annotation helpers ───────────────────────────────────────────────
+        * claims attach by LABEL, not by an annotation naming the policy.
+          annotate_pvc_backup_policy() does that instead now.
+        * ``schedule``, ``maxVersions`` and ``maxAge`` are IMMUTABLE. A
+          different schedule needs a new policy; editing one is refused.
+        * a policy selects claims in its own namespace only, which is the
+          StorageCluster's namespace -- and the StorageBackups it produces
+          are created in the operator's namespace whatever the claim's.
+
+        An absent claimSelector selects NOTHING and is reported with a
+        SelectorEmpty event, while ``{}`` selects every claim. The
+        selector is therefore always written, so a policy created here is
+        never accidentally the second of those.
+        """
+        ns = namespace or self.namespace
+        return self.create_storage_backup_policy(
+            name=name, cluster_name=cluster_name, schedule=schedule or None,
+            max_versions=max_versions or None, max_age=max_age or None,
+            match_labels={self.BACKUP_POLICY_LABEL: name}, namespace=ns)
 
     def annotate_pvc_backup_policy(self, pvc_name: str, policy_name: str,
-                                    namespace: str | None = None):
-        """Attach a BackupPolicy to a PVC via annotation."""
+                                   namespace: str | None = None):
+        """Attach a claim to a policy. A LABEL now, despite the name.
+
+        The name is kept so the call sites do not move. The legacy kind
+        read an annotation naming the policy; StorageBackupPolicy selects
+        on labels, so attaching is "kubectl label pvc <claim>
+        backup=<policy>" and detaching is removing it. Existing backups
+        survive both.
+        """
         ns = namespace or self.namespace
         self.logger.info(
-            f"[K8sUtils] Annotating PVC '{pvc_name}' with "
-            f"backup-policy='{policy_name}'"
-        )
-        self._exec_kubectl(
-            f"kubectl annotate pvc {pvc_name} -n {ns} "
-            f"simplybk/backup-policy={policy_name} --overwrite"
-        )
+            f"[K8sUtils] attaching PVC '{pvc_name}' to policy "
+            f"'{policy_name}' via label "
+            f"{self.BACKUP_POLICY_LABEL}={policy_name}")
+        return self._exec_kubectl(
+            f"kubectl label pvc {pvc_name} -n {ns} "
+            f"{self.BACKUP_POLICY_LABEL}={policy_name} --overwrite")
 
     def remove_pvc_backup_policy_annotation(self, pvc_name: str,
-                                             namespace: str | None = None):
-        """Remove BackupPolicy annotation from a PVC."""
+                                            namespace: str | None = None):
+        """Detach a claim from its policy by removing the label."""
         ns = namespace or self.namespace
-        self.logger.info(
-            f"[K8sUtils] Removing backup-policy annotation from PVC "
-            f"'{pvc_name}'"
-        )
-        self._exec_kubectl(
-            f"kubectl annotate pvc {pvc_name} -n {ns} simplybk/backup-policy-"
-        )
+        return self._exec_kubectl(
+            f"kubectl label pvc {pvc_name} -n {ns} "
+            f"{self.BACKUP_POLICY_LABEL}- 2>/dev/null || true")
 
-    # ── Utility pod operations (checksums) ───────────────────────────────────
+    def delete_backup_policy(self, name: str, namespace: str | None = None):
+        return self.delete_storage_backup_policy(name, namespace=namespace)
+
+    def storage_backup_policy_status(self, name: str,
+                                     namespace: str | None = None) -> dict:
+        """attachedClaims and lastBackupAt, which is how a test knows the
+        policy actually picked a claim up rather than silently selecting
+        nothing."""
+        res = self.get_resource_json(self.SBPOLICY_KIND, name,
+                                     namespace=namespace or self.namespace)
+        st = res.get("status") or {}
+        return {"phase": st.get("phase"),
+                "attachedClaims": st.get("attachedClaims") or [],
+                "lastBackupAt": st.get("lastBackupAt")}
 
     def create_utility_pod(self, pod_name: str, pvc_name: str,
                            mount_path: str = "/spdkvol",
