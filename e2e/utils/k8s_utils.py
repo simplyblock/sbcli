@@ -5098,7 +5098,16 @@ class K8sSbcliUtils:
         lvols = self.list_lvols()
         for name, lvol_id in lvols.items():
             details = self.get_lvol_details(lvol_id)
-            if details and details[0].get("cloned_from_snap"):
+            # isinstance, not truthiness. get_lvol_details does not always
+            # hand back a list of dicts -- a failed or empty read can come
+            # back with a bool in the first slot, and `details[0].get(...)`
+            # then raises "'bool' object has no attribute 'get'" out of
+            # teardown, which is where it was seen: run 38248680886 lost
+            # its clone cleanup twice that way. Teardown is the one place
+            # that must not throw, because it runs after a failure and its
+            # exception replaces the one worth reading.
+            row = details[0] if isinstance(details, (list, tuple)) and details else None
+            if isinstance(row, dict) and row.get("cloned_from_snap"):
                 self.logger.info(f"Deleting clone lvol: {name}")
                 try:
                     self.delete_lvol(lvol_name=name, skip_error=True)

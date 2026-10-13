@@ -447,6 +447,128 @@ def check_bringup_document_against_crd():
     return True
 
 
+def check_no_attribute_shadows_a_method():
+    """No ``self.x = ...`` where ``x`` is also a method.
+
+    Written after one line cost a 4h26m run and 18 of its 21 cases. The
+    migration lane gained a seeded random number generator whose seed was
+    stored as ``self.seed`` -- and ``seed()`` was already a method on that
+    class, the one that writes known content to a fresh volume. From the
+    first test onward every case that created a volume died on
+
+        TypeError: 'int' object is not callable
+
+    and the only three that "passed" were the negative cases, which make
+    their volumes with seed=False and so never called it. A green-looking
+    3/21 that actually meant the suite never ran.
+
+    Python gives no warning for this: an instance attribute simply hides
+    the class's method from that point on, and the failure surfaces
+    wherever the method is next called, which can be a different file.
+    The cost of asking is one AST walk.
+
+    Methods are collected from the class itself and from any base in the
+    same file, plus the two shared bases every lane inherits, since
+    shadowing an INHERITED method is the easier mistake to make -- the
+    name is not visible in the file doing the shadowing.
+    """
+    import ast as _ast
+
+    print("=" * 68)
+    print("no instance attribute shadows a method of the same class")
+    print("=" * 68)
+
+    roots = [os.path.join("e2e_tests"), os.path.join("stress_test"),
+             os.path.join("load_tests")]
+    if not any(os.path.isdir(r) for r in roots):
+        roots = [os.path.join("e2e", r) for r in
+                 ("e2e_tests", "stress_test", "load_tests")]
+
+    # The bases nearly everything inherits. Shadowing one of their methods
+    # is invisible in the file that does it.
+    shared = {}
+    for rel in (os.path.join("e2e_tests", "cluster_test_base.py"),
+                os.path.join("e2e", "e2e_tests", "cluster_test_base.py"),
+                os.path.join("e2e_tests", "migration", "migration_base.py"),
+                os.path.join("e2e", "e2e_tests", "migration",
+                             "migration_base.py")):
+        if not os.path.exists(rel):
+            continue
+        try:
+            tree = _ast.parse(open(rel, encoding="utf-8").read())
+        except SyntaxError:
+            continue
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ClassDef):
+                shared[node.name] = {b.name for b in node.body
+                                     if isinstance(b, (_ast.FunctionDef,
+                                                       _ast.AsyncFunctionDef))}
+
+    bad = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in sorted(files):
+                if not fn.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, fn)
+                try:
+                    tree = _ast.parse(open(path, encoding="utf-8").read())
+                except SyntaxError:
+                    continue
+                local = {}
+                for node in _ast.walk(tree):
+                    if isinstance(node, _ast.ClassDef):
+                        local[node.name] = {
+                            b.name for b in node.body
+                            if isinstance(b, (_ast.FunctionDef,
+                                              _ast.AsyncFunctionDef))}
+                for node in _ast.walk(tree):
+                    if not isinstance(node, _ast.ClassDef):
+                        continue
+                    methods = set(local.get(node.name, ()))
+                    for base in node.bases:
+                        name = getattr(base, "id", None) or getattr(
+                            base, "attr", None)
+                        methods |= set(local.get(name, ()))
+                        methods |= set(shared.get(name, ()))
+                    if not methods:
+                        continue
+                    for sub in _ast.walk(node):
+                        if not isinstance(sub, (_ast.Assign, _ast.AnnAssign,
+                                                _ast.AugAssign)):
+                            continue
+                        targets = (sub.targets if isinstance(sub, _ast.Assign)
+                                   else [sub.target])
+                        for tgt in targets:
+                            if (isinstance(tgt, _ast.Attribute)
+                                    and isinstance(tgt.value, _ast.Name)
+                                    and tgt.value.id == "self"
+                                    and tgt.attr in methods):
+                                bad.append((path, getattr(sub, "lineno", 0),
+                                            node.name, tgt.attr))
+
+    if bad:
+        for path, line, cls, attr in sorted(set(bad)):
+            try:
+                rel = os.path.relpath(path)
+            except ValueError:
+                rel = path
+            print(f"  {rel}:{line}")
+            print(f"      {cls}.{attr} is a METHOD, and this assigns an "
+                  f"attribute over it")
+            print(f"      every later self.{attr}(...) raises TypeError "
+                  f"'... object is not callable'")
+        print()
+        print(f"  {len(set(bad))} shadowed method(s). Rename the attribute.")
+        print()
+        return False
+    print("  none")
+    print()
+    return True
+
+
 def main():
     ok = True
     ok &= run("CLI invocations match simplyblock_cli/cli.py",
@@ -457,6 +579,7 @@ def main():
     ok &= check_no_naive_error_checks()
     ok &= check_seed_writes_to_a_real_mount()
     ok &= check_helper_kwargs()
+    ok &= check_no_attribute_shadows_a_method()
     ok &= check_bringup_document_against_crd()
 
     print("=" * 68)

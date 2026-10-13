@@ -426,7 +426,7 @@ class MigrationSoak(MigrationTestBase):
             n = self.rng.randint(max(1, lo), max(1, hi))
             self.logger.info(
                 "[MIG-P-005] drew %d volume(s) from the range %d-%d; pin "
-                "this run with %s=%s", n, lo, hi, self.SEED_ENV, self.seed)
+                "this run with %s=%s", n, lo, hi, self.SEED_ENV, self.rng_seed)
             return n
         try:
             return max(1, int(raw))
@@ -620,7 +620,7 @@ class MigrationSoak(MigrationTestBase):
                     f"{(time.time() - started_at) / 3600:.1f}h of soaking: "
                     f"{str(exc)[:240]}. Earlier hops succeeded, so something "
                     f"accumulated. Replay this run with "
-                    f"{self.SEED_ENV}={self.seed}.") from exc
+                    f"{self.SEED_ENV}={self.rng_seed}.") from exc
             durations.append(time.time() - t0)
             hops += 1
 
@@ -633,7 +633,7 @@ class MigrationSoak(MigrationTestBase):
                     f"hop {hops} is gone after the migration. A migration "
                     f"carries the volume's whole lineage; dropping a user "
                     f"snapshot silently loses the only copy of that point in "
-                    f"time. Replay with {self.SEED_ENV}={self.seed}.")
+                    f"time. Replay with {self.SEED_ENV}={self.rng_seed}.")
 
             data = self._cli_json(f"{self.base_cmd} snapshot list")
             rows = (data.get("results", data) if isinstance(data, dict)
@@ -652,7 +652,7 @@ class MigrationSoak(MigrationTestBase):
                                 f"at hop {hops} (MIG-P-005)")
 
         self.logger.info("[MIG-P-005] soak finished: %d hops over %.1fh "
-                         "(seed %s)", hops, self.HOURS, self.seed)
+                         "(seed %s)", hops, self.HOURS, self.rng_seed)
         if hops < 2:
             self.logger.warning(
                 "[MIG-P-005] only %d hop(s) completed in %.1fh -- each "
@@ -686,12 +686,12 @@ class MigrationSoak(MigrationTestBase):
                 f"{snap_counts[-1] - allowed} extra are intermediate "
                 f"snapshots migrations left behind; at this rate the cluster "
                 f"fills up on migration traffic alone. counts={snap_counts}. "
-                f"Replay with {self.SEED_ENV}={self.seed}.")
+                f"Replay with {self.SEED_ENV}={self.rng_seed}.")
 
         for w in vols:
             self.verify(w["name"], w["sums"],
                         f"after {hops} migrations (MIG-P-006)")
         self.logger.info("[MIG-P-006] PASS: %d hops over %d volume(s), no "
                          "drift, data intact (seed %s)", hops, len(vols),
-                         self.seed)
+                         self.rng_seed)
         self.cleanup_migrations()

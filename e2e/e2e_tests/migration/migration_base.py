@@ -209,7 +209,7 @@ class MigrationTestBase(TestClusterBase):
                     f"cannot be parsed would silently become a different "
                     f"run.") from None
             how = "from " + self.SEED_ENV
-        self.seed = base
+        self.rng_seed = base
         cls = type(self).__name__
         self.rng = random.Random(f"{base}:{cls}")
         self.logger.info(
