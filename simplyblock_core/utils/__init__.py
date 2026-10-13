@@ -1539,6 +1539,18 @@ def resolve_lblk_entries(configured_entries, host_devices):
     A live device resolves for at most one entry, and a serial or PARTUUID match
     is settled for every entry before any positional one is tried, so a
     positional match can never take the disk another entry owns by identity.
+
+    A positional match is not proof the live device is the entry's own disk —
+    only that it sits where that disk used to and looks like it could be it.
+    SFAM-2822: a node restarted onto a host with different, blank disks still
+    positionally matched every entry (same by-id/name layout), so the restart
+    treated them as the SAME devices it already held data on and tried to
+    recover a lvstore that was never written to them. Such an entry therefore
+    carries the LIVE device's own serial rather than the stored one: a
+    restart's device reconciliation matches by serial, so a changed serial is
+    what makes it treat an unverified disk as a new device (to be provisioned
+    and backfilled) instead of silently trusting it with another device's data.
+
     Returns ``(resolved, missing)`` where resolved entries carry the CURRENT
     name/path/by-id."""
     by_serial = {d["serial"]: d for d in host_devices}
@@ -1561,11 +1573,14 @@ def resolve_lblk_entries(configured_entries, host_devices):
 
     matched = {}
     claimed = set()
+    positional_matches = set()
 
-    def claim(index, live):
+    def claim(index, live, is_positional=False):
         if live is not None and live["name"] not in claimed:
             matched[index] = live
             claimed.add(live["name"])
+            if is_positional:
+                positional_matches.add(index)
 
     for index, entry in enumerate(configured_entries):
         live = by_serial.get(entry.get("serial"))
@@ -1577,7 +1592,7 @@ def resolve_lblk_entries(configured_entries, host_devices):
         for index, entry in enumerate(configured_entries):
             if index not in matched:
                 live = lookup.get(entry.get(key))
-                claim(index, live if positional(entry, live) else None)
+                claim(index, live if positional(entry, live) else None, is_positional=True)
 
     resolved, missing = [], []
     for index, entry in enumerate(configured_entries):
@@ -1585,10 +1600,14 @@ def resolve_lblk_entries(configured_entries, host_devices):
         if live is None:
             missing.append(entry)
             continue
+        if index in positional_matches:
+            resolved_serial = live["serial"]
+        else:
+            resolved_serial = entry.get("serial") or live["serial"]
         resolved_entry = {
             "name": live["name"],
             "current_path": live["device_path"],
-            "serial": entry.get("serial") or live["serial"],
+            "serial": resolved_serial,
             "by_id": live.get("by_id_path") or entry.get("by_id", ""),
             "size": int(live.get("size") or entry.get("size") or 0),
             "numa": int(live.get("numa_node", entry.get("numa", -1))),

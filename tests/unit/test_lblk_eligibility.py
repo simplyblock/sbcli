@@ -365,6 +365,26 @@ class TestResolveLblkEntriesOnAnotherHost(unittest.TestCase):
         self.assertNotIn("sdb", {e["name"] for e in resolved})
         self.assertEqual([e["serial"] for e in missing], ["SYN-origin-j"])
 
+    def test_a_positional_match_carries_the_live_devices_own_serial(self):
+        """SFAM-2822: a restart's device reconciliation (storage_node_ops.py,
+        ``known_devices_sn``) matches devices by serial to tell an already-
+        known device from a new one. Every entry here resolves only by
+        position (by-id path), with nothing proving the target's disks are
+        the SAME physical disks the node held data on. Keeping the stored
+        serial made the reconciliation see the SAME device and try to recover
+        a lvstore that was never written to it (bdev_wait_for_examine timing
+        out in the port-fence window); reporting the live serial instead
+        makes the restart correctly treat it as a new, blank device."""
+        resolved, _ = utils.resolve_lblk_entries(self.CONFIGURED, self._target_host())
+
+        journal = next(e for e in resolved if e.get("journal"))
+        self.assertEqual(journal["serial"], "SYN-target-j")
+        self.assertNotEqual(journal["serial"], "SYN-origin-j")
+
+        by_name = {e["name"]: e for e in resolved}
+        self.assertEqual(by_name["sda"]["serial"], "SYN-target-a")
+        self.assertEqual(by_name["sdc"]["serial"], "SYN-target-c")
+
     def test_one_live_disk_is_never_resolved_for_two_entries(self):
         configured = [
             {"name": "sdb", "serial": "S1", "size": 100 << 30,

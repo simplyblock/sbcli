@@ -324,6 +324,11 @@ class TestResolvePartitionEntries(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(resolved[0]["name"], "sdz1")
         self.assertEqual(resolved[0]["type"], "part")
+        # PARTUUID proved this is the entry's own partition despite the
+        # serial drift, so the stored serial is kept (contrast: SFAM-2822's
+        # positional-only match below carries the LIVE serial instead,
+        # because position alone proves nothing).
+        self.assertEqual(resolved[0]["serial"], "OLD-part-aaaa")
 
     def test_journal_flag_carried_through_resolution(self):
         configured = [_entry("sdb1", serial="S1", dtype="part",
