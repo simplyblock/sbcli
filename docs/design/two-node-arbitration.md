@@ -5,7 +5,7 @@ campaign c1 (no preferred node; bookkeeping, explicit-sync, fence-port, SPDK-dow
 rules). Design rationale, diagrams and failure analysis:
 [`two-node-ha-design.pdf`](two-node-ha-design.pdf) (revision 2; where it describes a preferred
 node, this document wins). This document is the binding contract between the work packages:
-ultra (JC, distrib), the SPDK fork (lvol, blobstore), sbcli (arbiter, Go event collector, API)
+ultra (JC, distrib), the SPDK fork (lvol, blobstore), sbcli (arbiter, event collector, API)
 and the simplyblock operator.
 
 Scope: clusters whose storage-node membership is exactly two (`apply_jc_dual_node` in
@@ -202,11 +202,11 @@ Capability probe: the CP calls `rpc_get_methods`; the protocol is used only if i
 `jc_unfence`. Older nodes keep today's behaviour and are read with `distr_status_events_get`
 every 1 s.
 
-## 4. Collector (sbcli, Go)
+## 4. Collector (sbcli)
 
-- Runs in the CP image as its own process, one goroutine per storage node of each cluster with
-  `two_node_arbitration` on.
-- Each goroutine loops on `jc_wait_events`; on transport errors it reconnects with backoff
+- Runs in the CP image as its own process (`simplyblock_core/services/two_node_event_collector.py`),
+  one thread per storage node of each cluster with `two_node_arbitration` on.
+- Each thread loops on `jc_wait_events`; on transport errors it reconnects with backoff
   (100 ms, doubling, max 5 s) and re-sends the last `instance` and `after_seq`.
 - On `instance` change or `overflow: true`: call `jc_ha_status`, emit a synthetic
   `ha_resync` event carrying the full status to the arbiter, continue from the returned `seq`.
@@ -525,7 +525,7 @@ setting brings that below KATO.
 | ultra | Hold trigger in dual-node mode; lease and epoch; `jc_grant_solo`, `jc_fence`, `jc_unfence`, `jc_lease_renew`, `jc_ha_status`, `jc_wait_events`; event fields and new statuses; resume gating after JCERR |
 | spdk fork | Hold on JC's signal through the frozen-IO queue (`blobstore.c:blob_execute_queued_io`); path error instead of EIO on fence; no rule removal while fenced (`lvol.c:spdk_lvs_remove_rules_poller`) |
 | sbcli | Arbiter service, `ClusterArbitration` model, API, verdict RPC client methods, healing flow, feature flag; RPC client methods for the new RPCs |
-| sbcli | Go collector (section 4), packaged in the CP image |
+| sbcli | Collector (section 4), packaged in the CP image |
 | operator | Taint handling, remediation status, CR fields |
 | test | Unit (arbiter table, epochs, lease arithmetic, long-poll sequencing); two-SPDK tests with tc/iptables; bed scenarios: storage link cut, uplink cut, both, power-off, SIGSTOP, CP restart mid-hold, latency injection; OpenShift two-node with arbiter and with fencing |
 

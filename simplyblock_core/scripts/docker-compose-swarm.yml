@@ -209,7 +209,7 @@ services:
   TwoNodeEventCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "/usr/local/bin/sb-event-collector"
+    command: "python3 simplyblock_core/services/two_node_event_collector.py"
     networks:
       - hostnet
     deploy:
