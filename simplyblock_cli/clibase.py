@@ -1386,6 +1386,61 @@ class CLIWrapperBase:
             return f"Clone failed: {err}"
         return utils.print_table([{"Volume": v} for v in created])
 
+    def consistency_group__backup_create(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        group = self._cg_resolve(args.group_id)
+        group_backup_id, err = group_backup.create_group_backup(
+            group.get_id(), group_seq=getattr(args, 'group_seq', None))
+        if err:
+            return f"Group backup failed: {err}"
+        return f"Group backup {group_backup_id} started"
+
+    def _group_backup_row(self, gb):
+        return {
+            "ID": gb.get_id(),
+            "Group": gb.consistency_group_name or "-",
+            "Gen": gb.group_seq,
+            "Status": gb.status,
+            "Members": len(gb.members),
+            "Encrypted": "yes" if gb.encrypted else "no",
+            "Size": utils.humanbytes(gb.size),
+        }
+
+    def group_backup__list(self, sub_command, args):
+        db = db_controller.DBController()
+        group_backups = sorted(db.get_group_backups(args.cluster_id),
+                               key=lambda g: (g.created_at, g.uuid), reverse=True)
+        return _format_result([self._group_backup_row(g) for g in group_backups],
+                              json=args.json)
+
+    def group_backup__get(self, sub_command, args):
+        db = db_controller.DBController()
+        try:
+            gb = db.get_group_backup_by_id(args.group_backup_id)
+        except KeyError:
+            return f"Group backup {args.group_backup_id} not found"
+        if args.json:
+            return _format_json(gb.get_clean_dict())
+        return utils.print_table([self._group_backup_row(gb)])
+
+    def group_backup__restore(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        group_id, lvol_ids, err = group_backup.restore_group_backup(
+            args.group_backup_id, args.into_group_name, args.pool,
+            target_node_id=getattr(args, 'node', None),
+            s3_credentials=_s3_credentials(args))
+        if err:
+            return f"Group restore failed: {err}"
+        return (f"Restoring group backup into consistency group {group_id} "
+                f"({len(lvol_ids)} volumes)")
+
+    def group_backup__delete(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        success, err = group_backup.delete_group_backup(args.group_backup_id)
+        if err:
+            return f"Delete failed: {err}"
+        return f"Group backup {args.group_backup_id} deleted"
+
     def snapshot__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)
 

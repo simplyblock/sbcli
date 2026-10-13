@@ -533,10 +533,12 @@ class GroupBackupManifest(BaseModel):
     members: list[GroupManifestMember]
     membership: GroupManifestMembership
 
-    #: The shared encryption disposition of every member (homogeneous, design
-    #: §3.4), or absent when the members are not encrypted. The per-member keys
-    #: are in the member manifests; this is the group-level statement.
-    encryption: KeyDescriptor | None = None
+    #: Whether the members are encrypted. Homogeneous (design §3.4): every member
+    #: shares this disposition. The actual per-member keys are NOT here -- each
+    #: member has its own DEK, recorded in its own manifest
+    #: (``manifests/<backup_id>.json``) -- so this is only the group-level
+    #: statement that a reader must resolve per-member keys before a restore.
+    encrypted: bool = False
 
     def is_complete(self) -> bool:
         """Whether every expected member is present in this manifest."""

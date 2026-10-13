@@ -26,6 +26,7 @@ from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .alert import api as alert_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
+from .group_backup import api as group_backup_api
 from .replication import api as replication_api
 from .storage_node import api as storage_node_api
 from .storage_pool import api as pool_api
@@ -304,6 +305,7 @@ instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
+instance_api.include_router(group_backup_api, prefix='/group-backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
 instance_api.include_router(consistency_group_api, prefix='/consistency-groups')

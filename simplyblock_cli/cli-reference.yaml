@@ -3046,6 +3046,17 @@ commands:
             dest: into
             type: str
             required: false
+      - name: backup-create
+        help: "Back up one generation of a consistency group to S3 as one all-or-nothing unit. Takes a fresh crash-consistent generation unless --group-seq names an existing one."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--group-seq"
+            help: "Back up an existing generation by its sequence number. Omit to take a fresh generation."
+            dest: group_seq
+            type: int
   - name: "backup"
     help: "Backup Commands"
     weight: 650
@@ -3261,6 +3272,76 @@ commands:
           - name: "target_id"
             help: "The target id (storage pool or logical volume id)."
             dest: target_id
+            type: str
+  - name: "group-backup"
+    help: "Consistency-group backup commands"
+    aliases:
+      - gb
+    weight: 655
+    subcommands:
+      - name: list
+        help: "List the cluster's consistency-group backups."
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: get
+        help: "Show one consistency-group backup and its members."
+        arguments:
+          - name: "group_backup_id"
+            help: "Group backup id (or uuid)."
+            dest: group_backup_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: restore
+        help: "Restore a consistency-group backup into a NEW consistency group, all-or-nothing. Each member volume recovers asynchronously."
+        arguments:
+          - name: "group_backup_id"
+            help: "Group backup id (or uuid)."
+            dest: group_backup_id
+            type: str
+          - name: "--name"
+            help: "Name of the NEW consistency group to form from the restored volumes. Must not already exist."
+            dest: into_group_name
+            type: str
+            required: true
+          - name: "--pool"
+            help: "The target pool name or id."
+            dest: pool
+            type: str
+            required: true
+          - name: "--node"
+            help: "The target storage node id. Omit to auto-select; every member is pinned to one store."
+            dest: node
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the backup's bucket, when it is not this cluster's own."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the backup's bucket, when it is not this cluster's own."
+            dest: secret_access_key
+            type: secret
+      - name: delete
+        help: "Delete a consistency-group backup: its group manifest and record. Member backups follow per-volume retention."
+        arguments:
+          - name: "group_backup_id"
+            help: "Group backup id (or uuid)."
+            dest: group_backup_id
             type: str
   - name: "qos"
     help: "QoS Commands"

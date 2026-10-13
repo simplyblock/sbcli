@@ -68,10 +68,10 @@ class TestSchema:
         restored = backup_manifest._parse_group(original.model_dump_json().encode(), "k")
         assert restored == original
 
-    def test_round_trip_keeps_the_encryption_backend(self):
-        original = _group_manifest(encryption=backup_manifest.FDBKeyDescriptor(dek_path="p"))
+    def test_round_trip_keeps_the_encrypted_disposition(self):
+        original = _group_manifest(encrypted=True)
         restored = backup_manifest._parse_group(original.model_dump_json().encode(), "k")
-        assert isinstance(restored.encryption, backup_manifest.FDBKeyDescriptor)
+        assert restored.encrypted is True
         assert restored == original
 
     def test_lists_member_backup_ids(self):
@@ -89,8 +89,8 @@ class TestSchema:
         assert "access_key_id" not in json.dumps(
             json.loads(_group_manifest().model_dump_json()))
 
-    def test_an_unencrypted_group_describes_no_key(self):
-        assert _group_manifest().encryption is None
+    def test_an_unencrypted_group_is_marked_plain(self):
+        assert _group_manifest().encrypted is False
 
     def test_unknown_field_is_rejected(self):
         with pytest.raises(ValueError):

@@ -9,7 +9,7 @@ from pydantic import BaseModel, SecretStr, field_serializer
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
 from simplyblock_core.models.backup_config import (
     BackupConfig,
     BackupLocation,
@@ -129,6 +129,7 @@ TaskFunctionName = Literal[
     "s3_backup",
     "s3_backup_restore",
     "s3_backup_merge",
+    "group_backup_commit",
     "cluster_expand",
     "replication_final",
     "fdb_backup",
@@ -718,6 +719,53 @@ class BackupDTO(BaseModel):
             created_at=model.created_at,
             completed_at=model.completed_at,
             encrypted=model.encrypted,
+        )
+
+
+class GroupBackupMemberDTO(BaseModel):
+    """One member of a group backup: the source volume and its own backup.
+
+    ``backup_id`` is the member ``Backup``'s composite ``cluster_id/uuid`` id and
+    ``lvol_id`` the source volume's id, kept as strings rather than UUIDs because
+    the member id is composite (design §4.1).
+    """
+    lvol_id: str
+    backup_id: str
+
+
+class GroupBackupDTO(BaseModel):
+    """A consistency-group backup: the member backups of one generation as one
+    all-or-nothing unit (design §4.1)."""
+    id: UUID
+    cluster_id: UUID
+    #: Composite ``cluster_id/uuid`` of the source consistency group.
+    consistency_group_id: str
+    consistency_group_name: str
+    group_seq: int
+    status: str
+    members: list[GroupBackupMemberDTO]
+    encrypted: bool
+    size: int
+    created_at: int
+    completed_at: int
+    error_message: str = ""
+
+    @staticmethod
+    def from_model(model: GroupBackup):
+        return GroupBackupDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            consistency_group_id=model.consistency_group_id,
+            consistency_group_name=model.consistency_group_name,
+            group_seq=model.group_seq,
+            status=model.status,
+            members=[GroupBackupMemberDTO(lvol_id=m["lvol_id"], backup_id=m["backup_id"])
+                     for m in model.members],
+            encrypted=model.encrypted,
+            size=model.size,
+            created_at=model.created_at,
+            completed_at=model.completed_at,
+            error_message=model.error_message,
         )
 
 

@@ -22,6 +22,7 @@ from simplyblock_core.controllers import (
     migration_controller,
     replication_policy_controller,
 )
+from simplyblock_core.controllers.backup import group_backup as group_backup_controller
 from simplyblock_core.controllers.consistency_group_controller import (
     ConsistencyGroupError,
 )
@@ -43,6 +44,7 @@ from .._dtos import (
     ConsistencyGroupReplicationIntentDTO,
     ConsistencyGroupReplicationStatusDTO,
     ConsistencyGroupResolutionDTO,
+    GroupBackupDTO,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,6 +269,28 @@ def delete_generation(cluster: Cluster, group: ConsistencyGroupResource, seq: in
     if err is not None:
         raise HTTPException(404, err)
     return Response(status_code=204)
+
+
+class _GroupBackupCreateParams(BaseModel):
+    #: Back up an existing generation by its sequence; omit to take a fresh
+    #: crash-consistent generation and back that up.
+    group_seq: int | None = None
+
+
+@instance_api.post('/backups', name='clusters:consistency-groups:backups:create',
+                   status_code=201, response_model=GroupBackupDTO)
+def create_group_backup(cluster: Cluster, group: ConsistencyGroupResource,
+                        body: _GroupBackupCreateParams) -> GroupBackupDTO:
+    """Back up one generation of the group to S3 as one all-or-nothing unit
+    (design §6). Takes a fresh crash-consistent generation unless ``group_seq``
+    names an existing one. Returns the in-progress group backup; it commits once
+    every member backup completes.
+    """
+    group_backup_id, err = group_backup_controller.create_group_backup(
+        group.get_id(), group_seq=body.group_seq)
+    if err is not None:
+        raise HTTPException(422, err)
+    return GroupBackupDTO.from_model(db.get_group_backup_by_id(group_backup_id))
 
 
 @instance_api.put('/replication', name='clusters:consistency-groups:replication:configure',

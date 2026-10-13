@@ -1282,6 +1282,25 @@ def add_backup_task(backup):
     )
 
 
+def add_group_backup_commit_task(group_backup):
+    """Create the task that commits a consistency-group backup.
+
+    The task does no data-plane RPC: it watches the member backups (which the
+    FN_BACKUP runner drives) and publishes the group manifest once every member
+    has completed, so it carries no node and only the group backup id.
+    """
+    return _add_task(
+        JobSchedule.FN_GROUP_BACKUP_COMMIT,
+        group_backup.cluster_id,
+        "",
+        "",
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        function_params={
+            "group_backup_id": group_backup.uuid,
+        },
+    )
+
+
 def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids,
                             lvol_id="", s3_config=None):
     """Create the task that restores an S3 backup chain into a new lvol.
