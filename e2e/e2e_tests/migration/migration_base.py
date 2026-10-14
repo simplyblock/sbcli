@@ -1046,11 +1046,26 @@ class MigrationTestBase(TestClusterBase):
             line = (f"[MIG] status={status} phase={phase} "
                     f"snaps={self._get(m, 'snaps') or ''} "
                     f"retries={self._get(m, 'retries') or ''}")
+            terminal = status in self.TERMINAL
             if err:
-                self.logger.warning("%s error=%r", line, str(err)[:200])
+                # Truncated while polling, because the same error repeats
+                # on every poll and would bury the log. NOT truncated once
+                # the migration is terminal: run 20261013-221421 cut two
+                # failures off at exactly the interesting clause --
+                #
+                #   the migration failed: delete LVS_31/SNAP_187m: ...
+                #   (taking the migration back also failed: cancel
+                #    migration 58205fd2-...: cancel mig
+                #
+                # -- so why the ROLLBACK failed, which is the more serious
+                # half of both failures, was the part that got cut, and
+                # the state it describes is gone with the cluster.
+                self.logger.warning(
+                    "%s error=%r", line,
+                    str(err) if terminal else str(err)[:200])
             else:
                 self.logger.info(line)
-            if status in self.TERMINAL:
+            if terminal:
                 return status, phase
             if status == "cutover" and not terminal_only:
                 return "cutover", phase

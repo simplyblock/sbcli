@@ -356,7 +356,8 @@ class MigrationSourceAndTargetFaults(_FaultBase):
 
 
 class MigrationCancel(_FaultBase):
-    """MIG-F-016, MIG-F-010, MIG-F-011, MIG-F-012: cancel at four points.
+    """MIG-F-016, MIG-F-010, MIG-F-011, MIG-F-012, MIG-F-017: cancel at
+    four points, and migrate again after each.
 
     Deterministic where a fault is not: cancel forces the same rollback path
     a real failure takes, at a moment of the test's choosing. Early and late
@@ -501,9 +502,47 @@ class MigrationCancel(_FaultBase):
                         f"after cancelling in {phase} ({case_id})")
             self.assert_no_target_leftovers(self._tgt, self._vol_id,
                                             f"after cancel ({case_id})")
+
+            # -- MIG-F-017 the volume is still migratable afterwards -----
+            # The question none of the four cancel points asked. Every
+            # assertion above is about the state the rollback left on this
+            # node right now; none of them establishes that the volume can
+            # still be moved, which is the thing a rollback exists to
+            # preserve. Run 20261013-221421 is why it is asked: two
+            # migrations failed and BOTH reported that the rollback failed
+            # as well ("taking the migration back also failed: cancel
+            # migration ..."), and nothing in the lane would have noticed
+            # the volume was left unmovable. MIG-F-013 retries after a
+            # cancel but reboots the target first, so a rollback that is
+            # only repairable by a reboot still passes there.
+            here = self.lvol_node(self._vol_id)
+            elsewhere = self.pick_target(here, "no-overlap")
+            self.logger.info(
+                "[MIG-F-017] after the %s cancel, migrating again %s -> %s",
+                case_id, here, elsewhere)
+            try:
+                self.full_migration(
+                    self._vol_id, elsewhere,
+                    what=f"MIG-F-017 re-migration after the {case_id} cancel")
+            except Exception as exc:                      # noqa: BLE001
+                raise AssertionError(
+                    f"[MIG-F-017] the volume could not be migrated again "
+                    f"after the {case_id} cancel: {str(exc)[:300]}. The "
+                    f"rollback reported terminal, left the data intact and "
+                    f"left no leftovers the previous checks could see, and "
+                    f"the volume is still stuck -- so the state that blocks "
+                    f"it is state none of those checks looks at."
+                ) from exc
+            self.assert_placed_on(self._vol_id, elsewhere,
+                                  f"(MIG-F-017, after the {case_id} cancel)")
+            self.verify(self._vol, self._sums,
+                        f"after re-migrating post-cancel (MIG-F-017)")
+            self.assert_migration_invariants(
+                self._vol_id, here, elsewhere,
+                f"(MIG-F-017, after the {case_id} cancel)")
             self.logger.info(
                 "[%s] PASS: terminal, on exactly one node, data intact, "
-                "target clean", case_id)
+                "target clean, and the volume still migrates", case_id)
             self._teardown()
 
 
