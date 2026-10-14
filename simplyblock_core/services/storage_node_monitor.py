@@ -2360,7 +2360,11 @@ def main():
                 update_cluster_status(cluster_id)
                 logger.debug("Iteration has been finished...")
             except Exception:
-                logger.error("Error while updating cluster status")
+                # cluster_activate runs inside update_cluster_status; swallowing
+                # its message here left a cluster that could not re-activate
+                # with 100+ identical "Error while updating cluster status"
+                # lines and no reason (incident 2026-10-08 run 62).
+                logger.exception("Error while updating cluster status for %s", cluster_id)
             _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
