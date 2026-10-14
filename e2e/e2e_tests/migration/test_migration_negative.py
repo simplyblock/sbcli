@@ -87,7 +87,7 @@ class MigrationNegativeTargets(MigrationTestBase):
                 self.sbcli_utils.restart_node(node_uuid=tgt)
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG-N-003] could not restart %s: %s",
-                                    tgt, str(exc)[:160])
+                                    tgt, self.detail(exc))
             deadline = time.time() + 900
             while time.time() < deadline:
                 if any((n.get("uuid") or n.get("id")) == tgt
@@ -113,7 +113,7 @@ class MigrationNegativeTargets(MigrationTestBase):
                 f"lives, and the other's cleanup runs against state it no "
                 f"longer owns.")
         self.logger.info("[MIG-N-004] PASS: second migration refused -- %s",
-                         combined.strip()[:200])
+                         self.detail(combined.strip()))
         self.migrate_cancel(mid)
         self.cleanup_migrations()
 
@@ -137,7 +137,7 @@ class MigrationNegativeCapacity(MigrationTestBase):
             data = self.sbcli_utils.get_cluster_capacity()
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[MIG-N-005] capacity read failed: %s",
-                                str(exc)[:140])
+                                self.detail(exc))
             return None
         rows = data.get("results", data) if isinstance(data, dict) else data
         if isinstance(rows, list) and rows:
@@ -161,7 +161,7 @@ class MigrationNegativeCapacity(MigrationTestBase):
         except Exception:                             # noqa: BLE001
             pass
         self.logger.info("[MIG-N-005] cluster capacity: %s",
-                         str(cap)[:200] if cap else "unknown")
+                         self.detail(cap) if cap else "unknown")
 
         # Try to fill the target by provisioning a volume pinned to it that
         # is larger than what is left.
@@ -184,7 +184,7 @@ class MigrationNegativeCapacity(MigrationTestBase):
         try:
             self.make_volume(filler, size=huge, host_id=tgt, seed=False)
         except Exception as exc:                      # noqa: BLE001
-            refused = str(exc)[:200]
+            refused = self.detail(exc)
         if refused:
             self.logger.warning(
                 "[MIG-N-005] SKIPPED: the cluster refused the %s filler "
@@ -251,7 +251,7 @@ class MigrationNegativeCapacity(MigrationTestBase):
                 status, phase)
         else:
             self.logger.info("[MIG-N-005] PASS: refused at pre-create -- %s",
-                             combined.strip()[:200])
+                             self.detail(combined.strip()))
         self.cleanup_migrations()
 
 
@@ -294,7 +294,7 @@ class MigrationUnderReplication(MigrationTestBase):
         if cli_failed(out, err):
             self.logger.warning(
                 "[MIG-N-006] SKIPPED: could not create a replication policy "
-                "on the existing target: %s", (out + err).strip()[:220])
+                "on the existing target: %s", self.detail((out + err).strip()))
             return
 
         vol = f"migrepl{stamp}"
@@ -306,7 +306,7 @@ class MigrationUnderReplication(MigrationTestBase):
         before = self._cli_json(f"{self.base_cmd} volume "
                                 f"replication-relationship {vol_id}")
         self.logger.info("[MIG-N-006] relationship before the migration: %s",
-                         str(before)[:240])
+                         self.detail(before))
         if not before:
             self.logger.warning(
                 "[MIG-N-006] SKIPPED: the volume never started replicating, "
@@ -328,7 +328,7 @@ class MigrationUnderReplication(MigrationTestBase):
                 "[MIG-N-006] PASS (by refusal): migrating a replicating "
                 "volume is not allowed -- %s. That is a defensible design; "
                 "worth confirming with dev it is deliberate rather than a "
-                "side effect.", combined.strip()[:220])
+                "side effect.", self.detail(combined.strip()))
             self._cli(f"{self.base_cmd} -d volume replication-policy-clear "
                       f"{vol_id} 2>&1")
             self._cli(f"{self.base_cmd} -d cluster replication-policy-remove "
@@ -350,14 +350,14 @@ class MigrationUnderReplication(MigrationTestBase):
         after = self._cli_json(f"{self.base_cmd} volume "
                                f"replication-relationship {vol_id}")
         self.logger.info("[MIG-N-007] relationship after: %s",
-                         str(after)[:240])
+                         self.detail(after))
         if not after:
             raise AssertionError(
                 f"[MIG-N-007] the replication relationship for {vol} is GONE "
                 f"after the volume migrated between nodes. The volume is now "
                 f"unprotected and nothing says so -- an operator who set a "
                 f"policy still believes it is replicating. Before the "
-                f"migration it was: {str(before)[:200]}")
+                f"migration it was: {self.detail(before)}")
 
         self._cli(f"{self.base_cmd} -d volume replication-trigger "
                   f"{vol_id} 2>&1")
@@ -431,7 +431,7 @@ class MigrationProtectionGuards(MigrationTestBase):
                 snaps.append(name)
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG-N-008] could not snapshot: %s",
-                                    str(exc)[:160])
+                                    self.detail(exc))
                 break
         if not snaps:
             self.logger.warning(
@@ -556,7 +556,7 @@ class MigrationProtectionGuards(MigrationTestBase):
                 self.logger.info(
                     "[MIG-N-010] PASS: %s is still there, so the guard held. "
                     "Response was: %s", snaps[0],
-                    (out + err).strip()[:200] or "(silent)")
+                    self.detail((out + err).strip()) or "(silent)")
             else:
                 raise AssertionError(
                     f"[MIG-N-010] snapshot {snaps[0]} was DELETED while its "
@@ -573,7 +573,7 @@ class MigrationProtectionGuards(MigrationTestBase):
                     f"canceled.' A migration transfers the ancestry chain "
                     f"oldest first, so removing a link while it is being "
                     f"walked is how a transfer ends up pointing at nothing. "
-                    f"Response was: {(out + err).strip()[:200] or '(silent)'}")
+                    f"Response was: {self.detail((out + err).strip()) or '(silent)'}")
         else:
             self.logger.warning("[MIG-N-010] SKIPPED: could not resolve the "
                                 "id of %s", snaps[0])
@@ -612,7 +612,7 @@ class MigrationProtectionGuards(MigrationTestBase):
                 self.migrate_cancel(mid2)
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG-N-008] cancelling %s: %s", mid2,
-                                    str(exc)[:160])
+                                    self.detail(exc))
             if not survived:
                 raise AssertionError(
                     f"[MIG-N-008] {vol2} is GONE from the cluster after its "
@@ -652,7 +652,7 @@ class MigrationProtectionGuards(MigrationTestBase):
         if cli_failed(out, err):
             raise AssertionError(
                 f"[MIG-N-009] the volume still cannot be resized AFTER the "
-                f"migration completed: {(out + err)[:300]}. The guard is "
+                f"migration completed: {self.detail(out + err)}. The guard is "
                 f"documented to hold 'until the migration completes or is "
                 f"canceled'; one that never lifts leaves a volume nobody "
                 f"can manage.")

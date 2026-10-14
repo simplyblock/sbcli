@@ -71,7 +71,7 @@ class MigrationHappyPath(MigrationTestBase):
         except Exception as exc:                      # noqa: BLE001
             raise AssertionError(
                 f"[MIG-H-004] cannot snapshot {vol} after migrating it: "
-                f"{str(exc)[:300]}. The migration reported success, so "
+                f"{self.detail(exc)}. The migration reported success, so "
                 f"this is state it left behind, not an unrelated failure."
             ) from exc
         if handle:
@@ -90,7 +90,7 @@ class MigrationHappyPath(MigrationTestBase):
                 "[MIG-H-004] resize after migration was refused: %s. Raised "
                 "rather than failed -- resize has its own preconditions and "
                 "this may be one of them rather than migration damage.",
-                (out + err).strip()[:200])
+                self.detail((out + err).strip()))
         else:
             self.logger.info("[MIG-H-004] resize OK")
 
@@ -112,7 +112,7 @@ class MigrationHappyPath(MigrationTestBase):
         # out, err = self._cli(f"{self.base_cmd} -d volume qos-set "
         #                      f"{vol_id} --max-rw-iops 10000 2>&1")
         # self.logger.info("[MIG-H-004] qos-set: %s",
-        #                  (out + err).strip()[:160] or "accepted")
+        #                  self.detail((out + err).strip()) or "accepted")
         self.logger.info("[MIG-H-004] PASS: the migrated volume behaves "
                          "normally")
         self.cleanup_migrations()

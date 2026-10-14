@@ -66,7 +66,7 @@ class _BatchBase(MigrationTestBase):
             if cli_failed(out, err):
                 raise MigrationPreconditionError(
                     f"[MIG-B] could not add {name} as a namespace on a "
-                    f"shared subsystem: {(out + err)[:300]}. The group is "
+                    f"shared subsystem: {self.detail(out + err)}. The group is "
                     f"built with --namespaced, which fills an existing "
                     f"subsystem of this pool on the node before opening a "
                     f"new one; if that is refused here the batch lane needs "
@@ -219,7 +219,7 @@ class _BatchBase(MigrationTestBase):
         try:
             self.cleanup_migrations()
         except Exception as exc:                      # noqa: BLE001
-            self.logger.warning("[MIG-B] teardown: %s", str(exc)[:140])
+            self.logger.warning("[MIG-B] teardown: %s", self.detail(exc))
 
 
 class MigrationBatchFlat(_BatchBase):
@@ -362,7 +362,7 @@ class MigrationBatchNegative(_BatchBase):
         mid = self.MIG_ID_RE.search(combined)
         if not mid:
             self.logger.info("[MIG-B-005] PASS: refused -- %s",
-                             combined.strip()[:220])
+                             self.detail(combined.strip()))
         else:
             self._migrations.append(mid.group(1))
             self.logger.warning(
@@ -401,7 +401,7 @@ class MigrationBatchNegative(_BatchBase):
                 "rather than failed.")
         else:
             self.logger.info("[MIG-B-006] PASS: refused -- %s",
-                             combined.strip()[:200])
+                             self.detail(combined.strip()))
         self._teardown()
 
 

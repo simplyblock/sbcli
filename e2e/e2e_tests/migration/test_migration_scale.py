@@ -164,7 +164,7 @@ class MigrationLargeVolume(MigrationTestBase):
                 "[MIG-P-001] SKIPPED: could not create a %s volume (%s). "
                 "This lane needs a cluster that can hold one; set "
                 "MIG_LARGE_SIZE to something the lab can carry.",
-                self.SIZE, str(exc)[:200])
+                self.SIZE, self.detail(exc))
             return
 
         src = self.lvol_node(vol_id)
@@ -289,7 +289,7 @@ class MigrationManyVolumes(MigrationTestBase):
             except MigrationPreconditionError as exc:
                 raise MigrationPreconditionError(
                     f"[MIG-P-003] the lab ran out at volume {i + 1} of "
-                    f"{self.COUNT}: {str(exc)[:200]}. Lower MIG_MANY_COUNT.")
+                    f"{self.COUNT}: {self.detail(exc)}. Lower MIG_MANY_COUNT.")
             vols.append({"name": name, "id": vid, "sums": sums})
 
         src = self.lvol_node(vols[0]["id"])
@@ -305,7 +305,7 @@ class MigrationManyVolumes(MigrationTestBase):
                 self.migrate_continue(mid)
                 started.append((v, mid))
             except Exception as exc:                  # noqa: BLE001
-                refused.append((v["name"], str(exc)[:160]))
+                refused.append((v["name"], self.detail(exc)))
         self.logger.info("[MIG-P-003] %d started, %d refused in %.0fs",
                          len(started), len(refused), time.time() - t0)
         if refused:
@@ -325,7 +325,7 @@ class MigrationManyVolumes(MigrationTestBase):
                 (done if status in self.OK_TERMINAL else failed).append(
                     (v["name"], status, phase))
             except AssertionError as exc:
-                failed.append((v["name"], "stuck", str(exc)[:100]))
+                failed.append((v["name"], "stuck", self.detail(exc)))
         elapsed = time.time() - t0
 
         self.logger.info("[MIG-P-004] %d/%d completed in %.0fs (%.1f min)",
@@ -495,7 +495,7 @@ class MigrationSoak(MigrationTestBase):
                 if cli_failed(o, e):
                     raise MigrationPreconditionError(
                         f"[MIG-P-005] could not add {name} to a shared "
-                        f"subsystem: {(o + e)[:240]}")
+                        f"subsystem: {self.detail(o + e)}")
                 vid = self.sbcli_utils.get_lvol_id(lvol_name=name)
                 self._mig_vols.append(name)
                 out.append({"name": name, "id": vid,
@@ -554,7 +554,7 @@ class MigrationSoak(MigrationTestBase):
                 self.logger.warning(
                     "[MIG-P-005] could not build a shared subsystem of %d "
                     "(%s); falling back to all-private volumes, so this run "
-                    "does NOT cover the group path", n_shared, str(exc)[:200])
+                    "does NOT cover the group path", n_shared, self.detail(exc))
                 n_shared = 0
         elif n_shared == 1:
             # One volume cannot share a subsystem with itself.
@@ -615,7 +615,7 @@ class MigrationSoak(MigrationTestBase):
                     self.logger.warning(
                         "[MIG-P-005] could not snapshot %s before hop %d: "
                         "%s; migrating without one", v["name"], hops + 1,
-                        str(exc)[:160])
+                        self.detail(exc))
                     snap_name = None
 
             t0 = time.time()
@@ -628,7 +628,7 @@ class MigrationSoak(MigrationTestBase):
                     f"[MIG-P-005] hop {hops + 1} ({v['name']} {here} -> "
                     f"{there}) failed after "
                     f"{(time.time() - started_at) / 3600:.1f}h of soaking: "
-                    f"{str(exc)[:240]}. Earlier hops succeeded, so something "
+                    f"{self.detail(exc)}. Earlier hops succeeded, so something "
                     f"accumulated. Replay this run with "
                     f"{self.SEED_ENV}={self.rng_seed}.") from exc
             durations.append(time.time() - t0)

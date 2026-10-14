@@ -185,7 +185,7 @@ class _FaultBase(MigrationTestBase):
         try:
             self.cleanup_migrations()
         except Exception as exc:                      # noqa: BLE001
-            self.logger.warning("[MIG-F] teardown: %s", str(exc)[:140])
+            self.logger.warning("[MIG-F] teardown: %s", self.detail(exc))
 
 
 class MigrationTargetOfflinePerPhase(_FaultBase):
@@ -231,7 +231,7 @@ class MigrationTargetOfflinePerPhase(_FaultBase):
                 # The fault did not take. Asserting now would be a
                 # statement about an undisturbed cluster.
                 self.logger.warning(
-                    "[%s] SKIPPED: %s", case_id, str(exc)[:240])
+                    "[%s] SKIPPED: %s", case_id, self.detail(exc))
                 self._teardown()
                 continue
             try:
@@ -253,7 +253,7 @@ class MigrationTargetOfflinePerPhase(_FaultBase):
                     undo()
                 except Exception as exc:              # noqa: BLE001
                     self.logger.warning("[%s] undo: %s", case_id,
-                                        str(exc)[:160])
+                                        self.detail(exc))
 
             sleep_n_sec(60)
             self.assert_no_target_leftovers(
@@ -273,7 +273,7 @@ class MigrationTargetOfflinePerPhase(_FaultBase):
             except Exception as exc:                  # noqa: BLE001
                 raise AssertionError(
                     f"[{case_id}] the migration rolled back cleanly but a "
-                    f"manual retry then FAILED: {str(exc)[:300]}. A rollback "
+                    f"manual retry then FAILED: {self.detail(exc)}. A rollback "
                     f"whose state blocks the next attempt has not actually "
                     f"rolled anything back.") from exc
             self._teardown()
@@ -332,7 +332,7 @@ class MigrationSourceAndTargetFaults(_FaultBase):
                 # The fault did not take. Asserting now would be a
                 # statement about an undisturbed cluster.
                 self.logger.warning(
-                    "[%s] SKIPPED: %s", case_id, str(exc)[:240])
+                    "[%s] SKIPPED: %s", case_id, self.detail(exc))
                 self._teardown()
                 continue
             try:
@@ -362,7 +362,7 @@ class MigrationSourceAndTargetFaults(_FaultBase):
                     undo()
                 except Exception as exc:              # noqa: BLE001
                     self.logger.warning("[%s] undo: %s", case_id,
-                                        str(exc)[:160])
+                                        self.detail(exc))
             sleep_n_sec(90)
 
             # -- MIG-F-018 still migratable after a FAILED migration -----
@@ -404,7 +404,7 @@ class MigrationSourceAndTargetFaults(_FaultBase):
                     "(%s). Whether the volume can migrate again is not "
                     "answerable while a node is still recovering, and "
                     "failing here would read as migration residue.",
-                    case_id, kind, side, str(exc)[:200])
+                    case_id, kind, side, self.detail(exc))
                 self._teardown()
                 continue
 
@@ -429,7 +429,7 @@ class MigrationSourceAndTargetFaults(_FaultBase):
                 raise AssertionError(
                     f"[MIG-F-018] {self._vol} cannot be migrated again after "
                     f"the {case_id} failure ({kind} on the {side}): "
-                    f"{str(exc)[:300]}. The fault is undone and the volume "
+                    f"{self.detail(exc)}. The fault is undone and the volume "
                     f"reported a definite node, so what blocks this is state "
                     f"the failed attempt left behind -- which is the half of "
                     f"a failed migration nothing else in this lane looks at."
@@ -619,7 +619,7 @@ class MigrationCancel(_FaultBase):
             except Exception as exc:                      # noqa: BLE001
                 raise AssertionError(
                     f"[MIG-F-017] the volume could not be migrated again "
-                    f"after the {case_id} cancel: {str(exc)[:300]}. The "
+                    f"after the {case_id} cancel: {self.detail(exc)}. The "
                     f"rollback reported terminal, left the data intact and "
                     f"left no leftovers the previous checks could see, and "
                     f"the volume is still stuck -- so the state that blocks "
@@ -695,7 +695,7 @@ class MigrationRetryAfterTargetReboot(_FaultBase):
                     "[MIG-F-013] %s did not report Ready after the reboot "
                     "(%s); uncordoning anyway, because leaving it cordoned "
                     "is worse than uncordoning a node that is still "
-                    "settling", ip, str(exc)[:140])
+                    "settling", ip, self.detail(exc))
             k8s.cordon_node(ip, cordon=False)
             self._cordoned.discard(ip)
             self.logger.info("[MIG-F-013] uncordoned %s", ip)
@@ -759,7 +759,7 @@ class MigrationHaPartnerRestart(_FaultBase):
             undo = self._break(partner, "graceful_shutdown")
         except MigrationPreconditionError as exc:
             self.logger.warning(
-                "[MIG-F-014] SKIPPED: %s", str(exc)[:240])
+                "[MIG-F-014] SKIPPED: %s", self.detail(exc))
             self._teardown()
             return
         try:
@@ -780,7 +780,7 @@ class MigrationHaPartnerRestart(_FaultBase):
             try:
                 undo()
             except Exception as exc:                  # noqa: BLE001
-                self.logger.warning("[MIG-F-014] undo: %s", str(exc)[:160])
+                self.logger.warning("[MIG-F-014] undo: %s", self.detail(exc))
         self._teardown()
 
 
@@ -806,7 +806,7 @@ class MigrationClusterRestartBetween(_FaultBase):
                 self.sbcli_utils.restart_node(node_uuid=nid, force=True)
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG-F-015] restart %s: %s", nid,
-                                    str(exc)[:140])
+                                    self.detail(exc))
         deadline = time.time() + 1800
         while time.time() < deadline:
             if len(self.online_nodes()) >= len(ids):

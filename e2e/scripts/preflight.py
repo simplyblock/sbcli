@@ -569,6 +569,59 @@ def check_no_attribute_shadows_a_method():
     return True
 
 
+def check_no_lossy_error_truncation():
+    """No bare ``[:n]`` slice on text that could be a product error.
+
+    Twice in two days this lane destroyed the only copy of the thing
+    that explained a failure. The migration poller cut its error at 200
+    characters, which landed exactly on "(taking the migration back
+    also failed: ...)", so the more serious half of both rollback
+    failures is the half that is gone. await_batch logged no error at
+    all, so a tree failing its SECOND migration -- the shape SFAM-2820
+    describes -- survives only as "batch status=failed phase=migrating
+    members=3".
+
+    The cluster is destroyed when a run ends. A truncated product error
+    is not a smaller clue than a whole one, it is no clue, and getting
+    it back costs another seven-hour run.
+
+    MigrationTestBase.detail() exists for this: it logs the full text
+    and returns a short form pointing at it. Slices on names, ids and
+    sample lists are fine; this only matches captured output.
+    """
+    print("=" * 68)
+    print("no product error is truncated without being logged in full")
+    print("=" * 68)
+
+    rx = re.compile(
+        r"(?:str\(\s*(?:exc|err|e|out|combined|last|stderr|stdout)\s*\)"
+        r"|\b(?:out|err|combined|last|output|stderr|stdout)\b"
+        r"(?:\s*\+\s*\w+)?(?:\.strip\(\))?)\[:\d+\]")
+
+    base = os.path.join(E2E, "e2e_tests", "migration")
+    bad = []
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(base, name)
+            with open(path, encoding="utf-8") as fh:
+                for n, line in enumerate(fh, 1):
+                    if rx.search(line):
+                        bad.append("    e2e_tests/migration/%s:%d" % (name, n))
+                        bad.append("        %s" % line.strip()[:120])
+    if bad:
+        for row in bad:
+            print(row)
+        print()
+        print("    Use self.detail(x) rather than x[:n]: it logs the whole")
+        print("    text and returns a short form that points at it, so the")
+        print("    message stays readable and nothing is destroyed.")
+        return False
+    print("    none")
+    return True
+
+
 def main():
     ok = True
     ok &= run("CLI invocations match simplyblock_cli/cli.py",
@@ -580,6 +633,7 @@ def main():
     ok &= check_seed_writes_to_a_real_mount()
     ok &= check_helper_kwargs()
     ok &= check_no_attribute_shadows_a_method()
+    ok &= check_no_lossy_error_truncation()
     ok &= check_bringup_document_against_crd()
 
     print("=" * 68)

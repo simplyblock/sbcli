@@ -71,7 +71,7 @@ class MigrationHaOverlapMatrix(MigrationTestBase):
                 tgt = self.pick_target(src, shape)
             except MigrationPreconditionError as exc:
                 self.logger.warning("[%s] SKIPPED (%s): %s", case_id, shape,
-                                    str(exc)[:220])
+                                    self.detail(exc))
                 self.cleanup_migrations()
                 continue
 
@@ -179,12 +179,12 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
                     f"moves one namespace and leaves the others behind, "
                     f"splitting one subsystem across two nodes. It should be "
                     f"refused with a pointer to --batch. Output: "
-                    f"{combined[:300]}")
+                    f"{self.detail(combined)}")
             if "--batch" not in combined:
                 raise AssertionError(
                     f"[MIG-T-006] the single-volume migrate was refused, "
                     f"which is right, but the message does not tell the "
-                    f"operator to use --batch: {combined[:300]}")
+                    f"operator to use --batch: {self.detail(combined)}")
             self.logger.info("[MIG-T-006] single-volume migrate correctly "
                              "refused, pointing at --batch")
             self.full_migration(vol_id, tgt, batch=True,
@@ -366,12 +366,12 @@ class MigrationConcurrent(MigrationTestBase):
                 self.migrate_continue(mid)
                 mids.append((v, mid))
             except Exception as exc:                  # noqa: BLE001
-                deferred.append((v, str(exc)[:160]))
+                deferred.append((v, self.detail(exc)))
                 self.logger.info(
                     "[MIG-T-011] %s was not accepted while another "
                     "migration is running on %s, which is the documented "
                     "one-per-source-node rule: %s", v["name"], tgt,
-                    str(exc)[:160])
+                    self.detail(exc))
         if deferred:
             self.logger.info(
                 "[MIG-T-011] %d of %d accepted concurrently, %d deferred; "
@@ -388,7 +388,7 @@ class MigrationConcurrent(MigrationTestBase):
                 if status not in self.OK_TERMINAL:
                     failures.append((v["name"], status, phase))
             except AssertionError as exc:
-                failures.append((v["name"], "stuck", str(exc)[:120]))
+                failures.append((v["name"], "stuck", self.detail(exc)))
         # Anything the product deferred is run now, one at a time. The case
         # is "N volumes get from here to there while sharing a source", not
         # "N pre-creates are accepted in one breath", so a deferred volume
@@ -400,7 +400,7 @@ class MigrationConcurrent(MigrationTestBase):
             except Exception as exc:                  # noqa: BLE001
                 failures.append((v["name"], "deferred-then-failed",
                                  f"refused while busy ({why}); then "
-                                 f"{str(exc)[:120]}"))
+                                 f"{self.detail(exc)}"))
         con = time.time() - t0
 
         if failures:

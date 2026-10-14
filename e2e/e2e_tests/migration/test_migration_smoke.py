@@ -68,7 +68,7 @@ class MigrationSmoke(MigrationTestBase):
         except MigrationPreconditionError as exc:
             raise AssertionError(
                 f"[MIG-S-001] LINK 1 FAILED: could not create a volume. "
-                f"{str(exc)[:400]}\n\n"
+                f"{self.detail(exc)}\n\n"
                 f"This is the CLI surface, not migration. Check the invocation "
                 f"against simplyblock_cli/cli.py -- "
                 f"`python e2e/scripts/check_cli_usage.py` does it statically "
@@ -84,7 +84,7 @@ class MigrationSmoke(MigrationTestBase):
         except MigrationPreconditionError as exc:
             raise AssertionError(
                 f"[MIG-S-001] LINK 2 FAILED: {vol} exists but could not be "
-                f"seeded. {str(exc)[:400]}\n\n"
+                f"seeded. {self.detail(exc)}\n\n"
                 f"None of this is migration -- it is nvme connect, mkfs, "
                 f"mount and a write on the client, in that order. Check it "
                 f"in that order too: did a new block device appear after "
@@ -113,7 +113,7 @@ class MigrationSmoke(MigrationTestBase):
             tgt = self.pick_target(src, "no-overlap")
         except MigrationPreconditionError as exc:
             raise AssertionError(
-                f"[MIG-S-001] LINK 3 FAILED: no target node. {str(exc)[:300]}\n"
+                f"[MIG-S-001] LINK 3 FAILED: no target node. {self.detail(exc)}\n"
                 f"At least two online storage nodes are needed, and at "
                 f"NDCS+NPCS=1+1 so that one is spare. A 1+2 cluster on four "
                 f"nodes leaves nothing to migrate to.") from exc
@@ -126,7 +126,7 @@ class MigrationSmoke(MigrationTestBase):
         except MigrationPreconditionError as exc:
             raise AssertionError(
                 f"[MIG-S-001] LINK 4 FAILED: pre-create did not return a "
-                f"migration id. {str(exc)[:400]}\n\n"
+                f"migration id. {self.detail(exc)}\n\n"
                 f"Either the verb is wrong, or the output does not contain "
                 f"'Migration ID: <uuid>' in the shape MIG_ID_RE expects.") from exc
         self.logger.info("[MIG-S-001] LINK 4 OK: migration %s", mid)

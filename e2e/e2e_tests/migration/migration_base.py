@@ -516,7 +516,7 @@ class MigrationTestBase(TestClusterBase):
             return row.get("nqn")
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[MIG] could not read the nqn of %s: %s",
-                                vol_id, str(exc)[:140])
+                                vol_id, self.detail(exc))
             return None
 
     def shares_subsystem(self, vol_id, other_id):
@@ -539,7 +539,7 @@ class MigrationTestBase(TestClusterBase):
             return row.get("node_id")
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[MIG] could not read the node of %s: %s",
-                                vol_id, str(exc)[:140])
+                                vol_id, self.detail(exc))
             return None
 
     def lvol_size(self, vol_id):
@@ -556,7 +556,7 @@ class MigrationTestBase(TestClusterBase):
             return self._get(row, "size")
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[MIG] could not read the size of %s: %s",
-                                vol_id, str(exc)[:140])
+                                vol_id, self.detail(exc))
             return None
 
     # ── the two-phase protocol ───────────────────────────────────────────
@@ -858,7 +858,7 @@ class MigrationTestBase(TestClusterBase):
 
         raise MigrationPreconditionError(
             f"[MIG] no Migration ID after {attempt} attempt(s) for {vol_id}. "
-            f"Last output: {last[:300]!r}")
+            f"Last output: {self.detail(last)!r}")
 
     def _client_for_vol(self, vol_id):
         """The client machine this volume is actually attached to.
@@ -947,7 +947,7 @@ class MigrationTestBase(TestClusterBase):
             cmd += " --retry-on-failure"
         out, err = self._cli(cmd + " 2>&1")
         self.logger.info("[MIG] migrate-continue %s: %s", migration_id,
-                         (out + err).strip()[:200])
+                         self.detail((out + err).strip()))
         return out, err
 
     def migrate_cancel(self, migration_id, batch=False):
@@ -967,7 +967,7 @@ class MigrationTestBase(TestClusterBase):
                 migration_id)
             combined = (out or "") + (err or "")
             self.logger.info("[MIG] abort requested on %s: %s", migration_id,
-                             combined.strip()[:200])
+                             self.detail(combined.strip()))
             return combined
         cmd = f"{self.base_cmd} --dev volume migrate-cancel {migration_id}"
         if batch:
@@ -978,7 +978,7 @@ class MigrationTestBase(TestClusterBase):
             self.logger.warning(
                 "[MIG] migrate-cancel for %s did not report success: %r. The "
                 "runner has a known canceled-flag race, so the migration may "
-                "still be running.", migration_id, combined.strip()[:200])
+                "still be running.", migration_id, self.detail(combined.strip()))
         return combined
 
     def migrate_cleanup(self, migration_id):
@@ -1099,7 +1099,7 @@ class MigrationTestBase(TestClusterBase):
                 # the state it describes is gone with the cluster.
                 self.logger.warning(
                     "%s error=%r", line,
-                    str(err) if terminal else str(err)[:200])
+                    str(err) if terminal else self.detail(err))
             else:
                 self.logger.info(line)
             if terminal:
@@ -1155,7 +1155,7 @@ class MigrationTestBase(TestClusterBase):
                 # status=failed phase=migrating members=3". Full once
                 # terminal, truncated while polling, same as the other.
                 self.logger.warning("%s error=%r", line,
-                                    str(err) if terminal else str(err)[:200])
+                                    str(err) if terminal else self.detail(err))
             else:
                 self.logger.info(line)
             if terminal:
@@ -1297,7 +1297,7 @@ class MigrationTestBase(TestClusterBase):
         out, err = self._cli(cmd + " 2>&1")
         if cli_failed(out, err):
             raise MigrationPreconditionError(
-                f"[MIG] could not create {name}: {(out + err)[:300]}")
+                f"[MIG] could not create {name}: {self.detail(out + err)}")
         vol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
         self._mig_vols.append(name)
         sums = self.seed(name) if seed else {}
@@ -1349,7 +1349,7 @@ class MigrationTestBase(TestClusterBase):
             return on or bench
         except Exception as exc:                      # noqa: BLE001
             self.logger.info("[MIG] could not read the cluster's auto "
-                             "placement settings: %s", str(exc)[:160])
+                             "placement settings: %s", self.detail(exc))
             return False
 
     # ── the cutover window ───────────────────────────────────────────────
@@ -1429,7 +1429,7 @@ class MigrationTestBase(TestClusterBase):
                 break
         except Exception as exc:                      # noqa: BLE001
             self.logger.info("[ANA] could not resolve data addresses of "
-                             "%s: %s", node_id, str(exc)[:140])
+                             "%s: %s", node_id, self.detail(exc))
         return out
 
     def watch_cutover(self, vol_id, what="", source=None, target=None):
@@ -1534,14 +1534,14 @@ class MigrationTestBase(TestClusterBase):
         if reject_id and self.MIG_ID_RE.search(combined):
             raise AssertionError(
                 f"[{case_id}] {what} was ACCEPTED and returned a migration "
-                f"id. Response: {combined.strip()[:300]}")
+                f"id. Response: {self.detail(combined.strip())}")
         if not any(m in low for m in self.REFUSAL_MARKERS + tuple(allow)):
             raise AssertionError(
                 f"[{case_id}] {what} produced no recognisable refusal: "
-                f"{combined.strip()[:300] or '(empty)'}. Silence is "
+                f"{self.detail(combined.strip()) or '(empty)'}. Silence is "
                 f"acceptance as far as an operator can tell.")
         self.logger.info("[%s] PASS: refused -- %s", case_id,
-                         combined.strip()[:200])
+                         self.detail(combined.strip()))
 
     def snapshots_of(self, vol_id):
         """Every snapshot the control plane holds FOR THIS VOLUME.
@@ -1600,7 +1600,7 @@ class MigrationTestBase(TestClusterBase):
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning(
                     "[MIG] could not resolve the backend id of snapshot "
-                    "%s from its VolumeSnapshot: %s", name, str(exc)[:160])
+                    "%s from its VolumeSnapshot: %s", name, self.detail(exc))
                 return None
         data = self._cli_json(f"{self.base_cmd} snapshot list")
         for s in (data.get("results", data) if isinstance(data, dict)
@@ -1652,7 +1652,7 @@ class MigrationTestBase(TestClusterBase):
                 self.logger.warning(
                     "[MIG] snapshot %d/%d (%s) was refused: %s; carrying on "
                     "with the %d taken so far", i + 1, count, name,
-                    str(exc)[:140], taken)
+                    self.detail(exc), taken)
         if taken:
             self.logger.info("[MIG] %s now carries %d snapshot(s)",
                              vol_name, taken)
@@ -1677,7 +1677,7 @@ class MigrationTestBase(TestClusterBase):
                 self._create_clone_dual(snap_handle, clone_name,
                                         size=size or self.VOL_SIZE)
             except Exception as exc:                  # noqa: BLE001
-                return None, str(exc)[:300]
+                return None, self.detail(exc)
             self._mig_vols.append(clone_name)
             vol_id = (self._volume_registry.get(clone_name)
                       or {}).get("lvol_id")
@@ -1688,7 +1688,7 @@ class MigrationTestBase(TestClusterBase):
         out, err = self._cli(f"{self.base_cmd} -d snapshot clone "
                              f"{snap_handle} {clone_name} 2>&1")
         if cli_failed(out, err):
-            return None, (out + err)[:300]
+            return None, self.detail(out + err)
         self._mig_vols.append(clone_name)
         return self.sbcli_utils.get_lvol_id(lvol_name=clone_name), (out + err)
 
@@ -1768,16 +1768,42 @@ class MigrationTestBase(TestClusterBase):
                             f"| grep -i {short} || true")
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[MIG] leftover check on %s: %s", ip,
-                                str(exc)[:140])
+                                self.detail(exc))
             return
         if (out or "").strip():
             raise AssertionError(
                 f"[MIG] target {node_id} still has subsystem state for "
-                f"{vol_id} {context}:\n{out.strip()[:400]}\nA rolled-back "
+                f"{vol_id} {context}:\n{self.detail(out.strip())}\nA rolled-back "
                 f"migration must leave the target as it found it; leftovers "
                 f"are invisible until the next migration to this node "
                 f"collides with them.")
         self.logger.info("[MIG] no leftovers on target %s %s", node_id, context)
+
+    def detail(self, text, limit=300, what="detail"):
+        """Short enough to read in a message, and never loses the rest.
+
+        Truncation is how this lane keeps losing the part that explains
+        a failure. Two instances in two days: the migration poller cut
+        its error at 200 characters, exactly where "(taking the
+        migration back also failed: ...)" began, so the more serious
+        half of both rollback failures was the half that went; and
+        await_batch logged no error at all, so MIG-T-008 failing the
+        second migration of a tree -- the shape SFAM-2820 describes --
+        is on record as "batch status=failed phase=migrating
+        members=3". The cluster is gone by the time anyone reads it, so
+        a truncated message is not a smaller clue, it is no clue.
+
+        So: anything longer than *limit* is written to the log IN FULL
+        first, and what comes back is the short form plus a pointer
+        saying so. Callers keep their readable one-liners and nothing
+        is destroyed. Use this instead of a bare ``[:n]`` slice
+        anywhere the text could be a product error.
+        """
+        s = str(text)
+        if len(s) <= limit:
+            return s
+        self.logger.warning("[MIG] full %s (%d chars): %s", what, len(s), s)
+        return f"{s[:limit]}... [{len(s)} chars, full text logged above]"
 
     def pvc_of(self, vol_id):
         """The PVC backing this volume, or None if it was not made as one.
@@ -1823,7 +1849,7 @@ class MigrationTestBase(TestClusterBase):
             return out or ""
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[MIG] rpc %s on %s: %s", args, node_ip,
-                                str(exc)[:140])
+                                self.detail(exc))
             return None
 
     def _node_ip(self, node_id):
@@ -1891,7 +1917,7 @@ class MigrationTestBase(TestClusterBase):
             stores = {s.get("name") for s in json.loads(out) if s.get("name")}
         except (ValueError, TypeError, AttributeError):
             self.logger.warning("[MIG] could not parse lvstores on %s: %s",
-                                node_id, (out or "").strip()[:200])
+                                node_id, self.detail((out or "").strip()))
             return
         if not stores:
             self.logger.warning("[MIG] node %s reported no lvstores; "
@@ -2035,7 +2061,7 @@ class MigrationTestBase(TestClusterBase):
                     "[MIG] could NOT uncordon %s: %s. Until someone does, "
                     "nothing schedules there, its storage node stays down, "
                     "and every later case fails its health check on a node "
-                    "with nothing wrong with it.", ip, str(exc)[:160])
+                    "with nothing wrong with it.", ip, self.detail(exc))
         self._cordoned = set()
 
         for sc in reversed(getattr(self, "_extra_scs", []) or []):
@@ -2047,7 +2073,7 @@ class MigrationTestBase(TestClusterBase):
                     "[MIG] could NOT remove StorageClass %s: %s. The pool it "
                     "is assigned to cannot be deleted until it goes, so the "
                     "next case starts against a pool that will not clear.",
-                    sc, str(exc)[:160])
+                    sc, self.detail(exc))
         self._extra_scs = []
         return super().teardown(*args, **kwargs)
 
@@ -2062,7 +2088,7 @@ class MigrationTestBase(TestClusterBase):
                 self.migrate_cleanup(mid)
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG] cleanup of %s: %s", mid,
-                                    str(exc)[:140])
+                                    self.detail(exc))
         # Snapshots first, because a volume with any cannot be deleted and
         # the failure is reported against the VOLUME, which reads like a
         # stuck migration rather than the ordinary dependency it is.
@@ -2086,7 +2112,7 @@ class MigrationTestBase(TestClusterBase):
                                   f"--force 2>&1")
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG] snapshot sweep for %s: %s", name,
-                                    str(exc)[:140])
+                                    self.detail(exc))
         for name in reversed(self._mig_vols):
             try:
                 self._disconnect_and_cleanup_dual(name)
@@ -2101,7 +2127,7 @@ class MigrationTestBase(TestClusterBase):
                 self._delete_lvol_dual(name)
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG] could not delete %s: %s", name,
-                                    str(exc)[:140])
+                                    self.detail(exc))
         # After the volumes, never before: a StorageClass still named by a
         # bound PVC cannot be removed, and deleting it first would leave
         # the PVCs un-provisionable mid-teardown.
@@ -2110,5 +2136,5 @@ class MigrationTestBase(TestClusterBase):
                 self._ensure_k8s_utils().delete_storage_class(sc)
             except Exception as exc:                  # noqa: BLE001
                 self.logger.warning("[MIG] could not delete SC %s: %s", sc,
-                                    str(exc)[:140])
+                                    self.detail(exc))
         self._extra_scs = []
