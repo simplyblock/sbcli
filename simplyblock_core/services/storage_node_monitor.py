@@ -1163,11 +1163,13 @@ _ana_failover_applied: set = set()
 def _ana_failover_once(node) -> bool:
     """Run ANA failover for ``node`` at most once per offline episode.
 
-    Returns True when the failover was actually applied this call. The
-    episode marker is set only then: a call that could not promote -- the
-    first secondary not online yet, as when it is restarting after the crash
-    that took the cluster down -- leaves the marker clear so the next cycle
-    tries again once the secondary is back (2026-10-14 run 63)."""
+    Returns True when a failover was attempted this call. The episode marker
+    is set only then: a call that was SKIPPED -- the first secondary not
+    online yet, as when it is restarting after the crash that took the
+    cluster down -- leaves the marker clear so the next cycle tries again once
+    the secondary is back (2026-10-14 run 63). An attempt that failed still
+    consumes the one shot, as it always did: retrying it every cycle against
+    a peer that cannot take the flips is the 2026-08-09 pause storm."""
     node_id = node.get_id()
     if node_id in _ana_failover_applied:
         return False

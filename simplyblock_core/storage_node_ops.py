@@ -465,9 +465,11 @@ def _failover_primary_ana(primary_node: StorageNode) -> bool:
 
     The second_sec stays at non_optimized (its permanent state).
 
-    Returns whether the promotion was actually issued. It is skipped entirely
-    while first_sec is not ONLINE -- there is nothing to promote onto -- and a
-    caller that records "done" on a skipped call loses the failover for good
+    Returns whether the promotion was attempted (True once the flips were
+    issued, whatever each one answered; _set_lvol_ana_on_node logs a failed
+    flip and moves on). It is skipped entirely while first_sec is not ONLINE
+    -- there is nothing to promote onto -- and a caller that records "done"
+    on a skipped call loses the failover for good
     (2026-10-14 run 63: the secondary was itself restarting while its primary
     was shut down for removal, the monitor's one-shot marker was consumed by
     the skip, and the primary's volumes stayed unserved until the promotion
@@ -531,10 +533,13 @@ def trigger_ana_failover_for_node(offline_node: StorageNode) -> bool:
     first_sec to optimized.  The second_sec is always non_optimized and
     never needs ANA state changes.
 
-    Returns True only when the promotion was issued; False when the node is
-    not a primary, the secondary is not online yet, or the RPCs failed. The
-    monitor's one-shot marker keys off this so a failover that could not run
-    is retried on a later cycle instead of being recorded as done.
+    Returns True when a promotion was attempted, whether or not every flip
+    succeeded; False when nothing was attempted because the node is not a
+    primary or its first secondary is not online yet. The monitor's one-shot
+    marker keys off this: a SKIPPED failover is retried on a later cycle
+    instead of being recorded as done, while an attempt that failed counts as
+    the episode's one shot exactly as before, so a peer that cannot take the
+    flips is not hammered every cycle (the 2026-08-09 pause storm).
     """
     node_id = offline_node.get_id()
 
@@ -545,7 +550,7 @@ def trigger_ana_failover_for_node(offline_node: StorageNode) -> bool:
         return _failover_primary_ana(offline_node)
     except Exception as e:
         logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
-        return False
+        return True
 
 
 def trigger_ana_failback_for_node(restarting_node: StorageNode):

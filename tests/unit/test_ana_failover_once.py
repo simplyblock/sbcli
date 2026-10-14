@@ -85,6 +85,39 @@ class TestAnaFailoverOnce(unittest.TestCase):
         self.assertEqual(self.ops.trigger_ana_failover_for_node.call_count, 3)
 
 
+class TestTriggerReportsAttemptedNotSucceeded(unittest.TestCase):
+    """The trigger's return value drives the one-shot: False only when nothing
+    was attempted (not a primary, or the first secondary is not online), True
+    for any attempt, including one whose flips failed -- a failed attempt must
+    keep consuming the episode, or a peer that cannot take the flips is hammered
+    every cycle (2026-08-09 storm)."""
+
+    def setUp(self):
+        from simplyblock_core import storage_node_ops
+        self.ops = storage_node_ops
+        self.node = MagicMock()
+        self.node.get_id.return_value = "primary-a"
+        self.node.secondary_node_id = "secondary-b"
+
+    def test_not_a_primary_is_not_an_attempt(self):
+        self.node.secondary_node_id = ""
+        with patch.object(self.ops, "_failover_primary_ana") as fo:
+            self.assertFalse(self.ops.trigger_ana_failover_for_node(self.node))
+            fo.assert_not_called()
+
+    def test_a_skipped_promotion_is_not_an_attempt(self):
+        with patch.object(self.ops, "_failover_primary_ana", return_value=False):
+            self.assertFalse(self.ops.trigger_ana_failover_for_node(self.node))
+
+    def test_an_issued_promotion_is_an_attempt(self):
+        with patch.object(self.ops, "_failover_primary_ana", return_value=True):
+            self.assertTrue(self.ops.trigger_ana_failover_for_node(self.node))
+
+    def test_a_failed_attempt_still_counts_as_the_one_shot(self):
+        with patch.object(self.ops, "_failover_primary_ana", side_effect=RuntimeError("peer rpc down")):
+            self.assertTrue(self.ops.trigger_ana_failover_for_node(self.node))
+
+
 class TestRemovalStatesAreCovered(unittest.TestCase):
     """check_node owes the same one-shot failover to a node whose removal has
     already shut its SPDK down: such a node never returns through OFFLINE, the
