@@ -460,10 +460,18 @@ def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
                             node.get_id(), iface.ip4_address, ana_state)
 
 
-def _failover_primary_ana(primary_node: StorageNode):
+def _failover_primary_ana(primary_node: StorageNode) -> bool:
     """Primary failed: promote first_sec→optimized.
 
     The second_sec stays at non_optimized (its permanent state).
+
+    Returns whether the promotion was actually issued. It is skipped entirely
+    while first_sec is not ONLINE -- there is nothing to promote onto -- and a
+    caller that records "done" on a skipped call loses the failover for good
+    (2026-10-14 run 63: the secondary was itself restarting while its primary
+    was shut down for removal, the monitor's one-shot marker was consumed by
+    the skip, and the primary's volumes stayed unserved until the promotion
+    was triggered by hand).
     """
     db_ctrl = DBController()
     lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
@@ -472,6 +480,11 @@ def _failover_primary_ana(primary_node: StorageNode):
     first_sec = None
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
+    if not (first_sec and first_sec.status == StorageNode.STATUS_ONLINE):
+        logger.info("ANA failover for %s skipped: first secondary %s is %s, not online",
+                    primary_node.get_id(), primary_node.secondary_node_id,
+                    first_sec.status if first_sec else "absent")
+        return False
 
     # Dedupe per NAMESPACE, not per subsystem. The old per-(nqn, lvs) dedupe was
     # correct only while the flip was subsystem-wide: now that each volume's
@@ -484,8 +497,8 @@ def _failover_primary_ana(primary_node: StorageNode):
         if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
         seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
-        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-            _set_lvol_ana_on_node(lvol, first_sec, "optimized")
+        _set_lvol_ana_on_node(lvol, first_sec, "optimized")
+    return True
 
 
 def _failback_primary_ana(primary_node: StorageNode):
@@ -511,21 +524,28 @@ def _failback_primary_ana(primary_node: StorageNode):
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
 
-def trigger_ana_failover_for_node(offline_node: StorageNode):
+def trigger_ana_failover_for_node(offline_node: StorageNode) -> bool:
     """Trigger ANA failover when a node goes offline.
 
     Only action needed: if the offline node is a primary, promote its
     first_sec to optimized.  The second_sec is always non_optimized and
     never needs ANA state changes.
+
+    Returns True only when the promotion was issued; False when the node is
+    not a primary, the secondary is not online yet, or the RPCs failed. The
+    monitor's one-shot marker keys off this so a failover that could not run
+    is retried on a later cycle instead of being recorded as done.
     """
     node_id = offline_node.get_id()
 
-    if offline_node.secondary_node_id:
-        logger.info("ANA failover: node %s is primary, promoting first_sec", node_id)
-        try:
-            _failover_primary_ana(offline_node)
-        except Exception as e:
-            logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
+    if not offline_node.secondary_node_id:
+        return False
+    logger.info("ANA failover: node %s is primary, promoting first_sec", node_id)
+    try:
+        return _failover_primary_ana(offline_node)
+    except Exception as e:
+        logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
+        return False
 
 
 def trigger_ana_failback_for_node(restarting_node: StorageNode):
