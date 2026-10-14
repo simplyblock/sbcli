@@ -44,14 +44,33 @@ def migration_started(task):
     return "migration" in task.function_params
 
 
-def require_active_cluster(task):
-    # IN_SHRINK is operable: draining data off the departing node is the node
-    # removal's own work, and removal blocks until every data device reaches
-    # FAILED_AND_MIGRATED — which only this family sets. Refusing here would
-    # deadlock the removal against the status it set itself.
-    cluster = db.get_cluster_by_id(task.cluster_id)
+def defer_unless_operable(cluster):
+    """Raise :class:`TaskDefer` while ``cluster`` does not allow operations.
+
+    A deferral, not a failure: the cluster being suspended, in activation or
+    in expansion is external state the task waits on, and the driver contract
+    reserves ``TaskRetry`` for a failed attempt. Raising ``TaskRetry`` here
+    consumed a retry per poll for as long as an outage lasted, and the
+    driver's exponential backoff (interval * 2**(retry-1), capped at
+    RESTART_TASK_EXEC_INTERVAL_MAX_SEC) then kept the migrations silent long
+    after the cluster was back: 2026-10-14 run 63, sixteen failed-device
+    migrations at retry 12 did not resume for the hour after activation while
+    the node removal that waited on them sat in MigratingDevices. On a regular
+    cluster nothing else wakes them, since ``backoff_reset_key`` only acts on
+    single-node and two-node clusters.
+
+    IN_SHRINK is operable: draining data off the departing node is the node
+    removal's own work, and removal blocks until every data device reaches
+    FAILED_AND_MIGRATED — which only this family sets. Refusing here would
+    deadlock the removal against the status it set itself.
+    """
     if not cluster.allows_operation():
-        raise TaskRetry("cluster is not active, retrying")
+        raise TaskDefer(f"cluster is {cluster.status}, deferring until it allows operations")
+
+
+def require_active_cluster(task):
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    defer_unless_operable(cluster)
 
     # Expansion-first ordering: no data migration runs while a cluster
     # expansion is open — even between the expand task's retries, when the
