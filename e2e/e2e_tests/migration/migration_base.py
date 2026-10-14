@@ -413,7 +413,7 @@ class MigrationTestBase(TestClusterBase):
             return "overlap d: the source is the target's TERTIARY"
         return "no-overlap: unrelated to the source's HA set"
 
-    def pick_target(self, source_id, overlap="no-overlap"):
+    def pick_target(self, source_id, overlap="no-overlap", avoid=None):
         """Pick a target node for a given HA overlap shape.
 
         The overlap matrix is the heart of the topology lane, and the four
@@ -430,10 +430,30 @@ class MigrationTestBase(TestClusterBase):
         Raises rather than silently falling back for b/c/d: a test asked
         for a specific topology, and quietly giving it a different one
         produces a pass that means nothing.
+
+        *avoid* drops nodes from the candidate set before any of that. It
+        exists for the retry cases: a node that was just faulted and has
+        only now been re-listed as online is a target whose readiness is
+        the newest thing on the cluster, and choosing it turns a question
+        about one thing into a question about another. Honoured only
+        where it leaves something to choose from -- for no-overlap, which
+        draws; the fixed shapes a/b/c/d name one node each and avoiding
+        it would mean silently changing the topology, which is the thing
+        the paragraph above refuses to do.
         """
         nodes = self.online_nodes()
+        skip = set(avoid or ())
         cands = [n for n in nodes
                  if (n.get("uuid") or n.get("id")) != source_id]
+        if skip and overlap == "no-overlap":
+            kept = [n for n in cands
+                    if (n.get("uuid") or n.get("id")) not in skip]
+            if kept:
+                cands = kept
+            else:
+                self.logger.warning(
+                    "[MIG] asked to avoid %s but that leaves no target; "
+                    "using the full set", skip)
         if not cands:
             raise MigrationPreconditionError(
                 "[MIG] no candidate target node: the cluster has one online "
@@ -1122,9 +1142,23 @@ class MigrationTestBase(TestClusterBase):
             last = g
             status = str(self._get(g, "status") or "unknown").lower()
             phase = str(self._get(g, "phase") or "").lower()
-            self.logger.info("[MIG] batch status=%s phase=%s members=%s",
-                             status, phase, self._get(g, "member_count"))
-            if status in self.TERMINAL:
+            terminal = status in self.TERMINAL
+            err = self._get(g, "error_message", "error", "message")
+            line = (f"[MIG] batch status={status} phase={phase} "
+                    f"members={self._get(g, 'member_count')}")
+            if err:
+                # The single-migration poller has logged its error all
+                # along and this one never has, which cost run
+                # 20261014-141411 its explanation: MIG-T-008 failed the
+                # second migration of a tree -- the shape SFAM-2820
+                # describes -- and the only record is "batch
+                # status=failed phase=migrating members=3". Full once
+                # terminal, truncated while polling, same as the other.
+                self.logger.warning("%s error=%r", line,
+                                    str(err) if terminal else str(err)[:200])
+            else:
+                self.logger.info(line)
+            if terminal:
                 return status, phase
             sleep_n_sec(self.MIGRATION_POLL)
         raise AssertionError(

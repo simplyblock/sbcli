@@ -5264,7 +5264,9 @@ class K8sSbcliUtils:
     def get_lvol_details(self, lvol_id):
         """Return ``[{uuid, lvol_name, node_id, nqn, status, ...}]``."""
         raw = self._run(f"{self.sbcli_cmd} lvol get {lvol_id} --json")
-        data = json.loads(raw)
+        data = self._json_or_empty(raw, f"lvol get {lvol_id}")
+        if not data:
+            return []
         return data if isinstance(data, list) else [data]
 
     def get_lvol_connect_str(self, lvol_name):
@@ -5408,14 +5410,42 @@ class K8sSbcliUtils:
         for item in items:
             uuid = item["UUID"]
             detail_raw = self._run(f"{self.sbcli_cmd} sn get {uuid}")
-            detail = json.loads(detail_raw)
-            results.append(detail)
+            detail = self._json_or_empty(detail_raw, f"sn get {uuid}")
+            if detail:
+                results.append(detail)
         return {"results": results}
+
+    def _json_or_empty(self, raw, what):
+        """Parse sbctl output that is normally JSON, tolerating that it is not.
+
+        _run_json already does this for --json commands; these callers
+        did not, and a control plane that answers with an empty string
+        or a traceback is not an exceptional condition -- run
+        20261014-184128 lost two whole classes to it. Node 0f28a2bb was
+        stuck in_restart, `sbctl sn get` returned nothing, and the bare
+        json.loads raised JSONDecodeError out of a status poll, which
+        reads as a harness crash rather than as the node still being
+        down. An empty list says "could not read it", which is what the
+        callers already handle.
+        """
+        text = (raw or "").strip()
+        if not text:
+            self.logger.warning("[%s] empty output; treating as no result",
+                                what)
+            return []
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            self.logger.warning("[%s] not JSON (%s); raw=%r", what, exc,
+                                text[:200])
+            return []
 
     def get_storage_node_details(self, storage_node_id):
         """Return ``[{uuid, mgmt_ip, status, ...}]``."""
         raw = self._run(f"{self.sbcli_cmd} sn get {storage_node_id}")
-        data = json.loads(raw)
+        data = self._json_or_empty(raw, f"sn get {storage_node_id}")
+        if not data:
+            return []
         return data if isinstance(data, list) else [data]
 
     def get_management_nodes(self):

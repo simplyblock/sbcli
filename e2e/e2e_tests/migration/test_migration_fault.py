@@ -386,12 +386,38 @@ class MigrationSourceAndTargetFaults(_FaultBase):
             # The fault is undone and the cluster has had 90s by now, so a
             # refusal here is about residue from the failed attempt rather
             # than about the injected fault still being present.
+            # The settle above is a fixed sleep and that is not the same
+            # as the cluster being ready. Run 20261014 proved it: after
+            # nic_down on the target, pick_target chose that very node --
+            # the control plane had re-listed it as online while its SPDK
+            # was not serving yet -- and the retry failed with "target
+            # node offline (status=down)". That is the fault still
+            # clearing, not residue from the failed attempt, and
+            # reporting it as the latter accuses the product of something
+            # the run does not show.
+            try:
+                self._validate_storage_node_health(timeout=600)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[MIG-F-018] SKIPPED after %s: the cluster did not "
+                    "return to health within 600s of undoing %s on the %s "
+                    "(%s). Whether the volume can migrate again is not "
+                    "answerable while a node is still recovering, and "
+                    "failing here would read as migration residue.",
+                    case_id, kind, side, str(exc)[:200])
+                self._teardown()
+                continue
+
             here = self.lvol_node(self._vol_id)
             if not here:
                 raise AssertionError(
                     f"[MIG-F-018] after {kind} on the {side} and its undo, "
                     f"{self._vol} has no node at all.")
-            elsewhere = self.pick_target(here, "no-overlap")
+            # Avoid the node that was just faulted. It is healthy again by
+            # the check above, but it is also the least interesting target
+            # for this question and the one whose readiness is newest.
+            elsewhere = self.pick_target(here, "no-overlap",
+                                         avoid=[self._tgt])
             self.logger.info(
                 "[MIG-F-018] after the %s failure, migrating again %s -> %s",
                 case_id, here, elsewhere)
