@@ -489,26 +489,6 @@ class MigrationProtectionGuards(MigrationTestBase):
         # the thing the guard protects is still there.
         pvc = self.pvc_of(vol_id) if self.k8s_test else None
 
-        # -- MIG-N-008 delete, mid-migration -----------------------------
-        if pvc:
-            k8s = self._ensure_k8s_utils()
-            self.logger.info("[MIG-N-008] deleting PVC %s mid-migration", pvc)
-            k8s.delete_pvc(pvc)
-        else:
-            out, err = self._cli(f"{self.base_cmd} -d volume delete {vol_id} "
-                                 f"--force 2>&1")
-            self.assert_refused(
-                "MIG-N-008", out + err,
-                "deleting a volume while it is migrating", reject_id=False)
-        sleep_n_sec(15)
-        if not self.lvol_node(vol_id):
-            raise AssertionError(
-                f"[MIG-N-008] {vol} is GONE from the cluster after a delete "
-                f"issued while it was migrating. The migration is still "
-                f"running against storage that no longer has an owner, which "
-                f"is worse than no guard at all.")
-        self.logger.info("[MIG-N-008] PASS: %s survived the delete", vol)
-
         # -- MIG-N-009 resize, mid-migration -----------------------------
         before = self.lvol_size(vol_id)
         if pvc:
@@ -597,6 +577,33 @@ class MigrationProtectionGuards(MigrationTestBase):
         else:
             self.logger.warning("[MIG-N-010] SKIPPED: could not resolve the "
                                 "id of %s", snaps[0])
+
+        # -- MIG-N-008 delete, mid-migration -----------------------------
+        # Deliberately last, and only on k8s does the order matter. A
+        # refused `volume delete` on docker changes nothing, so it could
+        # sit anywhere. A PVC delete is different: the API server ACCEPTS
+        # it and the claim sits in Terminating behind its finalizer, with
+        # only the CSI layer declining to finish the job. Running it
+        # first would therefore hand MIG-N-009 a terminating PVC to patch
+        # and MIG-N-010 a volume already on its way out, and both would
+        # be measuring the delete rather than their own guard.
+        if pvc:
+            self.logger.info("[MIG-N-008] deleting PVC %s mid-migration", pvc)
+            self._ensure_k8s_utils().delete_pvc(pvc)
+        else:
+            out, err = self._cli(f"{self.base_cmd} -d volume delete {vol_id} "
+                                 f"--force 2>&1")
+            self.assert_refused(
+                "MIG-N-008", out + err,
+                "deleting a volume while it is migrating", reject_id=False)
+        sleep_n_sec(15)
+        if not self.lvol_node(vol_id):
+            raise AssertionError(
+                f"[MIG-N-008] {vol} is GONE from the cluster after a delete "
+                f"issued while it was migrating. The migration is still "
+                f"running against storage that no longer has an owner, which "
+                f"is worse than no guard at all.")
+        self.logger.info("[MIG-N-008] PASS: %s survived the delete", vol)
 
         # -- and the guards must LIFT ------------------------------------
         status, phase = self.await_migration(
