@@ -560,6 +560,31 @@ def _single_peer_jm_is_complete(db, node, remote_jm_devices):
     return len(members) == 2
 
 
+def _two_node_fence_holds_ports(node):
+    """Why the node's client ports must stay blocked, or "".
+
+    Two-node arbitration only (campaign c6, F15): with the F14 fix the task
+    completed during fence_both and lifted the client ports of both nodes
+    25-35 s before the arbiter's unfence, bypassing the monitor's guard. The
+    block belongs to the HA fence until the arbiter unfences (and
+    ``spdk_lvs_ha_unfence`` lifts the fence's own block, SPDK #76). Deferring,
+    not completing without the unblock: a block SPDK set on the outage before
+    the fence is not the fence's, so only this task lifts it once the node is
+    unfenced. Same rule as the monitor and the restart flow
+    (``_two_node_peer_port_must_stay_blocked``): fenced, holding, or an HA
+    state that cannot be read keeps the ports blocked."""
+    if not storage_node_ops._cluster_two_node_arbitrated(node.cluster_id, db=db):
+        return ""
+    try:
+        status = node.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
+    except Exception as e:                      # noqa: BLE001 - unknown: stay blocked
+        return "HA state unknown (%s)" % (e,)
+    for entry in status.get("lvs") or []:
+        if entry.get("state") in ("fenced", "holding"):
+            return "LVS %s is %s on the node" % (entry.get("jm_vuid"), entry.get("state"))
+    return ""
+
+
 def _abort_recovering_node(node, reason):
     """Abort port-allow: kill SPDK on the recovering node, mark OFFLINE,
     do NOT issue port_allowed. Used when one or more online peers cannot
@@ -667,6 +692,17 @@ def exec_port_allow_task(task):
     except Exception as e:
         logger.error(e)
         raise TaskDefer("Error when connect to remote devs, retry task")
+
+    # Two-node arbitration (campaign c6, F15): the node's client ports stay
+    # blocked while one of its LVS is HA-fenced or holding. Deferred here, right
+    # after the remote JMs are (re)connected, as the pre-F14 task did: that
+    # connect is what lets the remote JM turn healthy, which the arbiter's
+    # unfence waits for. Only a node with exactly one remote JM can be on a
+    # two-node cluster, so a cluster with 3 or more members never gets here.
+    if len(remote_jm_devices) == 1:
+        keep = _two_node_fence_holds_ports(node)
+        if keep:
+            raise TaskDefer(f"Client ports stay blocked: {keep}, retry task")
 
     # After a network outage every distrib in the cluster is working from a
     # stale device view: the recovering node's distribs have stale REMOTE
