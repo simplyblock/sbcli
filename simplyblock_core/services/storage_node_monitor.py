@@ -1843,6 +1843,19 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
                 port, snode.get_id(), held, owner.lvstore)
             continue
 
+        # Two-node arbitration only (campaign c5, 07): during fence_both this
+        # lifted each node's own client port at +17-21 s while the LVS was
+        # still HA-fenced. That block belongs to the fence; the arbiter's
+        # unfence (spdk_lvs_ha_unfence) lifts it. Regular clusters return ""
+        # without a status call (remembered cluster flag).
+        keep = storage_node_ops._two_node_peer_port_must_stay_blocked(
+            snode, owner.jm_vuid, db, rebuild_too=False)
+        if keep:
+            logger.warning(
+                "Port %s on %s blocked %.0fs for %s, left blocked: %s",
+                port, snode.get_id(), held, owner.lvstore, keep)
+            continue
+
         logger.error(
             "Port %s on %s has been blocked %.0fs on a %s node with a "
             "healthy hublvol and no restart owning %s -- SPDK fenced it and "

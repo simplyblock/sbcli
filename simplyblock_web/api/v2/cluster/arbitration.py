@@ -48,6 +48,10 @@ def get(cluster: Cluster) -> dict:
     # until its data rebuild has finished.
     out["rebuild_pending"] = sorted(rec.rebuild or {})
     out["redundant"] = not rec.rebuild and not rec.data_unavailable
+    # Campaign c4, F12: rebuilds that cannot progress because a device is not
+    # available (the node was handed to the restart flow).
+    out["rebuild_stuck"] = sorted(nid for nid, mark in (rec.rebuild or {}).items()
+                                  if (mark or {}).get("stuck"))
     return out
 
 

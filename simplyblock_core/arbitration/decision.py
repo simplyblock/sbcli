@@ -195,8 +195,8 @@ def _unreported_loss(snap: Snapshot) -> Verdict | None:
 
     Safe without the survivor's report: a peer whose lease has expired fences
     itself the moment it starts holding (lease-expiry rule on the node), and a
-    node that wakes from a stall longer than its lease fences itself (node
-    side, campaign c2); a gone peer does not write at all. A grant to a
+    node that wakes from a stall longer than its lease aborts (node side,
+    ultra #211); a gone peer does not write at all. A grant to a
     survivor whose remote JM is still healthy only permits it to continue
     alone should it lose the peer later."""
     a, b, now, margin = snap.a, snap.b, snap.now_ms, snap.lease_margin_ms
