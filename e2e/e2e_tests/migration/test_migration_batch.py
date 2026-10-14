@@ -445,13 +445,11 @@ class MigrationBatchWithTrees(_BatchBase):
             raise AssertionError(
                 f"[MIG-B-007] members not on the target: {off}")
 
-        data = self._cli_json(f"{self.base_cmd} snapshot list")
-        rows = (data.get("results", data) if isinstance(data, dict)
-                else data) or []
+        # By parent id per member, not by name prefix -- the CSI driver
+        # names backend snapshots on k8s, so the prefix matches nothing
+        # and this read as "every member lost its whole chain".
         for m in group:
-            mine = [s for s in rows
-                    if str(self._get(s, "snap_name", "name") or "")
-                    .startswith(m["name"])]
+            mine = self.snapshots_of(m["id"])
             if len(mine) < self.SNAPS_EACH:
                 raise AssertionError(
                     f"[MIG-B-008] member {m['name']} has {len(mine)} of "

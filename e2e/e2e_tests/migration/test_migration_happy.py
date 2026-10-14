@@ -221,11 +221,10 @@ class MigrationWithSnapshots(MigrationTestBase):
         self.verify(vol, sums, "after migrating with history (MIG-H-007)")
 
         # ── MIG-H-008 the snapshots came too ─────────────────────────────
-        data = self._cli_json(f"{self.base_cmd} snapshot list")
-        rows = (data.get("results", data) if isinstance(data, dict) else data) or []
-        mine = [s for s in rows
-                if str(self._get(s, "snap_name", "name") or "").startswith(
-                    f"migs{stamp}")]
+        # By parent id, not by name. The CSI driver names the backend
+        # snapshot on k8s, so a prefix match finds none of them and reads
+        # as "the migration lost every snapshot" -- see snapshots_of.
+        mine = self.snapshots_of(vol_id)
         if len(mine) < self.SNAP_COUNT:
             raise AssertionError(
                 f"[MIG-H-008] only {len(mine)} of {self.SNAP_COUNT} snapshots "

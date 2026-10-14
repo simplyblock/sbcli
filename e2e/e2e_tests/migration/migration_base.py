@@ -1477,6 +1477,39 @@ class MigrationTestBase(TestClusterBase):
         self.logger.info("[%s] PASS: refused -- %s", case_id,
                          combined.strip()[:200])
 
+    def snapshots_of(self, vol_id):
+        """Every snapshot the control plane holds FOR THIS VOLUME.
+
+        By parent volume id, not by name prefix, and that is the whole
+        point. The lane used to count snapshots whose name began with
+        the prefix it had asked for, which works on docker and cannot
+        work on k8s: there a snapshot is a VolumeSnapshot and the CSI
+        driver names the backend object, so `snapshot list` comes back
+        holding rows like
+
+            "Name": "snapshot-<uuid>", "BDev": "LVS_19/SNAP_69",
+            "LVol ID": "8f001596-..."
+
+        and the logical name appears nowhere. MIG-H-008 and MIG-B-008
+        both read that as "0 of 20 snapshots survived the migration" and
+        accused the product of silently dropping every recovery point,
+        when all twenty were sitting right there under names we had not
+        looked for.
+
+        The parent id survives a migration -- a volume keeps its uuid and
+        only changes node -- so this is also the thing the case actually
+        means: the history moved with the volume.
+        """
+        data = self._cli_json(f"{self.base_cmd} snapshot list")
+        rows = (data.get("results", data) if isinstance(data, dict)
+                else data) or []
+        out = []
+        for row in rows:
+            owner = self._get(row, "lvol_id", "lvol", "volume_id")
+            if owner and str(owner) == str(vol_id):
+                out.append(row)
+        return out
+
     def snap_id(self, name):
         """The backend snapshot uuid for a snapshot NAME, or None.
 

@@ -494,20 +494,42 @@ class MigrationProtectionGuards(MigrationTestBase):
             "resizing a volume while it is migrating", reject_id=False)
 
         # -- MIG-N-010 snapshot delete, mid-migration --------------------
+        # Judged on STATE, not on wording. Whether the product refuses
+        # with a sentence, an error code or silence does not matter -- the
+        # guard either kept the snapshot or it did not, and that is the
+        # only thing this case is about. Matching refusal words got it
+        # wrong in both directions: MIG-N-003 "passed" on a connection
+        # error because "Connection refused" contains "refus", and this
+        # case failed on output that was neither a refusal nor a quiet
+        # success but the CLI narrating itself --
+        #   "INFO: Removing snapshot: 4c44671f-..."
+        #   "DEBUG: Requesting method: bdev_lvol_get_lvstores"
+        # which is the product going ahead and deleting it.
         sid = self.snap_id(snaps[0])
         if sid:
             out, err = self._cli(f"{self.base_cmd} -d snapshot delete {sid} "
                                  f"--force 2>&1")
-            self.assert_refused(
-                "MIG-N-010", out + err,
-                f"deleting snapshot {snaps[0]}, a link in the lineage the "
-                f"migration is still transferring", reject_id=False)
-            if not self.snap_id(snaps[0]):
+            sleep_n_sec(5)
+            if self.snap_id(snaps[0]):
+                self.logger.info(
+                    "[MIG-N-010] PASS: %s is still there, so the guard held. "
+                    "Response was: %s", snaps[0],
+                    (out + err).strip()[:200] or "(silent)")
+            else:
                 raise AssertionError(
-                    f"[MIG-N-010] the refusal was printed but {snaps[0]} is "
-                    f"gone. A migration transfers the ancestry chain oldest "
-                    f"first; removing a link while it is being walked is how "
-                    f"a transfer ends up with a chain pointing at nothing.")
+                    f"[MIG-N-010] snapshot {snaps[0]} was DELETED while its "
+                    f"volume was migrating. The other two guards held on the "
+                    f"same volume moments earlier -- 'Cannot delete lvol ...: "
+                    f"active migration' and 'Cannot resize lvol ...: active "
+                    f"migration' -- so deletion and resize are enforced and "
+                    f"snapshot deletion is not, though all three are "
+                    f"documented together: 'Volumes undergoing migration are "
+                    f"protected from deletion, resizing, and snapshot "
+                    f"deletion until the migration completes or is "
+                    f"canceled.' A migration transfers the ancestry chain "
+                    f"oldest first, so removing a link while it is being "
+                    f"walked is how a transfer ends up pointing at nothing. "
+                    f"Response was: {(out + err).strip()[:200] or '(silent)'}")
         else:
             self.logger.warning("[MIG-N-010] SKIPPED: could not resolve the "
                                 "id of %s", snaps[0])
