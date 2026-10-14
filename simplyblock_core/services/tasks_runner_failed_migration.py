@@ -43,7 +43,8 @@ def task_runner(task):
         started = mig.start_migration(task, lambda: rpc_client.distr_migration_failure_start(
             task.function_params["distr_name"], device.cluster_device_order,
             mig.qos_high_priority(snode.cluster_id),
-            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS))
+            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
+            relaxed_mode=mig.migration_relaxed(snode.cluster_id)))
         if started is None:
             raise TaskAbort("canceled while starting migration")
         task = started
@@ -75,6 +76,7 @@ SPEC = RunnerSpec(
     on_finish=tag_device_migrated,
     is_eligible=mig.sibling_eligibility,
     interval=3,
+    backoff_reset_key=mig.backoff_reset_key,
 )
 
 

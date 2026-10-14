@@ -115,7 +115,7 @@ def _lvol(uuid, node_id, lvs_name="LVS_100", ha_type="ha", nqn=None):
 def _mock_rpc():
     """Create a standard mock RPC client with all expected methods."""
     rpc = MagicMock()
-    rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+    rpc.get_lvstore.return_value = {"lvs leadership": True}
     # Include the standard _lvol()'s base bdev so the post-examine
     # lvol-presence check in recreate_lvstore_on_non_leader passes.
     rpc.bdev_get.return_value = {"name": "LVS_100/bdev_test", "aliases": []}
@@ -130,7 +130,7 @@ def _mock_rpc():
     rpc.bdev_distrib_check_inflight_io.return_value = False
     rpc.subsystem_create.return_value = True
     rpc.nvmf_subsystem_listener_set_ana_state.return_value = True
-    rpc.jc_suspend_compression.return_value = (True, None)
+    rpc.jc_suspend_compression.return_value = True
     return rpc
 
 

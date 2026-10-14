@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 
 
 def _cluster():
@@ -94,8 +95,9 @@ def _rpc_client():
     # (absent) -> listeners_create(ana_state=...) once.
     mock.listeners_list.return_value = []
     mock.listeners_create.return_value = True
-    # add_lvol_on_node uses nvmf_subsystem_add_ns2, which returns (ret, err).
-    mock.nvmf_subsystem_add_ns2.return_value = (7, None)
+    # add_lvol_on_node uses nvmf_subsystem_add_ns2, which returns the nsid
+    # on success and raises RPCRemoteError on failure.
+    mock.nvmf_subsystem_add_ns2.return_value = 7
     mock.ultra21_util_get_malloc_stats.return_value = {}
 
     # bdev_get(name) is called at least twice against the same name:
@@ -117,7 +119,7 @@ def _rpc_client():
 
     mock.bdev_get.side_effect = _bdev_get
     # _remove_bdev_stack's bdev_lvol_clone branch calls this.
-    mock.delete_lvol.return_value = (True, None)
+    mock.delete_lvol.return_value = True
     return mock
 
 
@@ -181,9 +183,8 @@ class TestNamespacedAttachRace(unittest.TestCase):
         # First add_ns (against the torn-down subsystem) is rejected the way
         # SPDK rejects an unknown NQN; the retry after the downgrade succeeds.
         rpc.nvmf_subsystem_add_ns2.side_effect = [
-            (None, {"code": -32602,
-                    "message": "Unable to find subsystem with NQN"}),
-            (7, None),
+            RPCRemoteError("Unable to find subsystem with NQN", -32602),
+            7,
         ]
         node.rpc_client = MagicMock(return_value=rpc)
 
@@ -273,7 +274,7 @@ class TestPostBdevStackRollback(unittest.TestCase):
         node = _node()
         rpc = _rpc_client()
         # add_ns fails with a non -32602 error -> hard failure + rollback.
-        rpc.nvmf_subsystem_add_ns2.return_value = (False, {"code": -32000})
+        rpc.nvmf_subsystem_add_ns2.side_effect = RPCRemoteError("add failed", -32000)
         node.rpc_client = MagicMock(return_value=rpc)
         mock_db_cls.return_value = MagicMock()
 

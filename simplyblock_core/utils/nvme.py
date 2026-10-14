@@ -102,6 +102,12 @@ def build_nvme_connect_entry(
     """
     keep_alive_tmo = (constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
                       if transport == "tcp" else constants.LVOL_NVME_KEEP_ALIVE_TO)
+    if getattr(cluster, "two_node_arbitration", False):
+        # Two-node arbitration: a host must notice a silent path within the
+        # hold window (hold_ms 2500 < KATO), so keep-alive 4 s with
+        # fast_io_fail 8 s, ctrl_loss 3600 s and reconnect 2 s
+        # (docs/design/two-node-arbitration.md, client requirements).
+        keep_alive_tmo = constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO
     client_data_nic_str = f"--host-iface={cluster.client_data_nic}" if cluster.client_data_nic else ""
     tls_str = host_auth_str = ""
     if host_entry:

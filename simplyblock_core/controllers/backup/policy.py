@@ -295,45 +295,17 @@ def evaluate_schedule(lvol):
 def _auto_backup_lvol(lvol):
     """Create an automatic snapshot, then back up its whole unbacked ancestry.
 
-    A scheduled backup is a `backup_snapshot()` call that names its own
-    snapshot instead of taking one the user already made; see
-    `controller.ensure_snapshot_chain_backed_up` for the chain walk both
-    share.
+    A scheduled backup names its own snapshot (`auto_*`) instead of taking
+    one the user already made, so it shares `backup_controller`'s private
+    `_create_snapshot_and_back_up` -- the same core `backup_lvol` (a direct
+    user-requested backup) uses -- rather than that function's own public
+    entry point, which pins a different, non-overridable name of its own.
+    See its docstring for the restorability pre-check and chain walk.
     """
-    from simplyblock_core.controllers import snapshot_controller
-
-    # Resolve everything the backup needs, and refuse up front if the chain
-    # it would join could never be restorable -- BEFORE taking the snapshot.
-    # This used to create the snapshot first and discover afterwards that the
-    # node, the cluster, or the chain itself was unusable, leaving an
-    # orphaned auto_* snapshot behind on every scheduler tick.
-    node_id = lvol.node_id
+    snap_name = f"{backup_controller.SCHEDULED_BACKUP_SNAPSHOT_PREFIX}{lvol.lvol_name}_{int(time.time())}"
     try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        cluster_id = snode.cluster_id
-        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
-        backup_controller.chain_would_be_restorable(
-            lvol, location, what=f"The backup chain of volume {lvol.lvol_name}")
-    except (KeyError, ValueError, PreconditionError) as e:
-        logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
-        return
-
-    snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
-    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
-    if error:
-        logger.warning(f"Auto-backup snapshot failed for lvol {lvol.get_id()}: {error}")
-        return
-
-    try:
-        snapshot = db_controller.get_snapshot_by_id(snap_id)
-    except KeyError:
-        logger.warning(f"Auto-backup: snapshot {snap_id} not found after creation")
-        return
-
-    try:
-        backup_controller.ensure_snapshot_chain_backed_up(
-            snapshot, lvol, node_id, cluster_id, location)
-    except (KeyError, ValueError, PreconditionError) as e:
+        backup_controller._create_snapshot_and_back_up(lvol, snap_name)
+    except (PreconditionError, RuntimeError) as e:
         logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
 
 

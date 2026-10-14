@@ -1098,10 +1098,11 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             f"[REUSE] snap={snap_uuid[:8]} migration flag already set when "
             f"{tgt_composite} was created; not re-asserting it")
     else:
-        ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_composite)
-        if not ret:
+        try:
+            tgt_rpc.bdev_lvol_set_migration_flag(tgt_composite)
+        except RPCException as e:
             _cleanup()
-            return None, f"bdev_lvol_set_migration_flag failed for snap {snap_uuid}"
+            return None, f"bdev_lvol_set_migration_flag failed for snap {snap_uuid}: {e}"
 
     # Step 4: get map_id of target bdev — used by bdev_lvol_transfer to route
     # data through the hub instead of a per-snap temp NVMe-oF subsystem.
@@ -1126,12 +1127,13 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         return None, hub_err
 
     # Step 6: fire async transfer via hub
-    ret = src_rpc.bdev_lvol_transfer(
-        src_composite, 0, constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev,
-        "migrate", lvol_id=tgt_map_id)
-    if ret is None:
+    try:
+        src_rpc.bdev_lvol_transfer(
+            src_composite, 0, constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev,
+            "migrate", lvol_id=tgt_map_id)
+    except RPCException as e:
         _cleanup()
-        return None, f"bdev_lvol_transfer failed for snap {snap_uuid}"
+        return None, f"bdev_lvol_transfer failed for snap {snap_uuid}: {e}"
 
     return {
         'snap_uuid': snap_uuid,
@@ -1597,12 +1599,13 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
 
             # Update transfer-done status for this entry
             if not t['transfer_done']:
-                result = src_rpc.bdev_lvol_transfer_stat(src_composite)
-                if result is None:
+                try:
+                    result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+                except RPCException as e:
                     migration.transfer_context = {}
                     migration.write_to_db(db.kv_store)
                     return False, True, (
-                        f"bdev_lvol_transfer_stat returned None for {snap_uuid}")
+                        f"bdev_lvol_transfer_stat failed for {snap_uuid}: {e}")
 
                 state = result.get('transfer_state', 'No process')
                 if state == 'In progress':
@@ -1855,7 +1858,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
 
 
 # Outcomes of _poll_intermediate_transfer besides SPDK's own transfer states.
-_TRANSFER_STAT_FAILED = 'stat_failed'   # bdev_lvol_transfer_stat answered nothing
+_TRANSFER_STAT_FAILED = 'stat_failed'   # the bdev_lvol_transfer_stat call failed
 _TRANSFER_TIMED_OUT = 'timeout'         # still in flight after _INTERMEDIATE_POLL_MAX polls
 _TRANSFER_SETTLED = ('Done', 'Failed', 'No process', _TRANSFER_STAT_FAILED)
 
@@ -1869,8 +1872,9 @@ def _poll_intermediate_transfer(src_rpc, src_composite):
     _INTERMEDIATE_POLL_INTERVAL_S apart. Never raises for those outcomes.
     """
     def _stat():
-        result = src_rpc.bdev_lvol_transfer_stat(src_composite)
-        if result is None:
+        try:
+            result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+        except RPCException:
             return _TRANSFER_STAT_FAILED
         return result.get('transfer_state', 'No process')
 
@@ -1898,7 +1902,7 @@ def _get_lvol_delta_bytes(src_rpc, composite_name):
     last snapshot (the dirty delta that would be frozen by bdev_lvol_final_migration).
 
     Uses num_allocated_clusters from bdev_get_bdevs multiplied by the lvstore
-    cluster_size returned by bdev_lvol_get_lvstores.  Returns None on any RPC
+    cluster_size returned by get_lvstore.  Returns None on any RPC
     failure so callers can treat an unknown delta conservatively.
     """
     try:
@@ -1910,10 +1914,10 @@ def _get_lvol_delta_bytes(src_rpc, composite_name):
         if num_alloc is None:
             return None
         lvs_name = lvol_data.get('lvs_name') or composite_name.split('/')[0]
-        lvs_info = src_rpc.bdev_lvol_get_lvstores(lvs_name)
+        lvs_info = src_rpc.get_lvstore(lvs_name)
         if not lvs_info:
             return None
-        cluster_size = lvs_info[0].get('cluster_size', 0)
+        cluster_size = lvs_info.get('cluster_size', 0)
         if not cluster_size:
             return None
         return num_alloc * cluster_size
@@ -2083,10 +2087,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
             _revert_src_replicas("final migration status check failed (crash recovery)")
             raise
         if not result:
-            # Falsy covers both a hard None (RPC/connection error) and the
-            # malformed-but-200 empty body a target restart can produce mid-RPC
-            # (rpc_client._request2 falls back to returning raw response bytes,
-            # e.g. b'', when json decoding fails) — neither is a valid stat dict.
+            # A malformed-but-200 body (a target restart mid-RPC) already
+            # raises RPCProtocolError, caught above. This covers the other
+            # falsy case: a well-formed but empty/None successful result,
+            # which is not a valid stat dict either.
             _revert_src_replicas("final migration status unavailable (crash recovery)")
             _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True,
                                      tgt_sec_rpc=tgt_sec_rpc, tgt_ter_rpc=tgt_ter_rpc,
@@ -2261,10 +2265,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
                 src_lvol_composite, tgt_map_id, tgt_snap_composite,
                 constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
             if not ret:
-                # Falsy, not just None: a target restart mid-RPC can come back as a
-                # 200 with an empty/non-JSON body, which rpc_client._request2 then
-                # returns as raw bytes (e.g. b'') rather than None — that must be
-                # treated the same as a hard failure, not silently as success.
+                # Falsy, not just None: a malformed-but-200 body (a target
+                # restart mid-RPC) already raises RPCProtocolError, caught
+                # below -- this covers a well-formed but empty/falsy result.
                 # Connection timeout or SPDK error (e.g. "File exists" = already in
                 # progress). SPDK may have completed the migration while the RPC
                 # connection dropped. Check transfer_stat before treating this as
@@ -3722,11 +3725,12 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, pri
 
             src_composite = _snap_composite(src_lvstore, snap)
             if not t['transfer_done']:
-                result = src_rpc.bdev_lvol_transfer_stat(src_composite)
-                if result is None:
+                try:
+                    result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+                except RPCException as e:
                     migration.transfer_context = {}
                     migration.write_to_db(db.kv_store)
-                    return False, True, f"bdev_lvol_transfer_stat returned None for {snap_uuid}"
+                    return False, True, f"bdev_lvol_transfer_stat failed for {snap_uuid}: {e}"
                 state = result.get('transfer_state', 'No process')
                 if state == 'In progress':
                     migration.transfer_context = ctx
@@ -3933,11 +3937,12 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc,
 
     src_composite = _snap_composite(src_lvstore, snap)
     if not t.get('transfer_done'):
-        result = src_rpc.bdev_lvol_transfer_stat(src_composite)
-        if result is None:
+        try:
+            result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+        except RPCException as e:
             migration.transfer_context = {'stage': 'intermediate_retry', 'snap_uuid': snap_uuid}
             migration.write_to_db(db.kv_store)
-            return False, True, f"bdev_lvol_transfer_stat returned None for {snap_uuid}"
+            return False, True, f"bdev_lvol_transfer_stat failed for {snap_uuid}: {e}"
         state = result.get('transfer_state', 'No process')
         if state == 'In progress':
             return False, False, None

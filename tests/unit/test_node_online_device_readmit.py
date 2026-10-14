@@ -295,9 +295,9 @@ def _online_node(uuid):
         _device(f"{uuid}-d0", uuid, NVMeDevice.STATUS_ONLINE, order=0),
         _device(f"{uuid}-d1", uuid, NVMeDevice.STATUS_ONLINE, order=1),
     ]
-    # Falsy lvstore list → get_next_cluster_status skips the JM-replication RPC.
+    # Falsy lvstore → get_next_cluster_status skips the JM-replication RPC.
     n.rpc_client = MagicMock(return_value=MagicMock(
-        bdev_lvol_get_lvstores=MagicMock(return_value=[])))
+        get_lvstore=MagicMock(return_value=None)))
     return n
 
 

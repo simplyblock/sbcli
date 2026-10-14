@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 
 from simplyblock_core import utils
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.rpc_client import RPCRemoteError
 
 logger = utils.get_logger(__name__)
 
@@ -410,14 +411,15 @@ def move_namespace(lvol, target_nqn, *, client_swap_ready=False):
         removed.append(rpc)
     added: list = []
     for node, rpc in zip(nodes, rpcs):
-        _, err = rpc.nvmf_subsystem_add_ns2(target_nqn, lvol.top_bdev, lvol.get_ns_uuid(),
-                                            lvol.guid, nsid=new_nsid)
-        if err:
+        try:
+            rpc.nvmf_subsystem_add_ns2(target_nqn, lvol.top_bdev, lvol.get_ns_uuid(),
+                                       lvol.guid, nsid=new_nsid)
+        except RPCRemoteError as e:
             for a in added:
                 a.nvmf_subsystem_remove_ns(target_nqn, new_nsid)
             _restore(lvol, removed, old_nqn, old_nsid)
             raise ColocationError(f"adding {lvol.get_id()} to {target_nqn} on "
-                                  f"{node.get_id()[:8]} failed: {err}")
+                                  f"{node.get_id()[:8]} failed: {e}") from e
         added.append(rpc)
     root = next((x for x in db.get_lvols(nodes[0].cluster_id)
                  if x.nqn == target_nqn and x.get_id() != lvol.get_id()), None)

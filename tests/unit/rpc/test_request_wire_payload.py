@@ -1,10 +1,10 @@
-"""Regression test: _request3 must omit "params" entirely for a zero-argument
+"""Regression test: _request must omit "params" entirely for a zero-argument
 call, not send an empty object.
 
 Some SPDK RPC handlers (framework_start_init is the one that broke in
 production) reject any request carrying a "params" field at all, even `{}` --
 "framework_start_init requires no parameters". _request2 already got this
-right (`if params: payload['params'] = params`); _request3 regressed it by
+right (`if params: payload['params'] = params`); _request regressed it by
 always setting `'params': kwargs`.
 """
 import json
@@ -54,6 +54,6 @@ def test_call_with_arguments_still_sends_params():
         "jsonrpc": "2.0", "id": 1, "result": True,
     })
 
-    client._request3("bdev_examine", name="foo")
+    client._request("bdev_examine", name="foo")
 
     assert _posted_payload(client)["params"] == {"name": "foo"}

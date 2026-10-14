@@ -354,9 +354,9 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
         db.get_cluster_by_id.return_value = _cluster()
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [
-            {"lvs leadership": True, "uuid": "u", "lvs_primary": False}
-        ]
+        rpc.get_lvstore.return_value = {
+            "lvs leadership": True, "uuid": "u", "lvs_primary": False
+        }
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -542,9 +542,9 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
         for n in nodes.values():
             n.write_to_db = MagicMock()
             n.rpc_client = MagicMock(return_value=MagicMock(
-                bdev_lvol_get_lvstores=MagicMock(return_value=[
-                    {"lvs leadership": True, "uuid": "u",
-                     "lvs_primary": False}]),
+                get_lvstore=MagicMock(return_value={
+                    "lvs leadership": True, "uuid": "u",
+                    "lvs_primary": False}),
                 bdev_get=MagicMock(return_value=None),
                 bdev_lvol_set_lvs_opts=MagicMock(return_value=True),
                 bdev_lvol_set_leader=MagicMock(return_value=True),
@@ -585,8 +585,8 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
                    return_value=MagicMock()), \
              patch("simplyblock_core.rpc_client.RPCClient",
                    return_value=MagicMock(
-                       bdev_lvol_get_lvstores=MagicMock(return_value=[
-                           {"lvs leadership": True}]))), \
+                       get_lvstore=MagicMock(return_value=
+                           {"lvs leadership": True}))), \
              patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
                    return_value=[]), \
              patch("simplyblock_core.storage_node_ops._connect_to_remote_devs",

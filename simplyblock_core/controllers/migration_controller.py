@@ -1096,12 +1096,11 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
     Returns (ok: bool, error: str) — error is empty when ok is True.
     """
     try:
-        ret = rpc.bdev_lvol_get_lvstores(lvs_name)
+        lvs = rpc.get_lvstore(lvs_name)
     except Exception as e:
         return False, f"Could not query lvstore {lvs_name}{f' on {node_id}' if node_id else ''}: {e}"
-    if not ret or not isinstance(ret, list) or len(ret) == 0:
+    if lvs is None:
         return False, f"Lvstore {lvs_name} not found{f' on {node_id}' if node_id else ''}"
-    lvs = ret[0]
     is_primary = bool(lvs.get("lvs_primary"))
     is_leader = bool(lvs.get("lvs leadership"))
     if not is_primary or not is_leader:

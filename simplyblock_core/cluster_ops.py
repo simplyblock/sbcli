@@ -1173,6 +1173,7 @@ def activation_minimum_devices(cluster, single_node_cluster) -> int:
 
 def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
+    storage_node_ops._remember_cluster_arbitration(cluster)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")
@@ -1827,8 +1828,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     if ols_status == Cluster.STATUS_UNREADY and not jc_compression_upgrade.resume_is_held(cluster):
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
-                ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                if not ret:
+                if not node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False):
                     logger.info("Failed to resume JC compression adding task...")
                     tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
 

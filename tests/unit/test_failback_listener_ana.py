@@ -221,9 +221,9 @@ class RecreateUsesPresumedLeaderTest(unittest.TestCase):
 
     def test_fallback_follows_the_probe_and_precedes_the_quiesce(self):
         src = self._src()
-        i_probe = src.index('ret[0].get("lvs leadership")')
+        i_probe = src.index('lvs.get("lvs leadership")')
         i_fallback = src.index("_presumed_acting_leader(")
-        i_compression = src.index("jc_compression_get_status(lvs_jm_vuid)")
+        i_compression = src.index("_jc_compression_status_with_retry(current_leader, lvs_jm_vuid)")
         i_fence = src.index(
             "port_block.set_port(sec_node, snode_lvs_port, block=True")
         i_disable = src.index(".jc_disable_replication(lvs_jm_vuid)")

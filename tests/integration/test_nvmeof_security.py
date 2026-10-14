@@ -23,6 +23,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.utils import (
     generate_dhchap_key,
     generate_psk_key,
@@ -630,7 +631,8 @@ class TestRemoveHostFromLvol(unittest.TestCase):
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
-        mock_rpc_inst.subsystem_remove_host.return_value = False
+        mock_rpc_inst.subsystem_remove_host.side_effect = RPCRemoteError(
+            "Invalid parameters", code=-32602)
         MockRPC.return_value = mock_rpc_inst
 
         result, err = remove_host_from_lvol("lvol-1", "nqn:host1")
@@ -719,9 +721,9 @@ class TestBdevNvmeSetOptionsParams(unittest.TestCase):
         """bdev_nvme_set_options must never send dhchap params (moved to nvmf_set_config)."""
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request3 = MagicMock(return_value=True)
+        client._request = MagicMock(return_value=True)
         client.bdev_nvme_set_options()
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
 
@@ -731,13 +733,13 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
     def _client(self):
         from simplyblock_core.rpc_client import RPCClient
         c = RPCClient.__new__(RPCClient)
-        c._request3 = MagicMock(return_value=True)
+        c._request = MagicMock(return_value=True)
         return c
 
     def test_without_dhchap_only_pollers_mask_sent(self):
         client = self._client()
         client.nvmf_set_config("0x1")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["poll_groups_mask"], "0x1")
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
@@ -747,7 +749,7 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
         client.nvmf_set_config("0x3",
                                dhchap_digests=["sha256", "sha384", "sha512"],
                                dhchap_dhgroups=["ffdhe2048"])
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["poll_groups_mask"], "0x3")
         self.assertEqual(params["dhchap_digests"], ["sha256", "sha384", "sha512"])
         self.assertEqual(params["dhchap_dhgroups"], ["ffdhe2048"])
@@ -759,7 +761,7 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
         client.nvmf_set_config("0x1",
                                dhchap_digests=constants.DHCHAP_DIGESTS,
                                dhchap_dhgroups=[constants.DHCHAP_DHGROUP])
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertIn("sha256", params["dhchap_digests"])
         self.assertIn("sha384", params["dhchap_digests"])
         self.assertIn("sha512", params["dhchap_digests"])
@@ -775,17 +777,17 @@ class TestSubsystemCreateAllowAnyHost(unittest.TestCase):
     def test_default_allow_any_host_true(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request3 = MagicMock(return_value=True)
+        client._request = MagicMock(return_value=True)
         client.subsystem_create("nqn:test", "serial", "model")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertTrue(params["allow_any_host"])
 
     def test_allow_any_host_false(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request3 = MagicMock(return_value=True)
+        client._request = MagicMock(return_value=True)
         client.subsystem_create("nqn:test", "serial", "model", allow_any_host=False)
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertFalse(params["allow_any_host"])
 
 
@@ -798,13 +800,13 @@ class TestSubsystemAddHostParams(unittest.TestCase):
     def _client(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request3 = MagicMock(return_value=True)
+        client._request = MagicMock(return_value=True)
         return client
 
     def test_basic_no_security(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["nqn"], "nqn:sub")
         self.assertEqual(params["host"], "nqn:host")
         self.assertNotIn("psk", params)
@@ -813,14 +815,14 @@ class TestSubsystemAddHostParams(unittest.TestCase):
     def test_with_psk(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host", psk="/tmp/psk.key")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["psk"], "/tmp/psk.key")
 
     def test_with_dhchap_keys(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   dhchap_key="key1", dhchap_ctrlr_key="key2")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["dhchap_key"], "key1")
         self.assertEqual(params["dhchap_ctrlr_key"], "key2")
 
@@ -828,7 +830,7 @@ class TestSubsystemAddHostParams(unittest.TestCase):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   psk="psk_val", dhchap_key="dk", dhchap_ctrlr_key="dck")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["psk"], "psk_val")
         self.assertEqual(params["dhchap_key"], "dk")
         self.assertEqual(params["dhchap_ctrlr_key"], "dck")
@@ -837,20 +839,20 @@ class TestSubsystemAddHostParams(unittest.TestCase):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   dhchap_key="dk", dhchap_group="ffdhe2048")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["dhchap_group"], "ffdhe2048")
 
     def test_dhchap_group_null_passed(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host",
                                   dhchap_key="dk", dhchap_group="null")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertEqual(params["dhchap_group"], "null")
 
     def test_dhchap_group_omitted_when_none(self):
         client = self._client()
         client.subsystem_add_host("nqn:sub", "nqn:host", dhchap_key="dk")
-        params = client._request3.call_args.kwargs
+        params = client._request.call_args.kwargs
         self.assertNotIn("dhchap_group", params)
 
 
@@ -863,9 +865,9 @@ class TestSubsystemRemoveHost(unittest.TestCase):
     def test_remove_host_params(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request3 = MagicMock(return_value=True)
+        client._request = MagicMock(return_value=True)
         client.subsystem_remove_host("nqn:sub", "nqn:host")
-        client._request3.assert_called_once_with("nvmf_subsystem_remove_host",
+        client._request.assert_called_once_with("nvmf_subsystem_remove_host",
                                                   nqn="nqn:sub", host="nqn:host")
 
 
@@ -1068,7 +1070,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc_inst.subsystem_get.return_value = None
         # The inflight-IO drain check on the leader must not time out.
         mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
-        mock_rpc_inst.jc_suspend_compression.return_value = (True, None)
+        mock_rpc_inst.jc_suspend_compression.return_value = True
         # Post-examine verification scans bdev_get() for each expected lvol
         # (by uuid or lvs/bdev alias); without this the check aborts.
         mock_rpc_inst.bdev_get.return_value = {
@@ -1207,7 +1209,8 @@ class TestRemoveHostKeyringCleanup(unittest.TestCase):
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
-        mock_rpc_inst.subsystem_remove_host.return_value = False  # SPDK error
+        mock_rpc_inst.subsystem_remove_host.side_effect = RPCRemoteError(
+            "Invalid parameters", code=-32602)  # SPDK error
         MockRPC.return_value = mock_rpc_inst
 
         result, err = remove_host_from_lvol("lvol-1", "nqn:host1")

@@ -128,13 +128,13 @@ class TestRpcClientPolicyParams(unittest.TestCase):
     def _rpc(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request3 = MagicMock(return_value=True)
+        client._request = MagicMock(return_value=True)
         return client
 
     @staticmethod
     def _params(client):
         # request_timeout is a transport-level override, not an RPC param.
-        params = dict(client._request3.call_args.kwargs)
+        params = dict(client._request.call_args.kwargs)
         params.pop("request_timeout", None)
         return params
 

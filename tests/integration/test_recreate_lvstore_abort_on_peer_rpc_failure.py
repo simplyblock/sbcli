@@ -210,11 +210,11 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
 
         rpc = MagicMock()
         # On snode: leader=False (snode just restarted, has not promoted yet)
-        rpc.bdev_lvol_get_lvstores.return_value = [{
+        rpc.get_lvstore.return_value = {
             "lvs leadership": True,  # default: peer reports as leader
             "lvs_primary": False,
             "uuid": "lvs-uuid",
-        }]
+        }
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -353,7 +353,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
     # Leader-detection RPC raises → abort (early, before _create_bdev_stack)
     # ----------------------------------------------------------------------
     def test_leader_detection_rpc_failure_aborts_before_bdev_stack(self):
-        """get_lvstores on the only peer raises (mgmt slow). Must abort
+        """get_lvstore on the only peer raises (mgmt slow). Must abort
         without creating the bdev stack on snode."""
         from simplyblock_core import storage_node_ops
 
@@ -361,8 +361,8 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         m = self._enter_patches(patches)
         nodes, rpc, snode_api = self._setup_common(m)
 
-        # rpc returned by RPCClient(sec_node...) raises on get_lvstores
-        rpc.bdev_lvol_get_lvstores.side_effect = Exception("simulated peer mgmt timeout")
+        # rpc returned by RPCClient(sec_node...) raises on get_lvstore
+        rpc.get_lvstore.side_effect = Exception("simulated peer mgmt timeout")
 
         snode = nodes["snode"]
         with self.assertRaises(Exception) as ctx:
@@ -418,11 +418,11 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         # bound rpc_client mock instead. Mirror the leader-detection
         # response on leader_rpc so sec is still selected as leader.
         leader_rpc = MagicMock()
-        leader_rpc.bdev_lvol_get_lvstores.return_value = [{
+        leader_rpc.get_lvstore.return_value = {
             "lvs leadership": True,
             "lvs_primary": False,
             "uuid": "lvs-uuid",
-        }]
+        }
         leader_rpc.jc_compression_get_status.side_effect = Exception(
             "simulated jc_compression timeout")
         nodes["sec"].rpc_client = MagicMock(return_value=leader_rpc)

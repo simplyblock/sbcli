@@ -30,7 +30,7 @@ class _Recorder:
 def _client(monkeypatch):
     client = rpc_client_instance()
     recorder = _Recorder()
-    monkeypatch.setattr(client, "_request3", recorder)
+    monkeypatch.setattr(client, "_request", recorder)
     return client, recorder
 
 

@@ -169,6 +169,11 @@ class StorageNode(BaseNodeObject):
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
+    # Two-node arbitration: positive fencing evidence for this node from the
+    # edge operator (BMC fence done, or the out-of-service taint present).
+    # Lets the arbiter grant the peer solo operation even when THIS node is the
+    # preferred one (docs/design/two-node-arbitration.md, invariant 3).
+    remediation_fenced: bool = False
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: list[str] = default_factory(list)
@@ -955,7 +960,7 @@ class StorageNode(BaseNodeObject):
         deadline = time.time() + retry * delay
         while retry > 0:
             try:
-                if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+                if not self.rpc_client().get_lvstore(self.lvstore):
                     return True  # no lvstore means no need to wait
                 jm_replication_tasks = False
                 ret = self.rpc_client().jc_get_jm_status(jm_vuid)

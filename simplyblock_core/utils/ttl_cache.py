@@ -160,7 +160,7 @@ LEADER_TTL_SEC = 8
 # the LVS fail fast inside this window instead of re-running the probe/recovery
 # machinery per request — a leaderless LVS under a mass-create workload
 # otherwise probes every member several times per second for hours (run
-# 20260712-231123: 61k bdev_lvol_get_lvstores per member). The TTL bounds how
+# 20260712-231123: 61k get_lvstore per member). The TTL bounds how
 # long a restored leader can go unnoticed, so keep it short-ish.
 NO_LEADER_TTL_SEC = 15
 QUORUM_VERDICT_TTL_SEC = 8

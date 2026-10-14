@@ -429,9 +429,9 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
         cluster.nqn = "nqn.cluster.c1"
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [
-            {"lvs leadership": True, "uuid": "u", "lvs_primary": False}
-        ]
+        rpc.get_lvstore.return_value = {
+            "lvs leadership": True, "uuid": "u", "lvs_primary": False
+        }
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True

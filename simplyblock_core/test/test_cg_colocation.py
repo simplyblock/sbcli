@@ -10,6 +10,7 @@ from simplyblock_core.controllers import cg_colocation as cgl
 from simplyblock_core.controllers import lvol_controller, migration_controller
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
+from simplyblock_core.rpc_client import RPCRemoteError
 
 
 def _lv(uid, nqn, node="N1", lvs="LVS_1", pool="P1", maxns=4, nsid=1, size=10,
@@ -289,7 +290,10 @@ def _move_fixture(add_err_on_second=False):
         rpc = mock.MagicMock()
         rpc.subsystem_get.return_value = {"namespaces": [{"nsid": 1}, {"nsid": 2}]}
         err = "boom" if (add_err_on_second and i == 1) else None
-        rpc.nvmf_subsystem_add_ns2.return_value = (not err, err)
+        if err:
+            rpc.nvmf_subsystem_add_ns2.side_effect = RPCRemoteError(err, -1)
+        else:
+            rpc.nvmf_subsystem_add_ns2.return_value = 3
         node.rpc_client.return_value = rpc
         nodes.append(node)
         rpcs.append(rpc)

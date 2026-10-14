@@ -29,13 +29,14 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.rpc_client import RPCRemoteError
 
 
 class ListenerOrderingTest(unittest.TestCase):
 
     def setUp(self):
         self.rpc = MagicMock(name="rpc")
-        self.rpc.nvmf_subsystem_add_ns2.return_value = ("3", None)
+        self.rpc.nvmf_subsystem_add_ns2.return_value = "3"
         # publish_lvol_listeners creates a listener once, via ensure_listener:
         # listeners_list (absent) -> listeners_create(ana_state=...).
         self.rpc.listeners_list.return_value = []
@@ -123,8 +124,7 @@ class ListenerOrderingTest(unittest.TestCase):
             self.lvol.nqn, 3)
 
     def test_a_failed_namespace_add_publishes_no_listener(self):
-        self.rpc.nvmf_subsystem_add_ns2.return_value = (
-            None, {"code": -1, "message": "no slot"})
+        self.rpc.nvmf_subsystem_add_ns2.side_effect = RPCRemoteError("no slot", -1)
         self.rpc.subsystem_get.return_value = {"nqn": self.lvol.nqn}
 
         lvol_controller.add_lvol_on_node(self.lvol, self.snode)
