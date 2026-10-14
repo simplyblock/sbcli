@@ -1013,6 +1013,106 @@ def _failback_scenario(monkeypatch, db, unshipped=()):
     return local, policy_id
 
 
+def _reprotect_scenario(monkeypatch, db):
+    """The DB state after an UNPLANNED failover X->Y, at the moment the recovered
+    site X is demoted back to Secondary (re-protect).
+
+    Origin group X on CL_SRC still holds its members -- now superseded failed-over
+    SOURCES (the peer's clones carry every post-failover write) -- and the peer
+    group Y on CL_TGT holds the live failed-over TARGET clones the app writes to.
+    This is bit-for-bit the replication state of a relocate fail-back
+    (``_failback_scenario``); the ONLY thing that separates them is that here the
+    peer is still the serving primary. Returns (origin_group, policy_id)."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    local = ConsistencyGroup()
+    local.uuid, local.cluster_id, local.group_name = "CG_SRC", "CL_SRC", "cg"
+    local.policy_id = policy_id
+    local.members = {"ORIG_PB1": {"joined_seq": 1, "removed_seq": 0},
+                     "ORIG_PB2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(local)
+
+    peer = ConsistencyGroup()
+    peer.uuid, peer.cluster_id, peer.group_name = "CG_TGT", "CL_TGT", "cg"
+    peer.members = {"PB1": {"joined_seq": 1, "removed_seq": 0},
+                    "PB2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(peer)
+
+    for src, tgt in (("ORIG_PB1", "PB1"), ("ORIG_PB2", "PB2")):
+        origin, clone = _lvol(src), _lvol(tgt)
+        origin.cluster_id, clone.cluster_id = "CL_SRC", "CL_TGT"
+        clone.group_id = peer.get_id()
+        db._lvols.extend([origin, clone])
+        rep = LVolReplication()
+        rep.source_lvol = origin                       # X's superseded source
+        rep.target_lvol = clone                        # Y's live clone
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+    return local, policy_id
+
+
+def test_group_demote_leaves_the_serving_peer_untouched_on_reprotect(monkeypatch):
+    """Regression: #31 -- after an UNPLANNED failover X->Y the app runs on Y, and
+    healing X sends a group DemoteVolume to X. X's members are superseded
+    failed-over SOURCES, which is exactly the condition demote_group's
+    peer-resolution branch (written for a relocate fail-back) keys on, so it
+    resolved to the PEER group on Y -- the LIVE app -- and fenced its volumes and
+    took a demote cut, cutting the survivor off its disk the instant the recovered
+    site rejoined (WordPress on B, Gitea on A; run 20261013-0050-ebs).
+
+    The replication state is identical to a relocate fail-back, so state alone
+    cannot tell the two apart: the discriminator is that the peer is still being
+    served. When it is, the demote must leave the peer untouched and fence only
+    X's own superseded sources, returning done with nothing to ship."""
+    from simplyblock_core.controllers import consistency_group_controller as cgc
+    from simplyblock_core.controllers import lvol_controller as lc
+    from simplyblock_core.services import replication_final_step as rfs
+
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(cgc, "db", db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    local, _ = _reprotect_scenario(monkeypatch, db)
+
+    # The peer (Y) is the serving primary: its clones have a connected host.
+    # raising=False so this test is runnable (and RED) against the unfixed tree,
+    # where the discriminator does not exist yet.
+    monkeypatch.setattr(cgc, "_peer_group_is_being_served",
+                        lambda members: True, raising=False)
+
+    snapped: list = []
+    failed_back: list = []
+    demoted: list = []
+    monkeypatch.setattr(rfs, "fence_source_paths", lambda *a, **k: None)
+
+    def _record_group_snapshot(group, **kwargs):
+        snapped.append(group.uuid)
+        return [], None
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _record_group_snapshot)
+
+    def _record_demote(lvol_id):
+        demoted.append(lvol_id)
+        return {"demoted": True}
+    monkeypatch.setattr(lc, "demote_lvol", _record_demote)
+    monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
+
+    result = cgc.demote_group(local)
+
+    # The live peer must be untouched -- no group cut, no reverse-pipe reconfig.
+    assert snapped == [], \
+        "the serving peer's group must not be snapshotted -- fencing it cuts off " \
+        "the running app (#31)"
+    assert failed_back == [], \
+        "the serving peer's reverse pipe must not be reconfigured"
+    # Only X's own superseded sources are fenced-and-done.
+    assert sorted(demoted) == ["ORIG_PB1", "ORIG_PB2"], demoted
+    assert result["demoted"] is True, result
+    assert {m["lvol_id"] for m in result["members"]} == {"ORIG_PB1", "ORIG_PB2"}, \
+        result
+
+
 def test_failback_group_clones_peer_members_home_pinned_to_the_demote_cut(monkeypatch):
     """Regression (2026-09-27): promoting an empty local group on fail-back cloned
     NOTHING -- the promote reported success while the workload kept writing to the
@@ -1115,6 +1215,12 @@ def test_group_demote_resolves_to_peer_primary_and_ships_home(monkeypatch):
         rep.target_lvol = db.get_lvol_by_id(src)
         rep.state = LVolReplication.STATE_FAILED_OVER
         db._replications.append(rep)
+
+    # Relocate precondition: Ramen stopped the workload on the peer before issuing
+    # the demote, so the peer's clones have no connected host. That is what makes
+    # resolving the demote here (and shipping the cut home) safe -- see #31 and
+    # test_group_demote_leaves_the_serving_peer_untouched_on_reprotect.
+    monkeypatch.setattr(cgc, "_peer_group_is_being_served", lambda members: False)
 
     failed_back: list = []
     monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
