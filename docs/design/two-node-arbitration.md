@@ -284,6 +284,8 @@ Who lifts the client-port block (campaign c3, F8 and 03):
   In c3/03 the defensive unblock opened the stale node's port 4426; 70 ms later that node took
   over LVS_6 on new IO, could not read an md stripe and aborted. The successful restart's own
   unblock still opens it: the up-to-date node is then back.
+- The storage node monitor's stale-port remediation and the port-allow task follow the same rule
+  (section 7.13): neither lifts a client port while one of the node's LVS is fenced or holding.
 
 ## 7. Arbiter (sbcli)
 
@@ -590,6 +592,23 @@ lifts any client port blocked longer than 12 s on a node with a healthy hublvol.
 clusters it now leaves a port whose LVS is fenced or holding on that node (the same guard as the
 restart flow's unblocks, `_two_node_peer_port_must_stay_blocked`); the unfence lifts it. Regular
 clusters are unchanged (no status call).
+
+**Port-allow respects the fence (c6, F15).** Once it could complete on two nodes, the port-allow
+task lifted the client ports of both nodes during `fence_both`, 25-35 s before the arbiter's
+unfence (c6: 08, 10b and the 07/08 reruns). On an arbitrated cluster it now defers while one of
+the node's LVS is fenced or holding, or the HA state cannot be read
+(`tasks_runner_port_allow._two_node_fence_holds_ports`).
+
+- Deferred, not completed without the unblock: a block SPDK set on the outage before the fence
+  is not the fence's, so the unfence does not lift it and only this task does, once the node is
+  unfenced.
+- Deferred right after the remote JMs are reconnected, where the pre-F14 task also deferred: that
+  reconnect is what lets the remote JM turn healthy, which the unfence waits for. No deadlock:
+  the unfence does not wait for the task, the task proceeds on its next pass (5 s) after the
+  unfence, and the arbiter's leadership restoration waits for a port-allow task only up to
+  `leadership_task_stale_s`.
+- Only a node with exactly one remote JM is checked, so a cluster with 3 or more members never
+  reaches it (no extra read or call).
 
 ## 8. Healing and re-admission
 
