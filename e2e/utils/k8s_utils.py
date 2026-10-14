@@ -1904,7 +1904,7 @@ class K8sUtils:
                              ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
                              compression: bool = False, encryption: bool = False,
                              fabric: str = "tcp",
-                             max_namespace_per_subsys: int = 1,
+                             max_namespace_per_subsys: int = 30,
                              dhchap_node_selector: str | None = None,
                              cluster_name: str | None = None, namespace: str | None = None):
         """Create a simplyblock CSI StorageClass.

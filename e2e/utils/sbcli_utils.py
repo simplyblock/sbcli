@@ -582,7 +582,7 @@ class SbcliUtils:
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
                  crypto=False, fabric="tcp", cluster_id=None,
-                 max_namespace_per_subsys=None, namespace=None):
+                 max_namespace_per_subsys=30, namespace=None):
         """Adds lvol with given params
         """
         lvols = self.list_lvols(exclude_in_deletion=True)
