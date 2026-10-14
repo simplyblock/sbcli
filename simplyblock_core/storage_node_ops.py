@@ -13474,6 +13474,34 @@ def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activati
             snode, force=force, lvs_primary=lvs_primary, activation_mode=False)
 
 
+def _fence_rpc_bounds(fence_held: bool, fence_elapsed: float,
+                      budget: float | None = None) -> tuple[float | None, int | None]:
+    """``(timeout, retry)`` for one RPC of the lvstore restart flow.
+
+    While a peer's client port is fenced every call is bounded to ``budget``
+    (``FENCE_RPC_TIMEOUT_SEC`` unless the call asks for more), clamped to the
+    time left before ``FENCE_DEADLINE_SEC``: the fence has to be lifted by us
+    before SPDK converts the block to reject (ack_timeout * 4 = 8s) and
+    quiesces every client qpair on the port. Overrunning the budget there
+    aborts the restart, which the task runner re-queues.
+
+    With no port fenced there is nothing that budget protects, and applying
+    it only turns a slow-but-correct answer into an endless restart loop:
+    2026-10-14 run 63, after a removal left a survivor's SPDK aborted, every
+    auto-restart cycle discarded the whole cluster activation because
+    ``bdev_lvol_set_leader`` on the crashed node took 669ms against the 0.5s
+    budget with ``fence 0.000s`` -- seven cycles, each one draining the
+    cluster back to all-offline. Unfenced calls therefore get the ordinary
+    client (``None``, ``None``), the same bounds every other restart step
+    outside the window runs with.
+    """
+    if not fence_held:
+        return None, None
+    budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
+    remaining = constants.FENCE_DEADLINE_SEC - fence_elapsed
+    return min(budget, remaining), constants.FENCE_RPC_RETRY
+
+
 def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
     """Recreate LVStore as leader.
 
@@ -13927,29 +13955,34 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 f"{constants.FENCE_DEADLINE_SEC}s deadline (reject threshold 8s)")
 
     def _fenced(method, *args, budget=None, **kwargs):
-        """Run one RPC while a peer's client port is fenced.
+        """Run one RPC of the restart flow, bounded while a peer port is fenced.
 
         ``method`` is the RPCClient method name. The client is built per call
         so its timeout can be clamped to the time left on the fence -- a fixed
         per-call timeout is not enough on its own, since a 6s call started late
         in the window would still overrun the deadline.
 
+        With no peer port fenced (every peer skipped as disconnected or
+        offline) the call runs on the ordinary client: see
+        ``_fence_rpc_bounds`` for why the fence budget must not apply there.
+
         Any failure, a timeout above all, releases the fence and aborts the
         restart. The task runner re-queues an aborted restart; a quiesced
         client path is not recoverable.
         """
-        budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
-        timeout = budget
-        if _block_started:
-            remaining = constants.FENCE_DEADLINE_SEC - _fence_elapsed()
-            if remaining <= 0:
-                _check_fence_deadline(method)
-            timeout = min(budget, remaining)
+        timeout, retry = _fence_rpc_bounds(bool(_block_started), _fence_elapsed(), budget)
+        if timeout is not None and timeout <= 0:
+            _check_fence_deadline(method)
         try:
-            client = snode.rpc_client(timeout=timeout,
-                                      retry=constants.FENCE_RPC_RETRY)
+            if timeout is None:
+                client = snode.rpc_client()
+            else:
+                client = snode.rpc_client(timeout=timeout, retry=retry)
             return getattr(client, method)(*args, **kwargs)
         except Exception as e:
+            if timeout is None:
+                _abort_restart_and_unblock(
+                    f"{method} failed with no port fenced (client defaults): {e}")
             _abort_restart_and_unblock(
                 f"{method} failed inside the port-fence window "
                 f"(budget {timeout:.2f}s, fence {_fence_elapsed():.3f}s): {e}")
