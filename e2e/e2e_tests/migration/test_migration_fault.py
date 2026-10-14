@@ -536,7 +536,7 @@ class MigrationCancel(_FaultBase):
             self.assert_placed_on(self._vol_id, elsewhere,
                                   f"(MIG-F-017, after the {case_id} cancel)")
             self.verify(self._vol, self._sums,
-                        f"after re-migrating post-cancel (MIG-F-017)")
+                        "after re-migrating post-cancel (MIG-F-017)")
             self.assert_migration_invariants(
                 self._vol_id, here, elsewhere,
                 f"(MIG-F-017, after the {case_id} cancel)")

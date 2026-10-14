@@ -505,10 +505,22 @@ class MigrationProtectionGuards(MigrationTestBase):
         #   "INFO: Removing snapshot: 4c44671f-..."
         #   "DEBUG: Requesting method: bdev_lvol_get_lvstores"
         # which is the product going ahead and deleting it.
+        # No --force, and that is the whole correction. The run that made
+        # this case look like a product gap asked for a refusal while
+        # passing the one flag that waives it: snapshot_controller.py
+        # guards with `if active_mig and not force_delete`, so --force is
+        # a documented bypass and the product was right to delete.
+        #
+        # The sibling guards are NOT waivable -- lvol delete and resize
+        # both use a bare `if active_mig:` (lvol_controller.py:2725, 3827)
+        # and refuse even under --force, which is why MIG-N-008 passes
+        # while passing --force too. Three guards documented in one
+        # sentence, two absolute and one bypassable; that difference is
+        # worth a question to dev, but it is not this case's business.
         sid = self.snap_id(snaps[0])
         if sid:
             out, err = self._cli(f"{self.base_cmd} -d snapshot delete {sid} "
-                                 f"--force 2>&1")
+                                 f"2>&1")
             sleep_n_sec(5)
             if self.snap_id(snaps[0]):
                 self.logger.info(
@@ -523,7 +535,9 @@ class MigrationProtectionGuards(MigrationTestBase):
                     f"active migration' and 'Cannot resize lvol ...: active "
                     f"migration' -- so deletion and resize are enforced and "
                     f"snapshot deletion is not, though all three are "
-                    f"documented together: 'Volumes undergoing migration are "
+                    f"documented together (and this delete passed no "
+                    f"--force, so the documented bypass is not the "
+                    f"explanation): 'Volumes undergoing migration are "
                     f"protected from deletion, resizing, and snapshot "
                     f"deletion until the migration completes or is "
                     f"canceled.' A migration transfers the ancestry chain "
