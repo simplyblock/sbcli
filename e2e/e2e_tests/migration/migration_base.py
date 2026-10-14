@@ -522,6 +522,23 @@ class MigrationTestBase(TestClusterBase):
                                 vol_id, str(exc)[:140])
             return None
 
+    def lvol_size(self, vol_id):
+        """The volume's size as the control plane records it.
+
+        Read rather than asserted on a refusal message, because a refused
+        expand on k8s produces no message at all: the request is accepted
+        into the PVC's spec and status.capacity simply never follows.
+        """
+        try:
+            d = self.sbcli_utils.get_lvol_details(lvol_id=vol_id)
+            rows = d.get("results", d) if isinstance(d, dict) else d
+            row = (rows[0] if isinstance(rows, list) and rows else rows) or {}
+            return self._get(row, "size")
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[MIG] could not read the size of %s: %s",
+                                vol_id, str(exc)[:140])
+            return None
+
     # ── the two-phase protocol ───────────────────────────────────────────
     #: `volume migrate` prints "Migration ID: <uuid>"; `volume migrate
     #: --batch` prints "Migration Group ID: <uuid>" instead (clibase.py:978
@@ -1727,6 +1744,19 @@ class MigrationTestBase(TestClusterBase):
                 f"are invisible until the next migration to this node "
                 f"collides with them.")
         self.logger.info("[MIG] no leftovers on target %s %s", node_id, context)
+
+    def pvc_of(self, vol_id):
+        """The PVC backing this volume, or None if it was not made as one.
+
+        The claim rather than the PV, because a k8s user acts on the
+        claim: they delete it, they patch its requested size. The PV is
+        what the operator addresses a migration by, which is a different
+        question and already has :meth:`_pv_for_vol`.
+        """
+        for name, reg in self._volume_registry.items():
+            if reg.get("lvol_id") == vol_id and reg.get("pvc_name"):
+                return reg["pvc_name"]
+        return None
 
     # -- post-migration invariants ---------------------------------------
     #: A bdev the migration machinery creates on the target and renames away

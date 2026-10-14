@@ -472,26 +472,63 @@ class MigrationProtectionGuards(MigrationTestBase):
             raise SkippedTestsException(
                 "MIG-N-008: the migration finished before the guarded operations could be attempted")
 
+        # On k8s a user does not have sbctl. They delete a PVC and patch
+        # its requested size, and the CSI driver turns that into the
+        # DeleteVolume and ControllerExpandVolume the guard actually
+        # sees. Running sbctl here instead would reach the control plane
+        # directly, skipping the operator and the driver -- so it would
+        # pass or fail without saying anything about what a k8s user
+        # experiences, which is the only thing this lane is for.
+        #
+        # It also changes what a refusal LOOKS like, which is why none of
+        # the three asserts on wording any more. A refused PVC delete
+        # does not print an error: the claim sits in Terminating behind
+        # its finalizer. A refused expand does not either: the request is
+        # accepted into spec and status.capacity never follows. So all
+        # three are judged the same way on both backends -- by whether
+        # the thing the guard protects is still there.
+        pvc = self.pvc_of(vol_id) if self.k8s_test else None
+
         # -- MIG-N-008 delete, mid-migration -----------------------------
-        out, err = self._cli(f"{self.base_cmd} -d volume delete {vol_id} "
-                             f"--force 2>&1")
-        self.assert_refused(
-            "MIG-N-008", out + err,
-            "deleting a volume while it is migrating", reject_id=False)
+        if pvc:
+            k8s = self._ensure_k8s_utils()
+            self.logger.info("[MIG-N-008] deleting PVC %s mid-migration", pvc)
+            k8s.delete_pvc(pvc)
+        else:
+            out, err = self._cli(f"{self.base_cmd} -d volume delete {vol_id} "
+                                 f"--force 2>&1")
+            self.assert_refused(
+                "MIG-N-008", out + err,
+                "deleting a volume while it is migrating", reject_id=False)
+        sleep_n_sec(15)
         if not self.lvol_node(vol_id):
             raise AssertionError(
-                f"[MIG-N-008] the refusal was printed but {vol} is GONE from "
-                f"the cluster. The guard reported itself and then deleted "
-                f"the volume anyway, which is worse than no guard: the "
-                f"migration is still running against storage that no longer "
-                f"has an owner.")
+                f"[MIG-N-008] {vol} is GONE from the cluster after a delete "
+                f"issued while it was migrating. The migration is still "
+                f"running against storage that no longer has an owner, which "
+                f"is worse than no guard at all.")
+        self.logger.info("[MIG-N-008] PASS: %s survived the delete", vol)
 
         # -- MIG-N-009 resize, mid-migration -----------------------------
-        out, err = self._cli(f"{self.base_cmd} -d volume resize {vol_id} "
-                             f"4G 2>&1")
-        self.assert_refused(
-            "MIG-N-009", out + err,
-            "resizing a volume while it is migrating", reject_id=False)
+        before = self.lvol_size(vol_id)
+        if pvc:
+            self.logger.info("[MIG-N-009] expanding PVC %s mid-migration", pvc)
+            self._ensure_k8s_utils().resize_pvc(pvc, "4Gi")
+        else:
+            out, err = self._cli(f"{self.base_cmd} -d volume resize {vol_id} "
+                                 f"4G 2>&1")
+            self.assert_refused(
+                "MIG-N-009", out + err,
+                "resizing a volume while it is migrating", reject_id=False)
+        sleep_n_sec(15)
+        after = self.lvol_size(vol_id)
+        if before is not None and after is not None and after != before:
+            raise AssertionError(
+                f"[MIG-N-009] {vol} grew from {before} to {after} during its "
+                f"migration. The copy sizes the target from the source at the "
+                f"moment it starts, so a volume that grows underneath it has "
+                f"more data than the target was built to hold.")
+        self.logger.info("[MIG-N-009] PASS: %s still %s", vol, before)
 
         # -- MIG-N-010 snapshot delete, mid-migration --------------------
         # Judged on STATE, not on wording. Whether the product refuses
@@ -517,11 +554,24 @@ class MigrationProtectionGuards(MigrationTestBase):
         # while passing --force too. Three guards documented in one
         # sentence, two absolute and one bypassable; that difference is
         # worth a question to dev, but it is not this case's business.
+        # Same split as the two above. On k8s the snapshot is a
+        # VolumeSnapshot and the user deletes that; the CSI driver turns
+        # it into the DeleteSnapshot the guard sees. There is no --force
+        # on that path at all, which is worth saying plainly: the bypass
+        # that made the docker reading of this case wrong is not even
+        # expressible here, so k8s exercises the guard as written.
         sid = self.snap_id(snaps[0])
         if sid:
-            out, err = self._cli(f"{self.base_cmd} -d snapshot delete {sid} "
-                                 f"2>&1")
-            sleep_n_sec(5)
+            if self.k8s_test:
+                self.logger.info(
+                    "[MIG-N-010] deleting VolumeSnapshot %s mid-migration",
+                    snaps[0])
+                self._ensure_k8s_utils().delete_volume_snapshot(snaps[0])
+                out, err = "", ""
+            else:
+                out, err = self._cli(
+                    f"{self.base_cmd} -d snapshot delete {sid} 2>&1")
+            sleep_n_sec(15)
             if self.snap_id(snaps[0]):
                 self.logger.info(
                     "[MIG-N-010] PASS: %s is still there, so the guard held. "
