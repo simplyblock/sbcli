@@ -101,6 +101,7 @@ class Arbiter:
                  devices_ok: Callable | None = None,
                  rebuild_task_errors: Callable | None = None,
                  promote_survivor: Callable | None = None,
+                 restore_leadership: Callable | None = None,
                  notify: Callable | None = None):
         self.db = db
         self.clock = clock
@@ -136,6 +137,15 @@ class Arbiter:
         #: (cluster_id, survivor, primary, lvs_name) -> bool: make the survivor
         #: the leader of the lost primary's LVS (campaign c4, F13)
         self.promote_survivor = promote_survivor or default_promote_survivor
+        #: (cluster_id, primary, peer, lvs_name) -> bool: the LVS is led by a
+        #: node again, with ANA optimized on its leader (campaign c5, 07/08)
+        self.restore_leadership = restore_leadership or default_restore_leadership
+        #: cluster_id -> {lvs_name: {"primary": id, "vuid": int, "why": str}}:
+        #: LVS whose leadership is put back once both nodes serve it again
+        self.lead_pending: dict = {}
+        #: (cluster_id, lvs_name) restorations running / ms of the last attempt
+        self.lead_running: set = set()
+        self.lead_tried_at: dict = {}
         #: (cluster_id, node, code, message) -> None: cluster event log
         self.notify = notify or default_notify
         #: node_id -> ms when its rebuild was first seen failing on unavailable devices
@@ -662,6 +672,10 @@ class Arbiter:
                     continue
                 for v in fenced:
                     sig.lvs_state[v] = LVS_NORMAL
+                # Campaign c5, 07/08: the fence demoted the LVS and only
+                # bdev_lvol_set_leader brings leadership (and the primary's
+                # ANA) back; nothing else does that promptly after an unfence.
+                self.request_leadership(rec, nodes, "heal unfence of %s" % nid)
                 if not from_partition:
                     # Its peer ran alone meanwhile (F10): rebuild before the
                     # pair counts as redundant again.
@@ -718,8 +732,8 @@ class Arbiter:
     # ---- self-fenced nodes (campaign c2, F4) -----------------------------------
 
     def readmit_self_fenced(self, rec: ClusterArbitration, nodes: list) -> None:
-        """Unfence an LVS a node fenced by itself (hold deadline, lease expiry,
-        stall) once its remote JM is healthy again.
+        """Unfence an LVS a node fenced by itself (hold deadline, lease expiry)
+        once its remote JM is healthy again (a stalled node aborts instead).
 
         Without a verdict in force nothing else ever unfences it (campaign c2:
         30 min fenced in STEADY, LVS leaderless, rebuild stalled). Only in
@@ -765,6 +779,7 @@ class Arbiter:
                 continue
             for v in vuids:
                 sig.lvs_state[v] = LVS_NORMAL
+            self.request_leadership(rec, nodes, "self-fence re-admission of %s" % nid)
             self.needs_resync.add(nid)
             logger.warning("Self-fenced node %s re-admitted for LVS %s at epoch %s "
                            "(remote JM healthy again)", nid, vuids, rec.epoch)
@@ -818,6 +833,107 @@ class Arbiter:
         logger.error("Node %s: %s; handing it to the restart flow", nid, reason)
         self.notify(rec.cluster_id, node, "TWO_NODE_DEVICE_RECOVERY", reason)
         self.readmit(node)
+
+    # ---- leadership after an unfence (campaign c5, 07/08) -----------------------
+
+    def request_leadership(self, rec: ClusterArbitration, nodes: list, why: str) -> None:
+        """Queue every member's primary LVS for leadership restoration.
+
+        Campaign c5, 07 and 08: after a partition both nodes are fenced; the
+        fence demotes the LVS, latches the IO-driven takeover off and sets the
+        listeners ANA inaccessible (simplyblock/spdk#76). From then on only
+        ``bdev_lvol_set_leader`` restores leadership and the primary's ANA. The
+        heal only unfenced, so both LVS stayed leaderless (vol1 inaccessible,
+        rebuild deferred on "not the leader") until the general leaderless
+        recovery, which runs only once the cluster is steady again and needs
+        two leaderless passes (> 60 s). Restored by
+        ``restore_pending_leadership`` once both nodes serve the LVS."""
+        pend = self.lead_pending.setdefault(rec.cluster_id, {})
+        for node in nodes:
+            fresh = self.db.get_storage_node_by_id(node.get_id())
+            lvs_name = getattr(fresh, "lvstore", "")
+            vuid = int(getattr(fresh, "jm_vuid", 0) or 0)
+            if not lvs_name or not vuid or getattr(fresh, "is_secondary_node", False):
+                continue
+            pend.setdefault(lvs_name, {"primary": fresh.get_id(), "vuid": vuid, "why": why})
+
+    def _serves(self, rec: ClusterArbitration, node: StorageNode, vuid: int) -> bool:
+        """``node`` is reachable, not lost, and serves ``vuid``: the LVS is
+        normal there and its remote JM is healthy (the resync finished)."""
+        nid = node.get_id()
+        if not self.reachable.get(nid, True) or self.spdk_lost.get(nid) \
+                or nid in (rec.planned_loss or {}):
+            return False
+        sig = self.signals.get(nid) or ev.NodeSignals()
+        state = sig.lvs_state.get(vuid, sig.lvs_state.get(str(vuid), LVS_NORMAL))
+        healthy = sig.peer_unhealthy.get(vuid, sig.peer_unhealthy.get(str(vuid)))
+        return state == LVS_NORMAL and healthy is False
+
+    def restore_pending_leadership(self, rec: ClusterArbitration, nodes: list) -> None:
+        """Put each queued LVS's leadership back on its primary.
+
+        Order: the heal or re-admission unfenced (``request_leadership``),
+        then both nodes serve the LVS again (normal, remote JM healthy: the
+        unfence gate), then ``restore_leadership`` reloads the lvstore
+        metadata on the primary, grants leadership, verifies it and sets ANA
+        (optimized on the primary, non_optimized on the secondary). Off the
+        decision loop, idempotent (an LVS already led is only re-checked for
+        ANA), retried every ``TWO_NODE_LEADERSHIP_RETRY_MS`` on failure;
+        ``restore_leadership`` leaves the LVS alone while a restart or
+        port-allow task moves leadership. Dropped on a new fence verdict."""
+        pend = self.lead_pending.get(rec.cluster_id)
+        if not pend or rec.state == ARB_PARTITIONED:
+            return
+        by_id = {n.get_id(): n for n in nodes}
+        now = self.clock()
+        cid, epoch = rec.cluster_id, rec.epoch
+        for lvs_name, entry in list(pend.items()):
+            primary = by_id.get(entry["primary"])
+            peer = next((n for n in nodes if n.get_id() != entry["primary"]), None)
+            if primary is None or peer is None:
+                pend.pop(lvs_name, None)
+                continue
+            vuid = int(entry["vuid"])
+            if not (self._serves(rec, primary, vuid) and self._serves(rec, peer, vuid)):
+                continue
+            key = (cid, lvs_name)
+            if key in self.lead_running or \
+                    now - self.lead_tried_at.get(key, 0) < int(constants.TWO_NODE_LEADERSHIP_RETRY_MS):
+                continue
+            self.lead_tried_at[key] = now
+            self.lead_running.add(key)
+            self.run_async(self._restore_one(cid, epoch, key, lvs_name, primary, peer,
+                                             entry.get("why", "")))
+
+    def _restore_one(self, cid, epoch, key, lvs_name, primary, peer, why):
+        def run():
+            ok = False
+            try:
+                ok = bool(self.restore_leadership(cid, primary, peer, lvs_name))
+            except Exception as e:                  # noqa: BLE001 - retried
+                logger.error("Restoring leadership of %s on %s failed: %s",
+                             lvs_name, primary.get_id(), e)
+            at = self.clock()
+
+            def put(fresh):
+                fresh.leadership_restored = dict(fresh.leadership_restored or {})
+                fresh.leadership_restored[lvs_name] = {
+                    "node": primary.get_id(), "epoch": epoch, "at": at, "ok": ok, "why": why}
+            cur = self.db.get_cluster_arbitration(cid)
+            if cur is not None:
+                self.db.atomic_update(cur, put)
+            self.lead_running.discard(key)
+            if ok:
+                (self.lead_pending.get(cid) or {}).pop(lvs_name, None)
+                self.lead_tried_at.pop(key, None)
+                logger.warning("LVS %s: leadership restored on %s after %s",
+                               lvs_name, primary.get_id(), why)
+                self.notify(cid, primary, "TWO_NODE_LEADERSHIP_RESTORED",
+                            "LVS %s: leadership restored after %s" % (lvs_name, why))
+            else:
+                logger.warning("LVS %s: leadership not restored on %s yet; retrying",
+                               lvs_name, primary.get_id())
+        return run
 
     # ---- survivor promotion after a grant (campaign c4, F13) --------------------
 
@@ -1224,6 +1340,8 @@ class Arbiter:
         verdict = dec.decide(snap)
 
         if verdict.kind in (dec.V_PARTITION, dec.V_DEGRADED):
+            # A new fence: leadership restoration starts over after its heal.
+            self.lead_pending.pop(cluster_id, None)
             rec = self.commit(rec, verdict, snap)
             logger.warning("Two-node verdict %s epoch %s for cluster %s: %s",
                            verdict.kind, rec.epoch, cluster_id, verdict.reason)
@@ -1260,6 +1378,7 @@ class Arbiter:
         if rec.state == ARB_HEALING:
             self.heal(rec, nodes)
         self.readmit_self_fenced(rec, nodes)
+        self.restore_pending_leadership(self.db.get_cluster_arbitration(cluster_id), nodes)
         self.progress_rebuild(self.db.get_cluster_arbitration(cluster_id), nodes)
         self.recover_partition(rec, nodes)
         self.persist_leases(rec)
@@ -1517,6 +1636,97 @@ def default_promote_survivor(cluster_id: str, survivor: StorageNode, primary: St
                 return False
             time.sleep(0.1)
     sno._failover_primary_ana(db.get_storage_node_by_id(primary.get_id()))
+    return True
+
+
+def _leadership_task_blocks(db, cluster_id: str, node_ids: list, lvs_name: str) -> bool:
+    """A restart or port-allow task on either node owns leadership movement
+    (``storage_node_ops._leadership_moving_tasks_active``), so the restoration
+    waits for it. A restart always blocks. A port-allow task older than
+    ``TWO_NODE_LEADERSHIP_TASK_STALE_S`` does not: in campaign c5 every
+    port-allow task of the 2-node bed deferred forever on "unable to connect
+    to remote JMs" (a two-node cluster has one remote JM), and the LVS stayed
+    leaderless behind it. Both target the LVS's primary, so they do not fight.
+    True (wait) when the task state cannot be read."""
+    from simplyblock_core.models.job_schedule import JobSchedule
+    now = int(time.time())
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception as e:                          # noqa: BLE001 - wait, as the shared check
+        logger.warning("Cannot read the task state for %s (%s); not restoring leadership",
+                       lvs_name, e)
+        return True
+    for task in tasks:
+        if task.function_name not in (JobSchedule.FN_PORT_ALLOW, JobSchedule.FN_NODE_RESTART):
+            continue
+        if task.node_id not in node_ids or task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        age = now - int(task.date or now)
+        if task.function_name == JobSchedule.FN_PORT_ALLOW and                 age > int(constants.TWO_NODE_LEADERSHIP_TASK_STALE_S):
+            logger.warning("LVS %s: port-allow task %s on %s open for %ss; restoring "
+                           "leadership anyway", lvs_name, task.uuid, task.node_id, age)
+            continue
+        logger.info("LVS %s: %s task %s on %s moves leadership; later",
+                    lvs_name, task.function_name, task.uuid, task.node_id)
+        return True
+    return False
+
+
+def default_restore_leadership(cluster_id: str, primary: StorageNode, peer: StorageNode,
+                               lvs_name: str) -> bool:
+    """Campaign c5, 07/08: put the LVS's leadership back on its primary after
+    an unfence, and the primary's volumes' ANA with it.
+
+    Same reload-then-grant order as ``default_promote_survivor`` (and the
+    leaderless recovery): ``bdev_lvol_update_lvstore`` before
+    ``bdev_lvol_set_leader``, the grant verified. True when the LVS is led and
+    ANA is set: optimized on the primary, non_optimized on its secondary
+    (``_failback_primary_ana``). Left alone (True) when the peer already leads
+    it: the survivor took it after a grant (F13) and the failback belongs to
+    the restart flow. False (retried) while a restart or port-allow task moves
+    leadership on either node, or when the grant does not take."""
+    from simplyblock_core import storage_node_ops as sno
+    from simplyblock_core.controllers.lvol_controller import is_node_leader
+    from simplyblock_core.db_controller import DBController
+    from simplyblock_core.models.lvol_model import LVol
+
+    db = DBController()
+    owner = db.get_storage_node_by_id(primary.get_id())
+    other = db.get_storage_node_by_id(peer.get_id())
+    if _leadership_task_blocks(db, cluster_id, [owner.get_id(), other.get_id()], lvs_name):
+        return False
+    owner_leads = is_node_leader(owner, lvs_name)
+    if is_node_leader(other, lvs_name):
+        if owner_leads:
+            logger.error("LVS %s reports a leader on both %s and %s; not touching it",
+                         lvs_name, owner.get_id(), other.get_id())
+            return False
+        logger.info("LVS %s is led by %s (survivor); failback is the restart flow's",
+                    lvs_name, other.get_id())
+        return True
+    if not owner_leads:
+        rpc = owner.rpc_client(timeout=10, retry=0)
+        if not rpc.bdev_lvol_update_lvstore(lvs_name):
+            logger.error("bdev_lvol_update_lvstore %s on %s returned False; not granting "
+                         "leadership on top of un-reloaded metadata", lvs_name, owner.get_id())
+            return False
+        rpc.bdev_lvol_set_leader(lvs_name, leader=True)
+        deadline = time.monotonic() + float(constants.TWO_NODE_PROMOTE_VERIFY_S)
+        while not is_node_leader(owner, lvs_name):
+            if time.monotonic() >= deadline:
+                logger.error("bdev_lvol_set_leader %s on %s did not take effect",
+                             lvs_name, owner.get_id())
+                return False
+            time.sleep(0.1)
+    seen = set()
+    for lvol in db.get_lvols_by_node_id(owner.get_id()):
+        if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE) or lvol.lvs_name != lvs_name:
+            continue
+        if (lvol.nqn, lvol.ns_id) in seen:
+            continue
+        seen.add((lvol.nqn, lvol.ns_id))
+        sno._set_lvol_ana_on_node(lvol, owner, "optimized")
+    sno._failback_primary_ana(owner)
     return True
 
 

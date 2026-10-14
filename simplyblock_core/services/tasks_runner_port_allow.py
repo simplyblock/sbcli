@@ -540,6 +540,26 @@ def _read_lvs_leadership(target_node, lvs_name):
         return None
 
 
+def _single_peer_jm_is_complete(db, node, remote_jm_devices):
+    """A two-node cluster has exactly one peer, so exactly one remote JM.
+
+    The "at least 2 remote JMs" requirement can never be met there: in
+    campaign c5 every port-allow task of the 2-node bed deferred forever,
+    and the arbiter's leadership restoration waited behind it. Only asked
+    when exactly one remote JM connected, i.e. on the path that defers
+    anyway: a cluster with 3 or more members still defers exactly as before
+    (and an extra member read on that path changes nothing for it)."""
+    if len(remote_jm_devices) != 1:
+        return False
+    try:
+        members = [n for n in db.get_storage_nodes_by_cluster_id(node.cluster_id)
+                   if n.status != StorageNode.STATUS_REMOVED]
+    except Exception as e:                      # noqa: BLE001 - defer as before
+        logger.warning("Could not read the members of %s: %s", node.cluster_id, e)
+        return False
+    return len(members) == 2
+
+
 def _abort_recovering_node(node, reason):
     """Abort port-allow: kill SPDK on the recovering node, mark OFFLINE,
     do NOT issue port_allowed. Used when one or more online peers cannot
@@ -632,7 +652,8 @@ def exec_port_allow_task(task):
 
         logger.info("connect to remote JM devices")
         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
-        if not remote_jm_devices or len(remote_jm_devices) < 2:
+        if not remote_jm_devices or (len(remote_jm_devices) < 2
+                                     and not _single_peer_jm_is_complete(db, node, remote_jm_devices)):
             raise TaskDefer("Node unable to connect to remote JMs, retry task")
         else:
             # Re-read fresh before writing to avoid overwriting concurrent changes

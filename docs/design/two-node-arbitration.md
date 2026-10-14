@@ -78,9 +78,11 @@ budget. The node clamps it below `hold_ms` and reports it in `jc_ha_status`; the
 configures a node again whose reported value differs. Should a node reject the field, the CP
 retries without it, and only then falls back to the plain flag (`arbitration.set_dual_node`).
 
-A node that wakes from a stall longer than its lease fences **every** LVS (normal and solo too)
-with `ha_self_fenced` reason `stalled`, treats its lease as expired and does not abort. The
-arbiter re-admits it like any self-fence (section 7.9).
+A node that wakes from a stall longer than its lease **aborts** (ultra #211, campaign c5),
+exactly like the hang abort without arbitration. Its restart rebuilds devices, leadership and
+data, and the abort cuts its hublvol, so the survivor takes over. (Campaigns c3/c4 instead fenced
+every LVS with reason `stalled`; that left port blocks (F8), deleted data devices (F12) and a
+survivor redirecting to the fenced primary (F13), and was dropped.)
 
 Result: `true`. `arbitration: false` (default for old callers) keeps today's behaviour
 (dual-node tolerance without hold); the CP sets it `true` only when the cluster flag
@@ -412,8 +414,8 @@ fence itself at the hold deadline:
 
 - **F5, frozen peer** (SIGSTOP, 02a): the frozen SPDK keeps its TCP connections, so the survivor
   saw the remote JM as connected until the peer woke and aborted (6.2 s). The node side now
-  holds after `remote_jm_timeout_ms` without an acknowledgement (section 3.1) and fences itself
-  when it wakes from a stall longer than its lease.
+  holds after `remote_jm_timeout_ms` without an acknowledgement (section 3.1) and aborts when it
+  wakes from a stall longer than its lease.
 - **F3, CP restart of a live node**: the restarting node's proxy stays up and answers "framework
   not initialized", never HTTP 500, so the node was neither lost nor silent; its peer held and
   fenced both LVS at the deadline.
@@ -426,8 +428,8 @@ Rules:
   still runs an LVS `normal` or `holding`. Not when both nodes are unreachable (uplink loss,
   invariant 4), not for a peer that was never leased, and not again once the survivor is solo
   everywhere. Safe without the survivor's report: a peer whose lease has expired fences itself
-  as soon as it starts holding, a node that wakes from a stall longer than its lease fences
-  itself, and a gone peer does not write at all. A grant to a survivor whose remote JM is still
+  as soon as it starts holding, a node that wakes from a stall longer than its lease aborts,
+  and a gone peer does not write at all. A grant to a survivor whose remote JM is still
   healthy only permits it to continue alone if it loses the peer later.
 - **Planned loss.** Every CP path that stops SPDK (restart, shutdown, restart abort, the
   kill-until-dead helper) first records a planned-loss marker in the record
@@ -439,7 +441,7 @@ Rules:
 
 ### 7.9 Self-fenced nodes and partition recovery (campaign c2)
 
-- **F4, self-fenced node.** A node that fenced itself (hold deadline, lease expiry, stall) while
+- **F4, self-fenced node.** A node that fenced itself (hold deadline, lease expiry) while
   no verdict is in force stayed fenced for 30 minutes in c2: unfence ran only in `healing`. In
   `steady` and `degraded` the arbiter now calls `jc_unfence` at the current epoch for every LVS
   the node fenced itself, once the node's own view reports the remote JM healthy, at most every
@@ -492,7 +494,8 @@ no finished heal) that the restart flow does not have.
 
 ### 7.11 Devices of a re-admitted node, and stuck rebuilds (campaign c4, F12)
 
-In c4, 02a froze sn1 for 4 s. On waking it fenced itself (`stalled`, section 6) as designed, but
+In c4, 02a froze sn1 for 4 s. On waking it fenced itself (`stalled`, since replaced by the abort,
+section 3.1), but
 its alceml stuck-IO watchdog counted the frozen time as device IO age and shut both data devices
 down (`bdev_get_bdevs alceml_...` → `-19`). The control plane, every distrib cluster map and the
 NVMe controllers kept showing the devices online; the unfence re-admitted a node without data
@@ -543,7 +546,50 @@ control plane sets its leadership again.
   it is a shared path of every cluster, left unchanged.
 
 After the re-admission the LVS stays led by the former secondary; failback to the primary is the
-restart flow's (as after any failover).
+restart flow's (as after any failover). With the abort on wake (section 3.1) a frozen primary's
+hublvol breaks, so this promotion matters mainly for fences that do not abort: the arbiter's own
+fence of a reachable primary, and a deadline or lease self-fence.
+
+### 7.13 Leadership after an unfence (campaign c5, 07/08)
+
+In c5, 07 (partition) and 08 (both links cut) fenced both nodes as designed. After the heal
+unfenced them, both LVS stayed **leaderless**: vol1's ANA stayed `inaccessible`, and the rebuild
+deferred on "not the leader". The fence demotes the LVS, latches its IO-driven takeover off and sets
+its listeners ANA inaccessible (simplyblock/spdk#76); from then on only `bdev_lvol_set_leader`
+restores leadership and the primary's ANA. The heal only unfenced. The general leaderless recovery
+(section 7.7) acts only in `steady` and after two leaderless passes, and it waited behind port-allow
+tasks that never completed on a 2-node cluster (below), so nothing restored leadership.
+
+- **Queued on every unfence.** After a heal (section 8) or self-fence re-admission (section 7.9)
+  unfences a node, every member's **primary** LVS is queued (`request_leadership`).
+- **Restored once both nodes serve it.** When both nodes report that LVS `normal` with its remote
+  JM healthy (the unfence gate), the arbiter, off the decision loop: reloads the lvstore metadata
+  on the primary (`bdev_lvol_update_lvstore`), `bdev_lvol_set_leader(leader=true)`, verifies it
+  within `promote_verify_s`, then sets ANA: optimized on the primary, non_optimized on its
+  secondary (`_failback_primary_ana`). The secondary is never granted.
+- **Idempotent.** An LVS already led by its primary only gets ANA set; one led by the survivor
+  (section 7.12) is left to the restart flow's failback; one reported led on both nodes is not
+  touched (logged). A failed attempt is retried every `leadership_retry_ms` (3 s); a new fence
+  verdict drops the queue; nothing runs while `partitioned`.
+- **Tasks.** A restart task on either node always holds it back (the restart owns the handoff). A
+  port-allow task holds it back only while younger than `leadership_task_stale_s` (120 s); both
+  target the primary, so they do not fight.
+- **Recorded** in `leadership_restored` (`{lvs: {node, epoch, at, ok, why}}`) and logged as
+  `TWO_NODE_LEADERSHIP_RESTORED`.
+
+**Port-allow on a 2-node cluster.** The port-allow task required at least 2 connected remote JMs,
+but a two-node cluster has exactly one peer and so one remote JM: every port-allow task deferred
+forever ("Node unable to connect to remote JMs"). With exactly one remote JM connected it now
+completes when the cluster has exactly 2 members (`_single_peer_jm_is_complete`). The member read
+happens only on that path, which defers anyway on 3+ nodes, so regular clusters are unchanged.
+
+**Monitor stale-port unblock.** During `fence_both` in c5/07 each node's own client port was
+lifted at +17-21 s while the LVS was still HA-fenced (ANA kept it inaccessible, so nothing was
+written): the storage node monitor's stale-port remediation (`_remediate_stale_port_blocks`)
+lifts any client port blocked longer than 12 s on a node with a healthy hublvol. On arbitrated
+clusters it now leaves a port whose LVS is fenced or holding on that node (the same guard as the
+restart flow's unblocks, `_two_node_peer_port_must_stay_blocked`); the unfence lifts it. Regular
+clusters are unchanged (no status call).
 
 ## 8. Healing and re-admission
 
@@ -638,6 +684,8 @@ setting brings that below KATO.
 | `rebuild_stuck_s` | 120 | arbiter, rebuild failing on unavailable devices before recovery (section 7.11) |
 | `device_recovery_retry_s` | 300 | arbiter, at most one device recovery per node (section 7.11) |
 | `promote_verify_s` | 3 | arbiter, survivor leadership confirmation (section 7.12) |
+| `leadership_retry_ms` | 3000 | arbiter, retry of a failed leadership restoration (section 7.13) |
+| `leadership_task_stale_s` | 120 | arbiter, a port-allow task older than this no longer holds it back (section 7.13) |
 | client keep-alive | 4 s | connect parameters of arbitrated clusters (section 9.1) |
 | `wait_timeout_ms` | 20000 | collector, `jc_wait_events` |
 | event ring | 1024 events | node |

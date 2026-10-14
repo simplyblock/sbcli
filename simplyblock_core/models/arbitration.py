@@ -73,6 +73,11 @@ class ClusterArbitration(BaseModel):
     #: survivor right after a grant: {lvs_name: {"node": id, "epoch": int,
     #: "at": ms, "ok": bool}}.
     promoted: dict = default_factory(dict)
+    #: Campaign c5, 07/08. LVS whose leadership the arbiter put back on the
+    #: primary after a heal or re-admission unfenced it (after a fence only
+    #: bdev_lvol_set_leader restores leadership and the primary's ANA):
+    #: {lvs_name: {"node": id, "epoch": int, "at": ms, "ok": bool, "why": str}}.
+    leadership_restored: dict = default_factory(dict)
 
     def get_id(self):
         return self.cluster_id

@@ -1106,6 +1106,13 @@ TWO_NODE_DEVICE_RECOVERY_RETRY_S = 300
 #: Campaign c4, F13: how long the survivor's promotion waits for its
 #: leadership to be confirmed after bdev_lvol_set_leader.
 TWO_NODE_PROMOTE_VERIFY_S = 3
+#: Campaign c5, 07/08: after a heal or a re-admission unfences, the arbiter
+#: puts each LVS's leadership back on its primary; a failed attempt is
+#: retried after this long.
+TWO_NODE_LEADERSHIP_RETRY_MS = 3000
+#: Campaign c5: a port-allow task open longer than this no longer holds back
+#: the arbiter's leadership restoration (it targets the same primary).
+TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60

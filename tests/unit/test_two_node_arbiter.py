@@ -147,7 +147,8 @@ def env(monkeypatch):
                     log_event=lambda item, event: db.logged.append((item.node_id, event["status"])),
                     reconcile_leadership=reconcile_leadership,
                     schedule_rebuild=schedule_rebuild,
-                    open_rebuild_tasks=lambda _cid: db.open_tasks)
+                    open_rebuild_tasks=lambda _cid: db.open_tasks,
+                    restore_leadership=lambda *_: True)
     return a, db, nodes, clock, readmitted
 
 
