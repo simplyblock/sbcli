@@ -28,7 +28,7 @@ from pathlib import Path
 from e2e_tests.cluster_test_base import TestClusterBase
 from exceptions.custom_exception import LvolNotConnectException
 from logger_config import setup_logger
-from utils.common_utils import sleep_n_sec
+from utils.common_utils import cli_failed, sleep_n_sec
 
 # ───────────────────────────────────── helpers ──────────────────────────────
 
@@ -4492,7 +4492,9 @@ class SecurityTestBase(TestClusterBase):
 #         snap_name = f"snap{lvol_name[-6:]}"
 #         out, err = self.ssh_obj.exec_command(
 #             self.mgmt_nodes[0],
-#             f"{self.base_cmd} -d snapshot add {lvol_id} {snap_name} --backup")
+#             f"{self.base_cmd} -d snapshot add {lvol_id} {snap_name}")
+#         # then: snapshot backup <snap_id> -- `snapshot add --backup`
+#         # was removed from the CLI in 58553c303.
 #         assert not err or "error" not in err.lower(), f"snapshot add --backup failed: {err}"
 #         sleep_n_sec(5)
 #
@@ -7136,11 +7138,23 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
         self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
+        # Two commands, not one. `snapshot add --backup` was the
+        # fire-and-log form and main removed it (58553c303); the backup is
+        # now its own subcommand taking the snapshot id (1015c4018). The
+        # old spelling does not fail loudly -- argparse rejects the unknown
+        # flag, the snapshot is never created, and the wait below then
+        # times out looking for a backup of a snapshot that does not exist.
         snap_name = f"snap{lvol_name[-6:]}"
         out, err = self.ssh_obj.exec_command(
             self.mgmt_nodes[0],
-            f"{self.base_cmd} -d snapshot add {lvol_id} {snap_name} --backup")
-        assert not err or "error" not in err.lower(), f"snapshot+backup failed: {err}"
+            f"{self.base_cmd} -d snapshot add {lvol_id} {snap_name}")
+        assert not cli_failed(out, err), f"snapshot add failed: {out} {err}"
+        snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
+        assert snap_id, f"snapshot {snap_name} was created but has no id"
+        out, err = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0],
+            f"{self.base_cmd} -d snapshot backup {snap_id}")
+        assert not cli_failed(out, err), f"snapshot backup failed: {out} {err}"
         sleep_n_sec(5)
         self.logger.info("TC-SEC-150: Snapshot + backup triggered PASSED")
 
