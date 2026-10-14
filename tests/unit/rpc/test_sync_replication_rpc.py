@@ -24,7 +24,7 @@ def _distrib_create_params(**kwargs):
     return params
 
 
-def test_distrib_create_without_sync_params_is_unchanged():
+def test_distrib_create_omits_sync_fields_by_default():
     params = _distrib_create_params()
     assert "synchronous_replication_mode" not in params
     assert "jm_n_local" not in params
@@ -55,7 +55,7 @@ def test_add_without_name_targets_every_distrib(method):
 
 
 @pytest.mark.parametrize("method", ["distr_add_nodes", "distr_add_devices"])
-def test_add_with_name_targets_one_distrib_without_mutating_the_caller(method):
+def test_add_with_name_targets_one_distrib(method):
     client = _client()
     payload = {"map_cluster": {"n1": {"status": "online", "replica": True}}}
     with patch.object(client, "_request", return_value=True) as request:

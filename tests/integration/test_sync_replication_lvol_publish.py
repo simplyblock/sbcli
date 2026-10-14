@@ -311,7 +311,7 @@ class TestMembers:
         assert vol.sync_active_site == SITE_A
 
     @pytest.mark.parametrize("marker, site", [(SITE_B, SITE_B), ("moving:" + SITE_B, SITE_B)])
-    def test_a_volume_created_on_a_remote_led_lvs_is_active_there(self, db, rpcs, env, marker, site):
+    def test_a_volume_on_a_remote_led_lvs_is_active_there(self, db, rpcs, env, marker, site):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         rpcs.lead(b[0])
         vol, registered = _add_lvol_ha(db, _pool(db, cluster), owner)
@@ -369,7 +369,8 @@ class TestRemoteRefChange:
         assert triplet[0] == b[0].get_id() and triplet[2] == b[2].get_id()
         assert db.get_lvol_by_id(vol.get_id()).nodes == [n.get_id() for n in a] + list(triplet)
 
-    def test_a_crash_between_the_ref_and_the_volume_writes_is_repaired_by_the_retry(self, db):
+    def test_the_retry_reconciles_volumes_a_crash_skipped(self, db):
+        """The crash hits after the owner's remote ref is written, before the volumes are."""
         cluster, a, b, owner, spare = self._layout_with_spare(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster))
         real = ops.reconcile_lvol_remote_members
@@ -471,7 +472,7 @@ class TestSharedSubsystem:
         assert _seen(spdk, owner, second) == "inaccessible"
         assert (second.nqn, _ip(owner), second.ns_id) in spdk[owner.get_id()].groups
 
-    def test_a_join_before_the_listener_is_set_by_the_creators_publication(self, db, spdk):
+    def test_an_early_joiner_is_set_by_the_creator(self, db, spdk):
         _, a, b, owner, first, second = self._pair(db)
         first.namespace = ""
         # creator: subsystem + namespace, publication not yet done
@@ -488,7 +489,7 @@ class TestSharedSubsystem:
         # the joiner's group was set explicitly, not left to the listener default
         assert spdk[owner.get_id()].groups[(second.nqn, _ip(owner), second.ns_id)] == "inaccessible"
 
-    def test_an_open_joiner_before_the_listener_is_opened_by_the_sweep(self, db, spdk):
+    def test_an_early_open_joiner_is_opened_by_the_sweep(self, db, spdk):
         _, a, b, owner, first, second = self._pair(db)
         first.namespace = ""
         # the site rule reads the stored record (under the site-rule lock)
@@ -518,7 +519,7 @@ class TestSharedSubsystem:
             assert _seen(spdk, owner, second, i=i) == "inaccessible"
             assert _seen(spdk, owner, first, i=i) == "optimized"
 
-    def test_a_join_that_cannot_probe_the_listeners_fails_and_rolls_back(self, db, spdk):
+    def test_a_failed_listener_probe_rolls_the_join_back(self, db, spdk):
         _, a, b, owner, first, second = self._pair(db)
         first.namespace = ""
         lvol_controller.add_lvol_on_node(first, owner)
@@ -536,7 +537,7 @@ class TestSharedSubsystem:
         assert err and "Cannot tell which listeners" in err
         assert [n["nsid"] for n in target.subsystems[first.nqn]["namespaces"]] == [first.ns_id]
 
-    def test_a_repair_recreating_the_listener_sets_every_namespace(self, db, spdk):
+    def test_a_recreated_listener_sets_every_namespace(self, db, spdk):
         cluster, a, b, owner, first, second = self._pair(db)
         target = spdk[a[1].get_id()]
         target.subsystem_create(first.nqn, "ha", "x")
@@ -580,7 +581,7 @@ class TestFailedGroup:
         assert done.status == JobSchedule.STATUS_DONE, done.function_result
         assert _seen(spdk, node, vol) == "non_optimized"
 
-    def test_another_members_failed_group_is_queued_for_that_member(self, db, spdk):
+    def test_another_volumes_failed_group_is_queued_for_it(self, db, spdk):
         cluster, a, b, owner = _layout(db)
         pool = _pool(db, cluster)
         nqn = f"{cluster.nqn}:lvol:shared"
@@ -683,7 +684,7 @@ class TestFailedGroup:
         assert self._retry_all(db, cluster) == sorted([first.get_id(), second.get_id()])
         self._right(spdk, node, first, second)
 
-    def test_a_listener_raised_on_the_second_nic_queues_every_member(self, db, spdk):
+    def test_a_listener_raised_on_nic_2_queues_every_member(self, db, spdk):
         cluster, node, target, first, second = self._shared(db, spdk, nics=2)
         real = target.listeners_create
 
@@ -713,7 +714,7 @@ class TestFailedGroup:
         assert self._retry_all(db, cluster) == sorted([first.get_id(), second.get_id()])
         self._right(spdk, node, first, second, nics=2)
 
-    def test_a_creator_whose_listener_raises_hands_the_joiners_to_the_retry(self, db, spdk):
+    def test_a_creators_failed_listener_queues_the_joiners(self, db, spdk):
         cluster, a, b, owner = _layout(db, nics=2)
         pool = _pool(db, cluster)
         nqn = f"{cluster.nqn}:lvol:shared"
@@ -783,7 +784,7 @@ class TestMonitorSelfHeal:
             lvol_monitor.check_node(cluster, owner, [vol], subsys_check=True)
         return repairs
 
-    def test_a_listener_whose_creation_answer_was_lost_is_repaired_on_the_next_cycle(self, db, spdk):
+    def test_a_listener_with_a_lost_answer_is_repaired(self, db, spdk):
         cluster, a, b, owner, vol = self._registered(db, spdk)
         node = a[1]
         target = spdk[node.get_id()]
@@ -808,7 +809,7 @@ class TestMonitorSelfHeal:
         assert self._cycle(cluster, owner, db.get_lvol_by_id(vol.get_id())) == []
         assert db.get_lvol_by_id(vol.get_id()).health_check is True
 
-    def test_the_owner_path_recreated_with_its_answer_lost_is_repaired(self, db, spdk):
+    def test_an_owner_path_with_a_lost_answer_is_repaired(self, db, spdk):
         """recreate_lvol_on_node on the owner: the first listener is created,
         then the answer is lost - the owner's group stays inaccessible."""
         cluster, a, b, owner, vol = self._registered(db, spdk)
@@ -925,7 +926,7 @@ def attached():
 
 class TestRestart:
 
-    def test_a_remote_member_publishes_in_its_window_and_stays_fenced(
+    def test_a_remote_member_restarts_fenced_in_its_window(
             self, db, rpcs, hub, env, attached):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
@@ -954,7 +955,7 @@ class TestRestart:
         assert _min_cntlid(rpc, vol.nqn) == [window]
         assert _ana_calls(rpc, vol.nqn) == [(1, state)]
 
-    def test_after_a_switchover_the_active_remote_primary_comes_back_as_the_leader(
+    def test_the_active_remote_primary_returns_as_the_leader(
             self, db, rpcs, hub, env, attached, adopt):
         # The real leader rebuild, taking the LVS back from its secondary.
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
@@ -972,7 +973,7 @@ class TestRestart:
         assert _min_cntlid(rpc, vol.nqn) == [3000]
         assert _ana_calls(rpc, vol.nqn) == [(1, "optimized")]
 
-    def test_after_a_switchover_the_home_primary_comes_back_fenced_in_window_0(
+    def test_the_home_primary_returns_fenced_in_window_0(
             self, db, rpcs, hub, env, attached):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B,
@@ -985,7 +986,7 @@ class TestRestart:
         assert _min_cntlid(rpc, vol.nqn) == [1]
         assert _ana_calls(rpc, vol.nqn) == [(1, "inaccessible")]
 
-    def test_a_home_primary_leader_restart_on_a_demoted_site_stays_fenced(
+    def test_a_demoted_home_primary_leader_restarts_fenced(
             self, db, rpcs, hub, env, attached):
         """Between demote and promote the LVS is still led from A: the home
         primary rebuilds as the leader (_recreate_lvstore_impl), its volumes
@@ -1050,7 +1051,7 @@ def _states_by_node(rpcs, nodes, nqn):
 
 class TestFailover:
 
-    def test_an_active_remote_primary_lost_promotes_its_secondary(self, db, rpcs):
+    def test_a_lost_remote_primary_promotes_its_secondary(self, db, rpcs):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B,
                       demoted=[SITE_A])
@@ -1059,13 +1060,13 @@ class TestFailover:
         assert calls[b[1].get_id()] == [(1, "optimized")]
         assert all(not v for k, v in calls.items() if k != b[1].get_id())
 
-    def test_a_home_primary_lost_on_a_remote_led_lvs_changes_nothing(self, db, rpcs):
+    def test_a_lost_fenced_home_primary_changes_nothing(self, db, rpcs):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
         ops.trigger_ana_failover_for_node(_fresh(db, owner))
         assert all(not v for v in _states_by_node(rpcs, (*a, *b), vol.nqn).values())
 
-    def test_a_home_primary_lost_on_a_home_led_lvs_promotes_its_secondary(self, db, rpcs):
+    def test_a_lost_home_primary_promotes_its_secondary(self, db, rpcs):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
         ops.trigger_ana_failover_for_node(_fresh(db, owner))
@@ -1093,7 +1094,7 @@ class TestFailover:
         assert calls[b[1].get_id()] == [(1, "non_optimized")]
         assert all(not v for k, v in calls.items() if k != b[1].get_id())
 
-    def test_deferred_promotion_of_a_recovered_active_secondary(self, db, rpcs):
+    def test_deferred_promotion_needs_the_primary_offline(self, db, rpcs):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
         _update(db, b[0], status=StorageNode.STATUS_OFFLINE)
@@ -1130,7 +1131,7 @@ class TestActivationPass4:
             assert [calls[n.get_id()] for n in a] == [[(1, s)] for s in home]
             assert [calls[n.get_id()] for n in b] == [[(1, "inaccessible")]] * 3
 
-    def test_a_volume_active_on_the_other_site_is_fenced_at_home(self, db, rpcs):
+    def test_a_volume_active_on_the_other_site_is_fenced(self, db, rpcs):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
         cluster_ops._activation_open_node_ana(owner.get_id())
@@ -1176,10 +1177,10 @@ class TestConnect:
         assert _connect_ips(db, vol.get_id()) == [_ip(n) for n in b]
 
     @pytest.mark.parametrize("promoted", [False, True])
-    def test_v2_connect_takes_no_site_and_returns_the_led_sites_paths(self, db, web_client, promoted):
-        """The v2 route names no site (it used to answer 400 "site is
-        required"): its entries are the paths of the site the LVS is led from,
-        on the home site and after a promote to the other one."""
+    def test_v2_connect_returns_the_led_sites_paths(self, db, web_client, promoted):
+        """The v2 route names no site: its entries are the paths of the site
+        the LVS is led from, on the home site and after a promote to the other
+        one."""
         cluster, a, b, owner = _layout(db, active_site=SITE_B if promoted else "")
         pool = _pool(db, cluster)
         vol = _volume(db, cluster, owner, pool, ns_id=1,
@@ -1205,7 +1206,7 @@ class TestConnect:
         with pytest.raises(SyncReplicationSiteError, match="not a sync-replication"):
             lvol_controller.connect_lvol(vol.get_id(), site=SITE_A)
 
-    def test_non_sync_unchanged_including_an_async_cutover(self, db):
+    def test_non_sync_connect_returns_every_path(self, db):
         """Non-sync: no site, every path; a cutover_pending relationship hands
         out both ends, nothing filtered."""
         cluster = _seed_cluster(db)
@@ -1283,7 +1284,7 @@ class TestRefused:
         assert db.get_migrations(cluster.get_id()) == []
         assert db.get_migration_groups(cluster.get_id()) == []
 
-    def test_a_batch_migration_task_is_ended_without_touching_anything(self, db, no_rpc):
+    def test_a_batch_migration_task_ends_without_an_rpc(self, db, no_rpc):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, namespaced=True)
         group = LVolMigrationGroup()
@@ -1310,7 +1311,7 @@ class TestRefused:
         assert failed.status == LVolMigrationGroup.STATUS_FAILED
         assert "sync-replication" in failed.error_message
 
-    def test_a_migration_task_is_ended_without_touching_anything(self, db, no_rpc):
+    def test_a_migration_task_ends_without_an_rpc(self, db, no_rpc):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
         migration = LVolMigration()

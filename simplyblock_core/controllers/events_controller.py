@@ -27,7 +27,7 @@ CAUSED_BY_API = "api"
 CAUSED_BY_MONITOR = "monitor"
 
 
-def log_distr_event(cluster_id, node_id, event_dict):
+def log_distr_event(cluster_id, node_id, event_dict, level=EventObj.LEVEL_ERROR):
 
     ds = EventObj()
     ds.uuid = str(uuid.uuid4())
@@ -35,7 +35,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
     ds.node_id = node_id
     ds.date = round(time.time()*1000)
     ds.domain = DOMAIN_DISTR
-    ds.event_level = EventObj.LEVEL_ERROR
+    ds.event_level = level
     ds.caused_by = CAUSED_BY_MONITOR
     ds.status = 'new'
 
@@ -51,7 +51,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
     ds.object_dict = event_dict
 
     log_event_based_on_level(cluster_id, event_dict['event_type'], DOMAIN_DISTR,
-                         event_dict['status'], CAUSED_BY_MONITOR, EventObj.LEVEL_ERROR)
+                         event_dict['status'], CAUSED_BY_MONITOR, level)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)

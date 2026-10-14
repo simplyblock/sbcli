@@ -44,7 +44,7 @@ class TestActiveTriplet:
         assert active.node_ids == ("rp", "rs", "rt")
         assert active.grants_allowed
 
-    def test_moving_away_from_home_offers_both_source_first_and_grants_nothing(self):
+    def test_moving_away_offers_the_home_triplet_first(self):
         active = ops.lvs_active_triplet(_owner(lvs_active_site="moving:site-b"))
         assert active.node_ids == ("p", "s", "t", "rp", "rs", "rt")
         assert active.moving_to == "site-b" and not active.grants_allowed
@@ -80,7 +80,7 @@ class TestInstanceRole:
         ("rs", True, "secondary"), ("rs", False, "secondary"),
         ("rt", True, "tertiary"), ("rt", False, "tertiary"),
     ])
-    def test_position_in_the_own_triplet_never_primary_unless_leading(self, node_id, leading, role):
+    def test_the_role_follows_the_slot_but_primary_must_lead(self, node_id, leading, role):
         assert ops.lvs_instance_role(_owner(), node_id, leading=leading) == role
 
     def test_ftt1_has_no_tertiary_slot(self):
@@ -151,7 +151,7 @@ class TestTakerJournalQuorum:
                                 "remote_xs_jm_a1n1": False, "remote_xs_jm_a2n1": False})
         assert ops._taker_jm_quorum_ok(taker, 42, sync=True) is True
 
-    def test_non_sync_counts_every_ready_copy_of_the_takers_own_journal(self):
+    def test_non_sync_counts_every_ready_journal_copy(self):
         taker, rpc = self._taker({"jm_b0": False, "remote_jm_b1n1": True, "remote_jm_b2n1": True})
         assert ops._taker_jm_quorum_ok(taker) is True
         rpc.jc_get_jm_status.assert_called_once_with(7)

@@ -118,7 +118,7 @@ class TestDirectAsyncOperationsRefused:
         assert db.get_job_tasks(cluster.get_id()) == []
 
     def test_policy_calls_are_not_guarded(self, db, no_rpc):
-        """A policy's own start / stop (from_policy) runs as before: the guard
+        """A policy's own start / stop (from_policy) is not guarded: the guard
         never fires inside a policy chain that wrote before calling it."""
         cluster, owner, vol = _sync_volume(db, do_replicate=True)
 

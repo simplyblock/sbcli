@@ -23,7 +23,7 @@ def _node(node_id, site="", distribs=(), secondary_of="", tertiary_of="",
     return node
 
 
-def test_owners_are_self_hosted_local_roles_and_remote_triplets():
+def test_owners_include_own_local_and_remote_roles():
     a1 = _node("a1", "a", distribs=["d_a1"])
     b1 = _node("b1", "b", distribs=["d_b1"], remote=("x", "", ""))
     a2 = _node("a2", "a", distribs=["d_a2"], secondary_of="a1")

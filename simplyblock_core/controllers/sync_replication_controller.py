@@ -31,6 +31,7 @@ from simplyblock_core.exceptions import (
     SyncReplicationSiteError, SyncReplicationUnsupportedError, SyncSiteOfflineError,
 )
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -58,6 +59,17 @@ _EVENT_KINDS = {
     STATUS_REMOTE_JOURNAL_UNSYNCED: (SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED, "jm_vuid"),
     STATUS_REMOTE_JOURNAL_SYNCED: (SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED, "jm_vuid"),
 }
+
+
+def sync_event_level(status: str) -> str:
+    """The cluster-log level of a ``sync_replication_status`` event. A journal
+    back in sync is information, every other status of the type (an unknown one
+    included) a warning. None is an error: the event reports a replication
+    state change, not a failed IO, and an Error / Critical event of the distr
+    domain raises the ``node_unrecoverable_io_error`` alert."""
+    if status == STATUS_REMOTE_JOURNAL_SYNCED:
+        return EventObj.LEVEL_INFO
+    return EventObj.LEVEL_WARN
 
 
 class SyncEventSubject(NamedTuple):
@@ -848,12 +860,77 @@ def _elect_on_returned_site(db: DBController, cluster, owner: StorageNode) -> bo
     return True
 
 
+#: The ``lost_site_state`` values the storage-node monitor writes - and clears
+#: when the cluster is suspended, so its record never outlives a suspension.
+MONITOR_LOST_SITE_STATES = (Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN)
+
+
+def _set_lost_site_record(c, site: str, state: str, expect_states: tuple) -> tuple[bool, bool]:
+    """The mutation of set_lost_site_state on the cluster ``c`` read in its
+    transaction: ``(holds, changed)`` - whether ``c`` holds the pair afterwards
+    and whether it was changed (nothing to write otherwise)."""
+    if c.lost_site not in ("", site) or c.lost_site_state not in expect_states:
+        return False, False
+    if c.lost_site == site and c.lost_site_state == state:
+        return True, False
+    c.lost_site, c.lost_site_state = site, state
+    return True, True
+
+
+def _clear_monitor_record(c) -> str | None:
+    """The mutation of clear_monitor_lost_site on the cluster ``c`` read in its
+    transaction: the site whose monitor record was cleared, None when the
+    record is not the monitor's (nothing to write)."""
+    if c.lost_site_state not in MONITOR_LOST_SITE_STATES:
+        return None
+    site = c.lost_site
+    c.lost_site, c.lost_site_state = "", ""
+    return site
+
+
+def set_lost_site_state(cluster_id: str, site: str, state: str, expect_states: Iterable[str]) -> bool:
+    """The one writer of the cluster's lost-site record: a compare-and-set of
+    ``lost_site`` / ``lost_site_state`` to ``site`` / ``state`` when the stored
+    pair is ``site`` (or unset) with a state in ``expect_states``. True when the
+    record holds the pair afterwards (also when it already did); False, and
+    nothing written, when another site is recorded or the state is not
+    expected."""
+    expect_states = tuple(expect_states)
+    written = {"ok": False}
+
+    def _mutate(c):
+        written["ok"], changed = _set_lost_site_record(c, site, state, expect_states)  # atomic_update may replay this
+        return changed
+    db = DBController()
+    db.atomic_update(db.get_cluster_by_id(cluster_id), _mutate)
+    return written["ok"]
+
+
+def clear_monitor_lost_site(cluster_id: str) -> bool:
+    """Clear the lost-site record when the storage-node monitor wrote it
+    (MONITOR_LOST_SITE_STATES); a disaster fail-over's record (fencing / done)
+    is left alone. True when a record was cleared."""
+    cleared = {"site": ""}
+
+    def _mutate(c):
+        site = _clear_monitor_record(c)     # atomic_update may replay this
+        cleared["site"] = site or ""
+        return site is not None
+    db = DBController()
+    db.atomic_update(db.get_cluster_by_id(cluster_id), _mutate)
+    if cleared["site"]:
+        logger.warning("Sync replication: the monitor's record of site %s cleared (cluster %s suspended)",
+                       cleared["site"], cluster_id)
+    return bool(cleared["site"])
+
+
 def settle_site_return(cluster_id: str) -> bool:
     """The return of a lost site, run by the storage-node monitor on every pass
     (cheap DB checks until the site is back). With a site recorded as lost -
-    its fence ``done``, or ``fencing`` left behind by a disaster promote that
-    no longer runs - and every node of it ONLINE with its zone up
-    (site_return_problems):
+    its fence ``done``, ``fencing`` left behind by a disaster promote that no
+    longer runs, or ``down`` (the monitor's record of a site that went down
+    with no fail-over; ``draining`` is not over yet) - and every node of it
+    ONLINE with its zone up (site_return_problems):
 
     1. every LVS still led from that site (never failed over: not promoted,
        not promotable, or empty) gets its leader there
@@ -863,9 +940,10 @@ def settle_site_return(cluster_id: str) -> bool:
     3. ``lost_site`` / ``lost_site_state`` cleared in one transaction that
        re-reads the site's nodes (DBController.clear_lost_site).
 
-    Any step not possible now -> False, retried by the next pass. The volumes
-    of the LVS that were active on the site stay fenced there
-    (``sync_demoted_sites``) until promoted. True when the site was cleared."""
+    Any step not possible now -> False, retried by the next pass. After a
+    fail-over the volumes of the LVS that were active on the site stay fenced
+    there (``sync_demoted_sites``) until promoted; after ``down`` none was
+    fenced. True when the site was cleared."""
     db = DBController()
     cluster = db.get_cluster_by_id(cluster_id)
     lost = cluster.lost_site
@@ -876,7 +954,7 @@ def settle_site_return(cluster_id: str) -> bool:
         if any(t.function_params.get("lost_site") == lost
                for t in db.get_active_sync_promote_tasks(cluster_id)):
             return False
-    elif state != Cluster.LOST_SITE_DONE:
+    elif state not in (Cluster.LOST_SITE_DONE, Cluster.LOST_SITE_DOWN):
         return False
     nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
     if site_return_problems(nodes, lost):
@@ -1475,9 +1553,12 @@ def _promote(db: DBController, volumes: list[LVol], site: str, force: bool, *,
     else:
         check_gate(cluster_id)
     task_owners = {lv.lvs_name: lv.node_id for lv in queued}
+    # Only a disaster row (a forced promote of a site that is not online)
+    # fences the site; any other promote queued while a site is recorded is
+    # judged by its disaster gate and leaves the site alone.
     task_id, _ = tasks_controller.add_sync_promote_task(
         cluster_id, queued[0].node_id, site=site, lvol_ids=[lv.get_id() for lv in queued],
-        owners=task_owners, lost_site=lost)
+        owners=task_owners, lost_site=lost, fence=PROMOTE_DISASTER in kinds)
     return SyncPromoteResult(in_progress=True, task_id=task_id)
 
 
@@ -1487,7 +1568,10 @@ def _lost_site_of_request(db: DBController, cluster, site: str, disaster_sources
     the cluster's recorded lost site - with a site lost the planned gate (live,
     both sites) can never pass, and opening a volume of an LVS already led from
     the surviving site is judged by the disaster gate, which judges only what
-    is still active on the lost site. "" for a planned promote.
+    is still active on the lost site. "" for a planned promote. A record does
+    not mean the site was fenced: the storage-node monitor records a site that
+    is out (``draining`` / ``down``) with no fail-over; only a request with a
+    disaster row fences it (``fence`` of the task).
 
     Refuses (SyncPromoteRefusedError) a disaster of the promoted site itself
     or while another site is already recorded as lost, and - before the site
@@ -1524,9 +1608,11 @@ def sync_promote_lvol(lvol_id: str, site: str, force: bool = False) -> SyncPromo
     A forced promote of a volume whose LVS is led from a site that is not
     online is a disaster fail-over (_lost_site_of_request): refused while a
     node of that site may still run, else judged by the disaster gate of that
-    site (persisted events of its nodes) and queued with ``lost_site``; the
-    runner fences the site before it moves anything. While a site is
-    recorded as lost every promote is judged by its disaster gate.
+    site (persisted events of its nodes) and queued with ``lost_site`` and
+    ``fence``; the runner fences the site before it moves anything. While a
+    site is recorded as lost - failed over, or recorded by the storage-node
+    monitor with no fail-over - every promote is judged by its disaster gate;
+    only the forced one of a disaster row fences it.
 
     A promote of the volume to ``site`` that ran and failed is answered once
     with SyncPromoteFailedError (its reason and task) before anything is

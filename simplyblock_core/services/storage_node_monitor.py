@@ -1,6 +1,7 @@
 import threading
 import time
 from datetime import datetime, UTC
+from typing import NamedTuple
 
 import fdb
 
@@ -263,15 +264,58 @@ def _collect_status_probes(snodes):
     return jm_repl, dp_quorum
 
 
-def get_next_cluster_status(cluster_id):
+_SITE_GONE_PROBED_STATUSES = (StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE,
+                              StorageNode.STATUS_IN_SHUTDOWN)
+
+
+def _collect_site_gone(snodes) -> dict[str, bool]:
+    """The veto dict of a sync-replication cluster's verdict: for each node in
+    UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN, whether it is gone - no answering
+    peer reports its JM link enabled (data_plane_seen_votes; ``0/0`` vetoes
+    nothing). In parallel across nodes, like _collect_status_probes, whose
+    majority dict reads the same peers. It reuses the cached vote
+    (_count_data_plane_votes) and has no cache of its own."""
+    gone: dict[str, bool] = {}
+
+    def _probe(n):
+        enabled, _total = data_plane_seen_votes(n)
+        gone[n.get_id()] = enabled == 0
+
+    threads = []
+    for node in snodes:
+        if node.status not in _SITE_GONE_PROBED_STATUSES:
+            continue
+        t = threading.Thread(target=_probe, args=(node,), name=f"site-gone-probe-{node.get_id()[:8]}")
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+    return gone
+
+
+class SyncVerdict(NamedTuple):
+    """The verdict of one status pass. ``site`` / ``state``: the lost-site
+    record it proposes ("" when none - always on a cluster without sync
+    replication); ``gone``: the transient nodes the site drain and the
+    ``down`` sweep may escalate (_apply_site_record) - on a sync-replication
+    cluster never one an answering peer still reports enabled."""
+    status: str
+    site: str
+    state: str
+    gone: dict
+
+
+def _next_cluster_verdict(cluster_id) -> SyncVerdict:
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
-        return Cluster.STATUS_UNREADY
+        return SyncVerdict(Cluster.STATUS_UNREADY, "", "", {})
 
     # Phase 1: slow, RPC-dependent signals on a throwaway snapshot.
     probe_snapshot = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
     jm_repl_by_node, dp_quorum_by_node = _collect_status_probes(probe_snapshot)
+    sync = cluster.sync_replication is True
+    site_gone_by_node = _collect_site_gone(probe_snapshot) if sync else {}
 
     # Phase 2: the verdict, computed from a FRESH snapshot with no RPCs —
     # milliseconds, so the returned status describes the cluster as it is
@@ -283,46 +327,97 @@ def get_next_cluster_status(cluster_id):
     # task list each time (O(n·T) per verdict).
     cluster_tasks = db.get_job_tasks(cluster_id)
 
-    if cluster.sync_replication is True:
-        return _sync_cluster_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks)
-    return _status_verdict(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks)
+    if sync:
+        return _sync_cluster_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node,
+                                    site_gone_by_node, cluster_tasks)
+    return SyncVerdict(_status_verdict(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks),
+                       "", "", dp_quorum_by_node)
+
+
+def get_next_cluster_status(cluster_id):
+    return _next_cluster_verdict(cluster_id).status
 
 
 _STATUS_RANK = {Cluster.STATUS_ACTIVE: 0, Cluster.STATUS_DEGRADED: 1, Cluster.STATUS_SUSPENDED: 2}
 
 
-def _sync_cluster_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks):
-    """The status of a sync-replication cluster, judged per site: every LVS
+def _worst(statuses):
+    return max(statuses, key=lambda st: _STATUS_RANK.get(st, 2))
+
+
+def _sync_cluster_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, site_gone_by_node,
+                         cluster_tasks) -> SyncVerdict:
+    """The verdict of a sync-replication cluster, judged per site: every LVS
     keeps one zone per site, so each site's nodes are judged on their own
-    (_status_verdict). A LOST site (_site_lost: every node of it gone) no
-    longer suspends: its zone is lost as a whole, which ultra's lost-zone rule
-    serves from the other zone; the cluster is then at least DEGRADED. Both
-    sites lost -> SUSPENDED. A site damaged beyond its FTT without being lost
-    still suspends (its zone is neither readable nor lost)."""
+    (_status_verdict), and a site that is out is served by the other one.
+
+    1. By the veto rule (``site_gone_by_node``, _collect_site_gone): a site
+       is out when it is recorded (``cluster.lost_site``), when every counted
+       node of it is gone (_site_lost) or when its verdict is SUSPENDED; it is
+       healthy when it is not out and its verdict is ACTIVE or DEGRADED. Every
+       site healthy -> the worst of their verdicts. One site out and the other
+       healthy -> DEGRADED at least, and for an out site not recorded yet a
+       record is proposed: ``down`` when every node of it is gone,
+       ``draining`` otherwise (the status returned is the one that holds after
+       the record, so SUSPENDED is never written for one pass).
+    2. No healthy site by the veto rule - which is also what a management node
+       cut off from both sites sees, where every vote is ``0/0`` - drops the
+       veto dict: main's majority dict (``dp_quorum_by_node``) decides, a
+       recorded site counts as lost, both sites lost -> SUSPENDED, one lost ->
+       DEGRADED at least. Nothing is proposed. The majority dict decides the
+       status only: the nodes a recorded site's drain / ``down`` sweep may
+       escalate (``gone``) are those gone by both dicts - a vetoed node is
+       left alone in this step too, and a ``0/0`` one (never gone by the
+       majority) as well."""
     sites = sorted({n.site for n in snodes if n.site})
-    verdicts = {site: _status_verdict(cluster, [n for n in snodes if n.site == site],
-                                      jm_repl_by_node, dp_quorum_by_node, cluster_tasks)
+    by_site = {site: [n for n in snodes if n.site == site] for site in sites}
+
+    def _recorded(site):
+        return bool(cluster.lost_site) and site == cluster.lost_site
+
+    # 1. the veto rule
+    verdicts = {site: _status_verdict(cluster, by_site[site], jm_repl_by_node, site_gone_by_node, cluster_tasks)
                 for site in sites}
-    lost = [site for site in sites
-            if _site_lost([n for n in snodes if n.site == site], dp_quorum_by_node)]
+    all_gone = {site: _site_lost(by_site[site], site_gone_by_node) for site in sites}
+    out = [site for site in sites
+           if _recorded(site) or all_gone[site] or verdicts[site] == Cluster.STATUS_SUSPENDED]
+    healthy = [site for site in sites
+               if site not in out and verdicts[site] in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED)]
+    if healthy and len(healthy) == len(sites):
+        return SyncVerdict(_worst(verdicts.values()), "", "", site_gone_by_node)
+    if healthy and len(out) == 1 and len(healthy) == len(sites) - 1:
+        site = out[0]
+        status = _worst([*(verdicts[s] for s in healthy), Cluster.STATUS_DEGRADED])
+        if _recorded(site):
+            return SyncVerdict(status, "", "", site_gone_by_node)
+        state = Cluster.LOST_SITE_DOWN if all_gone[site] else Cluster.LOST_SITE_DRAINING
+        logger.warning("Sync replication: site %s is out (%s) - not suspending", site, state)
+        return SyncVerdict(status, site, state, site_gone_by_node)
+
+    # 2. no healthy site: the majority dict for the status, both dicts for escalation
+    gone = {node_id: True for node_id, by_majority in dp_quorum_by_node.items()
+            if by_majority and site_gone_by_node.get(node_id)}
+    verdicts = {site: _status_verdict(cluster, by_site[site], jm_repl_by_node, dp_quorum_by_node, cluster_tasks)
+                for site in sites}
+    lost = [site for site in sites if _recorded(site) or _site_lost(by_site[site], dp_quorum_by_node)]
     live = [status for site, status in verdicts.items() if site not in lost]
     if not live:
-        return Cluster.STATUS_SUSPENDED
-    worst = max(live, key=lambda st: _STATUS_RANK.get(st, 2))
+        return SyncVerdict(Cluster.STATUS_SUSPENDED, "", "", gone)
+    worst = _worst(live)
     if lost:
         logger.warning("Sync replication: site(s) %s lost as a whole — not suspending", lost)
-        return worst if _STATUS_RANK.get(worst, 2) >= 1 else Cluster.STATUS_DEGRADED
-    return worst
+        worst = _worst([worst, Cluster.STATUS_DEGRADED])
+    return SyncVerdict(worst, "", "", gone)
 
 
-def _site_lost(site_nodes, dp_quorum_by_node) -> bool:
+def _site_lost(site_nodes, gone_by_node) -> bool:
     """Whether a site is lost as a whole: it has counted nodes (not in
     creation / suspended / removed) and every one of them is gone - OFFLINE
     (a terminal escalation), or in a transient state (UNREACHABLE,
-    SCHEDULABLE, IN_SHUTDOWN, RESTARTING) with a peer majority reporting its
-    data plane gone (``dp_quorum_by_node``, _collect_status_probes). A node
-    that is ONLINE or DOWN (SPDK alive) keeps its site, and device failures
-    never count: they are the per-site verdict's business."""
+    SCHEDULABLE, IN_SHUTDOWN) that ``gone_by_node`` reports gone (the veto or
+    the majority dict, _sync_cluster_status). A node that is ONLINE, DOWN
+    (SPDK alive) or RESTARTING (coming back) keeps its site, and device
+    failures never count: they are the per-site verdict's business."""
     counted = [n for n in site_nodes
                if n.status not in (StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED,
                                    StorageNode.STATUS_REMOVED)]
@@ -330,9 +425,9 @@ def _site_lost(site_nodes, dp_quorum_by_node) -> bool:
     def _gone(node):
         if node.status == StorageNode.STATUS_OFFLINE:
             return True
-        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING):
             return False
-        return bool(dp_quorum_by_node.get(node.get_id()))
+        return bool(gone_by_node.get(node.get_id()))
     return bool(counted) and all(_gone(n) for n in counted)
 
 
@@ -571,6 +666,10 @@ def _requeue_stuck_auto_restarts(cluster_id):
             # tick for a node that is intentionally down.
             if node.auto_restart_disabled:
                 continue
+            # Sync replication: a site being drained (record ``draining``)
+            # keeps its restarts paused while the other site's run.
+            if cluster.sync_replication is True and tasks_controller.is_auto_restart_paused(cluster, node):
+                continue
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
                 continue
             logger.info(
@@ -682,7 +781,7 @@ def _watchdog_stuck_activation(cluster):
                 "(> %ds): the activation driver is gone; reverting to SUSPENDED "
                 "so activation re-gates and auto-restart can re-queue",
                 cluster.get_id(), hb_age, ACTIVATION_HEARTBEAT_STALE_SEC)
-            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+            _set_cluster_status(cluster, Cluster.STATUS_SUSPENDED)
             return
 
     budget = _activation_watchdog_budget_sec(cluster)
@@ -692,7 +791,7 @@ def _watchdog_stuck_activation(cluster):
         "Cluster %s stuck in IN_ACTIVATION for %.0fs (> %ds budget for this node count); "
         "reverting to SUSPENDED so activation re-gates and auto-restart can re-queue",
         cluster.get_id(), elapsed, budget)
-    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+    _set_cluster_status(cluster, Cluster.STATUS_SUSPENDED)
 
 
 # Node statuses that mean a node is NOT yet drained for suspend recovery:
@@ -719,7 +818,7 @@ def _watchdog_stuck_shrink(cluster):
         "Cluster %s is IN_SHRINK but no node-removal task is open: the removal "
         "driver is gone. Reverting to %s so topology gates and stale-phase "
         "reclamation resume.", cluster.get_id(), next_status)
-    cluster_ops.set_cluster_status(cluster.get_id(), next_status)
+    _set_cluster_status(cluster, next_status)
 
 
 # every (non operator-stopped) node has left all of these for OFFLINE/REMOVED.
@@ -757,6 +856,46 @@ def _spawn_recovery_shutdown(node):
     recovery_shutdown_threads[node_id] = t
 
 
+def _drain_nodes(nodes, what, gone=None) -> bool:
+    """The node loop of a recovery drain - main's suspend drain over the whole
+    cluster (_drive_suspend_recovery), the site drain of a sync-replication
+    cluster over one site (_drive_site_drain). ``what`` prefixes the log lines.
+
+    ONLINE / DOWN nodes are force-shut down, UNREACHABLE ones escalated to
+    OFFLINE - every one with ``gone`` None (the cluster-wide drain), only those
+    ``gone`` reports gone otherwise (any other one is left alone this tick);
+    operator-stopped nodes (auto_restart_disabled) are left alone and not
+    waited for. True when nothing of ``nodes`` - as read before this tick's
+    actions - is still in _DRAIN_PENDING_STATUSES."""
+    for node in nodes:
+        if node.auto_restart_disabled:
+            continue
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            logger.info(
+                "%s: force-shutting-down node %s (status %s) "
+                "for clean recovery drain",
+                what, node.get_id(), node.status)
+            _spawn_recovery_shutdown(node)
+        elif node.status == StorageNode.STATUS_UNREACHABLE:
+            if gone is not None and not gone.get(node.get_id()):
+                logger.info("%s: unreachable node %s is not judged gone in this pass; left alone",
+                            what, node.get_id())
+                continue
+            logger.info(
+                "%s: escalating unreachable node %s to OFFLINE "
+                "to converge recovery drain", what, node.get_id())
+            try:
+                set_node_offline(node)
+            except Exception as e:
+                logger.error("Failed to escalate unreachable node %s to OFFLINE: %s",
+                             node.get_id(), e)
+
+    return all(
+        node.auto_restart_disabled or node.status not in _DRAIN_PENDING_STATUSES
+        for node in nodes
+    )
+
+
 def _drive_suspend_recovery(cluster):
     """Drive a SUSPENDED cluster to a clean all-offline slate before any
     auto-restart runs (auto-restart stays paused via
@@ -779,30 +918,7 @@ def _drive_suspend_recovery(cluster):
         return
 
     nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
-    for node in nodes:
-        if node.auto_restart_disabled:
-            continue
-        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
-            logger.info(
-                "Cluster %s suspended: force-shutting-down node %s (status %s) "
-                "for clean recovery drain",
-                cluster.get_id(), node.get_id(), node.status)
-            _spawn_recovery_shutdown(node)
-        elif node.status == StorageNode.STATUS_UNREACHABLE:
-            logger.info(
-                "Cluster %s suspended: escalating unreachable node %s to OFFLINE "
-                "to converge recovery drain", cluster.get_id(), node.get_id())
-            try:
-                set_node_offline(node)
-            except Exception as e:
-                logger.error("Failed to escalate unreachable node %s to OFFLINE: %s",
-                             node.get_id(), e)
-
-    drained = all(
-        node.auto_restart_disabled or node.status not in _DRAIN_PENDING_STATUSES
-        for node in nodes
-    )
-    if drained:
+    if _drain_nodes(nodes, f"Cluster {cluster.get_id()} suspended"):
         fresh = db.get_cluster_by_id(cluster.get_id())
         if fresh.status == Cluster.STATUS_SUSPENDED and not fresh.suspend_drain_complete:
             fresh.suspend_drain_complete = True
@@ -810,6 +926,24 @@ def _drive_suspend_recovery(cluster):
             logger.info(
                 "Cluster %s drained to all-offline; suspend-recovery auto-restart "
                 "unpaused", cluster.get_id())
+
+
+def _drive_site_drain(cluster, gone):
+    """The site drain of a sync-replication cluster whose record is ``draining``
+    (a site beyond its FTT while the other one is healthy): main's drain loop
+    (_drain_nodes) over the recorded site's nodes, an UNREACHABLE node escalated
+    only when ``gone`` - this pass's SyncVerdict.gone, which leaves a vetoed
+    node out - reports it gone. Once nothing of the site is pending the record
+    goes ``draining -> down`` and the site's restarts resume
+    (tasks_controller.is_auto_restart_paused). ``suspend_drain_complete`` is
+    the cluster-wide drain's flag: neither read nor written here."""
+    cluster_id, site = cluster.get_id(), cluster.lost_site
+    nodes = [n for n in db.get_storage_nodes_by_cluster_id(cluster_id) if n.site == site]
+    if not _drain_nodes(nodes, f"Sync replication: site {site} of cluster {cluster_id} draining", gone):
+        return
+    if sync_replication_controller.set_lost_site_state(
+            cluster_id, site, Cluster.LOST_SITE_DOWN, (Cluster.LOST_SITE_DRAINING,)):
+        logger.warning("Sync replication: site %s drained, recorded down (cluster %s)", site, cluster_id)
 
 
 # Debounce state for update_cluster_status: during a mass outage every
@@ -978,7 +1112,75 @@ def _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status):
             "Auto write-protection switch raised for cluster %s", cluster_id)
 
 
+def _set_cluster_status(cluster, status):
+    """cluster_ops.set_cluster_status, the monitor's way: on a sync-replication
+    cluster a write of SUSPENDED clears a monitor record of a site (draining /
+    down) first - the record must not outlive a suspension (a restart under it
+    brings a node ONLINE without lvstores, and the activation refuses a leader
+    on a recorded site). A failed clear propagates: no SUSPENDED without it."""
+    if status == Cluster.STATUS_SUSPENDED and cluster.sync_replication is True:
+        sync_replication_controller.clear_monitor_lost_site(cluster.get_id())
+    cluster_ops.set_cluster_status(cluster.get_id(), status)
+
+
+def _clear_site_record_under_suspension(cluster_id):
+    """The level rule of the monitor's record: a sync-replication cluster
+    stored SUSPENDED - by this monitor, by `sbctl cluster restart` or by
+    anybody else - keeps no draining / down record."""
+    cluster = db.get_cluster_by_id(cluster_id)
+    if (cluster.sync_replication is True and cluster.status == Cluster.STATUS_SUSPENDED
+            and cluster.lost_site_state in sync_replication_controller.MONITOR_LOST_SITE_STATES):
+        sync_replication_controller.clear_monitor_lost_site(cluster_id)
+
+
+#: The stored statuses of a working cluster - the only ones under which the
+#: monitor writes a record of a site and acts on it.
+_SITE_RECORD_STATUSES = (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY)
+
+
+def _apply_site_record(cluster, current_cluster_status, verdict: SyncVerdict):
+    """The monitor's part of the lost-site record on a working sync-replication
+    cluster: write the record the verdict proposes; while the record is
+    ``draining``, drive the site drain (_drive_site_drain), which ends it at
+    ``down``; while it is ``down``, escalate the site's UNREACHABLE /
+    SCHEDULABLE nodes gone by this pass's ``verdict.gone`` to OFFLINE
+    (set_node_offline: devices unavailable, ANA failover, auto-restart), so that
+    the data plane sees the zone lost. Level rules: a drain or a sweep cut short
+    completes on a later pass, and a vetoed node is never escalated."""
+    if cluster.sync_replication is not True or current_cluster_status not in _SITE_RECORD_STATUSES:
+        return
+    cluster_id = cluster.get_id()
+    if verdict.site:
+        expect = ("",) if verdict.state == Cluster.LOST_SITE_DRAINING else ("", Cluster.LOST_SITE_DRAINING)
+        if sync_replication_controller.set_lost_site_state(cluster_id, verdict.site, verdict.state, expect):
+            logger.warning("Sync replication: site %s recorded %s (cluster %s)",
+                           verdict.site, verdict.state, cluster_id)
+        else:
+            logger.warning("Sync replication: site %s not recorded %s - the record changed (cluster %s)",
+                           verdict.site, verdict.state, cluster_id)
+    cluster = db.get_cluster_by_id(cluster_id)
+    if cluster.lost_site and cluster.lost_site_state == Cluster.LOST_SITE_DRAINING:
+        _drive_site_drain(cluster, verdict.gone)
+        cluster = db.get_cluster_by_id(cluster_id)
+    if not cluster.lost_site or cluster.lost_site_state != Cluster.LOST_SITE_DOWN:
+        return
+    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+        if (node.site == cluster.lost_site
+                and node.status in (StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE)
+                and verdict.gone.get(node.get_id())):
+            logger.info("Sync replication: site %s is down, setting its gone node %s (%s) OFFLINE",
+                        cluster.lost_site, node.get_id(), node.status)
+            set_node_offline(node)
+
+
 def _update_cluster_status_impl(cluster_id):
+    # Sync replication: a suspended cluster carries no monitor record of a
+    # site (draining / down) - whoever wrote the suspension. Cleared before
+    # anything of this pass reads the record. DB-only; retried next pass.
+    try:
+        _clear_site_record_under_suspension(cluster_id)
+    except (KeyError, fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+        logger.error("Sync-replication site record clear failed for cluster %s: %s", cluster_id, e)
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
     # stranded whenever the cluster takes a recovery path (e.g.
@@ -1005,7 +1207,8 @@ def _update_cluster_status_impl(cluster_id):
     except (KeyError, fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
         logger.error("Sync-replication move reconcile failed for cluster %s: %s", cluster_id, e)
 
-    next_current_status = get_next_cluster_status(cluster_id)
+    verdict = _next_cluster_verdict(cluster_id)
+    next_current_status = verdict.status
     logger.info("cluster_new_status: %s", next_current_status)
 
     rebalancing_task_names = {
@@ -1089,6 +1292,8 @@ def _update_cluster_status_impl(cluster_id):
             _watchdog_stuck_shrink(cluster)
         return
 
+    _apply_site_record(cluster, current_cluster_status, verdict)
+
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
         # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
         # cluster_ops.cluster_activate(cluster_id, True)
@@ -1115,7 +1320,7 @@ def _update_cluster_status_impl(cluster_id):
         else:
             cluster_ops.cluster_activate(cluster_id, force=True)
     else:
-        cluster_ops.set_cluster_status(cluster_id, next_current_status)
+        _set_cluster_status(cluster, next_current_status)
 
 
 # Note: a `set_node_online` helper used to live here. It flipped DOWN /
@@ -1283,6 +1488,20 @@ def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None, *, fresh=Fal
     """
     disconnected, total = _data_plane_votes(node, fresh)
     return total > 0 and disconnected > total // 2
+
+
+def data_plane_seen_votes(node, *, fresh=False) -> tuple[int, int]:
+    """``(enabled, total)``: of the ``total`` peers that answered about
+    *node*'s remote JM, how many still report it ``enabled``.
+
+    The veto reading of the same vote (``fresh`` as in
+    is_node_data_plane_disconnected): a caller that has its own evidence of
+    the node being gone is stopped by ``enabled > 0`` only. ``(0, 0)`` - no
+    peer to ask, none that holds the link, none that answered - vetoes
+    nothing, where the two predicates above read it as "not disconnected".
+    """
+    disconnected, total = _data_plane_votes(node, fresh)
+    return total - disconnected, total
 
 
 def _count_data_plane_votes(node):

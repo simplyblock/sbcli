@@ -69,7 +69,7 @@ class TestAggregateLvs:
         assert status.answering == ("n1", "n2", "n3")
         assert (status.unsynced_pages, status.bytes_behind) == (0, 0)
 
-    def test_the_leader_answer_wins_over_a_non_leader_during_a_catch_up(self):
+    def test_the_leader_answer_wins_over_a_non_leader(self):
         answers = _set(_synced(), "n1", "d1", status="replica_syncing", n_replica_unsynced_pages=3)
         _set(answers, "n2", "d1", status="replica_unsynced", n_replica_unsynced_pages=9)
         status = src.aggregate_lvs(LAYOUT, answers, resync_running=False)
@@ -86,7 +86,7 @@ class TestAggregateLvs:
         assert status.state == src.STATE_DEGRADED
         assert status.bytes_behind == 2 * 4096
 
-    def test_an_idle_lvs_without_a_leader_all_synced_passes_the_gate(self):
+    def test_an_idle_leaderless_lvs_passes_the_gate(self):
         status = src.aggregate_lvs(LAYOUT, _synced(leader_node=""), resync_running=False)
         assert status.state == src.STATE_HEALTHY
         assert status.gate_problems == ()
@@ -105,11 +105,11 @@ class TestAggregateLvs:
         assert src.aggregate_lvs(LAYOUT, answers, resync_running=False).state == (
             src.STATE_DEGRADED if leader_status != "synced" else src.STATE_HEALTHY)
 
-    def test_a_running_catch_up_fails_the_gate_although_every_answer_is_synced(self):
+    def test_a_running_catch_up_fails_the_gate(self):
         status = src.aggregate_lvs(LAYOUT, _synced(), resync_running=True)
         assert status.gate_problems == ("LVS LVS_1: catch-up task running",)
 
-    def test_an_asked_member_that_did_not_answer_fails_the_gate(self):
+    def test_a_silent_asked_member_fails_the_gate(self):
         # The catch-up node (HA leader) is silent; the non-leaders' synced is
         # provisional and must not pass the gate.
         answers = _synced(leader_node="n1")
@@ -123,18 +123,18 @@ class TestAggregateLvs:
         del answers["n3"]    # not ONLINE: never queried
         assert src.aggregate_lvs(LAYOUT, answers, resync_running=False).gate_problems == ()
 
-    def test_a_silent_node_of_another_lvs_does_not_block_this_one(self):
+    def test_a_silent_node_of_another_lvs_is_ignored(self):
         answers = {**_synced(), "x9": None}
         assert src.aggregate_lvs(LAYOUT, answers, resync_running=False).gate_problems == ()
 
-    def test_no_answer_at_all_is_missing_degraded_and_fails_the_gate(self):
+    def test_no_answer_at_all_is_missing_and_degraded(self):
         status = src.aggregate_lvs(LAYOUT, {"n1": None}, resync_running=False)
         assert status.distribs == {"d1": "missing", "d2": "missing"}
         assert status.state == src.STATE_DEGRADED
         assert not status.mode_full
         assert status.gate_problems == ("LVS LVS_1: no instance answered",)
 
-    def test_a_node_answering_without_a_distrib_fails_the_gate_but_not_the_leader_status(self):
+    def test_a_missing_distrib_answer_fails_only_the_gate(self):
         answers = _synced()
         answers["n3"] = [e for e in answers["n3"] if e["name"] != "d2"]
         status = src.aggregate_lvs(LAYOUT, answers, resync_running=False)
@@ -143,7 +143,7 @@ class TestAggregateLvs:
         assert not status.mode_full
 
     @pytest.mark.parametrize("mode", ["disabled", "offset_based"])
-    def test_one_instance_not_full_is_not_completed_although_the_leader_is(self, mode):
+    def test_one_instance_not_full_blocks_completed(self, mode):
         answers = _set(_synced(), "n2", "d1", sync_replication_mode=mode)
         status = src.aggregate_lvs(LAYOUT, answers, resync_running=False)
         assert status.distribs == {"d1": "synced", "d2": "synced"}      # the leader's answers
@@ -159,7 +159,7 @@ class TestAggregateLvs:
         assert status.state == src.STATE_HEALTHY and "n9" not in status.answering
 
     @pytest.mark.parametrize("mode", ["offset_based", "disabled"])
-    def test_a_mode_other_than_full_fails_the_gate_and_completed(self, mode):
+    def test_a_mode_other_than_full_fails_the_gate(self, mode):
         answers = _synced()
         for nid in LAYOUT.members:
             _set(answers, nid, "d1", sync_replication_mode=mode)
@@ -171,7 +171,7 @@ class TestAggregateLvs:
         assert len(status.gate_problems) == 3
         assert all(f"mode {mode}" in p for p in status.gate_problems)
 
-    def test_journal_in_sync_is_the_and_of_the_jc_leader_answers(self):
+    def test_journal_in_sync_ands_the_jc_leader_answers(self):
         status = src.aggregate_lvs(LAYOUT, _synced(), resync_running=False)
         assert (status.remote_journal_in_sync, status.jc_leader_id) == (True, "n1")
         answers = _set(_synced(), "n1", "d2", remote_journal_in_sync=False)
@@ -180,7 +180,7 @@ class TestAggregateLvs:
         status = src.aggregate_lvs(LAYOUT, answers, resync_running=False)
         assert (status.remote_journal_in_sync, status.jc_leader_id) == (None, "")
 
-    def test_two_jc_leader_claims_across_a_handoff_are_not_known(self):
+    def test_two_jc_leader_claims_leave_the_journal_unknown(self):
         answers = _set(_synced(), "n2", "d1", jc_leader=True, remote_journal_in_sync=False)
         status = src.aggregate_lvs(LAYOUT, answers, resync_running=False)
         assert (status.remote_journal_in_sync, status.jc_leader_id) == (None, "")
@@ -306,7 +306,7 @@ class TestRoleAndActiveSite:
     def test_lvs_active_on(self, home, active, lost, expected):
         assert src.lvs_active_on(_node(home, lvs_active_site=active), lost) is expected
 
-    def test_layout_skips_pending_remote_members_and_takes_the_page_size(self):
+    def test_layout_skips_pending_remote_members(self):
         owner = _node("A")
         owner.lvstore = "LVS_1"
         owner.secondary_node_id, owner.tertiary_node_id = "s", "t"
@@ -368,14 +368,15 @@ class TestDisasterGate:
         assert "reported by t2" in _problems(list(reversed(events)))[0]
         assert _problems([_event(LIVE, "t2", 4), *events]) == []
 
-    def test_a_drop_marked_resolved_by_another_nodes_restore_still_blocks(self):
+    def test_a_drop_resolved_by_another_node_still_blocks(self):
         # The status bookkeeping (resolved flag, journal_restored_seq) ends a
         # drop by any later restore; the disaster gate does not.
         covered = {**STATE, "journal_restored_seq": 2}
         events = [_event(DROPPED, "t1", 1, resolved=True), _event(RESTORED, "t2", 2)]
         assert _problems(events, covered)
 
-    def test_a_legacy_drop_without_receive_seq_is_judged_by_its_flag(self):
+    def test_a_legacy_drop_is_judged_by_its_flag(self):
+        """A legacy drop has no receive_seq (0)."""
         assert _problems([_event(DROPPED, "t1", 0), _event(RESTORED, "t1", 5)])
         assert not _problems([_event(DROPPED, "t1", 0, resolved=True)])
 

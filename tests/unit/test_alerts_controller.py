@@ -313,6 +313,15 @@ class TestEventDerivedAlerts(unittest.TestCase):
         self.assertEqual(alerts[0]["message"],
                          "node node-1: unrecoverable io error")
 
+    def test_a_distr_event_below_error_is_not_an_io_error(self):
+        """A sync-replication state change reaches the cluster log through the
+        distr domain at Info / Warning: it is not a failed IO."""
+        for level in (EventObj.LEVEL_INFO, EventObj.LEVEL_WARN):
+            with self.subTest(level=level):
+                events = [_event(ec.DOMAIN_DISTR, level, event="sync_replication_status",
+                                 message="remote_journal_unsynced")]
+                self.assertEqual(_run(events=events), [])
+
     def test_a_storm_collapses_to_one_alert_per_node(self):
         """A distrib fault is reported many times. One alert per report would
         be the event log again under another name."""

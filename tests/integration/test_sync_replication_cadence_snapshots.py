@@ -6,8 +6,8 @@ and the timer must not make one: a due volume or group on such an LVS is
 deferred - nothing is granted, nothing is snapshotted - and taken on the first
 tick after a member of the active triplet reports the leadership. The verdict
 "nobody leads" is reused within a tick for the same LVS and marker only, a
-leader found never is. A led LVS and a cluster without sync replication tick
-as before.
+leader found never is. A led LVS, and every LVS of a cluster without sync
+replication, is snapshotted on its due tick.
 The snapshot itself is the real one (snapshot_controller.add,
 consistency_group_controller.create_group_snapshot_for_group), so a tick that
 is not deferred reaches the leaderless recovery those run. Storage nodes (RPC)
@@ -180,7 +180,7 @@ class TestLeaderlessVolume:
         for node in a:
             rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_not_called()
 
-    def test_the_deferral_is_one_log_line_and_one_lookup_per_tick(
+    def test_deferrals_log_once_and_look_up_once_per_tick(
             self, db, rpcs, hub, env, no_sleep, caplog):
         cluster, a, b, owner, pool = _leaderless(db, rpcs)
         _due_volume(db, cluster, owner, pool)
@@ -199,7 +199,7 @@ class TestLeaderlessVolume:
         # four deferred snapshots, one line (rate-limited per LVS)
         assert len(_deferrals(caplog)) == 1
 
-    def test_the_next_tick_after_the_primary_leads_takes_the_snapshot(
+    def test_the_snapshot_is_taken_once_the_primary_leads(
             self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, owner, pool = _leaderless(db, rpcs)
         lvol = _due_volume(db, cluster, owner, pool)
@@ -242,7 +242,7 @@ class TestLeaderlessGroup:
         assert db.get_consistency_group_by_id(group.get_id()).last_group_seq == 0
         assert len(_deferrals(caplog)) == 1
 
-    def test_the_next_tick_after_the_primary_leads_takes_the_generation(
+    def test_the_generation_is_taken_once_the_primary_leads(
             self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, members, group = self._grouped(db, rpcs)
         _tick(cluster)
@@ -271,7 +271,7 @@ class TestLeaderlessGroup:
 
 class TestMidTick:
 
-    def test_a_promote_that_completes_between_two_volumes_defers_the_second(
+    def test_a_mid_tick_promote_defers_the_second_volume(
             self, db, rpcs, hub, env, no_sleep):
         # A leader found for one volume says nothing about the next one.
         cluster, a, b, owner, pool = _layout(db)
@@ -296,7 +296,7 @@ class TestMidTick:
         assert sorted(len(_snapshots_of(db, cluster, lvol)) for lvol in lvols) == [0, 1]
         assert db.acquire_lvstore_lock(cluster.get_id(), "takeleader/LVS_1", "test") == (True, None)
 
-    def test_a_move_back_that_completes_between_two_volumes_snapshots_the_second(
+    def test_a_mid_tick_move_back_snapshots_the_second_volume(
             self, db, rpcs, hub, env, no_sleep):
         # "Nobody leads" is a verdict about one marker: it does not outlive it.
         cluster, a, b, owner, pool = _leaderless(db, rpcs)
@@ -343,7 +343,7 @@ class TestGuards:
         pytest.param("", "a", 0, id="home-led"),
         pytest.param(SITE_B, "b", 1, id="remote-led-by-its-secondary"),
     ])
-    def test_a_led_sync_lvs_snapshots_as_before(self, db, rpcs, hub, env, caplog, active_site, site, slot):
+    def test_led_sync_lvs_snapshots_without_a_grant(self, db, rpcs, hub, env, caplog, active_site, site, slot):
         cluster, a, b, owner, pool = _layout(db, active_site=active_site)
         leader = {"a": a, "b": b}[site][slot]
         rpcs.lead(leader)
@@ -408,7 +408,7 @@ class TestGuards:
         assert _deferrals(caplog) == []
         _not_sent(rpcs, [*a, *b], _GRANT_RPCS)
 
-    def test_a_non_sync_cluster_never_asks_the_timer_for_a_leader(self, db, rpcs, caplog):
+    def test_a_non_sync_volume_skips_the_leader_lookup(self, db, rpcs, caplog):
         cluster, owner, pool = _plain_layout(db)
         lvol = _due_volume(db, cluster, owner, pool)
         publish._volume(db, cluster, owner, pool, active_site="")   # does not replicate
@@ -423,7 +423,7 @@ class TestGuards:
         assert rpcs == {}                                 # the timer asked no node anything
         assert _deferrals(caplog) == []
 
-    def test_a_non_sync_group_never_asks_the_timer_for_a_leader(self, db, rpcs, caplog):
+    def test_a_non_sync_group_skips_the_leader_lookup(self, db, rpcs, caplog):
         cluster, owner, pool = _plain_layout(db)
         group = _group(db, cluster, owner, [_due_volume(db, cluster, owner, pool) for _ in range(2)])
         caplog.set_level(logging.INFO)

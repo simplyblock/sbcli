@@ -424,7 +424,7 @@ def is_suspension_operator_caused(cluster):
     return deliberate_down > 0 and other_not_online <= ftt
 
 
-def is_auto_restart_paused(cluster):
+def is_auto_restart_paused(cluster, node=None):
     """Auto-restart is paused while a SUSPENDED cluster is still being drained
     to a clean all-offline slate by the suspend-recovery auto-shutdown
     (storage_node_monitor). Recovering a suspended cluster by restarting nodes
@@ -439,10 +439,20 @@ def is_auto_restart_paused(cluster):
     ``is_suspension_operator_caused``) never drains, so the drain marker would
     pause restarts forever. The surviving nodes are still up in that state —
     restarting a genuinely-failed node one-by-one onto up peers is the normal
-    restart path, not the strand-prone post-drain path — so don't pause."""
-    return (cluster.status == Cluster.STATUS_SUSPENDED
+    restart path, not the strand-prone post-drain path — so don't pause.
+
+    Sync replication, with ``node`` given: the same pause for one site - the
+    node's site is recorded ``draining`` (cluster.lost_site_state), i.e. the
+    storage-node monitor is shutting down what is left of it
+    (storage_node_monitor._drive_site_drain); restarts of the site resume once
+    it is ``down``."""
+    if (cluster.status == Cluster.STATUS_SUSPENDED
             and not cluster.suspend_drain_complete
-            and not is_suspension_operator_caused(cluster))
+            and not is_suspension_operator_caused(cluster)):
+        return True
+    return (cluster.sync_replication is True and node is not None
+            and bool(cluster.lost_site) and node.site == cluster.lost_site
+            and cluster.lost_site_state == Cluster.LOST_SITE_DRAINING)
 
 
 def add_node_to_auto_restart(node):
@@ -513,11 +523,12 @@ def add_node_to_auto_restart(node):
     # auto-shutdown has drained the whole cluster offline. Restarting nodes
     # one-by-one before the drain completes is exactly what wedged the cluster
     # (stale ONLINE peers / stuck lvstore "in_creation"). Once
-    # suspend_drain_complete flips true, the normal path below runs.
-    if is_auto_restart_paused(cluster):
+    # suspend_drain_complete flips true, the normal path below runs. The same
+    # for a sync-replication site being drained (record ``draining``).
+    if is_auto_restart_paused(cluster, node):
         logger.info(
-            "Cluster %s is SUSPENDED and not yet drained; pausing auto-restart "
-            "for node %s until all nodes are offline",
+            "Cluster %s: auto-restart paused while a drain runs (cluster "
+            "suspended, or the node's site draining); not queuing node %s",
             node.cluster_id, node.get_id())
         return False
     # IN_SHRINK: a PEER failing mid-removal must still get an auto-restart —
@@ -549,7 +560,13 @@ def add_node_to_auto_restart(node):
     # means "tolerated, go ahead and restart"; the SUSPENDED-not-drained case
     # is already held by is_auto_restart_paused above. Only apply the flat
     # node-count guard to non-FD clusters.
-    if not cluster.enable_failure_domain:
+    #
+    # The same holds on a sync-replication cluster: its verdict is taken per
+    # site, a site beyond its FTT is drained and recorded (restarts paused
+    # until it is ``down``), and SUSPENDED is written only when no site is
+    # healthy - so a whole site offline while the other one serves is the
+    # tolerated case, and its nodes must restart.
+    if not cluster.enable_failure_domain and cluster.sync_replication is not True:
         offline_nodes = 0
         for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
             if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
@@ -1381,14 +1398,17 @@ def add_sync_resync_task(cluster_id, owner_node_id, lvs_name):
     return task_id
 
 
-def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners, lost_site=""):
+def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners, lost_site="",
+                          fence=False):
     """Queue the promote of ``lvol_ids`` to ``site`` (sync replication,
     FN_SYNC_PROMOTE); ``owners`` maps each LVS the promote may move to its
-    owner id; ``lost_site`` names the site a disaster fail-over fences first
-    ("" for a planned promote). Returns ``(task_id, created)``: when one of those LVS already
-    has an active (not done, not canceled) promote task, that task's id and
-    False - checked and created in one transaction
-    (DBController.ensure_sync_promote_task)."""
+    owner id; ``lost_site`` names the site whose disaster gate judges the
+    promote ("" for a planned promote); ``fence``: the request is a disaster
+    fail-over of ``lost_site``, which the runner fences first - without it a
+    promote queued while a site is recorded never fences it. Returns
+    ``(task_id, created)``: when one of those LVS already has an active (not
+    done, not canceled) promote task, that task's id and False - checked and
+    created in one transaction (DBController.ensure_sync_promote_task)."""
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
     task_obj.cluster_id = cluster_id
@@ -1397,7 +1417,8 @@ def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners, 
     task_obj.function_name = JobSchedule.FN_SYNC_PROMOTE
     task_obj.function_params = {"site": site, "lvol_ids": list(lvol_ids),
                                 "lvs_names": sorted(owners), "owners": dict(owners),
-                                "moves": {}, "transferring": [], "lost_site": lost_site}
+                                "moves": {}, "transferring": [], "lost_site": lost_site,
+                                "fence": fence}
     # A pass ends the task itself; max_retry bounds only the passes an
     # unexpected error interrupts (tasks_runner_sync_promote).
     task_obj.max_retry = constants.SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS

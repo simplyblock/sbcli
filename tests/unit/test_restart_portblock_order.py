@@ -1,11 +1,11 @@
 """On a primary restart, block non-leader ports BEFORE the leader, and start
 the demote only once every port is blocked.
 
-The leader path (_recreate_lvstore_impl, now _fence_and_demote_leader) used to block the leader first,
-suspend its replication, and only then block the non-leaders. That left a
-window between the leader's replication-disable and the non-leader block in
-which a non-leader (e.g. the tertiary) kept serving client IO and redirected it
-through the hublvol to a leader whose leadership was mid-transition ->
+The leader path is _fence_and_demote_leader. Blocking the leader first,
+suspending its replication, and only then blocking the non-leaders would leave
+a window between the leader's replication-disable and the non-leader block in
+which a non-leader (e.g. the tertiary) keeps serving client IO and redirects it
+through the hublvol to a leader whose leadership is mid-transition ->
 writer_conflict on the journal.
 
 Correct order:
@@ -20,9 +20,8 @@ from simplyblock_core import storage_node_ops
 
 
 def _src():
-    # The leader path's block / suspend / demote section, moved out of
-    # _recreate_lvstore_impl into the fenced hand-off it runs through
-    # (transfer_lvs_leadership).
+    # The leader path's block / suspend / demote section: the fenced
+    # hand-off _recreate_lvstore_impl runs through (transfer_lvs_leadership).
     return inspect.getsource(storage_node_ops._fence_and_demote_leader)
 
 

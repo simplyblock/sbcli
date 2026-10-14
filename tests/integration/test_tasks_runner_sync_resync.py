@@ -16,6 +16,7 @@ import pytest
 from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -126,7 +127,7 @@ def _pass(task):
 
 class TestConvergence:
 
-    def test_catch_up_on_the_leader_then_done_and_the_desync_resolved(self, db, rpcs, clock):
+    def test_a_catch_up_on_the_leader_resolves_the_desync(self, db, rpcs, clock):
         cluster, a, b, owner = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -249,7 +250,7 @@ class TestRerun:
         assert delays[1] == 2 * delays[0]
 
     @pytest.mark.parametrize("error", [ERROR_SHUTDOWN, 1, 1 << 3])
-    def test_shutdown_or_io_error_waits_for_the_zone_and_re_runs_when_it_returns(
+    def test_a_shutdown_or_io_error_waits_for_the_zone(
             self, db, rpcs, clock, error):
         cluster, a, b, _, catchup, task = _started(db, rpcs, clock)
         # the lagging (replica, site B) zone is lost again: the data plane
@@ -283,7 +284,7 @@ class TestRerun:
         assert (_fresh_task(db, task).status, _fresh_task(db, task).retry) == (
             JobSchedule.STATUS_SUSPENDED, 1)
 
-    def test_a_status_query_error_or_a_lost_migration_is_a_non_converging_run(self, db, rpcs, clock):
+    def test_a_poll_error_or_lost_migration_is_non_converging(self, db, rpcs, clock):
         _, a, _, _, catchup, task = _started(db, rpcs, clock)
         rpc = rpcs[a[0].get_id()]
         rpc.distr_migration_status.side_effect = RPCException("connection error")
@@ -307,7 +308,7 @@ class TestRerun:
             JobSchedule.STATUS_SUSPENDED, 1)
         assert catchup.migration["distrib_11"]["status"] == "none"
 
-    def test_a_leadership_change_during_the_catch_up_re_runs_it(self, db, rpcs, clock):
+    def test_a_leadership_change_re_runs_the_catch_up(self, db, rpcs, clock):
         cluster, a, _, _, catchup, task = _started(db, rpcs, clock)
         rpcs[a[0].get_id()].bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
         rpcs.lead(a[1])
@@ -330,7 +331,7 @@ class TestRerun:
         assert (kwargs["event_level"], kwargs["node_id"]) == ("Error", owner.get_id())
         assert _fresh_task(db, task).status != JobSchedule.STATUS_DONE
 
-    def test_an_alert_that_failed_to_be_written_is_raised_on_the_next_run(self, db, rpcs, clock, alerts):
+    def test_a_failed_alert_write_is_retried_next_run(self, db, rpcs, clock, alerts):
         failures = []
 
         def log(*args, **kwargs):
@@ -383,17 +384,20 @@ class TestWaits:
         for node in (*a, *b):
             rpcs[node.get_id()].distr_migration_expansion_start.assert_not_called()
 
-    def test_while_a_site_is_lost(self, db, rpcs, clock):
+    # "" is a record without a state; draining and down are the storage-node
+    # monitor's record (no fail-over).
+    @pytest.mark.parametrize("state", ["", Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN])
+    def test_while_a_site_is_lost(self, db, rpcs, clock, state):
         cluster, a, b, _ = _layout(db)
         rpcs.lead(a[0])
         _Catchup(rpcs[a[0].get_id()])
         _desync(a[0])
         cluster = db.get_cluster_by_id(cluster.get_id())
-        cluster.lost_site = SITE_B
+        cluster.lost_site, cluster.lost_site_state = SITE_B, state
         cluster.write_to_db(db.kv_store)
         task = _task(db, cluster)
         self._assert_waiting(db, rpcs, task, a, b, f"site {SITE_B} is lost")
-        cluster.lost_site = ""
+        cluster.lost_site, cluster.lost_site_state = "", ""
         cluster.write_to_db(db.kv_store)
         _pass(task)
         rpcs[a[0].get_id()].distr_migration_expansion_start.assert_called()
@@ -410,7 +414,7 @@ class TestWaits:
         _pass(task)
         rpcs[a[0].get_id()].distr_migration_expansion_start.assert_called()
 
-    def test_a_down_node_outside_the_lagging_zone_does_not_hold_it(self, db, rpcs, clock):
+    def test_a_down_node_outside_the_lagging_zone_is_ignored(self, db, rpcs, clock):
         cluster, a, b, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -439,7 +443,7 @@ class TestWaits:
                           return_value=(None, [])):
             self._assert_waiting(db, rpcs, task, a, b, "no leader")
 
-    def test_a_leaderless_lvs_is_waited_for_and_never_given_a_leader(self, db, rpcs, env, clock):
+    def test_a_leaderless_lvs_waits_without_a_grant(self, db, rpcs, env, clock):
         # the real lookup: led from site B, nobody leads (as between a promote
         # and the first client IO), and a recovery WOULD grant on b0 - its
         # journal is ready and a grant on it takes
@@ -472,7 +476,7 @@ class TestWaits:
 
 class TestNewerDesync:
 
-    def test_a_desync_during_the_final_check_keeps_the_task_and_the_event(self, db, rpcs, clock):
+    def test_a_desync_in_the_final_check_keeps_the_task(self, db, rpcs, clock):
         cluster, a, b, _, catchup, task = _started(db, rpcs, clock)
         catchup.complete()
         before = db.get_unresolved_sync_replication_events(cluster.get_id(), "LVS_1")
@@ -500,7 +504,7 @@ class TestNewerDesync:
         catchup.complete()
         assert _pass(task) is True
 
-    def test_a_desync_committed_inside_the_finish_transaction_forces_its_retry(self, db, rpcs, clock):
+    def test_a_desync_racing_the_finish_keeps_the_task(self, db, rpcs, clock):
         cluster, a, b, _, catchup, task = _started(db, rpcs, clock)
         catchup.complete()
         original = DBController._read_sync_state_tx
@@ -560,7 +564,7 @@ class TestLifecycle:
         assert _fresh_task(db, task).status == JobSchedule.STATUS_DONE
         rpcs[a[0].get_id()].distr_migration_expansion_start.assert_not_called()
 
-    def test_a_cancel_during_a_start_rpc_stays_and_stops_further_starts(self, db, rpcs, clock):
+    def test_a_cancel_during_a_start_stops_further_starts(self, db, rpcs, clock):
         cluster, a, _, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -578,7 +582,7 @@ class TestLifecycle:
         assert ended.status == JobSchedule.STATUS_DONE
         assert catchup.starts() == ["distrib_11"]
 
-    def test_a_cancel_during_a_status_rpc_stays_and_ends_the_task(self, db, rpcs, clock):
+    def test_a_cancel_during_a_status_poll_ends_the_task(self, db, rpcs, clock):
         cluster, a, _, _, catchup, task = _started(db, rpcs, clock)
 
         def status(name):

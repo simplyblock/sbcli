@@ -168,7 +168,7 @@ def test_a_site_with_no_online_node_is_reported():
 
 # -- activation: journal hosts per site ---------------------------------------------
 
-def test_every_site_needs_a_host_per_copy_of_the_largest_journal():
+def test_the_largest_journal_sets_the_hosts_per_site():
     # site b has four hosts, site a three; one node journals 4 + 4, so every
     # node places four copies on site a as well.
     nodes = _two_sites(per_site=3) + [_node("104", "site-b")]
@@ -179,7 +179,7 @@ def test_every_site_needs_a_host_per_copy_of_the_largest_journal():
     assert violation == "site site-a has 3 online node(s) on 3 host(s), needs 2 node(s) on 4 host(s)"
 
 
-def test_the_cluster_journal_rule_needs_four_hosts_per_site_with_failure_domains():
+def test_failure_domains_need_four_hosts_per_site():
     cluster = _cluster(ndcs=1, npcs=1)
     cluster.enable_failure_domain = True   # per-site journal share of 4
     nodes = _two_sites(per_site=3)

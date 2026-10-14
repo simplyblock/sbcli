@@ -111,7 +111,7 @@ class TestPickRemoteTriplet:
         for triplet in triplets:
             assert len({label[m] for m in triplet}) == 3
 
-    def test_kept_members_stay_and_only_the_empty_slot_is_filled(self):
+    def test_kept_members_stay_the_empty_slot_is_filled(self):
         candidates = _site(4)
         load: dict[str, list[int]] = {}
         triplet = pick_remote_triplet(candidates, load,
@@ -193,7 +193,7 @@ class TestApplyRoleMoves:
         assert apply_role_moves(layout, moves) == {
             "n1": ("n2", "n3"), "n2": ("n3", "n1"), "n3": ("n4", "n1"), "n4": ("n1", "n2")}
 
-    def test_applying_to_a_partly_executed_layout_gives_the_same_result(self):
+    def test_a_partly_executed_layout_ends_the_same(self):
         layout = {"n1": ("n2", ""), "n2": ("n1", "")}
         moves = [RoleMove("n2", ROLE_SECONDARY, "n1", "n3"),
                  RoleMove("n3", ROLE_PRIMARY, "", "n3"),

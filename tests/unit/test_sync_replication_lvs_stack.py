@@ -59,7 +59,7 @@ class TestRebuildCandidates:
         assert ops.non_leader_rebuild_candidates(owner, "rs") == ["p", "s", "t"]
         assert ops.non_leader_rebuild_candidates(owner, "s") == ["p", "t"]
 
-    def test_led_from_the_remote_site_leads_from_the_remote_triplet(self):
+    def test_led_from_the_remote_site_is_the_remote_triplet(self):
         owner = _owner(lvs_active_site="site-b")
         assert ops.non_leader_rebuild_candidates(owner, "s") == ["rp", "rs", "rt"]
         assert ops.non_leader_rebuild_candidates(owner, "p") == ["rp", "rs", "rt"]
@@ -108,7 +108,7 @@ class TestPendingMarks:
         ops._set_remote_triplet_refs(node, ("b1", "b4", "b3"))
         assert node.remote_instances_pending == ["b4"]
 
-    def test_a_member_leaving_the_triplet_leaves_the_pending_list(self):
+    def test_a_member_leaving_the_triplet_is_unmarked(self):
         node = StorageNode()
         ops._set_remote_triplet_refs(node, ("b1", "b2", "b3"))
         node.remote_instances_pending = ["b2"]

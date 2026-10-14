@@ -35,21 +35,32 @@ an LVS whose hand-off never started, storage_node_ops.reconcile_lvs_move for
 one whose hand-off did (the leader decides). A pass that restarts after a
 crash finds its markers by ``moves`` and goes on from the DB state.
 
-A disaster fail-over (``lost_site`` in the params: the forced promote of a site
-T that is lost) judges every gate by the disaster gate of T
-(sync_replication_controller.check_disaster_gate) and, before any marker,
-runs the site steps (_site_steps) unless the cluster records them as done:
-T proven down (_site_loss_problems), ``lost_site = T`` / ``fencing``, every T
-device ``unavailable`` in every distrib of the surviving site, the T nodes
-offline, every other volume of every LVS led from T fenced there, T proven
-down again, ``done``. A retry that finds ``fencing`` redoes them. Each LVS's
-hand-off is preceded by a check that none of its T members leads it.
+A promote with ``lost_site`` T in the params (a site T recorded as lost, or
+the forced promote of T) judges every gate by the disaster gate of T
+(sync_replication_controller.check_disaster_gate). A disaster fail-over -
+``fence`` in the params too: the forced promote of a site T that is not
+online - before any marker runs the site steps (_site_steps) unless the
+cluster records them as done: T proven down (_site_loss_problems),
+``lost_site = T`` / ``fencing`` (from no record, from the storage-node
+monitor's ``down`` or from ``fencing``; refused while the monitor still drains
+T), every T device ``unavailable`` in every distrib of the surviving site, the
+T nodes offline, every other volume of every LVS led from T fenced there, T
+proven down again, ``done``. A retry that finds ``fencing`` redoes them. Any
+other promote never fences: a record may be the monitor's, with no fail-over.
+Each LVS's hand-off is preceded by a check that none of its T members leads
+it.
+
+A node is proven down by the management plane - its status says SPDK does not
+run and neither the node API nor its RPC gets an answer from SPDK
+(_spdk_answers); the data plane only vetoes: a peer that still reports the
+node's JM link enabled (_not_gone_reason). Peers that cannot tell prove
+nothing either way.
 """
 import time
 from datetime import UTC, datetime
 
 from simplyblock_core import db_controller, distr_controller, storage_node_ops, utils
-from simplyblock_core.controllers import device_controller, tasks_controller
+from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
 from simplyblock_core.controllers import sync_replication_controller as sync_ctl
 from simplyblock_core.exceptions import PreconditionError, SyncAnaError, SyncGateError
 from simplyblock_core.models.cluster import Cluster
@@ -140,33 +151,43 @@ def _gate(cluster_id, when, lost_site="", lvs_names=()):
 # disaster fail-over: the site steps
 # ---------------------------------------------------------------------------
 
-def _spdk_answers(node) -> bool:
-    """Whether the management plane sees ``node``'s SPDK running: the node
-    API says the process is up, or its RPC answers at all."""
+def _spdk_answers(node) -> str:
+    """"" when the management plane gets no answer from ``node``'s SPDK, else
+    which probe answered: the node API reporting the process up, or the RPC
+    returning a version. A call that merely returns is no answer - the RPC
+    proxy of a host outlives its SPDK and then returns no result."""
     try:
         is_up, _ = node.client(timeout=5, retry=1).spdk_process_is_up(node.rpc_port, node.cluster_id)
-        if is_up:
-            return True
     except SNodeClientException as e:
         logger.info("Node %s: spdk_process_is_up probe failed: %s", node.get_id(), e)
-    try:
-        node.rpc_client(timeout=3, retry=0).get_version()
-        return True
-    except RPCException:
-        return False
+    else:
+        if is_up:
+            return "the node API reports the SPDK process up"
+    if health_controller.check_node_rpc(node, timeout=3, retry=0)[1]:
+        return "its RPC answers"
+    return ""
 
 
-def _data_plane_gone(node) -> bool:
+def _not_gone_reason(node) -> str:
+    """"" when ``node`` is gone, else why it is not: its SPDK answers the
+    management plane (_spdk_answers), or a peer still reports its JM link
+    enabled - a veto by a fresh vote. A peer without the link, a peer that
+    does not answer and no voter at all veto nothing: the evidence is the
+    management probe."""
+    answered = _spdk_answers(node)
+    if answered:
+        return answered
     from simplyblock_core.services import storage_node_monitor
-    return storage_node_monitor.is_node_data_plane_disconnected(node, fresh=True)
+    enabled, total = storage_node_monitor.data_plane_seen_votes(node, fresh=True)
+    if enabled:
+        return f"{enabled} of {total} answering peers still report its JM link enabled"
+    return ""
 
 
 def _site_loss_problems(cluster_id, site) -> list[str]:
     """Why ``site`` cannot be taken as lost now: a node of it (not removed)
-    whose status says SPDK may run, whose SPDK the management plane sees
-    running, or that the surviving site's data plane still reaches (a fresh
-    vote; no voter at all proves nothing). Status alone is no evidence: an
-    UNREACHABLE node may still serve IO."""
+    whose status says SPDK may run, or that is not gone (_not_gone_reason).
+    Status alone is no evidence: an UNREACHABLE node may still serve IO."""
     problems = []
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
         if node.site != site or node.status == StorageNode.STATUS_REMOVED:
@@ -174,10 +195,10 @@ def _site_loss_problems(cluster_id, site) -> list[str]:
         nid = node.get_id()
         if node.status in sync_ctl.SITE_RUNNING_STATES:
             problems.append(f"node {nid} is {node.status}")
-        elif _spdk_answers(node):
-            problems.append(f"node {nid}: SPDK answers the management plane")
-        elif not _data_plane_gone(node):
-            problems.append(f"node {nid}: the surviving site's data plane does not report it gone")
+            continue
+        reason = _not_gone_reason(node)
+        if reason:
+            problems.append(f"node {nid}: {reason}")
     return problems
 
 
@@ -247,39 +268,23 @@ def _offline_site_nodes(cluster_id, site):
                                  f"(it is {node.status})")
 
 
-def _set_lost_site_state(cluster_id, site, state, expect_states) -> bool:
-    """Compare-and-set of the cluster's ``lost_site`` / ``lost_site_state``:
-    ``site`` / ``state`` when the stored pair is ``site`` (or unset) with a
-    state in ``expect_states``."""
-    written = {"ok": False}
-
-    def _mutate(c):
-        written["ok"] = False    # atomic_update may replay this
-        if c.lost_site not in ("", site) or c.lost_site_state not in expect_states:
-            return False
-        if c.lost_site == site and c.lost_site_state == state:
-            written["ok"] = True
-            return False
-        c.lost_site, c.lost_site_state = site, state
-        written["ok"] = True
-        return True
-    db.atomic_update(db.get_cluster_by_id(cluster_id), _mutate)
-    return written["ok"]
-
-
 def _site_steps(task, site):
     """The site steps of a disaster fail-over of ``site``, all before any
     marker or hand-off; skipped once the cluster records them ``done``, redone
-    (idempotent) from ``fencing``."""
+    (idempotent) from ``fencing``, entered from the monitor's ``down``. While
+    the monitor drains the site (``draining``) nothing is probed or changed:
+    the caller's retry comes after the drain."""
     cluster_id = task.cluster_id
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.lost_site == site and cluster.lost_site_state == Cluster.LOST_SITE_DONE:
         return
     if cluster.lost_site not in ("", site):
         raise _PromoteFailed(f"site {cluster.lost_site} is already lost")
+    if cluster.lost_site == site and cluster.lost_site_state == Cluster.LOST_SITE_DRAINING:
+        raise _PromoteFailed(f"site {site} is being shut down by the monitor; retry")
     _require_site_lost(cluster_id, site, "before the fence")
-    if not _set_lost_site_state(cluster_id, site, Cluster.LOST_SITE_FENCING,
-                                ("", Cluster.LOST_SITE_FENCING)):
+    if not sync_ctl.set_lost_site_state(cluster_id, site, Cluster.LOST_SITE_FENCING,
+                                        ("", Cluster.LOST_SITE_DOWN, Cluster.LOST_SITE_FENCING)):
         raise _PromoteFailed(f"the lost-site record changed before the fence of {site}")
     logger.warning("Sync promote task %s: site %s lost, fencing", task.uuid, site)
     acked: set = set()
@@ -290,8 +295,8 @@ def _site_steps(task, site):
     # A node that turned ack-required since the first pass (e.g. a restart
     # that built its map before the DB write) gets the devices now.
     _fence_devices(cluster_id, site, acked)
-    if not _set_lost_site_state(cluster_id, site, Cluster.LOST_SITE_DONE,
-                                (Cluster.LOST_SITE_FENCING,)):
+    if not sync_ctl.set_lost_site_state(cluster_id, site, Cluster.LOST_SITE_DONE,
+                                        (Cluster.LOST_SITE_FENCING,)):
         raise _PromoteFailed(f"the lost-site record changed during the fence of {site}")
     logger.warning("Sync promote task %s: fence of site %s done", task.uuid, site)
 
@@ -300,8 +305,9 @@ def _lost_members_not_leading(lvs_name, owner_id, site):
     """Right before a disaster hand-off of ``lvs_name``: no member of it on the
     lost ``site`` may lead it. A member counts when it answers and does not
     report the leadership (rebuilt non-leader under the lost-site rule), or
-    when it is proven down (its SPDK not seen by the management plane and gone
-    from the surviving site's data plane)."""
+    when it does not answer and is gone (_not_gone_reason). No result is no
+    answer, like an RPC error: that is what the RPC proxy of a dead SPDK
+    returns."""
     owner = db.get_storage_node_by_id(owner_id)
     problems = []
     for node_id in storage_node_ops._lvs_member_ids(owner):
@@ -315,13 +321,14 @@ def _lost_members_not_leading(lvs_name, owner_id, site):
             ret = node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(lvs_name)
         except RPCException:
             ret = None
-        else:
-            if not (ret and ret[0].get("lvs leadership")):
-                continue
-            problems.append(f"{node_id} reports the leadership")
+        if ret is not None:
+            if ret and ret[0].get("lvs leadership"):
+                problems.append(f"{node_id} reports the leadership")
             continue
-        if _spdk_answers(node) or not _data_plane_gone(node):
-            problems.append(f"{node_id} is neither answering as a non-leader nor proven down")
+        reason = _not_gone_reason(node)
+        if reason:
+            problems.append(f"{node_id} is neither answering as a non-leader nor proven down "
+                            f"({reason})")
     if problems:
         raise _PromoteFailed(f"LVS {lvs_name}: members on the lost site {site}: "
                              + "; ".join(problems))
@@ -423,6 +430,12 @@ def _open(cluster_id, lvol_id, site):
             raise _PromoteFailed(f"volume {lvol_id} not found") from e
         if lvol.status in _NOT_SERVABLE:
             raise _PromoteFailed(f"volume {lvol_id} is {lvol.status}")
+        # The record now, not the one the task was queued under: a promote
+        # judged against another lost site never opens a site recorded since.
+        cluster = db.get_cluster_by_id(cluster_id)
+        if cluster.lost_site == site:
+            raise _PromoteFailed(f"volume {lvol_id}: site {site} is recorded as lost "
+                                 f"({cluster.lost_site_state})")
         owner = db.get_storage_node_by_id(lvol.node_id)
         if (owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX)
                 or storage_node_ops.lvs_active_site_of(owner) != site):
@@ -467,9 +480,13 @@ def _run(task):
     lost = params.get("lost_site", "")
     requested = sorted(params["owners"])
     if lost:
-        # Before any change: the disaster gate, then the site steps.
+        # Before any change: the disaster gate, then - for a disaster
+        # fail-over only (``fence``) - the site steps. A task without
+        # ``fence`` runs none: its move fails at disaster_move_problems
+        # until the site's fence is done.
         _gate(task.cluster_id, "before the site steps", lost, requested)
-        _site_steps(task, lost)
+        if params.get("fence"):
+            _site_steps(task, lost)
     to_move, resumed = _classify(task, site)
     if to_move:
         _gate(task.cluster_id, "before the move", lost, requested)

@@ -270,7 +270,7 @@ def _create(db, rpcs, owner):
 class TestCreation:
 
     @pytest.mark.parametrize("ftt, instances", [(2, 6), (1, 5)])
-    def test_every_instance_is_built_with_its_role_and_journal_view(
+    def test_every_instance_gets_its_role_and_journal_view(
             self, db, rpcs, hub, env, ftt, instances):
         cluster = _seed_cluster(db, ftt=ftt)
         a, b = _sites(db, cluster)
@@ -316,7 +316,7 @@ class TestCreation:
         assert owner.remote_instances_pending == []
         assert all(owner.lvstore in _fresh(db, n).lvstore_ports for n in b)
 
-    def test_an_activation_mode_local_member_left_as_primary_fails(self, db, rpcs, hub, env):
+    def test_a_local_member_left_as_primary_fails_activation(self, db, rpcs, hub, env):
         # Its hublvol connect runs before the examine: the post-examine stamp
         # is the only one that sticks.
         _, a, b, owner_a = _one_owner_layout(db)
@@ -406,7 +406,7 @@ def _restart_for_real(db, node):
 
 class TestRemoteMemberRestart:
 
-    def test_rebuilt_as_non_leader_behind_a_quiesced_home_leader(self, db, rpcs, hub, env):
+    def test_rebuilt_non_leader_behind_a_quiesced_home_leader(self, db, rpcs, hub, env):
         _, a, b, owner_a = _one_owner_layout(db)
         rpcs.lead(owner_a)
         member = b[1]
@@ -424,13 +424,13 @@ class TestRemoteMemberRestart:
             assert not mock.called, name
         assert _fresh(db, owner_a).lvstore_status == "ready"
 
-    def test_the_leading_secondary_is_quiesced_not_the_idle_owner(self, db, rpcs, hub, env):
+    def test_the_leading_secondary_is_quiesced_not_the_owner(self, db, rpcs, hub, env):
         _, a, b, owner_a = _one_owner_layout(db)
         rpcs.lead(a[1])
         assert _restart(db, b[2]) is True
         assert env.blocked() == [a[1].get_id()]
 
-    def test_nobody_reports_the_leadership_the_member_is_rebuilt_behind_the_home_primary(
+    def test_no_leader_rebuilds_behind_the_home_primary(
             self, db, rpcs, hub, env):
         # An LVS waiting for its first IO has no leader: that blocks no restart.
         _, a, b, owner_a = _one_owner_layout(db)
@@ -448,7 +448,7 @@ class TestRemoteMemberRestart:
             assert not mock.called, name
         assert _fresh(db, owner_a).lvstore_status == "ready"
 
-    def test_home_triplet_all_down_rebuilds_without_quiesce_and_never_takes_over(
+    def test_home_triplet_down_rebuilds_without_quiesce(
             self, db, rpcs, hub, env):
         _, a, b, owner_a = _one_owner_layout(db)
         env.down.update(n.get_id() for n in a)
@@ -460,7 +460,7 @@ class TestRemoteMemberRestart:
         assert _roles(rpc) == ["tertiary"]
         assert env.blocked() == []
 
-    def test_a_failed_stamp_fails_the_restart_and_keeps_the_owner_healthy(self, db, rpcs, hub, env):
+    def test_a_failed_stamp_fails_the_restart_not_the_owner(self, db, rpcs, hub, env):
         _, a, b, owner_a = _one_owner_layout(db)
         rpcs.lead(owner_a)
         _update(db, owner_a, remote_instances_pending=[b[0].get_id()])
@@ -479,7 +479,7 @@ class TestRemoteMemberRestart:
         assert _restart(db, b[1]) is True
         assert _fresh(db, owner_a).remote_instances_pending == [b[2].get_id()]
 
-    def test_two_members_rebuilding_at_once_restore_the_owner_status(self, db, rpcs, env):
+    def test_concurrent_rebuilds_restore_the_owner_status(self, db, rpcs, env):
         _, a, b, owner_a = _one_owner_layout(db)
         seen = []
 
@@ -500,7 +500,7 @@ class TestRemoteMemberRestart:
         assert _fresh(db, owner_a).lvstore_status == "ready"
 
     @pytest.mark.parametrize("slot", ["secondary", "tertiary"])
-    def test_a_local_restart_never_writes_the_owner_record_whole(self, db, rpcs, env, caplog, slot):
+    def test_a_local_restart_never_writes_the_whole_owner(self, db, rpcs, env, caplog, slot):
         # A stale full-object write of the owner would bring back a pending
         # mark a concurrent remote-triplet build just cleared on it.
         _, a, b, owner_a = _one_owner_layout(db)
@@ -530,7 +530,7 @@ class TestRemoteMemberRestart:
 
 class TestSameSiteRemoteLeader:
 
-    def test_a_remote_leader_on_the_members_site_wires_hublvol_within_the_site(self, db, rpcs, hub, env):
+    def test_a_same_site_leader_wires_hublvol_within_the_site(self, db, rpcs, hub, env):
         # LVS_1's home site A is lost: its remote triplet on B leads.
         _, a, b, owner_a, _ = _two_owner_layout(db, lost_site=SITE_A)
         env.down.update(n.get_id() for n in a)
@@ -556,7 +556,7 @@ class TestSameSiteRemoteLeader:
             assert c.kwargs["lvs_node"].lvstore == "LVS_1"
         assert env.blocked()[0] == b[0].get_id()
 
-    def test_a_failover_path_takes_its_metadata_from_the_lvs_node(self, db):
+    def test_a_failover_path_takes_metadata_from_lvs_node(self, db):
         cluster = _seed_cluster(db)
         tert, leader, peer, owner = (_seed_node(db, cluster, name, SITE_B) for name in ("t", "l", "p", "o"))
         with patch("simplyblock_core.utils.hublvol_reconnect.HublvolReconnectCoordinator") as coordinator:
@@ -586,8 +586,9 @@ class TestRebuildAnchor:
 
     @pytest.mark.parametrize("answer", [RPCException("no answer"), None, []])
     @pytest.mark.parametrize("reporter", [None, 0, 2])
-    def test_a_connected_candidate_that_does_not_answer_is_never_read_as_not_leading(
+    def test_a_silent_candidate_makes_the_leader_unknown(
             self, db, rpcs, env, answer, reporter):
+        """A connected candidate that does not answer is never read as not leading."""
         # ... not even next to a candidate that reports the leadership: the
         # silent one may lead as well.
         members, owner = self._layout(db)
@@ -597,7 +598,7 @@ class TestRebuildAnchor:
         with pytest.raises(ops.LVSLeaderUnknownError, match="did not answer"):
             self._anchor(db, owner, members[4])
 
-    def test_two_candidates_reporting_the_leadership_is_unknown(self, db, rpcs, env):
+    def test_two_reported_leaders_make_the_leader_unknown(self, db, rpcs, env):
         members, owner = self._layout(db)
         rpcs.lead(members[0])
         rpcs.lead(members[1])
@@ -632,7 +633,7 @@ class TestRebuildAnchor:
         active = members[3:] if active_site else members[:3]
         assert asked == {n.get_id() for n in active} - {members[restarting].get_id()}
 
-    def test_nobody_leads_and_the_active_primary_is_disconnected_the_active_secondary(
+    def test_nobody_leads_primary_down_the_active_secondary(
             self, db, rpcs, env):
         members, owner = self._layout(db)
         env.down.add(members[0].get_id())
@@ -654,7 +655,7 @@ class TestRebuildAnchor:
         (SITE_B, 0, 1),       # the source primary itself: the next of its triplet
         (SITE_A, 3, 4),
     ])
-    def test_a_move_in_flight_nobody_leads_the_source_triplets_primary(
+    def test_moving_and_nobody_leads_the_source_primary(
             self, db, rpcs, env, target, restarting, anchor):
         members, owner = self._layout(db, "moving:" + target)
         assert self._anchor(db, owner, members[restarting]) == members[anchor].get_id()
@@ -662,7 +663,7 @@ class TestRebuildAnchor:
         asked = {n.get_id() for n in members if rpcs[n.get_id()].bdev_lvol_get_lvstores.called}
         assert asked == {n.get_id() for n in members} - {members[restarting].get_id()}
 
-    def test_outside_sync_replication_the_owner_without_a_probe(self, db, rpcs, env):
+    def test_non_sync_owner_is_the_anchor_without_a_probe(self, db, rpcs, env):
         members, owner = self._layout(db)
         owner = _fresh(db, owner)
         owner.site = ""
@@ -692,7 +693,7 @@ class TestLostSiteRestart:
         assert [c.args[1].get_id() for c in remote.call_args_list] == [owner_b.get_id()]
 
     @pytest.mark.parametrize("stamp", [True, False])
-    def test_a_local_secondary_is_stamped_non_leader_behind_the_remote_leader(
+    def test_local_secondary_stamped_behind_the_remote_leader(
             self, db, rpcs, hub, env, stamp):
         # Real rebuild: no hublvol exists to stamp the role again, so the one
         # stamp must hold or the rebuild aborts.
@@ -717,7 +718,7 @@ class TestLostSiteRestart:
             env.set_node_status.assert_any_call(a[1].get_id(), StorageNode.STATUS_OFFLINE,
                                                 caused_by="restart_cleanup")
 
-    def test_a_local_secondary_is_rebuilt_behind_the_remote_primary_when_nobody_leads(
+    def test_no_leader_rebuilds_behind_the_remote_primary(
             self, db, rpcs, hub, env):
         # A forced promote to B that no client IO followed: LVS_1 has no leader
         # yet, and the returning site's nodes come back all the same.
@@ -753,7 +754,7 @@ class TestLostSiteRestart:
 
 class TestHostedOwners:
 
-    def test_ports_keep_every_owner_hosted_on_a_multi_owner_member(self, db, rpcs):
+    def test_ports_cover_every_owner_a_member_hosts(self, db, rpcs):
         cluster = _seed_cluster(db)
         a, b = _sites(db, cluster, per_site=4)
         owner_1 = _make_owner(db, a[0], a[:3], b[:3], lvs_id=1)
@@ -839,7 +840,7 @@ class TestSendersBeforeTheBuild:
 
 class TestRemovalTeardown:
 
-    def test_remote_instances_are_torn_down_and_the_refs_cleared(self, db, rpcs):
+    def test_remote_instances_are_torn_down_and_refs_cleared(self, db, rpcs):
         _, a, b, owner_a, _ = _two_owner_layout(db)
         owner_a = _update(db, owner_a, status=StorageNode.STATUS_IN_REMOVAL,
                           remote_instances_pending=[b[2].get_id()])
@@ -857,7 +858,7 @@ class TestRemovalTeardown:
             assert owner_a.lvstore not in _fresh(db, member).lvstore_ports
 
     @pytest.mark.parametrize("probe", [{"name": "distrib_12"}, RPCException("unreachable")])
-    def test_a_surviving_remote_instance_fails_the_phase_before_any_pointer_moves(self, db, rpcs, probe):
+    def test_a_surviving_remote_instance_fails_the_phase(self, db, rpcs, probe):
         _, a, b, owner_a, _ = _two_owner_layout(db)
         owner_a = _update(db, owner_a, status=StorageNode.STATUS_IN_REMOVAL)
         rpc = rpcs[b[1].get_id()]
@@ -913,7 +914,7 @@ class TestRemovalReselection:
                 _update(db, node, lvstore=f"LVS_x{node.get_id()[:3]}")
         return cluster, a, b, owner
 
-    def test_the_new_member_gets_the_instance_from_the_fresh_owner(self, db, rpcs):
+    def test_the_new_member_is_built_from_the_fresh_owner(self, db, rpcs):
         cluster, a, b, owner = self._layout(db)
         removed = _update(db, b[1], status=StorageNode.STATUS_IN_REMOVAL)
         with patch.object(ops, "_rebuild_remote_instance", return_value=True) as build:
@@ -984,7 +985,7 @@ def _activation_patches(stack):
 
 class TestActivationDispatch:
 
-    def test_fresh_creates_sharing_a_remote_member_never_overlap(self, db, rpcs, hub):
+    def test_creates_sharing_a_member_never_overlap(self, db, rpcs, hub):
         cluster = _seed_cluster(db, ftt=1)
         cluster.status = Cluster.STATUS_UNREADY
         cluster.write_to_db(db.kv_store)
@@ -1021,7 +1022,7 @@ class TestActivationDispatch:
                 assert (member_id, owner.get_id()) in built
             assert (owner.secondary_node_id, owner.get_id()) in built
 
-    def test_reactivation_rebuilds_every_remote_instance_and_clears_its_mark(
+    def test_reactivation_rebuilds_every_remote_instance(
             self, db, rpcs, hub, env):
         cluster = _seed_cluster(db, ftt=1)
         a, b = _sites(db, cluster)

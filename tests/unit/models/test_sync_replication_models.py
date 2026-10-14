@@ -5,7 +5,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.sync_replication import SyncReplicationEvent
 
 
-def test_new_fields_default_to_non_sync():
+def test_sync_fields_default_to_non_sync_values():
     cluster = Cluster()
     assert cluster.sync_replication is False
     assert cluster.lost_site == ""
@@ -80,7 +80,7 @@ def test_demoted_sites_are_not_shared_between_instances():
     assert second.sync_demoted_sites == []
 
 
-def test_pending_remote_instances_are_not_shared_between_instances():
+def test_pending_remote_instances_are_not_shared():
     first, second = StorageNode(), StorageNode()
     first.remote_instances_pending.append("rp")
     assert second.remote_instances_pending == []
@@ -120,7 +120,7 @@ def test_sync_replication_event_kinds():
     assert SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED == "remote_journal_restored"
 
 
-def test_sync_replication_event_index_tuples_follow_resolved():
+def test_sync_event_index_tuples_follow_resolved():
     (index,) = SyncReplicationEvent._INDEXES
     event = SyncReplicationEvent()
     event.cluster_id = "c1"

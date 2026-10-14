@@ -109,7 +109,7 @@ class TestReplicaFlags:
         assert _replica_nodes(cl_map) == {b1.get_id(), b2.get_id(), b3.get_id()}
         _assert_buckets_agree(cl_map)
 
-    def test_two_lvs_with_opposite_home_sites_on_one_node_get_inverted_flags(self, db):
+    def test_opposite_home_sites_invert_the_replica_flags(self, db):
         cluster = _seed_cluster(db)
         nodes = _layout(db, cluster)
         host = nodes[1]

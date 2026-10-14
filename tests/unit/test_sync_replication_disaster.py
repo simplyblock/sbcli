@@ -67,7 +67,7 @@ class TestDisasterMoveProblems:
     def _problems(self, cluster, owner, volumes, expect="", request=("v1",)):
         return src.disaster_move_problems(cluster, owner, volumes, expect, SITE_B, SITE_A, request)
 
-    def test_ok_when_the_fence_is_done_and_only_the_request_is_still_served(self):
+    def test_ok_when_fenced_and_only_the_request_is_served(self):
         vols = [_vol("v1"), _vol("v2", demoted=[SITE_A])]
         assert self._problems(_cluster(SITE_A, "done"), _owner(), vols) == []
 
@@ -80,12 +80,13 @@ class TestDisasterMoveProblems:
         problems = self._problems(_cluster(SITE_A, "done"), _owner(lvs_active_site=SITE_B), [_vol("v1")])
         assert problems == [f"LVS LVS_1: lvs_active_site is {SITE_B!r}, expected ''"]
 
-    def test_an_lvs_led_from_the_surviving_site_is_no_disaster_move(self):
+    def test_a_survivor_led_lvs_is_no_disaster_move(self):
         problems = self._problems(_cluster(SITE_A, "done"), _owner(lvs_active_site=SITE_B), [],
                                   expect=SITE_B)
         assert any("not from the lost site" in p for p in problems)
 
-    def test_a_volume_served_on_the_lost_site_outside_the_request_blocks(self):
+    def test_a_volume_outside_the_request_blocks_the_move(self):
+        """The extra volume is still served on the lost site."""
         (problem,) = self._problems(_cluster(SITE_A, "done"), _owner(), [_vol("v1"), _vol("late")])
         assert "late" in problem
 
@@ -98,7 +99,7 @@ class TestZoneAndReturn:
                  _node("b0", site=SITE_B, devices=(NVMeDevice.STATUS_UNAVAILABLE,))]
         assert src.zone_not_up(nodes, SITE_A) == ["dev:a0-d0"]
 
-    def test_a_suspended_node_is_up_for_the_zone_but_not_back_for_the_return(self):
+    def test_a_suspended_node_is_up_but_not_back(self):
         nodes = [_node("a0", status=StorageNode.STATUS_SUSPENDED), _node("a1")]
         assert src.zone_not_up(nodes, SITE_A) == []
         assert src.site_return_problems(nodes, SITE_A) == ["node:a0 suspended"]
@@ -155,21 +156,23 @@ class TestReplayProblems:
 
 class TestSiteLost:
 
-    def test_offline_nodes_and_transient_ones_the_data_plane_lost(self):
+    def test_offline_and_data_plane_lost_nodes_lose_the_site(self):
         nodes = [_node("a0", status=StorageNode.STATUS_OFFLINE),
                  _node("a1", status=StorageNode.STATUS_UNREACHABLE),
                  _node("a2", status=StorageNode.STATUS_REMOVED)]
         assert storage_node_monitor._site_lost(nodes, {"a1": True})
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE,
-                                        StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_RESTARTING])
-    def test_a_transient_node_the_data_plane_still_reaches_is_not_gone(self, status):
+                                        StorageNode.STATUS_IN_SHUTDOWN])
+    def test_a_transient_node_is_gone_only_by_the_data_plane(self, status):
         nodes = [_node("a0", status=StorageNode.STATUS_OFFLINE),
                  _node("a1", status=status, devices=(NVMeDevice.STATUS_FAILED,))]
         assert not storage_node_monitor._site_lost(nodes, {})
         assert not storage_node_monitor._site_lost(nodes, {"a1": False})
+        assert storage_node_monitor._site_lost(nodes, {"a1": True})
 
-    @pytest.mark.parametrize("status", [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN])
+    @pytest.mark.parametrize("status", [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                                        StorageNode.STATUS_RESTARTING])
     def test_a_node_that_serves_keeps_the_site(self, status):
         nodes = [_node("a0", status=StorageNode.STATUS_OFFLINE),
                  _node("a1", status=status, devices=(NVMeDevice.STATUS_FAILED,))]
@@ -243,7 +246,7 @@ class TestUnwiredFollower:
         lvol.uuid, lvol.lvs_name, lvol.nqn, lvol.ns_id = "v1", "LVS_1", "nqn", 1
         return lvol
 
-    def test_only_a_non_optimized_path_is_checked_and_once_per_memo(self):
+    def test_only_non_optimized_paths_are_checked_once(self):
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False, "connect_state": False,
                                                      "lvs_redirect": False}]

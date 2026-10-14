@@ -5,8 +5,7 @@ pass grants the leadership, queues a task, or changes a node's status or the
 state of an LVS port because of it. The taker is stamped primary and reports
 no leadership: (a) the owner after a fail-back promote, (b) the remote
 primary after a promote to the other site.
-Regression guards: nothing in the product code was changed for them. They
-hold because the leadership a hublvol check lists as expected is never
+No product code of its own implements this. It holds because the leadership a hublvol check lists as expected is never
 compared (health_controller._check_node_hublvol / _check_sec_node_hublvol)
 and because both services check an LVS on its home triplet only - the owner's
 own lvstore and its local secondaries - never an instance of the remote one.

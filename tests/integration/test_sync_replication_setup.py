@@ -128,7 +128,7 @@ class TestClusterCreate:
         ({"ha_type": "single"}, "ha_type='ha'"),
         ({"is_single_node": True}, "single-node"),
     ])
-    def test_add_cluster_refuses_invalid_sync_and_writes_nothing(self, db, kwargs, message):
+    def test_add_cluster_refuses_invalid_sync_options(self, db, kwargs, message):
         _seed_deploy_config(db)
         before = {c.get_id() for c in db.get_clusters()}
         with pytest.raises(ValueError, match=message):
@@ -261,7 +261,7 @@ class TestActivationSiteGuards:
             _activate(cluster)
         assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_UNREADY
 
-    def test_reactivation_after_a_site_loss_warns_and_continues(self, db):
+    def test_reactivation_after_a_site_loss_only_warns(self, db):
         """Two configured sites, one of them entirely offline: recovery must not
         be blocked by the capacity rule."""
         cluster = _seed_cluster(db, status=Cluster.STATUS_SUSPENDED)
@@ -379,7 +379,7 @@ def _add_node(cluster, site, **kwargs):
 class TestAddNodeSite:
 
     @pytest.mark.parametrize("slots", [1, 2])
-    def test_sync_cluster_add_succeeds_and_persists_the_site_from_the_first_write(self, db, slots):
+    def test_a_sync_node_has_its_site_from_the_first_write(self, db, slots):
         cluster = _seed_cluster(db)
         original_write = StorageNode.write_to_db
         persisted = []
@@ -415,7 +415,7 @@ class TestAddNodeSite:
         (True, "a:b", "invalid site"),
         (False, "site-a", "not created with --sync-replication"),
     ])
-    def test_invalid_site_is_refused_before_the_host_is_touched(self, db, sync, site, message):
+    def test_an_invalid_site_is_refused_before_host_setup(self, db, sync, site, message):
         cluster = _seed_cluster(db, sync=sync, spdk_vcpu_count=4)
         with _AddNodeWorld(_node_info()) as world, \
                 pytest.raises(storage_node_ops.NodeSiteError, match=message):
@@ -425,7 +425,7 @@ class TestAddNodeSite:
         world.api.spdk_process_start.assert_not_called()
         assert db.get_storage_nodes_by_cluster_id(cluster.get_id()) == []
 
-    def test_host_on_another_site_is_refused_before_the_host_is_touched(self, db):
+    def test_another_sites_host_is_refused_before_setup(self, db):
         cluster = _seed_cluster(db, spdk_vcpu_count=4)
         existing = _seed_node(db, cluster, "site-b", host=HOST_IP)
         with _AddNodeWorld(_node_info()) as world, \
@@ -438,7 +438,7 @@ class TestAddNodeSite:
             existing.get_id()]
 
 
-def test_node_add_task_with_an_invalid_site_ends_with_the_reason(db):
+def test_an_invalid_site_ends_the_node_add_task(db):
     cluster = _seed_cluster(db, spdk_vcpu_count=4)
     task_id = tasks_controller.add_node_add_task(cluster.get_id(), {
         "cluster_id": cluster.get_id(), "node_addr": NODE_ADDR, "iface_name": "eth0",

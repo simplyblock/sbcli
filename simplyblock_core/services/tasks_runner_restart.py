@@ -823,6 +823,22 @@ def _process_restart_task(task_uuid):
             time.time() + _restart_backoff_seconds(retry))
 
 
+def _deferred_by_drain(cluster, task) -> bool:
+    """Whether a queued node restart waits for a drain: a SUSPENDED cluster
+    still being drained to all-offline, or - sync replication - the node's site
+    being drained (tasks_controller.is_auto_restart_paused). A node no longer
+    in the database is judged by the cluster-wide pause alone."""
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        node = None
+    if not tasks_controller.is_auto_restart_paused(cluster, node):
+        return False
+    logger.info("Cluster %s: a drain is running (cluster suspended, or the node's "
+                "site draining); deferring node-restart task %s", cluster.get_id(), task.uuid)
+    return True
+
+
 def main():
     logger.info("Starting Tasks runner...")
     while True:
@@ -856,14 +872,12 @@ def main():
                     # would fight the auto-shutdown and re-create the wedged
                     # half-restarted state we are fixing. Re-poll soon without
                     # consuming a retry; the task runs once the drain completes
-                    # (suspend_drain_complete).
+                    # (suspend_drain_complete). The same for a node of a
+                    # sync-replication site being drained (_deferred_by_drain).
                     dispatch_parallel = False
                     if task.function_name == JobSchedule.FN_NODE_RESTART:
                         cl_fresh = db.get_cluster_by_id(cl.get_id())
-                        if tasks_controller.is_auto_restart_paused(cl_fresh):
-                            logger.info(
-                                "Cluster %s suspended and draining; deferring "
-                                "node-restart task %s", cl.get_id(), task.uuid)
+                        if _deferred_by_drain(cl_fresh, task):
                             _restart_next_attempt[task.uuid] = (
                                 time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
                             continue

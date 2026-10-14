@@ -206,7 +206,7 @@ class TestActivation:
                 pytest.raises(ValueError, match="site site-b: failure domains are enabled"):
             cluster_ops._cluster_activate(cluster.get_id())
 
-    def test_non_sync_failure_domain_balance_stays_cluster_wide(self, db):
+    def test_non_sync_fd_balance_is_judged_cluster_wide(self, db):
         cluster = _seed_cluster(db, sync=False, fd=True)
         _seed_site(db, cluster, "", 4, fds=[0, 0, 1, 2])
         for i, fd in enumerate([0, 1, 1, 2, 2]):
@@ -276,7 +276,7 @@ class TestReactivation:
         after = {n.get_id(): storage_node_ops.remote_triplet_refs(n) for n in _nodes(db, cluster).values()}
         assert after == before
 
-    def test_a_missing_ref_cannot_be_filled_while_the_other_site_is_down(self, db):
+    def test_a_missing_ref_to_a_down_site_is_refused(self, db):
         cluster, a, b = self._activated(db, b_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], remote_secondary_node_id="")
         with patch.object(cluster_ops, "_wait_for_full_device_connectivity"), \
@@ -459,7 +459,7 @@ class TestExpansion:
         assert {n: storage_node_ops.remote_triplet_refs(nodes[n]) for n in before} == before
         assert db.get_cluster_by_id(cluster.get_id()).expand_state["phase"] == EXPAND_PHASE_COMPLETED
 
-    def test_remote_triplet_survives_a_failed_move_and_the_resume(self, db):
+    def test_a_remote_triplet_survives_a_failed_move(self, db):
         """The first move lands in FDB, the second fails. The resume judges the
         JC cap on the same final layout as the fresh attempt did, although
         the DB pointers now reflect a partly executed plan."""
@@ -559,7 +559,7 @@ class TestRemoval:
             assert storage_node_ops._reselect_remote_roles_held_by(removed) is True
         write.assert_not_called()
 
-    def test_removal_is_refused_when_the_site_has_no_replacement(self, db):
+    def test_removal_without_a_site_replacement_is_refused(self, db):
         cluster, a, b = _active_cluster(db)
         ok, reason = storage_node_ops._check_replica_relocation_feasible(b[0], db)
         assert ok is False
@@ -569,7 +569,7 @@ class TestRemoval:
             assert storage_node_ops._reselect_remote_roles_held_by(b[0]) is False
         assert "cannot re-select" in error.call_args.args[0]
 
-    def test_removing_a_node_with_no_remote_role_needs_no_reselection(self, db):
+    def test_a_node_without_remote_roles_reselects_nothing(self, db):
         cluster, a, b = _active_cluster(db)
         idle = _seed_node(db, cluster, SITE_B, "10.4.0.99", lvstore="LVS_idle")
         assert storage_node_ops.owners_with_remote_role_on(

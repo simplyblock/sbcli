@@ -111,14 +111,14 @@ class TestAnaRule:
         states = _states(_lvol(), _ctx(_owner(lvs_active_site=moving)))
         assert set(states.values()) == {"inaccessible"}
 
-    def test_a_volume_whose_site_does_not_lead_the_lvs_is_fenced_everywhere(self):
+    def test_a_volume_off_the_leading_site_is_fenced(self):
         """Judgment call A: sync_active_site B on an LVS led from A (a create
         racing a move) opens nothing - B's instances are non-leaders without a
         hublvol to the leader and would take the leadership on the first IO."""
         states = _states(_lvol(sync_active_site=SITE_B), _ctx())
         assert set(states.values()) == {"inaccessible"}
 
-    def test_promoted_is_the_optimized_path_of_an_open_site_only(self):
+    def test_promoted_is_optimized_on_an_open_site_only(self):
         ctx = _ctx()
         assert ops.lvol_ana_state(_lvol(), _node("s", SITE_A), "optimized",
                                   promoted=True, ctx=ctx) == "optimized"
@@ -138,7 +138,7 @@ class TestAnaRule:
         assert ops.lvol_ana_state(_lvol(), _node("p", SITE_A), "non_optimized", ctx=ctx) == "optimized"
 
     @pytest.mark.parametrize("site", ["", MagicMock(name="site")])
-    def test_outside_sync_replication_the_callers_state_without_a_db_read(self, site):
+    def test_a_non_sync_node_keeps_the_callers_state(self, site):
         # No ctx and no database in this tier: a read would raise.
         node = SimpleNamespace(site=site, get_id=lambda: "p")
         for state in ("optimized", "non_optimized", "inaccessible"):
@@ -163,12 +163,12 @@ class TestMembers:
         assert lvol_controller.role_secondary_ids(_owner(tertiary_node_id="")) == [
             "s", "rp", "rs", "rt"]
 
-    def test_non_sync_unchanged(self):
+    def test_non_sync_owner_has_home_secondaries_only(self):
         owner = _owner(site="", remote_primary_node_id="", remote_secondary_node_id="",
                        remote_tertiary_node_id="")
         assert lvol_controller.role_secondary_ids(owner) == ["s", "t"]
 
-    def test_a_duck_typed_node_without_a_real_site_has_no_remote_members(self):
+    def test_a_siteless_mock_node_has_no_remote_members(self):
         node = MagicMock(secondary_node_id="s", tertiary_node_id="")
         assert lvol_controller.role_secondary_ids(node) == ["s"]
 
@@ -221,7 +221,7 @@ class TestRemoteMembers:
         assert self._members(["p", "gone", "s", "rp", "rs", "rt"], ("rp", "rs", "rt")) == [
             "p", "gone", "s", "rp", "rs", "rt"]
 
-    def test_unchanged(self):
+    def test_nodes_matching_the_refs_are_kept(self):
         nodes = ["p", "s", "t", "rp", "rs", "rt"]
         assert self._members(nodes, ("rp", "rs", "rt")) == nodes
 
@@ -291,7 +291,7 @@ class TestGroupsWithoutASweep:
             "nqn:1", "10.0.0.2", 4420, trtype="TCP", ana="optimized", anagrpid=3)
         rpc.subsystem_get.assert_not_called()
 
-    def test_a_failed_group_rpc_is_reported_and_queued_for_a_durable_retry(self):
+    def test_a_failed_group_rpc_is_reported_and_queued(self):
         node = _node("s", SITE_A)
         node.cluster_id = "cl-1"
         node.data_nics = [_nic("10.0.0.1")]

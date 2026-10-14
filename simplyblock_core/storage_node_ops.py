@@ -12713,7 +12713,7 @@ def _lvs_led_elsewhere(owner: StorageNode) -> bool:
 
 def _leader_for_non_leader_rebuild(owner: StorageNode, snode: StorageNode, db_controller) -> StorageNode:
     """The node a non-leader rebuild of ``owner``'s LVS on ``snode``
-    quiesces: the owner outside sync replication (unchanged); on a sync
+    quiesces: the owner outside sync replication; on a sync
     cluster the member of the active triplet _rebuild_anchor names - the
     owner may not lead there, and nobody may."""
     if not owner.site:

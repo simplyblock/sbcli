@@ -495,7 +495,8 @@ def start_event_collector_on_node(node_id):
                                 # state), and a journal event carries only
                                 # jm_vuid, which the grouping below drops.
                                 event = events_controller.log_distr_event(
-                                    snode.cluster_id, snode.get_id(), event_dict)
+                                    snode.cluster_id, snode.get_id(), event_dict,
+                                    level=sync_replication_controller.sync_event_level(event_dict["status"]))
                                 sync_replication_controller.record_sync_event(snode.get_id(), event_dict)
                                 logger.info(f"Processed sync-replication event: {event.get_id()}")
                                 continue

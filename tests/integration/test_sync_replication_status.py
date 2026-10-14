@@ -124,7 +124,7 @@ class TestStatus:
         assert [layout.calls(n) for n in (*layout.a, *layout.b)] == [1] * 7 + [0]
         src.check_gate(layout.cluster.get_id())
 
-    def test_one_lvs_unsynced_is_degraded_since_its_desync_event(self, db, rpcs):
+    def test_an_unsynced_lvs_is_degraded_since_its_desync(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a0 = layout.a[0]
         desync = (datetime.now(UTC) - timedelta(hours=1)).replace(microsecond=0)
@@ -255,7 +255,7 @@ class TestGates:
         db.atomic_update(task, lambda t: setattr(t, "status", JobSchedule.STATUS_RUNNING))
         assert _gate_problems(src.check_gate, cluster_id) == ["LVS LVS_1: catch-up task running"]
 
-    def test_an_unresolved_journal_drop_fails_only_the_disaster_gate(self, db, rpcs):
+    def test_a_journal_drop_fails_only_the_disaster_gate(self, db, rpcs):
         layout = _Layout(db, rpcs)
         # a0 is the JC leader of LVS_1 (active on A) and dropped its remote journal
         layout.set(layout.a[0], "distrib_11", remote_journal_in_sync=False)
@@ -268,7 +268,7 @@ class TestGates:
         # LVS_1 is not active on B: losing B does not judge it
         src.check_disaster_gate(cluster_id, SITE_B)
 
-    def test_the_surviving_sites_lvs_and_fence_generated_events_do_not_count(self, db, rpcs):
+    def test_events_of_the_surviving_site_do_not_count(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a, b = layout.a, layout.b
         stack._update(db, a[0], status=StorageNode.STATUS_OFFLINE)
@@ -287,7 +287,7 @@ class TestGates:
         assert problems == [f"LVS LVS_1: zone desync secondary_zone_unavailable at 2026-09-30T10:00:00Z "
                             f"reported by {layout.a[1].get_id()}"]
 
-    def test_the_latest_remote_journal_event_of_the_lost_site_wins(self, db, rpcs):
+    def test_the_lost_sites_latest_journal_event_wins(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a0, cluster_id = layout.a[0], layout.cluster.get_id()
         _record(a0, "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
@@ -296,7 +296,7 @@ class TestGates:
         _record(a0, "remote_journal_unsynced", "2026-09-30T10:02:00Z", jm_vuid=1)
         _gate_problems(src.check_disaster_gate, cluster_id, SITE_A)
 
-    def test_a_surviving_site_synced_does_not_end_a_lost_site_drop(self, db, rpcs):
+    def test_a_survivors_synced_keeps_a_lost_site_drop(self, db, rpcs):
         layout = _Layout(db, rpcs)
         _record(layout.a[0], "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
         # received later, but from B (e.g. a delayed event of an earlier B JC leadership)
@@ -326,7 +326,7 @@ def _journal_events(db, layout, lvs="LVS_1"):
 
 class TestLiveJournalRestore:
 
-    def test_a_lost_site_jc_leader_in_sync_is_recorded_once_and_opens_the_gate(self, db, rpcs):
+    def test_a_live_in_sync_answer_ends_the_drop(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a0, cluster_id = layout.a[0], layout.cluster.get_id()
         _record(a0, "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
@@ -342,7 +342,7 @@ class TestLiveJournalRestore:
         src.check_gate(cluster_id)
         assert len(_journal_events(db, layout)) == 2
 
-    def test_another_lost_site_nodes_collected_synced_does_not_end_a_drop_a_live_answer_does(
+    def test_only_a_live_answer_ends_a_drop_after_a_handover(
             self, db, rpcs):
         # A JC handover inside A: a0 dropped, a1's "synced" is received later
         # (independent collectors - it may be older than a0's drop).
@@ -380,7 +380,7 @@ class TestLiveJournalRestore:
         assert any(f"reported by {a1.get_id()}" in p
                    for p in _gate_problems(src.check_disaster_gate, cluster_id, SITE_A))
 
-    def test_a_deleted_nodes_drop_is_ended_by_a_live_answer_of_its_site(self, db, rpcs):
+    def test_a_deleted_nodes_drop_ends_on_its_sites_answer(self, db, rpcs):
         # The recorder judges the drop as the gate does: before, it ignored the
         # unknown node's drop and nothing could ever record the live restore.
         layout = _Layout(db, rpcs)
@@ -396,7 +396,7 @@ class TestLiveJournalRestore:
         src.cluster_sync_status(cluster_id)
         assert len(_journal_events(db, layout)) == count + 1
 
-    def test_a_deleted_nodes_drop_is_not_ended_by_a_live_answer_of_the_other_site(self, db, rpcs):
+    def test_a_deleted_nodes_drop_ignores_the_other_site(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a2, b0, cluster_id = layout.a[2], layout.b[0], layout.cluster.get_id()
         self._deleted_nodes_drop(db, layout)
@@ -414,7 +414,7 @@ class TestLiveJournalRestore:
         assert _journal_events(db, layout)[-1].node_id == a2.get_id()
         src.check_disaster_gate(cluster_id, SITE_A)
 
-    def test_nothing_is_recorded_without_a_drop_or_from_an_unknown_journal_state(self, db, rpcs):
+    def test_no_drop_or_unknown_state_records_nothing(self, db, rpcs):
         layout = _Layout(db, rpcs)
         src.cluster_sync_status(layout.cluster.get_id())
         assert _journal_events(db, layout) == []
@@ -423,7 +423,7 @@ class TestLiveJournalRestore:
         src.cluster_sync_status(layout.cluster.get_id())
         assert len(_journal_events(db, layout)) == 1
 
-    def test_a_surviving_site_jc_leader_does_not_open_the_lost_sites_gate(self, db, rpcs):
+    def test_a_surviving_jc_leader_keeps_the_gate_closed(self, db, rpcs):
         layout = _Layout(db, rpcs)
         cluster_id = layout.cluster.get_id()
         _record(layout.a[0], "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)

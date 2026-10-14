@@ -8,6 +8,7 @@ tests/integration/test_sync_replication_events.py.
 import pytest
 
 from simplyblock_core.controllers import sync_replication_controller as src
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.sync_replication import SyncReplicationEvent
 
@@ -42,6 +43,19 @@ class TestClassify:
     ])
     def test_anything_else_is_not_a_sync_event(self, event):
         assert src.classify_sync_event(event) is None
+
+
+class TestEventLevel:
+
+    @pytest.mark.parametrize("status, level", [
+        ("remote_journal_synced", EventObj.LEVEL_INFO),            # the journal is back in sync
+        ("remote_journal_unsynced", EventObj.LEVEL_WARN),
+        ("primary_zone_unavailable", EventObj.LEVEL_WARN),
+        ("secondary_zone_unavailable", EventObj.LEVEL_WARN),
+        ("zone_exploded", EventObj.LEVEL_WARN),                    # unknown status
+    ])
+    def test_only_a_synced_journal_is_info_others_warn(self, status, level):
+        assert src.sync_event_level(status) == level
 
 
 def _node(uid, site, **fields):
@@ -98,7 +112,7 @@ def _zone_event(status, kind=ZONE):
 
 class TestLaggingSites:
 
-    def test_the_primary_zone_is_the_home_site_and_the_replica_the_other(self):
+    def test_primary_is_the_home_site_replica_the_other(self):
         assert src.lagging_sites("A", "B", [_zone_event("primary_zone_unavailable")]) == ["A"]
         assert src.lagging_sites("A", "B", [_zone_event("secondary_zone_unavailable")]) == ["B"]
 

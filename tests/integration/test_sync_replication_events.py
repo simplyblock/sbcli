@@ -12,8 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
+from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.sync_replication import SyncReplicationEvent
 from simplyblock_core.rpc_client import RPCException
@@ -109,7 +111,7 @@ def _resync_tasks(db, cluster):
 
 class TestRecording:
 
-    def test_each_status_is_stored_with_its_lvs_node_kind_timestamp_and_order(self, db, rpcs):
+    def test_every_status_is_recorded_in_receive_order(self, db, rpcs):
         cluster, a, _, owner1, _ = _layout(db)
         batch = [_zone(11, "primary_zone_unavailable"), _zone(12, "secondary_zone_unavailable"),
                  _journal(1, False), _journal(1, True)]
@@ -129,7 +131,7 @@ class TestRecording:
         assert len(logged) == 4
         assert all(e.status == "new" for e in logged)   # never marked event_unknown
 
-    def test_an_event_of_a_remote_triplet_instance_maps_to_its_lvs(self, db, rpcs):
+    def test_a_remote_triplet_event_maps_to_its_lvs(self, db, rpcs):
         cluster, _, b, owner1, owner2 = _layout(db)
         # b0 owns LVS_2 and is the remote primary of LVS_1
         _collect(rpcs, b[0], [_zone(11), _zone(21), _journal(1, False), _journal(2, False)])
@@ -147,7 +149,7 @@ class TestRecording:
         _collect(rpcs, a[0], [event])
         assert [e.kind for e in _events(db, cluster, "LVS_1")] == [DROPPED]
 
-    def test_unknown_subjects_and_statuses_are_skipped_and_the_batch_still_discarded(self, db, rpcs):
+    def test_unknown_events_are_skipped_but_discarded(self, db, rpcs):
         cluster, a, _, _, _ = _layout(db)
         batch = [_zone(99),                                        # no such distrib
                  _zone(21),                                        # LVS_2 has no instance on a0
@@ -160,7 +162,7 @@ class TestRecording:
         assert [(e.kind, e.node_id) for e in _events(db, cluster, "LVS_1")] == [(ZONE, a[0].get_id())]
         assert _events(db, cluster, "LVS_2") == []
 
-    def test_a_cluster_without_sync_replication_records_nothing(self, db, rpcs):
+    def test_a_non_sync_cluster_records_nothing(self, db, rpcs):
         cluster, a, _, _, _ = _layout(db, sync=False)
         assert _collect(rpcs, a[0], [_zone(11), _journal(1, False)]) == [2]
         assert _events(db, cluster, "LVS_1") == []
@@ -181,6 +183,27 @@ class TestRecording:
         assert [c.args[2]["event_type"] for c in log_distr_event.call_args_list] == [
             "device_status", "sync_replication_status", "sync_replication_status"]
 
+    def test_sync_events_keep_their_level_others_are_errors(self, db, rpcs):
+        cluster, a, _, _, _ = _layout(db)
+        device = {"timestamp": _ts(), "event_type": "device_status", "storage_ID": 7,
+                  "status": "error_write", "index": 0, "count": 1}
+        levels = [("error_write", EventObj.LEVEL_ERROR),
+                  ("remote_journal_unsynced", EventObj.LEVEL_WARN),
+                  ("remote_journal_synced", EventObj.LEVEL_INFO)]
+        with patch.object(collector, "process_event"), \
+                patch.object(collector.events_controller, "log_event_based_on_level",
+                             wraps=collector.events_controller.log_event_based_on_level) as service_log:
+            assert _collect(rpcs, a[0], [device, _journal(1, False), _journal(1, True)]) == [3]
+
+        # the cluster event log: what the alert feed reads
+        logged = [e for e in db.get_events() if e.domain == events_controller.DOMAIN_DISTR]
+        assert sorted((e.message, e.event_level) for e in logged) == sorted(levels)
+        # the service log line of each event has the same level
+        assert [(c.args[3], c.args[-1]) for c in service_log.call_args_list
+                if c.args[2] == events_controller.DOMAIN_DISTR] == levels
+        # and both sync records are written
+        assert [e.kind for e in _events(db, cluster, "LVS_1")] == [DROPPED, RESTORED]
+
 
 # ---------------------------------------------------------------------------
 # the latest remote-journal event is the state
@@ -188,7 +211,7 @@ class TestRecording:
 
 class TestJournalOrder:
 
-    def test_a_dropped_synced_dropped_flap_in_one_batch_ends_dropped(self, db, rpcs):
+    def test_a_drop_synced_drop_flap_ends_dropped(self, db, rpcs):
         cluster, a, _, _, _ = _layout(db)
         _collect(rpcs, a[0], [_journal(1, False), _journal(1, True), _journal(1, False)])
         events = _events(db, cluster, "LVS_1")
@@ -196,7 +219,7 @@ class TestJournalOrder:
             (DROPPED, True), (RESTORED, True), (DROPPED, False)]
         assert [e.receive_seq for e in _open(db, cluster, "LVS_1")] == [3]
 
-    def test_a_later_drop_reopens_and_a_later_synced_resolves_across_nodes(self, db, rpcs):
+    def test_the_latest_journal_event_wins_across_nodes(self, db, rpcs):
         cluster, a, b, _, _ = _layout(db)
         _collect(rpcs, a[0], [_journal(1, False)])      # old JC leader
         _collect(rpcs, b[1], [_journal(1, False)])      # new JC leader on the other site
@@ -206,7 +229,7 @@ class TestJournalOrder:
         _collect(rpcs, a[0], [_journal(1, False)])
         assert [e.node_id for e in _open(db, cluster, "LVS_1")] == [a[0].get_id()]
 
-    def test_a_re_read_old_restored_does_not_resolve_a_later_drop(self, db, rpcs):
+    def test_a_re_read_synced_keeps_a_later_drop_open(self, db, rpcs):
         cluster, a, b, _, _ = _layout(db)
         restored = _journal(1, True)
         # A records its synced, but the discard is lost: the batch stays queued
@@ -283,7 +306,7 @@ class TestBoundedState:
         assert _open(db, cluster, "LVS_1") == []
         assert all(e.resolved for e in _events(db, cluster, "LVS_1"))
 
-    def test_flags_left_behind_by_a_crash_read_as_resolved_and_are_cleaned_later(self, db, rpcs):
+    def test_crash_left_flags_read_resolved_and_get_cleaned(self, db, rpcs):
         cluster, a, _, _, _ = _layout(db)
         for _ in range(3):
             src.record_sync_event(a[0].get_id(), _journal(1, False))
@@ -303,7 +326,7 @@ class TestBoundedState:
 
 class TestResyncScheduling:
 
-    def test_every_instance_reporting_the_desync_schedules_one_task(self, db, rpcs):
+    def test_many_desync_reports_schedule_one_task(self, db, rpcs):
         cluster, a, b, owner1, _ = _layout(db)
         _collect(rpcs, a[0], [_zone(11), _zone(12), _zone(11)])
         _collect(rpcs, a[1], [_zone(11), _zone(12)])
@@ -353,7 +376,7 @@ class TestResyncScheduling:
         src.record_sync_event(a[0].get_id(), _zone(11))
         assert len([t for t in _resync_tasks(db, cluster) if not t.canceled]) == 1
 
-    def test_a_re_read_desync_the_catch_up_covered_asks_for_nothing(self, db, rpcs):
+    def test_a_re_read_covered_desync_asks_for_nothing(self, db, rpcs):
         cluster, a, _, _, _ = _layout(db)
         event = _zone(11)
         _collect(rpcs, a[0], [event], discard_fails=True)
@@ -364,7 +387,7 @@ class TestResyncScheduling:
         assert _resync_tasks(db, cluster) == []
         assert len(_events(db, cluster, "LVS_1")) == 1
 
-    def test_a_re_read_desync_whose_first_pass_stopped_before_the_task_gets_one(self, db, rpcs):
+    def test_a_re_read_desync_without_a_task_gets_one(self, db, rpcs):
         cluster, a, _, owner1, _ = _layout(db)
         event = _zone(11)
         with patch.object(src.tasks_controller, "add_sync_resync_task",

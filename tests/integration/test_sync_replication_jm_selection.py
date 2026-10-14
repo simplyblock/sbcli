@@ -128,7 +128,7 @@ class TestJournalCopiesPerSite:
         with pytest.raises(ops.SiteJournalPlacementError, match="site 'site-b' 2"):
             ops.get_sorted_ha_jms(a[0])
 
-    def test_an_offline_owner_with_a_stale_online_jm_is_no_copy(self, db):
+    def test_an_offline_nodes_jm_is_never_picked(self, db):
         # a forced shutdown takes a node offline without marking its JM
         cluster = _seed_cluster(db)
         a = [_seed_node(db, cluster, f"a{i}", "site-a") for i in range(1, 4)]
@@ -141,7 +141,7 @@ class TestJournalCopiesPerSite:
         assert set(picked[2:]) == {_jm(b[0]), _jm(b[1]), _jm(spare)}
         assert _jm(offline) not in picked
 
-    def test_non_sync_selection_is_unchanged(self, db):
+    def test_non_sync_picks_two_foreign_jms(self, db):
         cluster = _seed_cluster(db, sync=False)
         nodes = [_seed_node(db, cluster, f"n{i}", "", ha_jm_count=3) for i in range(1, 5)]
         picked = ops.get_sorted_ha_jms(nodes[0])
@@ -202,7 +202,7 @@ class TestJournalNames:
         assert set(ordered[:3]) == {f"remote_jm_{n.get_id()}n1" for n in b}
         assert all(name.startswith("remote_xs_jm_") for name in ordered[3:])
 
-    def test_non_sync_names_are_unchanged(self, db):
+    def test_non_sync_names_have_no_n_local(self, db):
         cluster = _seed_cluster(db, sync=False)
         nodes = [_seed_node(db, cluster, f"n{i}", "", ha_jm_count=3) for i in range(1, 5)]
         owner = nodes[0]
@@ -272,7 +272,7 @@ class TestRemoteJmNames:
         rpcs[cross.get_id()].get_bdevs.assert_called_with(f"remote_xs_jm_{node.get_id()}n1")
         rpcs[cross.get_id()].bdev_nvme_controller_list.assert_called_with(f"remote_xs_jm_{node.get_id()}")
 
-    def test_health_check_uses_the_recorded_cross_site_controller(self, db, rpcs):
+    def test_health_check_uses_the_cross_site_controller(self, db, rpcs):
         cluster = _seed_cluster(db)
         owner = _seed_node(db, cluster, "a1", "site-a")
         record = RemoteJMDevice()
@@ -421,7 +421,7 @@ class TestReplacementOnRemoval:
                 return True
             rpcs[node_id].jc_replace_jm.side_effect = _replace
 
-    def test_replacement_from_the_same_site_on_all_six_instances(self, db, rpcs):
+    def test_six_instances_get_a_same_site_replacement(self, db, rpcs):
         (a1, a2, a3, a4), (b1, b2, b3, b4) = self._setup(db)
         expected = {n.get_id(): {a1.jm_vuid} for n in (a1, a2, a3, b3, b4)}
         expected[b2.get_id()] = {a1.jm_vuid, b2.jm_vuid}
@@ -450,7 +450,7 @@ class TestReplacementOnRemoval:
         assert _jm(b4) in stored_b2.jm_ids and _jm(b1) not in stored_b2.jm_ids
         assert _jm(a4) not in stored_a1.jm_ids
 
-    def test_no_free_jm_on_the_removed_site_leaves_the_slot_short(self, db, rpcs):
+    def test_no_free_jm_on_the_site_leaves_the_slot_short(self, db, rpcs):
         (a1, a2, a3, a4), (b1, b2, b3, b4) = self._setup(db)
         b4.jm_device.status = JMDevice.STATUS_UNAVAILABLE   # site b has no free JM left
         b4.write_to_db(db.kv_store)

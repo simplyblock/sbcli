@@ -1,5 +1,5 @@
-"""The v2 replication routes on a sync-replication cluster, and unchanged on an
-async one.
+"""The v2 replication routes on a sync-replication cluster and on an async one,
+where the sync-only ``site`` parameter is ignored.
 
 The routes run in their own FastAPI app: the resource lookups (cluster, pool,
 volume, consistency group) are overridden with in-memory models, so no
@@ -568,7 +568,7 @@ class TestGroup:
         sync_controller.sync_demote_group.assert_called_once_with(GROUP_ID, SITE)
         group_controller.demote_group.assert_not_called()
 
-    def test_an_empty_group_is_204_on_demote_and_200_without_members_on_promote(self, client, sync_controller):
+    def test_an_empty_group_succeeds_on_demote_and_promote(self, client, sync_controller):
         sync_controller.sync_demote_group.return_value = []
         sync_controller.sync_promote_group.return_value = SyncPromoteResult(
             in_progress=False, connection_strings={})
@@ -640,7 +640,7 @@ class TestGroup:
 
 
 # ---------------------------------------------------------------------------
-# an async cluster: unchanged
+# an async cluster: the async replication routes, the site ignored
 # ---------------------------------------------------------------------------
 
 @pytest.mark.usefixtures('async_cluster')

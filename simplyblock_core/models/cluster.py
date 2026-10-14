@@ -33,9 +33,14 @@ class Cluster(BaseModel):
     #: clear out from under a live rebuild.
     STATUS_IN_SHRINK = "in_shrink"
 
-    #: ``lost_site_state`` values (sync replication): the site steps of a
-    #: disaster fail-over are running (a retry redoes them), or they are
-    #: complete. The one definition - every reader compares against these.
+    #: ``lost_site_state`` values (sync replication). Written by the
+    #: storage-node monitor: the site is beyond its FTT and what is left of it
+    #: is being shut down (DRAINING), or every node of it is gone and it may
+    #: return (DOWN). Written by a disaster fail-over (a forced promote): its
+    #: site steps are running - a retry redoes them (FENCING) - or they are
+    #: complete (DONE). The one definition - every reader compares against these.
+    LOST_SITE_DRAINING = "draining"
+    LOST_SITE_DOWN = "down"
     LOST_SITE_FENCING = "fencing"
     LOST_SITE_DONE = "done"
 
@@ -257,10 +262,13 @@ class Cluster(BaseModel):
     # Every storage node then carries a `site`, and every LVS is replicated to
     # the other site.
     sync_replication: bool = False
-    # The site declared lost by a disaster fail-over ("" = both sites in
-    # service), and how far the site-level fencing of that fail-over got:
-    # LOST_SITE_FENCING while its steps run (a retry redoes them, they are
-    # idempotent), LOST_SITE_DONE once they completed.
+    # The site recorded as out ("" = both sites in service) and its state:
+    # LOST_SITE_DRAINING / LOST_SITE_DOWN when the storage-node monitor judged
+    # it beyond its FTT / gone as a whole (no fail-over involved), or how far
+    # the site-level fencing of a disaster fail-over got - LOST_SITE_FENCING
+    # while its steps run (a retry redoes them, they are idempotent),
+    # LOST_SITE_DONE once they completed. One site at a time; only the site
+    # return clears a record, except that a suspension clears the monitor's.
     lost_site: str = ""
     lost_site_state: str = ""
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe

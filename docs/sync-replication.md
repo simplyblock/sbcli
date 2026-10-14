@@ -55,8 +55,14 @@ promote, site return), `simplyblock_core/services/tasks_runner_sync_promote.py`,
   `storage_node_id` (the owner node in the volume DTO) share an LVS.
 - Per volume the control plane records the site it is assigned to (`LVol.sync_active_site`, default the
   LVS's active site at creation) and the sites it is fenced on (`LVol.sync_demoted_sites`).
-- The cluster records a lost site (`Cluster.lost_site`, `lost_site_state` = `fencing` while the site
-  steps of a disaster fail-over run, `done` after).
+- The cluster records one site at a time as out (`Cluster.lost_site`, `lost_site_state`), in four
+  states. Two are written by the storage-node monitor, with no fail-over and nothing fenced: `draining`
+  (the site is beyond its fault tolerance while the other one is healthy; what is left of it is being
+  shut down) and `down` (the site was judged gone as a whole, or its drain completed; it may return -
+  nodes coming back do not change it). Two are written by a disaster fail-over (a forced promote):
+  `fencing` while its site steps run, `done` after. Only the site return clears a record; any
+  suspension of the cluster also clears the monitor's two (see
+  [Disaster fail-over](#disaster-fail-over-site-t-lost)).
 
 ### The active and the passive triplet
 
@@ -134,12 +140,40 @@ activation and cluster expansion refuse a topology that exceeds it
 
 ### Control plane
 
-The management plane and FoundationDB are **not** replicated by this feature. A disaster fail-over
-runs on the control plane, so it must stay available when either site is lost: place the management
-nodes and the FoundationDB quorum so that they survive the loss of either site on their own (for
-example with a quorum member in an independent third failure domain). Splitting a majority quorum over
-the two storage sites does not survive the loss of the site holding the majority. The two-site rule
-applies to the storage topology only.
+The prototype assumes **one management node that reaches both sites**: a site the management node
+cannot reach is taken as unreachable for everybody. The management plane is not replicated by this
+feature. The management node must be able to reach FoundationDB; the monitoring and the disaster
+fail-over need both. The two-site rule applies to the storage topology only.
+
+The management node judges a site from two signals: its own probes (node API, SPDK RPC) are the
+evidence that a node is gone, and the surviving site's data plane can only veto - a node that a peer
+still reports with its journal (JM) link `enabled` is not gone. A peer without that link, a peer that
+does not answer and a vote with no voter (`0/0`) veto nothing.
+
+Limitations of the assumption:
+
+- **Loss of the management node** (or of its FoundationDB): no monitoring, no site record, no
+  disaster fail-over. The data plane keeps serving what it served.
+- **No quorum of its own, no witness, no self-fencing**: a site cut off from the management node and
+  from the other site does not stop serving by itself.
+- **A full partition** in which the management node and the other site both lose a site that is still
+  alive and serving its own clients is outside the assumption: the site looks gone to every witness, a
+  forced promote passes and both sites serve.
+- **A management-only partition** (the storage network intact): the nodes the management node cannot
+  reach turn `UNREACHABLE` and are vetoed by their peers, so they count neither as lost nor as
+  affected - on a cluster without `strict_node_anti_affinity` and otherwise healthy, a whole site cut
+  off this way gets no record, and no forced promote passes. (With `strict_node_anti_affinity` the
+  site's verdict also counts its `ONLINE` nodes, so the site can be recorded `draining`.) A site already
+  beyond its fault tolerance for other reasons (nodes `OFFLINE`, failed devices) stays `draining` while
+  such a vetoed node is part of it, until the node is reached again (it is then shut down) or the veto
+  clears.
+- **A management node cut off from both sites** judges nothing: every node turns `UNREACHABLE`, every
+  vote is `0/0`, so the veto rule leaves no healthy site and the verdict falls back to the cluster-wide
+  majority rule, in which `0/0` never counts, and no site record is proposed. On a cluster without
+  `strict_node_anti_affinity`, with the devices still online, the verdict counts none of those nodes
+  (it is what the devices and the nodes already `OFFLINE` give, not a frozen earlier status) and
+  nothing is drained; with `strict_node_anti_affinity` the missing `ONLINE` nodes can suspend the
+  cluster, and its suspend recovery drains it.
 
 ### Background services
 
@@ -157,7 +191,8 @@ Two task runners are new. Both must run on the management plane; without them a 
   (simplyblock-operator `operator/internal/controllers/controlplane/managementapi.go`).
 - The existing `MainDistrEventCollector` records the sync events (zone desync, remote journal
   dropped / restored) that the status, the disaster gate and the resync depend on, and the
-  `StorageNodeMonitor` runs the site return; both must run as today.
+  `StorageNodeMonitor` judges the sites, writes the monitor's site record, drives the site drain and
+  runs the site return; both must run as today.
 
 ---
 
@@ -375,8 +410,11 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
 - Opening the volume on S sets its ANA state on every `ONLINE` member of the LVS's triplet there. An
   opening that sets no path at all (the triplet went down after the call was queued) fails the promote
   task: nothing is recorded, the failure is reported to the next call, never a 200.
-- While a site is recorded as lost, **every** promote is judged by the disaster gate (the planned gate
-  needs both sites).
+- While a site is recorded as lost - by a fail-over or by the storage-node monitor (`draining` /
+  `down`) - **every** promote is judged by the disaster gate (the planned gate needs both sites). Only
+  the forced promote of a disaster row fences the site; any other promote leaves the record as it is.
+  The promote task re-reads the record before it opens a volume and refuses to open one on a site
+  recorded since it was queued.
 - The promote task does the whole promote in one pass and always ends DONE, **also when it failed**;
   the task being DONE is not the success condition. A failed task is reported once to each of its
   volumes: the first POST of that volume to S after the failure answers 409 with the task's reason and
@@ -422,18 +460,40 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
 A forced promote of a volume led from T, when T is not online and none of its nodes may still run:
 
 1. the disaster gate for the LVSs of the request - before anything changes;
-2. T proven down (every T node in no running state, its SPDK not seen by the management plane and gone
-   from the surviving site's data plane);
-3. site steps, resumable (`lost_site = T`, `lost_site_state = fencing`): every T device `unavailable` in
-   every distrib on the surviving site, the T nodes `OFFLINE`, **every other volume of every LVS led from
-   T** fenced on T (`sync_demoted_sites` += T; it stays closed on S until its own promote); T proven down
-   again; `lost_site_state = done`. A retry in `fencing` redoes these steps idempotently; later promotes
-   skip them once `done`;
+2. T proven down, per node of T that is not removed: its status is not a running one (not `ONLINE` /
+   `DOWN` / `RESTARTING` / `IN_CREATION`); the management plane gets no answer from its SPDK - the
+   node API does not report the process up and its RPC returns no version (a call through the RPC
+   proxy of a dead SPDK that merely returns is no answer); and no answering peer of the surviving site
+   still reports its JM link `enabled` (a fresh vote; a peer without the link, a peer that does not
+   answer and `0/0` do not block). A refusal names, per node, the status, the probe that answered or
+   the count of peers still reporting the link;
+3. site steps, resumable, **for a forced promote of a disaster row only**: entered from no record, from
+   the monitor's `down` or from `fencing`; refused while the monitor still drains T (`draining`: "site
+   T is being shut down by the monitor; retry"). `lost_site = T`, `lost_site_state = fencing`: every T
+   device `unavailable` in every distrib on the surviving site, the T nodes `OFFLINE`, **every other
+   volume of every LVS led from T** fenced on T (`sync_demoted_sites` += T; it stays closed on S until
+   its own promote); T proven down again; `lost_site_state = done`. A retry in `fencing` redoes these
+   steps idempotently; later promotes skip them once `done`;
 4. per LVS: the hand-off to the primary of the surviving site's triplet (nothing is granted; it takes
    the leadership on the first IO, as after a planned move), then the volumes opened on S.
 
-A cluster with a whole site lost is not suspended (it stays at least `DEGRADED`); a site that is up but
-beyond its fault tolerance still suspends it.
+The task does not wait for the proof: a refused proof fails the task, its reason is reported by the
+next call and only the call after that judges the table again (see [Promote](#promote)).
+
+**The cluster status of a sync cluster** is judged per site:
+
+- a site beyond its fault tolerance while the other one is healthy is shut down as a whole - the
+  storage-node monitor records it `draining`, shuts down its live nodes (operator-stopped nodes are
+  left alone), pauses the automatic restarts of that site only and records it `down` once nothing of it
+  is pending; a site gone as a whole is recorded `down` directly. The verdict is `DEGRADED` (or
+  worse by the healthy site's own verdict, never `SUSPENDED`; a cluster set `READONLY` stays
+  `READONLY`), and nothing of the healthy site is touched;
+- `SUSPENDED` only when no site is healthy - both sites beyond their fault tolerance, or a recorded
+  site while the other one is beyond its own. The cluster-wide suspend recovery then runs as on a
+  cluster without sync replication;
+- a suspension clears the monitor's record (`draining` / `down`): the monitor clears it before it
+  writes `SUSPENDED` itself; a suspension written elsewhere (`sbctl cluster restart`, any other) is
+  cleared by the next monitor pass. The record of a fail-over (`fencing` / `done`) stays.
 
 ---
 
@@ -453,7 +513,23 @@ beyond its fault tolerance still suspends it.
 
 **Disaster fail-over** (A lost): promote on B with `planned=true` answers 412; csi-addons escalates to a
 forced promote (`planned=false`); repeat while 409 "in progress" until 200; connect on B and issue
-client IO as in steps 4-5 above.
+client IO as in steps 4-5 above. A forced promote soon after the loss can be refused because the site
+is not proven lost yet: a peer still reports a JM link `enabled` (in the lab, with the SPDK processes
+killed, that ended about 6 s after the loss; for a host that goes silent it is the keep-alive time,
+not measured), a node of A is still in a running state, or the monitor still drains A. The failed
+task's reason is answered by the next call; call again once the cause has cleared. Any other refusal:
+stop and fix its cause, as the contract says.
+
+**Site loss without a fail-over** (nothing to call): when a site goes beyond its fault tolerance - or
+is lost as a whole - while the other one is healthy, the storage-node monitor records it, shuts down
+what is left of it (`draining`; its automatic restarts paused, operator-stopped nodes left alone and
+restarted only by the operator) and then records it `down`; the automatic restarts of its nodes
+resume. The cluster is `DEGRADED` (or stays `READONLY` if it was set so), the healthy site is not
+touched and keeps serving its volumes.
+**Recording a site moves nothing**: an LVS led from the recorded site stays led from it, and its
+volumes stay closed until the site returns as a whole (below) or an operator fails them over with a
+forced promote (which fences the site, `down -> fencing -> done`). No volume is fenced by the record
+itself.
 
 **First IO before object operations.** A promote that moved an LVS (planned or forced) leaves it
 without a leader until a client's first IO reaches the new site. Connect a volume of that LVS and
@@ -487,7 +563,9 @@ that was not reloaded. Issue IO on a volume itself before resizing it.
   task, only while a connected member of the active triplet does not answer whether it leads, or more
   than one says it does.
 
-**Site return** (A comes back, automatic - nothing to call):
+**Site return** (A comes back, automatic - nothing to call), after a fail-over (`done`, or `fencing`
+left by a promote that no longer runs) or after a site loss without one (`down`; a site still
+`draining` never returns):
 
 - A's nodes restart as non-leaders: an LVS already moved to B is rebuilt behind the member of B's
   triplet that leads it - behind the first connected member of that triplet, its primary first, when
@@ -498,8 +576,12 @@ that was not reloaded. Issue IO on a volume itself before resizing it.
   local journal quorum), checks every expected volume on it and every distrib replayed, schedules the
   catch-up of every LVS and clears `lost_site`. A degraded surviving site delays the election (every
   member must answer). Events: "Site A returned: <lvs> leader elected ...", "Site A return held: ...".
-- `lost_site` is cleared **before** the catch-up finishes. Volumes fenced on A stay closed there until
-  promoted.
+- `lost_site` is cleared **before** the catch-up finishes. Volumes fenced on A by a fail-over stay
+  closed there until promoted; after `down` no volume was fenced (`sync_demoted_sites` is untouched),
+  and once the record is cleared the lvol monitor's ANA repair restores the paths of the eligible
+  volumes according to the [ANA rule](#ana-rule-who-publishes-which-path) - a volume assigned to
+  another site or demoted on A stays closed (asynchronously, on its own passes; clearing the record
+  sends no ANA RPC).
 
 **Fail-back B -> A**: wait until `sync-status` is `healthy` / `peer_ready`, then run the planned
 switchover in reverse (demote on B, promote on A). `POST .../failback` is not part of it (a no-op).
@@ -532,9 +614,23 @@ replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) f
 
 ## 8. Known limitations
 
-- A network partition in which the management plane loses site A at the same moment may pass the
-  disaster gate on stale data; a full partition where the management plane and every surviving peer
-  lose A while A keeps serving its own clients passes the liveness checks (research item).
+- Everything below the [one-management-node assumption](#control-plane) is judged by that one node:
+  its loss stops monitoring and fail-over, and a full partition in which it and the surviving site lose
+  a site that keeps serving its own clients passes the liveness proof and the disaster gate (the gate
+  then judges stale events) - both sites serve. There is no witness and no self-fencing.
+- A recorded site returns **only as a whole**: every node of it `ONLINE` with its zone up. A node that
+  never comes back keeps the site recorded and the LVSs led from it closed. Ways out: remove the dead
+  node, or shut down the returned nodes and fail the site over with a forced promote.
+- A forced promote soon after a loss can be refused while the proof cannot pass yet (a peer still
+  reports a JM link `enabled`, a node still in a running state, the site still `draining`); call again
+  once the cause has cleared (see [Flows](#6-flows-for-the-operator)).
+- A cluster activation run by an operator while a site is recorded refuses to build a leader on a node
+  of that site, as for a fenced site: an activation of a cluster with an LVS still led from the
+  recorded site fails until the site returns.
+- A `SCHEDULABLE` node of a `draining` site is waited for, not shut down (the same rule as the
+  cluster-wide suspend drain): a node whose RPC recovers while its SPDK keeps running stays
+  `SCHEDULABLE`, and the site stays `draining` with its restarts paused, until the node is restarted
+  or shut down by hand.
 - Reads after a promote go to zone 0 while the home site is alive (local-zone reads are deferred).
 - Rejected on a sync cluster: lvol migration (single and batch), manual volume suspend / resume, the
   v1 `lvol/connect` (use the v2 connect).
