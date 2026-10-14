@@ -569,30 +569,25 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
     if v == 5:
         return finalize({
             "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
-            "jm_cpu_core": cores[1:2], "lvol_poller_core": cores[1:2],
-            "poller_cpu_cores": cores[2:3], "distrib_cpu_cores": cores[3:4],
-            "alceml_cpu_cores": cores[4:5],
+            "jm_cpu_core": cores[1:2],
+            "poller_cpu_cores": cores[2:3], "lvol_poller_core": cores[2:3],
+            "distrib_cpu_cores": cores[3:4], "alceml_cpu_cores": cores[4:5],
         })
 
     assigned = {}
-    # lvol_poller co-locates with jc_singleton's core below 32 vCPU to save a
-    # core; at/above 32 vCPU it gets its own dedicated core.
-    colocate_lvs = v < 32
     if v < 12:
-        vcpu = reserve_n(4 if colocate_lvs else 5)
+        vcpu = reserve_n(4)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
-        assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[4:5]
         assigned["distrib_cpu_cores"], assigned["poller_cpu_cores"] = split_distrib_and_poller()
     elif v < 22:
-        vcpu = reserve_n(5 if colocate_lvs else 6)
+        vcpu = reserve_n(5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
-        assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[5:6]
         assigned["distrib_cpu_cores"], assigned["poller_cpu_cores"] = split_distrib_and_poller()
     else:
         # Reordered: distrib claims its share first, as a pure function of
@@ -601,12 +596,10 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         # device-scaled count from what's left (clipped if there genuinely
         # isn't room), and poller -- already the "whatever's left" role --
         # absorbs the true remainder.
-        base = 3 if colocate_lvs else 4
-        vcpus = reserve_n(base)
+        vcpus = reserve_n(3)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        assigned["lvol_poller_core"] = vcpus[2:3] if colocate_lvs else vcpus[3:4]
 
         dp = int(len(remaining) / 2)
         if 17 > dp >= 12:
@@ -618,7 +611,28 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["distrib_cpu_cores"] = reserve_n(distrib_n)
         assigned["alceml_cpu_cores"] = reserve_n(min(alceml_count, len(remaining)))
         assigned["poller_cpu_cores"] = reserve_n(len(remaining))
+    assigned["lvol_poller_core"] = _lvol_poller_cores(assigned)
     return finalize(assigned)
+
+
+def _lvol_poller_cores(assigned):
+    """The lvstore poller group runs on the nvmf poller core set.
+
+    Both are "serve what the hosts send" work: the nvmf poll groups take the
+    I/O in, the lvol poller group drives the lvstore/transfer-hub bdevs that
+    complete it. Spreading the lvol pollers over the same set keeps a single
+    busy core (the JC singleton, where they used to be pinned) from
+    throttling every hub bdev at once. The allocation reserves no core for
+    this -- lvol_poller_core is a view of poller_cpu_cores. Below 32 vCPU
+    the layout is exactly what it was; at 32 and above the core the old
+    layout dedicated to the lvol poller goes back to the distrib/alceml/
+    poller pool, so the base roles take 3 cores at every size.
+
+    The JC singleton core is the fallback only when the layout ended up with
+    no poller core at all (a tiny host, or a device count that clipped the
+    remainder to nothing): the poller group must still be created somewhere.
+    """
+    return list(assigned.get("poller_cpu_cores") or assigned.get("jc_singleton_core") or [])
 
 
 def isolate_cores(spdk_cpu_mask):
