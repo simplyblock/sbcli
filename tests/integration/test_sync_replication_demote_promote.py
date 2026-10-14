@@ -244,10 +244,76 @@ class TestPromoteApi:
         gate.assert_not_called()
 
     def test_not_demoted_on_t_is_refused(self, db, spdk, gate):
+        # A volume served on its home (_registered uses active_site=SITE_A, a
+        # recorded active site: not birth state) still blocks a planned promote.
+        # The caller must demote it first; nothing is fenced, no task queued, and
+        # the planned gate is never reached. The birth-state volume below is the
+        # case that is now moved instead.
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         with pytest.raises(SyncPromoteRefusedError) as exc:
             src.sync_promote_lvol(vol.get_id(), SITE_B)
         assert exc.value.volumes == [vol.get_id()]
+        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
+        assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
+        gate.assert_not_called()
+
+    def test_a_birth_state_volume_is_fenced_at_home_and_moved(self, db, spdk, gate, moves):
+        """First placement: a brand-new volume (never served, born on its home)
+        whose pod lands on the site its LVS is not homed on. The promote fences
+        the birth-state home itself - what an unstage would have done - and
+        queues the move, instead of refusing it as not demoted. The move then
+        completes on the far site. Safe under the single-active-site (RWO)
+        contract: a birth-state home has no consumer to cut off."""
+        cluster, a, b, owner = _layout(db)
+        pool = _pool(db, cluster)
+        vol = _volume(db, cluster, owner, pool, active_site="")   # birth state
+        publish._register_everywhere(db, vol, owner, [*a, *b])
+        vol.write_to_db(db.kv_store)
+        owner = _fresh(db, owner)
+
+        first = src.sync_promote_lvol(vol.get_id(), SITE_B)
+        assert first.in_progress and first.task_id
+        # the home was fenced and recorded demoted as part of the promote
+        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_A]
+        assert _states(spdk, a, vol) == ["inaccessible"] * 3
+        # and the queued move completes on the far site
+        moves.leader["LVS_1"] = owner
+        assert _run(db, first.task_id)
+        done = src.sync_promote_lvol(vol.get_id(), SITE_B)
+        assert not done.in_progress
+        assert [e.ip for e in done.connection_strings[vol.get_id()]] == [_ip(n) for n in b]
+
+    def test_a_birth_state_volume_promoted_to_its_own_home_is_a_no_op(self, db, spdk, gate):
+        # Birth state is only relaxed into a move. A birth-state volume promoted
+        # to the site it is already led from is the ordinary served answer, and
+        # nothing is fenced.
+        cluster, a, b, owner = _layout(db)
+        pool = _pool(db, cluster)
+        vol = _volume(db, cluster, owner, pool, active_site="")
+        publish._register_everywhere(db, vol, owner, [*a, *b])
+        vol.write_to_db(db.kv_store)
+
+        result = src.sync_promote_lvol(vol.get_id(), SITE_A)
+        assert not result.in_progress
+        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
+        gate.assert_not_called()
+
+    def test_a_served_sibling_keeps_a_birth_state_volume_from_moving(self, db, spdk, gate):
+        """The whole LVS moves as one, so a birth-state volume cannot be moved
+        while a sibling of its LVS is genuinely served on the home. The promote
+        is refused and nothing (not even the birth-state volume) is fenced."""
+        cluster, a, b, owner = _layout(db)
+        pool = _pool(db, cluster)
+        fresh = _volume(db, cluster, owner, pool, active_site="")      # birth state
+        served = _another(db, spdk, cluster, owner, pool, a, b, active_site=SITE_A)
+        publish._register_everywhere(db, fresh, owner, [*a, *b])
+        fresh.write_to_db(db.kv_store)
+
+        with pytest.raises(SyncPromoteRefusedError) as exc:
+            src.sync_promote_lvol(fresh.get_id(), SITE_B)
+        assert exc.value.volumes == [served.get_id()]
+        assert db.get_lvol_by_id(fresh.get_id()).sync_demoted_sites == []
+        assert db.get_lvol_by_id(served.get_id()).sync_demoted_sites == []
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
 
     def test_other_volumes_of_the_lvs_still_on_t_are_listed(self, db, spdk, gate):

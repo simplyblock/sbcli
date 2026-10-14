@@ -1070,6 +1070,17 @@ def volumes_open_on(volumes: Iterable[LVol], owner: StorageNode, site: str) -> l
             if v.status != LVol.STATUS_DELETED and volume_open_on(v, owner, site)]
 
 
+def is_birth_state(lvol: LVol, owner: StorageNode) -> bool:
+    """Whether ``lvol`` has never been served: its LVS is still led from its
+    home (never moved, not moving) and the volume carries no record of a promote
+    or a demote. Such a volume is open on its home only by that birth default,
+    so a planned promote elsewhere may fence the home without cutting off a
+    consumer - under the single-active-site (RWO) contract a birth-state home has
+    none (birth_state_demote_plan, design-sync-replication-csi-addons.md)."""
+    return (owner.lvs_active_site == "" and lvol.sync_active_site == ""
+            and not lvol.sync_demoted_sites)
+
+
 def lvs_site_triplet(owner: StorageNode, site: str) -> tuple[str, ...]:
     """The triplet of ``owner``'s LVS on ``site``, primary first: the home
     triplet on the owner's site, the remote one on the other."""
@@ -1314,6 +1325,48 @@ def promote_decision(lvol: LVol, owner: StorageNode, lvs_volumes: Iterable[LVol]
     return PromoteDecision(PROMOTE_MOVE, source)
 
 
+def birth_state_demote_plan(
+    decisions: Iterable[tuple[LVol, PromoteDecision]],
+    owners: dict[str, StorageNode],
+    lvs_volumes: dict[str, list[LVol]],
+) -> dict[str, list[LVol]]:
+    """The volumes a planned promote may demote before it moves, keyed by the
+    site to demote them on, so a first-placement move can proceed: a brand-new
+    sync volume whose pod lands on the site its LVS is not homed on (the
+    scheduling-driven switchover of design-sync-replication-csi-addons.md). A
+    promote of such a volume is refused today (PROMOTE_NOT_DEMOTED /
+    PROMOTE_LVS_BUSY) because the volume is still open on its home, which a
+    normal move needs demoted first - but nothing demoted it, there having been
+    no pod on the home to unstage.
+
+    For every LVS a decision wants to move off (a NOT_DEMOTED or LVS_BUSY
+    blocker), when EVERY volume of that LVS still open on the source is in birth
+    state (is_birth_state), all of them are returned to be demoted there - what
+    an unstage would have done. An LVS any of whose source-open volumes was
+    genuinely served is left out: it is pinned and the promote is refused as
+    before. The emptiness of the result is the signal that nothing is to be
+    auto-demoted.
+
+    Safe under the single-active-site (RWO) contract: a birth-state home has no
+    live consumer, so fencing it cuts off nothing (the detection is the record
+    alone; no live consumer query)."""
+    plan: dict[str, list[LVol]] = {}
+    seen: set[str] = set()
+    for lvol, decision in decisions:
+        if decision.kind not in (PROMOTE_NOT_DEMOTED, PROMOTE_LVS_BUSY):
+            continue
+        owner_id = lvol.node_id
+        if owner_id in seen:
+            continue
+        seen.add(owner_id)
+        owner, source = owners[owner_id], decision.source_site
+        open_here = [v for v in lvs_volumes[owner_id]
+                     if v.status != LVol.STATUS_DELETED and volume_open_on(v, owner, source)]
+        if open_here and all(is_birth_state(v, owner) for v in open_here):
+            plan.setdefault(source, []).extend(open_here)
+    return plan
+
+
 def promote_move_problems(cluster, owner: StorageNode, volumes: Iterable[LVol], expect: str,
                           target_site: str) -> list[str]:
     """What forbids marking ``owner``'s LVS as moving to ``target_site`` now,
@@ -1516,8 +1569,42 @@ def reconcile_abandoned_moves(cluster_id: str) -> None:
                          owner.lvstore, e)
 
 
+def _auto_demote_birth_state(db: DBController, volumes: list[LVol], site: str, *,
+                             group=None) -> list[LVol]:
+    """Before a planned promote to ``site``: demote the home of every volume
+    that is open there only because it was never served (birth state), so a
+    first-placement move can proceed (birth_state_demote_plan). This is what an
+    unstage would have done, done here because a brand-new volume whose pod
+    lands off its LVS's home has had no pod on the home to unstage. The demote
+    runs the live planned gate (``_demote`` -> ``check_gate``), so it fences the
+    home only while replication is healthy.
+
+    Returns the request's volumes, re-read when any were demoted so the caller
+    judges the promote table against the demoted records. A no-op (the same
+    volumes) when nothing is in birth state."""
+    cluster, owners = _volumes_context(db, volumes, site, group=group)
+    nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+    sites = online_sites(nodes, cluster)
+    online_ids = {n.get_id() for n in nodes if n.status == StorageNode.STATUS_ONLINE}
+    lvs_volumes = {owner_id: db.get_lvols_by_node_id(owner_id) for owner_id in owners}
+    decisions = [(lv, promote_decision(lv, owners[lv.node_id], lvs_volumes[lv.node_id], site,
+                                       online_sites=sites, online_nodes=online_ids, force=False))
+                 for lv in volumes]
+    plan = birth_state_demote_plan(decisions, owners, lvs_volumes)
+    if not plan:
+        return volumes
+    for source_site, birth_volumes in plan.items():
+        _demote(db, birth_volumes, source_site)
+    return [db.get_lvol_by_id(lv.get_id()) for lv in volumes]
+
+
 def _promote(db: DBController, volumes: list[LVol], site: str, force: bool, *,
              group=None) -> SyncPromoteResult:
+    if not force:
+        # First-placement: fence the birth-state home of any volume still open
+        # there, so its planned move is no longer refused as "not demoted". A
+        # forced promote never takes this path (it acts only on a lost site).
+        volumes = _auto_demote_birth_state(db, volumes, site, group=group)
     for attempt in range(2):
         # Everything judged fresh on each attempt: a promote may have started
         # while an abandoned move was being reconciled.
