@@ -406,7 +406,7 @@ class MigrationBatchNegative(_BatchBase):
 
 
 class MigrationBatchWithTrees(_BatchBase):
-    """MIG-B-007, MIG-B-008: group members that have their own history.
+    """MIG-B-007, MIG-B-008, MIG-B-009: group members with their own history.
 
     The combination the scripts pushed hardest: a shared-namespace group
     where members carry snapshot chains, and a clone tree with fifteen
@@ -458,4 +458,52 @@ class MigrationBatchWithTrees(_BatchBase):
         self.logger.info("[MIG-B-008] PASS: every member kept its chain")
         self.verify(self._seeded["name"], self._sums,
                     "after a group-with-trees migration (MIG-B-008)")
+
+        # -- MIG-B-009 the same group moves a SECOND time ----------------
+        # One hop proves the group and its chains arrived. It cannot prove
+        # the hop left nothing behind, because the leftover only collides
+        # with the NEXT migration of the same object: that is exactly the
+        # shape of SFAM-2820, where a snapshot bdev keeps its ``m`` suffix
+        # and its record still names the lvstore it was taken on, and the
+        # second migration fails looking the old name up. Until this hop
+        # existed the k8s lane could not reach those conditions at all --
+        # every volume sat alone in its subsystem, so the batch runner the
+        # defect lives in was never entered.
+        self.assert_migration_invariants(
+            self._seeded["id"], src, tgt, "(MIG-B-009, after hop 1)")
+
+        back = self.pick_target(tgt, "no-overlap")
+        self.logger.info("[MIG-B-009] second hop %s -> %s", tgt, back)
+        mid2 = self.migrate(self._seeded["id"], back, batch=True)
+        self.migrate_continue(mid2, batch=True)
+        status, phase = self.await_batch(
+            mid2, timeout=2400,
+            what="MIG-B-009 second hop of a group carrying snapshots")
+        if status not in self.OK_TERMINAL:
+            raise AssertionError(
+                f"[MIG-B-009] the same group migrated once already and "
+                f"ended {status!r} (phase {phase!r}) on its second hop. A "
+                f"group that moves once and cannot move again has left "
+                f"state behind on the first hop -- check the member and "
+                f"snapshot bdev names in the failure for an ``m`` suffix.")
+
+        off = [(m["name"], self.lvol_node(m["id"])) for m in group
+               if self.lvol_node(m["id"]) != back]
+        if off:
+            raise AssertionError(
+                f"[MIG-B-009] after the second hop, members not on "
+                f"{back}: {off}")
+        for m in group:
+            mine = self.snapshots_of(m["id"])
+            if len(mine) < self.SNAPS_EACH:
+                raise AssertionError(
+                    f"[MIG-B-009] member {m['name']} has {len(mine)} of "
+                    f"{self.SNAPS_EACH} snapshots after the SECOND group "
+                    f"migration. The chain survived one hop and not two.")
+        self.assert_migration_invariants(
+            self._seeded["id"], tgt, back, "(MIG-B-009, after hop 2)")
+        self.verify(self._seeded["name"], self._sums,
+                    "after two group-with-trees migrations (MIG-B-009)")
+        self.logger.info("[MIG-B-009] PASS: the group migrated twice, "
+                         "chains intact, no artefacts left behind")
         self._teardown()

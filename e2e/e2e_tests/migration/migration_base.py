@@ -1713,6 +1713,133 @@ class MigrationTestBase(TestClusterBase):
                 f"collides with them.")
         self.logger.info("[MIG] no leftovers on target %s %s", node_id, context)
 
+    # -- post-migration invariants ---------------------------------------
+    #: A bdev the migration machinery creates on the target and renames away
+    #: at cutover: ``LVS_31/SNAP_187m``, ``LVS_7/LVOL_12m``. Its presence
+    #: after a migration reported success is the state SFAM-2820 describes --
+    #: the artefact survives, and the next migration of the same object then
+    #: fails looking it up. Catching it here names the defect at the moment
+    #: it is created, instead of waiting for a second migration to trip over
+    #: it and reporting a confusing "No such device".
+    ARTEFACT_RE = re.compile(r"(?:LVS_\d+/)?(?:SNAP|LVOL)_\d+m(?![0-9A-Za-z])")
+
+    def _spdk_rpc(self, node_ip, args, grep=None):
+        """Run an SPDK RPC on a node's own SPDK, whichever backend we are on.
+
+        The node's view, not the client's: the artefacts these checks look
+        for live on the storage node and survive the client disconnecting,
+        so ``nvme list-subsys`` on the client cannot see them.
+        """
+        tail = f" | grep -i {grep}" if grep else ""
+        cmd = f"/root/spdk/scripts/rpc.py {args} 2>/dev/null{tail} || true"
+        try:
+            if self.k8s_test:
+                out, _ = self._ensure_k8s_utils().exec_in_spdk_container(
+                    node_ip, cmd)
+            else:
+                out, _ = self.ssh_obj.exec_command(
+                    node=node_ip,
+                    command=f"sudo docker exec $(sudo docker ps -q -f "
+                            f"name=spdk_ | head -1) {cmd}")
+            return out or ""
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[MIG] rpc %s on %s: %s", args, node_ip,
+                                str(exc)[:140])
+            return None
+
+    def _node_ip(self, node_id):
+        for n in self.online_nodes():
+            if (n.get("uuid") or n.get("id")) == node_id:
+                return n.get("mgmt_ip")
+        return None
+
+    def assert_no_migration_artefacts(self, node_ids, context=""):
+        """No ``*m`` bdev survives a migration that reported success.
+
+        Backend-neutral by construction: it asks SPDK what it is holding,
+        which is the same question and the same answer on docker and on
+        k8s. Both the source and the target are worth asking -- the
+        artefact is created on the target and the source's copy is dropped
+        at cleanup_source, so either one surviving is a leak.
+        """
+        if isinstance(node_ids, str):
+            node_ids = [node_ids]
+        found = {}
+        for node_id in [n for n in node_ids if n]:
+            ip = self._node_ip(node_id)
+            if not ip:
+                self.logger.warning(
+                    "[MIG] cannot reach node %s for the artefact check",
+                    node_id)
+                continue
+            out = self._spdk_rpc(ip, "bdev_get_bdevs")
+            if out is None:
+                continue
+            hits = sorted(set(self.ARTEFACT_RE.findall(out)))
+            if hits:
+                found[node_id] = hits
+        if found:
+            raise AssertionError(
+                f"[MIG] a migration reported success and left migration "
+                f"artefacts behind {context}: {found}. These are the "
+                f"intermediate bdevs the copy creates and the cutover is "
+                f"meant to rename away. One surviving is not cosmetic: the "
+                f"next migration of the same object looks the name up, does "
+                f"not find it, and fails -- which is why this is asserted "
+                f"here, where the leak happens, rather than two migrations "
+                f"later where it surfaces.")
+        self.logger.info("[MIG] no migration artefacts on %s %s",
+                         node_ids, context)
+
+    def assert_snapshots_on_current_lvstore(self, vol_id, node_id,
+                                            context=""):
+        """Every snapshot record points at an lvstore on the volume's node.
+
+        The other half of the same defect. A snapshot whose record still
+        names the lvstore it was taken on is readable right up until
+        something resolves it, and nothing in the migration's own status
+        says the record was left behind.
+        """
+        ip = self._node_ip(node_id)
+        if not ip:
+            self.logger.warning("[MIG] cannot reach node %s to read its "
+                                "lvstores", node_id)
+            return
+        out = self._spdk_rpc(ip, "bdev_lvol_get_lvstores")
+        if out is None:
+            return
+        try:
+            stores = {s.get("name") for s in json.loads(out) if s.get("name")}
+        except (ValueError, TypeError, AttributeError):
+            self.logger.warning("[MIG] could not parse lvstores on %s: %s",
+                                node_id, (out or "").strip()[:200])
+            return
+        if not stores:
+            self.logger.warning("[MIG] node %s reported no lvstores; "
+                                "skipping the snapshot-record check", node_id)
+            return
+        stale = []
+        for row in self.snapshots_of(vol_id):
+            bdev = str(self._get(row, "bdev", "BDev") or "")
+            lvs = bdev.split("/", 1)[0] if "/" in bdev else ""
+            if lvs and lvs not in stores:
+                stale.append((self._get(row, "uuid", "id") or "?", bdev))
+        if stale:
+            raise AssertionError(
+                f"[MIG] {len(stale)} snapshot record(s) of {vol_id} still "
+                f"name an lvstore that is not on node {node_id} {context}: "
+                f"{stale[:6]}. The node now holds {sorted(stores)}. The "
+                f"volume moved and its history did not follow in the "
+                f"records, so these snapshots resolve to a store on the "
+                f"node the volume has left.")
+        self.logger.info("[MIG] all snapshot records resolve on %s %s",
+                         node_id, context)
+
+    def assert_migration_invariants(self, vol_id, src, tgt, context=""):
+        """Both post-migration invariants, for callers that want the pair."""
+        self.assert_no_migration_artefacts([src, tgt], context)
+        self.assert_snapshots_on_current_lvstore(vol_id, tgt, context)
+
     def watch_io(self, name, seconds=None, context=""):
         """Keep IO running past the operation and confirm it stayed clean.
 

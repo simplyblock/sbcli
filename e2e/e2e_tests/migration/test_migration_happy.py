@@ -146,6 +146,7 @@ class MigrationRoundTrip(MigrationTestBase):
         self.assert_no_target_leftovers(b, vol_id,
                                         "after the volume left it again "
                                         "(MIG-H-005)")
+        self.assert_migration_invariants(vol_id, b, a, "(MIG-H-005)")
         self.logger.info("[MIG-H-005] PASS: round trip clean")
 
         # ── MIG-H-006 three-hop ──────────────────────────────────────────
@@ -165,6 +166,7 @@ class MigrationRoundTrip(MigrationTestBase):
             self.verify(vol, sums, "after three hops (MIG-H-006)")
             self.assert_no_target_leftovers(
                 c, vol_id, "after hopping away from it (MIG-H-006)")
+            self.assert_migration_invariants(vol_id, c, b, "(MIG-H-006)")
             self.logger.info("[MIG-H-006] PASS: no stale state across hops")
 
         self.cleanup_migrations()
@@ -233,4 +235,12 @@ class MigrationWithSnapshots(MigrationTestBase):
                 f"recovery point taken before the move.")
         self.logger.info("[MIG-H-008] PASS: all %d snapshots present",
                          len(mine))
+
+        # Present is not the same as correct. SFAM-2820 is a snapshot that
+        # is still listed, still counted here, and whose bdev kept the
+        # ``m`` suffix the cutover should have renamed away while its
+        # record still names the lvstore on the node the volume has left.
+        # Nothing above can see that; it only surfaces when something
+        # resolves the record, which in the ticket is the next migration.
+        self.assert_migration_invariants(vol_id, src, tgt, "(MIG-H-008)")
         self.cleanup_migrations()
