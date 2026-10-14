@@ -280,12 +280,18 @@ class MigrationTargetOfflinePerPhase(_FaultBase):
 
 
 class MigrationSourceAndTargetFaults(_FaultBase):
-    """MIG-F-004 .. MIG-F-009: crash, graceful shutdown and NIC loss.
+    """MIG-F-004 .. MIG-F-009, MIG-F-018: crash, graceful shutdown, NIC loss.
 
     Three fault kinds on each side of the migration. The point is not that
     any particular one succeeds -- a source whose SPDK is killed mid-copy
     may legitimately fail the migration -- but that every combination ends
     somewhere, with the volume on exactly one node and nothing stranded.
+
+    "Nothing stranded" was the weakest of those until MIG-F-018. Ending
+    somewhere definite is satisfied by a volume that can never be moved
+    again, and this class is where that actually happened: run
+    20261013-221421 failed here with a rollback that failed too, and the
+    case passed.
     """
 
     def run(self):
@@ -345,6 +351,12 @@ class MigrationSourceAndTargetFaults(_FaultBase):
                     "[%s] PASS: reached %s (phase %s), volume on %s",
                     case_id, status, phase,
                     "source" if node == self._src else "target")
+                # Read BEFORE the undo, while the operator's record of
+                # what it built is still the one the failure left.
+                if status not in self.OK_TERMINAL:
+                    self.assert_target_paths_released(
+                        vol_id=self._vol_id, migration_id=mid,
+                        context=f"({case_id}, after {kind} on the {side})")
             finally:
                 try:
                     undo()
@@ -352,6 +364,60 @@ class MigrationSourceAndTargetFaults(_FaultBase):
                     self.logger.warning("[%s] undo: %s", case_id,
                                         str(exc)[:160])
             sleep_n_sec(90)
+
+            # -- MIG-F-018 still migratable after a FAILED migration -----
+            # MIG-F-017 asks this after a cancel, which is a deliberate,
+            # orderly abort. This asks it after a migration that failed on
+            # its own, which is the case with the worse cleanup path and
+            # the one that actually bit: run 20261013-221421 saw
+            #
+            #   the migration failed: delete LVS_31/SNAP_187m: delete bdev
+            #   LVS_31/SNAP_187m: initiation failed (taking the migration
+            #   back also failed: cancel migration 58205fd2-...
+            #
+            # inside this very class, and the case PASSED, because
+            # everything above is satisfied by a volume that is terminal
+            # and on one of two nodes. Whether it could still be moved was
+            # never asked. On the operator side that rollback stops before
+            # releasing the target paths (steps.go discardMigration), so
+            # "the volume is somewhere definite" is a weaker statement
+            # than it looks.
+            #
+            # The fault is undone and the cluster has had 90s by now, so a
+            # refusal here is about residue from the failed attempt rather
+            # than about the injected fault still being present.
+            here = self.lvol_node(self._vol_id)
+            if not here:
+                raise AssertionError(
+                    f"[MIG-F-018] after {kind} on the {side} and its undo, "
+                    f"{self._vol} has no node at all.")
+            elsewhere = self.pick_target(here, "no-overlap")
+            self.logger.info(
+                "[MIG-F-018] after the %s failure, migrating again %s -> %s",
+                case_id, here, elsewhere)
+            try:
+                self.full_migration(
+                    self._vol_id, elsewhere,
+                    what=f"MIG-F-018 re-migration after the {case_id} failure")
+            except Exception as exc:                  # noqa: BLE001
+                raise AssertionError(
+                    f"[MIG-F-018] {self._vol} cannot be migrated again after "
+                    f"the {case_id} failure ({kind} on the {side}): "
+                    f"{str(exc)[:300]}. The fault is undone and the volume "
+                    f"reported a definite node, so what blocks this is state "
+                    f"the failed attempt left behind -- which is the half of "
+                    f"a failed migration nothing else in this lane looks at."
+                ) from exc
+            self.assert_placed_on(self._vol_id, elsewhere,
+                                  f"(MIG-F-018, after {case_id})")
+            self.verify(self._vol, self._sums,
+                        "after re-migrating post-failure (MIG-F-018)")
+            self.assert_migration_invariants(
+                self._vol_id, here, elsewhere,
+                f"(MIG-F-018, after the {case_id} failure)")
+            self.logger.info(
+                "[MIG-F-018] PASS: %s still migrates after the %s failure",
+                self._vol, case_id)
             self._teardown()
 
 

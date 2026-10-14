@@ -1880,6 +1880,48 @@ class MigrationTestBase(TestClusterBase):
         self.logger.info("[MIG] all snapshot records resolve on %s %s",
                          node_id, context)
 
+    def assert_target_paths_released(self, vol_id=None, migration_id=None,
+                                     context=""):
+        """After a failed or aborted PVO, the operator released what it built.
+
+        k8s only, and it reads the operator's own bookkeeping rather than
+        going to the consumer hosts. ``discardMigration`` clears
+        ``status.migration.connections`` and ``validationJobs`` as its
+        LAST act, after deleting the validation Jobs and releasing the
+        paths on every node it connected. So those two fields still
+        holding entries on a finished operation means the release did not
+        run -- which is the state SFAM-2824 describes, where a cancel the
+        control plane was right to refuse makes discardMigration return
+        before it gets that far.
+
+        Advisory, not fatal. Whether a surviving record means paths are
+        genuinely still connected on the consumers has not been
+        established on a real cluster yet, and failing a case on an
+        unproven reading would be the same mistake as counting snapshots
+        by name. It logs loudly and names the CR to look at.
+        """
+        if not self.k8s_test:
+            return None
+        rec = self.migration_record(vol_id=vol_id,
+                                    migration_id=migration_id) or {}
+        left = {k: rec.get(k) for k in ("connections", "validation_jobs")
+                if rec.get(k)}
+        if left:
+            self.logger.warning(
+                "[MIG] the operation finished and still records what it "
+                "built %s: %s. discardMigration clears these only after "
+                "deleting the validation Jobs and releasing the paths on "
+                "every node it connected, so this is the signature of that "
+                "release being skipped -- SFAM-2824. Inspect `kubectl get "
+                "persistentvolumeops.storage.simplyblock.io %s -o yaml` and "
+                "`nvme list-subsys` on the consumer nodes before the "
+                "cluster is torn down.",
+                context, left, migration_id or "<name>")
+            return left
+        self.logger.info("[MIG] the operation released what it built %s",
+                         context)
+        return None
+
     def assert_migration_invariants(self, vol_id, src, tgt, context=""):
         """Both post-migration invariants, for callers that want the pair."""
         self.assert_no_migration_artefacts([src, tgt], context)

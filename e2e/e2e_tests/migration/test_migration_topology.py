@@ -244,6 +244,16 @@ class MigrationSnapshotCloneTrees(MigrationTestBase):
         self.verify(vol, sums, "after the tree round trip (MIG-T-008)")
         self.assert_no_target_leftovers(
             tgt, vol_id, "after the tree left it again (MIG-T-008)")
+        # The line above looks like it covers this and cannot. It greps the
+        # node's bdevs for the volume's uuid prefix, and the artefact a
+        # migration leaves is named for the lvstore and the snapshot --
+        # LVS_31/SNAP_187m -- with no uuid anywhere in it. So the check
+        # that exists here passes over exactly the leftover this family is
+        # most likely to produce: MIG-T-008 is a SECOND migration of a
+        # volume carrying a snapshot and clone tree, which is the shape
+        # SFAM-2820 describes.
+        self.assert_migration_invariants(
+            vol_id, tgt, src, "(MIG-T-008, after the round trip)")
         self.logger.info("[MIG-T-008] PASS: no stale tree state left behind")
 
         # ── MIG-T-009 snapshots still usable after all that ────────────
