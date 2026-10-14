@@ -13475,7 +13475,8 @@ def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activati
 
 
 def _fence_rpc_bounds(fence_held: bool, fence_elapsed: float,
-                      budget: float | None = None) -> tuple[float | None, int | None]:
+                      budget: float | None = None,
+                      removal_in_progress: bool = False) -> tuple[float | None, int | None]:
     """``(timeout, retry)`` for one RPC of the lvstore restart flow.
 
     While a peer's client port is fenced every call is bounded to ``budget``
@@ -13483,23 +13484,32 @@ def _fence_rpc_bounds(fence_held: bool, fence_elapsed: float,
     time left before ``FENCE_DEADLINE_SEC``: the fence has to be lifted by us
     before SPDK converts the block to reject (ack_timeout * 4 = 8s) and
     quiesces every client qpair on the port. Overrunning the budget there
-    aborts the restart, which the task runner re-queues.
+    aborts the restart, which the task runner re-queues. The window is tuned
+    and is not touched here, whatever else is going on.
 
-    With no port fenced there is nothing that budget protects, and applying
-    it only turns a slow-but-correct answer into an endless restart loop:
-    2026-10-14 run 63, after a removal left a survivor's SPDK aborted, every
-    auto-restart cycle discarded the whole cluster activation because
-    ``bdev_lvol_set_leader`` on the crashed node took 669ms against the 0.5s
-    budget with ``fence 0.000s`` -- seven cycles, each one draining the
-    cluster back to all-offline. Unfenced calls therefore get the ordinary
-    client (``None``, ``None``), the same bounds every other restart step
-    outside the window runs with.
+    A plain restart keeps the same bound even when no port happens to be
+    fenced: a healthy node answers far inside it, and a node that does not is
+    better re-queued than left to hold a half-built lvstore.
+
+    A restart while a removal is in flight is the exception. A survivor of a
+    removal may be holding the departing node's orphaned replica, and its own
+    leader set is then slow for as long as the removal lasts: 2026-10-14 run
+    63, after removal 4 left a survivor's SPDK aborted, every auto-restart
+    cycle discarded the whole cluster activation because
+    ``bdev_lvol_set_leader`` on that node took 669ms against the 0.5s budget
+    with ``fence 0.000s`` (the other survivors: 74ms and 153ms) -- eight
+    cycles, each one draining the cluster back to all-offline. With no fence
+    held there is nothing the budget protects, so an unfenced call during a
+    removal gets the ordinary client (``None``, ``None``), the same bounds
+    every other restart step outside the window runs with.
     """
-    if not fence_held:
-        return None, None
     budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
-    remaining = constants.FENCE_DEADLINE_SEC - fence_elapsed
-    return min(budget, remaining), constants.FENCE_RPC_RETRY
+    if fence_held:
+        remaining = constants.FENCE_DEADLINE_SEC - fence_elapsed
+        return min(budget, remaining), constants.FENCE_RPC_RETRY
+    if removal_in_progress:
+        return None, None
+    return budget, constants.FENCE_RPC_RETRY
 
 
 def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
@@ -13550,6 +13560,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.write_to_db()
+
+    # A removal in flight anywhere in the cluster relaxes the UNFENCED RPC
+    # bound in _fenced() (see _fence_rpc_bounds); the fenced bound is never
+    # relaxed. Decided once here, from the node statuses the monitor derives
+    # Cluster.is_shrinking from, so every call in this restart agrees.
+    removal_in_progress = any(
+        n.status in StorageNode.DEPARTING_STATUSES
+        for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id))
 
     # Gather peer nodes for this LVS, EXCLUDING snode itself
     sec_nodes = []
@@ -13970,7 +13988,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         restart. The task runner re-queues an aborted restart; a quiesced
         client path is not recoverable.
         """
-        timeout, retry = _fence_rpc_bounds(bool(_block_started), _fence_elapsed(), budget)
+        timeout, retry = _fence_rpc_bounds(bool(_block_started), _fence_elapsed(), budget,
+                                           removal_in_progress=removal_in_progress)
         if timeout is not None and timeout <= 0:
             _check_fence_deadline(method)
         try:
@@ -13982,7 +14001,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         except Exception as e:
             if timeout is None:
                 _abort_restart_and_unblock(
-                    f"{method} failed with no port fenced (client defaults): {e}")
+                    f"{method} failed with no port fenced during a removal "
+                    f"(client defaults): {e}")
             _abort_restart_and_unblock(
                 f"{method} failed inside the port-fence window "
                 f"(budget {timeout:.2f}s, fence {_fence_elapsed():.3f}s): {e}")
