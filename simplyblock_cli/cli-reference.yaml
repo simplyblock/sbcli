@@ -2229,11 +2229,13 @@ commands:
             help: "The snapshot name."
             dest: name
             type: str
-          - name: "--backup"
-            help: "Also create an S3 backup of this snapshot."
-            dest: backup
-            type: bool
-            action: store_true
+      - name: backup
+        help: "Creates a backup directly from a logical volume, snapshotting it first."
+        arguments:
+          - name: "volume_id"
+            help: "The logical volume id."
+            dest: volume_id
+            type: str
       - name: clone
         help: "Provisions a logical volumes from an existing snapshot."
         arguments:
@@ -2797,11 +2799,6 @@ commands:
             help: "The new snapshot name."
             dest: name
             type: str
-          - name: "--backup"
-            help: "Also create an S3 backup of this snapshot."
-            dest: backup
-            type: bool
-            action: store_true
       - name: list
         help: "Lists all snapshots."
         arguments:

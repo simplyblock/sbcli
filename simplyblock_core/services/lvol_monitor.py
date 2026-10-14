@@ -125,8 +125,7 @@ def resume_comp(lvol):
             logger.warning("Not all nodes are online, can not resume JC compression")
             return
     rpc_client = node.rpc_client(timeout=5, retry=2)
-    ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-    if err:
+    if not rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False):
         logger.info("Failed to resume JC compression adding task...")
         tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), node.jm_vuid)
 

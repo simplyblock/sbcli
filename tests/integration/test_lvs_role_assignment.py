@@ -537,7 +537,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
         rpc = MagicMock()
         rpc.bdev_wait_for_examine.return_value = True
         rpc.bdev_examine.return_value = True
-        rpc.jc_suspend_compression.return_value = (True, None)
+        rpc.jc_suspend_compression.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_distrib_force_to_non_leader.return_value = True
@@ -591,7 +591,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
         rpc = MagicMock()
         rpc.bdev_wait_for_examine.return_value = True
         rpc.bdev_examine.return_value = True
-        rpc.jc_suspend_compression.return_value = (True, None)
+        rpc.jc_suspend_compression.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_distrib_force_to_non_leader.return_value = True

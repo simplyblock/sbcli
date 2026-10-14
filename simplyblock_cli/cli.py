@@ -744,6 +744,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__connect(subparser)
         self.init_volume__resize(subparser)
         self.init_volume__create_snapshot(subparser)
+        self.init_volume__backup(subparser)
         self.init_volume__clone(subparser)
         if self.developer_mode:
             self.init_volume__move(subparser)
@@ -844,7 +845,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('name', help='The snapshot name.', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot.', dest='backup', action='store_true')
+
+    def init_volume__backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup', 'Creates a backup directly from a logical volume, snapshotting it first.')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
 
     def init_volume__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a logical volumes from an existing snapshot.')
@@ -1100,7 +1104,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new snapshot.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('name', help='The new snapshot name.', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot.', dest='backup', action='store_true')
 
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots.')
@@ -1673,6 +1676,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__resize(sub_command, args)
                 elif sub_command in ['create-snapshot']:
                     ret = self.volume__create_snapshot(sub_command, args)
+                elif sub_command in ['backup']:
+                    ret = self.volume__backup(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.volume__clone(sub_command, args)
                 elif sub_command in ['move']:

@@ -2087,10 +2087,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
             _revert_src_replicas("final migration status check failed (crash recovery)")
             raise
         if not result:
-            # Falsy covers both a hard None (RPC/connection error) and the
-            # malformed-but-200 empty body a target restart can produce mid-RPC
-            # (rpc_client._request2 falls back to returning raw response bytes,
-            # e.g. b'', when json decoding fails) — neither is a valid stat dict.
+            # A malformed-but-200 body (a target restart mid-RPC) already
+            # raises RPCProtocolError, caught above. This covers the other
+            # falsy case: a well-formed but empty/None successful result,
+            # which is not a valid stat dict either.
             _revert_src_replicas("final migration status unavailable (crash recovery)")
             _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True,
                                      tgt_sec_rpc=tgt_sec_rpc, tgt_ter_rpc=tgt_ter_rpc,
@@ -2265,10 +2265,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
                 src_lvol_composite, tgt_map_id, tgt_snap_composite,
                 constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
             if not ret:
-                # Falsy, not just None: a target restart mid-RPC can come back as a
-                # 200 with an empty/non-JSON body, which rpc_client._request2 then
-                # returns as raw bytes (e.g. b'') rather than None — that must be
-                # treated the same as a hard failure, not silently as success.
+                # Falsy, not just None: a malformed-but-200 body (a target
+                # restart mid-RPC) already raises RPCProtocolError, caught
+                # below -- this covers a well-formed but empty/falsy result.
                 # Connection timeout or SPDK error (e.g. "File exists" = already in
                 # progress). SPDK may have completed the migration while the RPC
                 # connection dropped. Check transfer_stat before treating this as
