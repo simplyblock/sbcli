@@ -72,6 +72,22 @@ class TestNoFenceHeld:
         assert _fence_rpc_bounds(False, 3.0) == (BUDGET, RETRY)
 
 
+class TestRemovalInFlight:
+    """The relaxation keys off removals still being worked, never off the
+    terminal states: a REMOVED node stays in the node list for good, so counting
+    it would relax every restart after the first removal ever made."""
+
+    def test_in_flight_is_the_removal_walk_without_its_terminal_state(self):
+        from simplyblock_core.models.storage_node import StorageNode
+        from simplyblock_core.storage_node_ops import REMOVAL_IN_FLIGHT_STATUSES
+        assert set(REMOVAL_IN_FLIGHT_STATUSES) == {
+            StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_MIGRATING_DEVICES,
+            StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_IN_REMOVAL}
+        assert StorageNode.STATUS_REMOVED not in REMOVAL_IN_FLIGHT_STATUSES
+        assert StorageNode.STATUS_REMOVED_FAILED not in REMOVAL_IN_FLIGHT_STATUSES
+        assert set(REMOVAL_IN_FLIGHT_STATUSES) < set(StorageNode.REMOVAL_STATUS_ORDER)
+
+
 def test_run63_set_leader_fails_fenced_and_in_a_plain_restart_but_passes_during_a_removal():
     """The incident numbers: 669ms against the 0.5s budget."""
     observed = 0.669

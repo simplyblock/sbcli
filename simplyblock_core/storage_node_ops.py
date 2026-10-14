@@ -13474,6 +13474,14 @@ def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activati
             snode, force=force, lvs_primary=lvs_primary, activation_mode=False)
 
 
+#: The removal statuses a node passes through while a removal is still being
+#: worked: REMOVAL_STATUS_ORDER without its terminal REMOVED. The terminal
+#: states (REMOVED, REMOVED_FAILED) are not "in flight": a node keeps them for
+#: as long as its record exists.
+REMOVAL_IN_FLIGHT_STATUSES: tuple = tuple(
+    s for s in StorageNode.REMOVAL_STATUS_ORDER if s != StorageNode.STATUS_REMOVED)
+
+
 def _fence_rpc_bounds(fence_held: bool, fence_elapsed: float,
                       budget: float | None = None,
                       removal_in_progress: bool = False) -> tuple[float | None, int | None]:
@@ -13563,10 +13571,12 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
     # A removal in flight anywhere in the cluster relaxes the UNFENCED RPC
     # bound in _fenced() (see _fence_rpc_bounds); the fenced bound is never
-    # relaxed. Decided once here, from the node statuses the monitor derives
-    # Cluster.is_shrinking from, so every call in this restart agrees.
+    # relaxed. Decided once here so every call in this restart agrees. Only
+    # the in-flight removal statuses count: a REMOVED node stays in the
+    # cluster's node list for good, and counting it would relax every restart
+    # that follows the first removal ever made.
     removal_in_progress = any(
-        n.status in StorageNode.DEPARTING_STATUSES
+        n.status in REMOVAL_IN_FLIGHT_STATUSES
         for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id))
 
     # Gather peer nodes for this LVS, EXCLUDING snode itself
