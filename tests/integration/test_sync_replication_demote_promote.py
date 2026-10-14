@@ -243,15 +243,17 @@ class TestPromoteApi:
         assert [e.ip for e in result.connection_strings[vol.get_id()]] == [_ip(n) for n in a]
         gate.assert_not_called()
 
-    def test_not_demoted_on_t_is_refused(self, db, spdk, gate):
-        # A volume served on its home (_registered uses active_site=SITE_A, a
-        # recorded active site: not birth state) still blocks a planned promote.
-        # The caller must demote it first; nothing is fenced, no task queued, and
-        # the planned gate is never reached. The birth-state volume below is the
-        # case that is now moved instead.
+    def test_a_volume_active_on_a_moved_lvs_is_refused(self, db, spdk, gate):
+        # A genuine refusal: the LVS has moved to site-b and the volume is served
+        # there (not at its home), so promoting it back to site-a is a real move
+        # that must demote site-b first. Only a volume still at its home is
+        # auto-demoted; this one is not, so nothing is fenced and no task queued.
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
+        _update(db, owner, lvs_active_site=SITE_B)
+        vol.sync_active_site = SITE_B
+        vol.write_to_db(db.kv_store)
         with pytest.raises(SyncPromoteRefusedError) as exc:
-            src.sync_promote_lvol(vol.get_id(), SITE_B)
+            src.sync_promote_lvol(vol.get_id(), SITE_A)
         assert exc.value.volumes == [vol.get_id()]
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
@@ -298,31 +300,17 @@ class TestPromoteApi:
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
         gate.assert_not_called()
 
-    def test_a_served_sibling_keeps_a_birth_state_volume_from_moving(self, db, spdk, gate):
-        """The whole LVS moves as one, so a birth-state volume cannot be moved
-        while a sibling of its LVS is genuinely served on the home. The promote
-        is refused and nothing (not even the birth-state volume) is fenced."""
-        cluster, a, b, owner = _layout(db)
-        pool = _pool(db, cluster)
-        fresh = _volume(db, cluster, owner, pool, active_site="")      # birth state
-        served = _another(db, spdk, cluster, owner, pool, a, b, active_site=SITE_A)
-        publish._register_everywhere(db, fresh, owner, [*a, *b])
-        fresh.write_to_db(db.kv_store)
-
-        with pytest.raises(SyncPromoteRefusedError) as exc:
-            src.sync_promote_lvol(fresh.get_id(), SITE_B)
-        assert exc.value.volumes == [served.get_id()]
-        assert db.get_lvol_by_id(fresh.get_id()).sync_demoted_sites == []
-        assert db.get_lvol_by_id(served.get_id()).sync_demoted_sites == []
-        assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
-
-    def test_other_volumes_of_the_lvs_still_on_t_are_listed(self, db, spdk, gate):
+    def test_birth_siblings_of_the_lvs_are_demoted_and_moved_together(self, db, spdk, gate):
+        """The LVS moves as one: a sibling still at its home is demoted together
+        with the move, so the LVS's other fresh volumes do not block a
+        first-placement move. (A sibling genuinely served on the away site would;
+        that is the moved-LVS refusal above.)"""
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         other = _another(db, spdk, cluster, owner, pool, a, b)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
-        with pytest.raises(SyncPromoteRefusedError) as exc:
-            src.sync_promote_lvol(vol.get_id(), SITE_B)
-        assert exc.value.volumes == [other.get_id()]
+        result = src.sync_promote_lvol(vol.get_id(), SITE_B)
+        assert result.in_progress
+        assert db.get_lvol_by_id(other.get_id()).sync_demoted_sites == [SITE_A]
 
     def test_t_offline_is_412_forced_is_a_disaster_failover(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)

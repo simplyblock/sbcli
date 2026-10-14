@@ -1071,14 +1071,20 @@ def volumes_open_on(volumes: Iterable[LVol], owner: StorageNode, site: str) -> l
 
 
 def is_birth_state(lvol: LVol, owner: StorageNode) -> bool:
-    """Whether ``lvol`` has never been served: its LVS is still led from its
-    home (never moved, not moving) and the volume carries no record of a promote
-    or a demote. Such a volume is open on its home only by that birth default,
-    so a planned promote elsewhere may fence the home without cutting off a
-    consumer - under the single-active-site (RWO) contract a birth-state home has
-    none (birth_state_demote_plan, design-sync-replication-csi-addons.md)."""
-    return (owner.lvs_active_site == "" and lvol.sync_active_site == ""
-            and not lvol.sync_demoted_sites)
+    """Whether ``lvol`` has never led from anywhere but its LVS's home: the LVS
+    is still led from home and the volume is still active on that home
+    (``volume_site == owner.site``).
+
+    A fresh sync volume is created with ``sync_active_site`` set to its home, not
+    empty (``db_controller`` stamps ``lvs_active_site_of(owner)`` at create), and
+    a demote of a site does not move the volume off its home - so the test is
+    "still at home", not "no record of a promote or demote". Such a volume is
+    open on its home only by that birth default, so a planned promote elsewhere
+    may fence the home without cutting off a consumer - under the
+    single-active-site (RWO) contract a volume still at its home has none
+    (birth_state_demote_plan, design-sync-replication-csi-addons.md)."""
+    return (storage_node_ops.lvs_active_site_of(owner) == owner.site
+            and volume_site(lvol, owner) == owner.site)
 
 
 def lvs_site_triplet(owner: StorageNode, site: str) -> tuple[str, ...]:

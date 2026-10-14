@@ -185,21 +185,24 @@ class TestPromoteDecision:
 
 class TestBirthState:
     """The first-placement relaxation: a planned promote whose only blocker is a
-    volume still open on its home purely because it was never served (birth
-    state) may demote that home first and move. Safe under the single-active-site
-    (RWO) contract (design-sync-replication-csi-addons.md): a birth-state home
-    has no live consumer to cut off. is_birth_state is the record test;
-    birth_state_demote_plan is what the planned promote demotes before it moves.
+    volume still at its LVS's home (never moved) may demote that home first and
+    move. Safe under the single-active-site (RWO) contract
+    (design-sync-replication-csi-addons.md): a volume still at its home has no
+    live consumer to cut off. is_birth_state is the record test (still at home,
+    whatever its demote record); birth_state_demote_plan is what the planned
+    promote demotes before it moves.
     """
 
     def test_is_birth_state(self):
         owner = _owner()  # home site-a, LVS never moved (lvs_active_site == "")
-        assert src.is_birth_state(_lvol(), owner)                            # fresh, at home
-        # Any record of a promote or a demote means it has been served: not birth.
+        # Still at home: birth, whether sync_active_site is unset or the home
+        # (a fresh volume is created with sync_active_site == home), and a demote
+        # of a site does not move it off home.
+        assert src.is_birth_state(_lvol(), owner)
+        assert src.is_birth_state(_lvol(sync_active_site=SITE_A), owner)
+        assert src.is_birth_state(_lvol(sync_demoted_sites=[SITE_B]), owner)  # demoted away
+        # Moved off home, or the LVS itself moved: no longer birth.
         assert not src.is_birth_state(_lvol(sync_active_site=SITE_B), owner)
-        assert not src.is_birth_state(_lvol(sync_active_site=SITE_A), owner)  # served on home
-        assert not src.is_birth_state(_lvol(sync_demoted_sites=[SITE_A]), owner)
-        # The LVS has moved (or is moving): leadership is no longer the birth default.
         assert not src.is_birth_state(_lvol(), _owner(lvs_active_site=SITE_B))
         assert not src.is_birth_state(_lvol(), _owner(lvs_active_site="moving:site-b"))
 
@@ -215,23 +218,29 @@ class TestBirthState:
         v1 = _lvol()
         assert self._plan([v1]) == {SITE_A: [v1]}
 
-    def test_a_volume_served_on_its_home_is_not_auto_demoted(self):
-        # Open on the source, but not birth (explicitly active there): the move
-        # is refused as before, nothing is demoted.
-        assert self._plan([_lvol(sync_active_site=SITE_A)]) == {}
+    def test_a_volume_created_active_on_its_home_is_demoted(self):
+        # A fresh volume carries sync_active_site == home; it is still birth.
+        v1 = _lvol(sync_active_site=SITE_A)
+        assert self._plan([v1]) == {SITE_A: [v1]}
 
-    def test_a_served_sibling_pins_the_whole_lvs(self):
-        # Requesting only the fresh volume, but a served sibling of the same LVS
-        # is still open on the source: demoting nothing (the LVS cannot move).
-        fresh, served = _lvol("v1"), _lvol("v2", sync_active_site=SITE_A)
-        assert self._plan([fresh], lvs=[fresh, served]) == {}
+    def test_a_prior_demote_does_not_block_the_first_move(self):
+        # "demote before": a demote of a site does not move the volume off its
+        # home, so the first cross-site promote still auto-demotes the home.
+        v1 = _lvol(sync_demoted_sites=[SITE_B])
+        assert self._plan([v1]) == {SITE_A: [v1]}
+
+    def test_a_volume_active_on_a_moved_lvs_is_not_auto_demoted(self):
+        # Genuinely active elsewhere (the LVS moved to site-b, the volume served
+        # there): promoting it back is a real move and is refused as before.
+        owner = _owner(lvs_active_site=SITE_B)
+        assert self._plan([_lvol(sync_active_site=SITE_B)], owner=owner, site=SITE_A) == {}
 
     def test_all_fresh_volumes_of_the_lvs_are_demoted_together(self):
         v1, v2 = _lvol("v1"), _lvol("v2")
         assert self._plan([v1, v2], lvs=[v1, v2]) == {SITE_A: [v1, v2]}
 
     def test_an_already_demoted_volume_has_nothing_to_demote(self):
-        # Decision is a clean PROMOTE_MOVE (no blocker): the plan is empty.
+        # Demoted on its home: not open there, a clean PROMOTE_MOVE, no blocker.
         assert self._plan([_lvol(sync_demoted_sites=[SITE_A])]) == {}
 
     def test_a_no_op_promote_on_the_home_site_demotes_nothing(self):
