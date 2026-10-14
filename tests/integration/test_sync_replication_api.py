@@ -295,6 +295,28 @@ class TestGroupSyncStatus:
         with pytest.raises(SyncReplicationSiteError):
             src.group_sync_status(_group(db, cluster, [vol]).get_id(), "site-x")
 
+    @pytest.mark.parametrize("site", [None, ""])
+    def test_a_missing_site_reads_the_members_led_site(self, db, live_status, site):
+        """A site-less group status read is cluster-wide: it resolves to the
+        members' led site (role primary there), the read the csi-addons VGR
+        adapter makes with no site to assert."""
+        cluster, owner, vol = _sync_volume(db)
+        other = _volume(db, cluster, owner, _pool(db, cluster))
+
+        status = src.group_sync_status(_group(db, cluster, [vol, other]).get_id(), site)
+
+        assert (status.role, status.site, status.member_count) == (src.ROLE_PRIMARY, SITE_A, 2)
+
+    @pytest.mark.parametrize("site", [None, ""])
+    def test_a_missing_site_on_an_empty_group_reads_a_cluster_site(self, db, live_status, site):
+        cluster, owner, vol = _sync_volume(db)
+        group = _group(db, cluster, [], removed=[vol])
+
+        status = src.group_sync_status(group.get_id(), site)
+
+        assert (status.role, status.member_count) == (src.ROLE_SECONDARY, 0)
+        assert status.site in (SITE_A, SITE_B)
+
     def test_not_a_sync_cluster(self, db, live_status):
         cluster, node, vol = _async_volume(db)
 

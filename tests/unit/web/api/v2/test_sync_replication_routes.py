@@ -165,9 +165,11 @@ def _detail(response):
 # ---------------------------------------------------------------------------
 
 class TestSiteRequired:
+    """A mutating verb (promote, demote) acts from a named site, so a missing one
+    is a 400. A status read is cluster-wide and site-optional: see
+    ``TestVolumeStatus.test_without_a_site_is_cluster_wide`` and the group twin."""
 
-    @pytest.mark.parametrize('method, path', [
-        ('post', 'failover'), ('post', 'demote'), ('get', 'status'), ('get', 'sync-status')])
+    @pytest.mark.parametrize('method, path', [('post', 'failover'), ('post', 'demote')])
     @pytest.mark.parametrize('query', ['', '?site='])
     def test_volume_route_without_site_is_400(self, client, sync_controller, method, path, query):
         response = getattr(client, method)(REPLICATION_URL + path + query)
@@ -177,8 +179,7 @@ class TestSiteRequired:
         assert sync_controller.method_calls == []
 
     @pytest.mark.parametrize('method, path', [
-        ('post', 'replication/failover'), ('post', 'replication/demote'), ('get', 'replication/status'),
-        ('get', 'replication/sync-status')])
+        ('post', 'replication/failover'), ('post', 'replication/demote')])
     def test_group_route_without_site_is_400(self, client, sync_controller, method, path):
         response = getattr(client, method)(GROUP_URL + path)
 
@@ -368,6 +369,27 @@ class TestVolumeStatus:
         assert body['last_replicated_at'] is None
         assert body['lag_seconds'] is None
 
+    @pytest.mark.parametrize('query', ['', '?site='])
+    def test_without_a_site_is_cluster_wide(self, client, sync_controller, resources, query):
+        """Regression: 2026-10-14-status-read-site-optional — the csi-addons
+        adapter's GetVolumeReplicationInfo reads this route with no site (it has
+        no class params to derive one from), and a required site 400'd it, so the
+        VolumeReplication's Replicating condition went Unknown with no
+        lastSyncTime. A status read is cluster-wide: a missing site resolves to the
+        volume's led site server-side (controller ``site=None``) and answers 200."""
+        sync_controller.volume_sync_status.return_value = VolumeSyncStatus(
+            role='primary', site=SITE, cluster=_cluster_status())
+
+        response = client.get(REPLICATION_URL + 'status' + query)
+
+        assert response.status_code == 200
+        args, kwargs = sync_controller.volume_sync_status.call_args
+        assert args == (resources.volume, None)
+        assert kwargs == {'max_age': volume_replication_module.constants.SYNC_STATUS_CACHE_SEC}
+        body = response.json()
+        assert body['role'] == 'source'
+        assert datetime.fromisoformat(body['last_replicated_at']) == NOW
+
 
 class TestVolumeSyncStatus:
 
@@ -397,6 +419,17 @@ class TestVolumeSyncStatus:
 
         assert (body['state'], body['peer_ready'], body['diverged'], body['bytes_behind']) == \
             ('healthy', True, False, 0)
+
+    def test_without_a_site_is_cluster_wide(self, client, sync_controller, resources):
+        sync_controller.volume_sync_status.return_value = VolumeSyncStatus(
+            role='primary', site=SITE, cluster=_cluster_status())
+
+        response = client.get(REPLICATION_URL + 'sync-status')
+
+        assert response.status_code == 200
+        args, _ = sync_controller.volume_sync_status.call_args
+        assert args == (resources.volume, None)
+        assert response.json()['site'] == SITE
 
     def test_non_sync_cluster_is_400(self, client, sync_controller, async_cluster):
         response = client.get(REPLICATION_URL + f'sync-status?site={SITE}')
@@ -616,6 +649,20 @@ class TestGroup:
         body = response.json()
         assert (body['site'], body['role'], body['state'], body['peer_ready']) == \
             (SITE, 'secondary', 'healthy', True)
+
+    @pytest.mark.parametrize('path', ['replication/status', 'replication/sync-status'])
+    def test_status_without_a_site_is_cluster_wide(self, client, sync_controller, path):
+        """The group status reads are site-optional for the same reason the volume
+        ones are (the csi-addons VGR adapter carries no site): a missing site
+        resolves server-side (controller ``site=None``) and answers 200."""
+        sync_controller.group_sync_status.return_value = GroupSyncStatus(
+            role='primary', site=SITE, member_count=3, cluster=_cluster_status())
+
+        response = client.get(GROUP_URL + path)
+
+        assert response.status_code == 200
+        args, _ = sync_controller.group_sync_status.call_args
+        assert args == (GROUP_ID, None)
 
     def test_sync_status_on_a_non_sync_cluster_is_400(self, client, sync_controller, async_cluster):
         assert client.get(GROUP_URL + f'replication/sync-status?site={SITE}').status_code == 400

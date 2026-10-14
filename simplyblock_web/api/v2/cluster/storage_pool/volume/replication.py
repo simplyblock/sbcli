@@ -79,16 +79,17 @@ def get_status(cluster: Cluster, pool: StoragePool, volume: Volume,
     valid answer for an unreplicated volume. The csi-addons adapter derives
     its conditions and ``lastSyncTime`` from this read on every reconcile.
 
-    On a sync-replication cluster (``site`` required) the same DTO carries
-    the site replication's status: role ``source`` on the site the volume is
-    served from, state ``in_sync`` or ``degraded`` (``resyncing`` set while
-    a catch-up runs), ``outstanding_bytes`` = the bytes behind.
+    On a sync-replication cluster the same DTO carries the site replication's
+    status: role ``source`` on the site the volume is served from, state
+    ``in_sync`` or ``degraded`` (``resyncing`` set while a catch-up runs),
+    ``outstanding_bytes`` = the bytes behind. ``site`` is optional - a status
+    read is cluster-wide, so a caller with no site to assert (the csi-addons
+    adapter) is answered for the volume's led site.
     """
     if cluster.sync_replication:
-        site = util.require_site(site)
         with util.sync_http_errors():
             status = sync_replication_controller.volume_sync_status(
-                volume, site, max_age=constants.SYNC_STATUS_CACHE_SEC)
+                volume, site or None, max_age=constants.SYNC_STATUS_CACHE_SEC)
         return ReplicationStatusDTO.from_sync_status(status)
     info = lvol_controller.get_replication_info(volume.get_id())
     return ReplicationStatusDTO.from_info(info)
@@ -99,13 +100,14 @@ def get_sync_status(cluster: Cluster, pool: StoragePool, volume: Volume,
                     site: util.SiteParameter = None) -> SyncReplicationStatusDTO:
     """The sync-replication status of the volume seen from ``site``: its role
     there and the cluster-wide state (the worst over every LVS, the same for
-    every volume). 400 on a cluster without sync replication."""
+    every volume). ``site`` is optional (a status read is cluster-wide; a
+    missing one resolves to the volume's led site). 400 on a cluster without
+    sync replication."""
     if not cluster.sync_replication:
         raise util.sync_error(400, f'cluster {cluster.get_id()} is not a sync-replication cluster')
-    site = util.require_site(site)
     with util.sync_http_errors():
         status = sync_replication_controller.volume_sync_status(
-            volume, site, max_age=constants.SYNC_STATUS_CACHE_SEC)
+            volume, site or None, max_age=constants.SYNC_STATUS_CACHE_SEC)
     return SyncReplicationStatusDTO.from_status(status)
 
 

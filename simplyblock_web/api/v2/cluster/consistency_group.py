@@ -202,15 +202,16 @@ def replication_status(cluster: Cluster, group: ConsistencyGroupResource,
     §14.4/§14.6). Never 404s -- a group with no replicating member reports
     ``state: not_replicating``.
 
-    On a sync-replication cluster (``site`` required): the cluster-wide site
-    replication status (the same for every member, not summed) and the
-    group's role on ``site`` - ``source`` only when every member is served
-    there.
+    On a sync-replication cluster: the cluster-wide site replication status
+    (the same for every member, not summed) and the group's role on ``site`` -
+    ``source`` only when every member is served there. ``site`` is optional (a
+    status read is cluster-wide; a missing one resolves to the members' led
+    site), the read the csi-addons adapter makes with no site to assert.
     """
     if cluster.sync_replication:
         with util.sync_http_errors():
             status = sync_replication_controller.group_sync_status(
-                group.get_id(), util.require_site(site), max_age=constants.SYNC_STATUS_CACHE_SEC)
+                group.get_id(), site or None, max_age=constants.SYNC_STATUS_CACHE_SEC)
         return ConsistencyGroupReplicationStatusDTO.from_sync_status(status)
     infos = []
     for member in consistency_group_controller.list_members(group):
@@ -226,12 +227,14 @@ def replication_sync_status(cluster: Cluster, group: ConsistencyGroupResource,
                             site: util.SiteParameter = None) -> SyncReplicationStatusDTO:
     """The sync-replication status of the group seen from ``site``: its role
     there (``primary`` only when every member is served there) and the
-    cluster-wide state. 400 on a cluster without sync replication."""
+    cluster-wide state. ``site`` is optional (a status read is cluster-wide; a
+    missing one resolves to the members' led site). 400 on a cluster without
+    sync replication."""
     if not cluster.sync_replication:
         raise util.sync_error(400, f'cluster {cluster.get_id()} is not a sync-replication cluster')
     with util.sync_http_errors():
         status = sync_replication_controller.group_sync_status(
-            group.get_id(), util.require_site(site), max_age=constants.SYNC_STATUS_CACHE_SEC)
+            group.get_id(), site or None, max_age=constants.SYNC_STATUS_CACHE_SEC)
     return SyncReplicationStatusDTO.from_status(status)
 
 

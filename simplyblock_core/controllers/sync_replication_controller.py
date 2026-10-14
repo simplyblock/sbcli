@@ -737,15 +737,32 @@ def _check_site(db: DBController, cluster_id: str, site: str) -> None:
             f"site {site!r} is not a site of cluster {cluster_id} (sites: {sorted(sites)})")
 
 
-def volume_sync_status(lvol: LVol, site: str, *, max_age: float = 0.0) -> VolumeSyncStatus:
+def _default_site(db: DBController, cluster_id: str, led_sites: Iterable[str]) -> str:
+    """The site a site-less status read answers for: the first led site offered
+    (a member's, for a group), else any cluster site (an empty group, which
+    claims no site regardless). Empty only on a cluster with no sited node."""
+    for site in led_sites:
+        if site:
+            return site
+    sites = sorted(n.site for n in db.get_storage_nodes_by_cluster_id(cluster_id) if n.site)
+    return sites[0] if sites else ""
+
+
+def volume_sync_status(lvol: LVol, site: str | None = None, *, max_age: float = 0.0) -> VolumeSyncStatus:
     """The sync-replication status of ``lvol`` seen from ``site``: the
     cluster-wide status and the volume's role there (cluster_sync_status for
-    ``max_age``). Raises SyncReplicationUnsupportedError on a cluster without
-    sync replication, SyncReplicationSiteError for a missing or unknown site."""
+    ``max_age``). A missing ``site`` resolves to the volume's led site
+    (``volume_site``), so a caller with no site to assert - the csi-addons
+    adapter reading status - gets a cluster-wide answer with role ``primary``.
+    Raises SyncReplicationUnsupportedError on a cluster without sync
+    replication, SyncReplicationSiteError for an unknown site."""
     db = DBController()
     owner = db.get_storage_node_by_id(lvol.node_id)
     _sync_cluster(db, owner.cluster_id)
-    _check_site(db, owner.cluster_id, site)
+    if site:
+        _check_site(db, owner.cluster_id, site)
+    else:
+        site = volume_site(lvol, owner)
     return VolumeSyncStatus(role=volume_role(lvol, owner, site), site=site,
                             cluster=cluster_sync_status(owner.cluster_id, max_age=max_age))
 
@@ -775,21 +792,28 @@ class GroupSyncStatus:
     cluster: ClusterSyncStatus
 
 
-def group_sync_status(group_id: str, site: str, *, max_age: float = 0.0) -> GroupSyncStatus:
+def group_sync_status(group_id: str, site: str | None = None, *, max_age: float = 0.0) -> GroupSyncStatus:
     """The sync-replication status of consistency group ``group_id`` seen from
     ``site`` (cluster_sync_status for ``max_age``). The cluster and the site
-    are judged from the group's own cluster, so an empty group answers too.
+    are judged from the group's own cluster, so an empty group answers too. A
+    missing ``site`` resolves to the led site of the group's members (its first
+    member's, or a cluster site when the group is empty), the cluster-wide read
+    the csi-addons adapter makes with no site to assert.
     Raises SyncReplicationUnsupportedError, SyncReplicationSiteError,
     SyncGroupMemberError (a member that cannot be resolved)."""
     db = DBController()
     group = db.get_consistency_group_by_id(group_id)
     _sync_cluster(db, group.cluster_id)
-    _check_site(db, group.cluster_id, site)
     volumes = _group_volumes(db, group)
     owners: dict[str, StorageNode] = {}
     for lvol in volumes:
         if lvol.node_id not in owners:
             owners[lvol.node_id] = db.get_storage_node_by_id(lvol.node_id)
+    if site:
+        _check_site(db, group.cluster_id, site)
+    else:
+        site = _default_site(db, group.cluster_id,
+                             (volume_site(lv, owners[lv.node_id]) for lv in volumes))
     return GroupSyncStatus(
         role=group_role(volume_role(lv, owners[lv.node_id], site) for lv in volumes),
         site=site, member_count=len(volumes),

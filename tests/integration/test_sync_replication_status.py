@@ -204,11 +204,24 @@ class TestStatus:
         assert (status.role, status.site, status.cluster.state) == (
             src.ROLE_SECONDARY, SITE_A, src.STATE_HEALTHY)
 
-    @pytest.mark.parametrize("site", ["", "site-c"])
-    def test_a_missing_or_unknown_site_is_refused(self, db, rpcs, site):
+    @pytest.mark.parametrize("site", ["site-c", "SITE_A "])
+    def test_an_unknown_site_is_refused(self, db, rpcs, site):
         layout = _Layout(db, rpcs)
         with pytest.raises(SyncReplicationSiteError):
             src.volume_sync_status(_lvol(layout.owner1), site)
+
+    @pytest.mark.parametrize("site", [None, ""])
+    def test_a_missing_site_reads_the_led_site(self, db, rpcs, site):
+        """A status read with no site is cluster-wide: it resolves to the
+        volume's led site (role primary there), the read the csi-addons adapter
+        makes with no site to assert. Only an unknown site is refused."""
+        layout = _Layout(db, rpcs)
+        # led from the home site (sync_active_site unset): primary there.
+        status = src.volume_sync_status(_lvol(layout.owner1), site)
+        assert (status.role, status.site) == (src.ROLE_PRIMARY, SITE_A)
+        # promoted on B: the no-site read follows the active site.
+        moved = src.volume_sync_status(_lvol(layout.owner1, SITE_B), site)
+        assert (moved.role, moved.site) == (src.ROLE_PRIMARY, SITE_B)
 
     def test_a_cluster_without_sync_replication_is_refused(self, db, rpcs):
         layout = _Layout(db, rpcs, sync=False)
