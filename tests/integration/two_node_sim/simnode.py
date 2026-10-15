@@ -31,8 +31,20 @@ from dataclasses import dataclass, field
 
 NORMAL, HOLDING, SOLO, FENCED = "normal", "holding", "solo", "fenced"
 
-#: F18 (open on main): set True once the fence restore puts back every group.
-RESTORE_ALL_ANA_GROUPS = False
+#: Node capabilities: behaviour of SPDK/ultra changes that exist as PRs but are
+#: not yet in the node image main deploys. ``DEPLOYED_CAPS`` must match what is
+#: merged (SPDK new_md_journal, ultra main), so main's CI stays truthful; a
+#: scenario can opt in to a capability to test a pending stack (bed run c8).
+#:
+#: * ``ana_restore_all_groups`` -- F18, SPDK #80: the unfence restores every ANA
+#:   group the fence changed (else only the groups that carry a namespace).
+#: * ``grant_stops_redirect`` -- F19, SPDK #81 + ultra #215: every solo grant
+#:   releases the LVS, and the release stops a non-leader's hublvol redirect to
+#:   the lost peer, so the next IO takes the LVS over at once.
+CAP_ANA_RESTORE_ALL = "ana_restore_all_groups"
+CAP_GRANT_STOPS_REDIRECT = "grant_stops_redirect"
+ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT})
+DEPLOYED_CAPS: frozenset = frozenset()
 
 
 class NodeAbort(Exception):
@@ -61,6 +73,7 @@ class Lvstore:
     held: bool = False
     fence_port_owned: bool = False
     takeover_until: float = 0.0
+    redirect_stopped: bool = False   # F19: hublvol redirect stopped by a grant
     ana_restore_pending: bool = False
     ana_saved: dict = field(default_factory=dict)
 
@@ -83,6 +96,7 @@ class SimNode:
         self.mgmt_ip, self.rpc_port, self.data_ip = mgmt_ip, rpc_port, data_ip
         self.own_vuid = own_vuid
         self.bugs: set = set()
+        self.caps: frozenset = DEPLOYED_CAPS
         # process: up | frozen | dead (SPDK gone, proxy answers 500) | down (host off)
         self.proc = "up"
         self.frozen_until = 0.0
@@ -148,6 +162,7 @@ class SimNode:
             lvs.fenced = lvs.held = lvs.fence_port_owned = False
             lvs.ana_saved = {}
             lvs.ana_restore_pending = False
+            lvs.redirect_stopped = False
         for d in self.devices:
             self.devices[d] = True
         self.blocked = {}
@@ -279,6 +294,11 @@ class SimNode:
         lvs = self.lvs_by_vuid(vuid)
         if lvs is not None:
             lvs.held = False
+            # SPDK #81 (F19): a non-leader, non-primary LVS stops redirecting to the
+            # lost peer (skip_redirecting + drain_in_action)
+            if (CAP_GRANT_STOPS_REDIRECT in self.caps and not lvs.leader
+                    and lvs.primary_node != self.uuid):
+                lvs.redirect_stopped = True
 
     def _fence(self, vuid: int):
         """spdk_lvs_ha_fence."""
@@ -325,10 +345,11 @@ class SimNode:
     def _restore_ana(self, lvs: Lvstore):
         """Put back the ANA state the fence saved. As observed on the bed (c7b,
         F18), only the groups that carry a namespace come back; an ANA group
-        without a namespace stays inaccessible. Flip ``RESTORE_ALL_ANA_GROUPS``
-        with the F18 fix."""
+        without a namespace stays inaccessible. With the F18 fix (capability
+        ``ana_restore_all_groups``) every group comes back."""
         for key, state in lvs.ana_saved.items():
-            if RESTORE_ALL_ANA_GROUPS or key[1] in self.world.namespace_groups(key[0]):
+            if (CAP_ANA_RESTORE_ALL in self.caps
+                    or key[1] in self.world.namespace_groups(key[0])):
                 self.ana[key] = state
         lvs.ana_saved = {}
 
@@ -399,7 +420,8 @@ class SimNode:
                 continue
             was_holding = lv.state == HOLDING
             lv.state, lv.since_ms = SOLO, now
-            if was_holding:
+            # ultra #215 (F19): release on every grant, not only after a hold
+            if was_holding or CAP_GRANT_STOPS_REDIRECT in self.caps:
                 self._release(int(v))
             self.push_event(int(v), "ha_solo", "grant", SOLO)
         self.world.on_grant(self, [int(v) for v in lvs])
@@ -486,12 +508,14 @@ class SimNode:
         if lvs_leadership:
             lvs.leader = True
             lvs.takeover_blocked = False
+            lvs.redirect_stopped = False
             if lvs.ana_restore_pending:
                 self._restore_ana(lvs)
                 lvs.ana_restore_pending = False
             self.world.on_leader(self, lvs, "set_leader")
         else:
             lvs.leader = False
+            lvs.redirect_stopped = False     # set_leader resets the redirect state
             lv = self.ha.get(lvs.vuid)
             if lv is not None and lv.state == SOLO:    # ha_on_demoted
                 lv.state, lv.since_ms = NORMAL, self.now_ms()
