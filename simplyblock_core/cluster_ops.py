@@ -2957,10 +2957,10 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
     update = ["sudo", "docker", "service", "update", "--force"]
     if enabled:
         if not settings['plugin']['preinstalled']:
-            update += ["--env-add", f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
-                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}"]
-        update += ["--mount-add", f"type=bind,src={datasource_path},"
-                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly"]
+            update += ["--env-add", (f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
+                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}")]
+        update += ["--mount-add", (f"type=bind,src={datasource_path},"
+                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly")]
 
     logger.info("Restarting Grafana...")
     subprocess.check_call(update + [constants.MONITORING_GRAFANA_SERVICE])

@@ -90,9 +90,9 @@ def main():
     # what actually happened instead of guessing.
     try:
         run(["ssh", "-f", *SSH_OPTS, f"ec2-user@{mgmt}",
-             f"cd ~ && setsid env {env_prefix}python3 -u test_async_replication.py {cases} "
+             (f"cd ~ && setsid env {env_prefix}python3 -u test_async_replication.py {cases} "
              f"> {remote_log} 2>&1 < /dev/null & echo $! > ~/repl_pid; "
-             f"echo ~/repl_cases_{ts}.log > ~/repl_log"], timeout=60)
+             f"echo ~/repl_cases_{ts}.log > ~/repl_log")], timeout=60)
     except subprocess.TimeoutExpired:
         log("ssh -f exceeded its 60s budget; checking whether the driver started")
         started = False

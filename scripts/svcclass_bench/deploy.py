@@ -189,8 +189,8 @@ def resume():
         base.ssh_exec(mgmt_ip, [f"{base.SBCTL} -d pool add {cfg['pool']} {uuid}"])
     tgt_pool_uuid = base.get_pool_uuid(mgmt_ip, "pool_tgt")
     base.ssh_exec(mgmt_ip, [
-        f"{base.SBCTL} -d cluster replication-target-add {src_uuid} tgt_{tgt_uuid[:8]}"
-        f" {tgt_uuid} --target-pool {tgt_pool_uuid} --timeout {base.REPLICATION['timeout']}"])
+        (f"{base.SBCTL} -d cluster replication-target-add {src_uuid} tgt_{tgt_uuid[:8]}"
+        f" {tgt_uuid} --target-pool {tgt_pool_uuid} --timeout {base.REPLICATION['timeout']}")])
 
     for c in clients:
         base.wait_for_ssh(c.public_ip_address)
