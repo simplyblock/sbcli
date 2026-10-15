@@ -1115,8 +1115,8 @@ TWO_NODE_REBUILD_SCHEDULE_RETRY_S = 30
 TWO_NODE_REBUILD_STUCK_S = 120
 #: Campaign c4, F12: at most one device recovery (restart) per node in this window.
 TWO_NODE_DEVICE_RECOVERY_RETRY_S = 300
-#: Campaign c4, F13: how long the survivor's promotion waits for its
-#: leadership to be confirmed after bdev_lvol_set_leader.
+#: How long the arbiter's leadership restoration (after an unfence) waits for
+#: the leadership to be confirmed after bdev_lvol_set_leader.
 TWO_NODE_PROMOTE_VERIFY_S = 3
 #: Campaign c5, 07/08: after a heal or a re-admission unfences, the arbiter
 #: puts each LVS's leadership back on its primary; a failed attempt is

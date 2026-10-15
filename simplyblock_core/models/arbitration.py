@@ -69,10 +69,6 @@ class ClusterArbitration(BaseModel):
     #: their data devices were missing at re-admission, or their rebuild was
     #: stuck on unavailable devices: {node_id: {"reason": str, "at": ms}}.
     device_recovery: dict = default_factory(dict)
-    #: Campaign c4, F13. LVS whose leadership the arbiter moved to the
-    #: survivor right after a grant: {lvs_name: {"node": id, "epoch": int,
-    #: "at": ms, "ok": bool}}.
-    promoted: dict = default_factory(dict)
     #: Campaign c5, 07/08. LVS whose leadership the arbiter put back on the
     #: primary after a heal or re-admission unfenced it (after a fence only
     #: bdev_lvol_set_leader restores leadership and the primary's ANA):

@@ -111,7 +111,6 @@ class Arbiter:
                  open_rebuild_tasks: Callable | None = None,
                  devices_ok: Callable | None = None,
                  rebuild_task_errors: Callable | None = None,
-                 promote_survivor: Callable | None = None,
                  restore_leadership: Callable | None = None,
                  notify: Callable | None = None):
         self.db = db
@@ -151,8 +150,6 @@ class Arbiter:
         #: that last failed with a migration error (campaign c4, F12)
         self.rebuild_task_errors = rebuild_task_errors or default_rebuild_task_errors
         #: (cluster_id, survivor, primary, lvs_name) -> bool: make the survivor
-        #: the leader of the lost primary's LVS (campaign c4, F13)
-        self.promote_survivor = promote_survivor or default_promote_survivor
         #: (cluster_id, primary, peer, lvs_name) -> bool: the LVS is led by a
         #: node again, with ANA optimized on its leader (campaign c5, 07/08)
         self.restore_leadership = restore_leadership or default_restore_leadership
@@ -166,8 +163,6 @@ class Arbiter:
         self.notify = notify or default_notify
         #: node_id -> ms when its rebuild was first seen failing on unavailable devices
         self.rebuild_stuck_since: dict = {}
-        #: (cluster_id, epoch, lvs_name) promotions already started
-        self.promoted: set = set()
         #: node_id -> NodeSignals
         self.signals: dict = {}
         #: node_id -> ms of the last successful lease renewal
@@ -1062,69 +1057,6 @@ class Arbiter:
                                lvs_name, primary.get_id())
         return run
 
-    # ---- survivor promotion after a grant (campaign c4, F13) --------------------
-
-    def promote_after_grant(self, rec: ClusterArbitration, verdict: dec.Verdict,
-                            nodes: list) -> None:
-        """Make the survivor the leader of the LVS its lost peer was primary of.
-
-        Campaign c4, 02b: the primary of vol1's LVS froze, its secondary was
-        granted solo at +2.4 s, but kept redirecting vol1 IO over the hublvol
-        to the fenced primary (the fence leaves the hublvol port open), never
-        became leader, and IO stalled 52 s until the leaderless recovery put
-        leadership back on the primary. The grant has already fenced (or
-        positively lost) the peer at this epoch, so the survivor is the only
-        writer; it now takes leadership at once: lvstore metadata reloaded
-        first, then ``bdev_lvol_set_leader``, then ANA optimized on it. Runs
-        off the decision loop, once per (epoch, LVS)."""
-        if verdict.kind != dec.V_DEGRADED or not verdict.winner or not verdict.loser:
-            return
-        by_id = {n.get_id(): n for n in nodes}
-        winner, loser = by_id.get(verdict.winner), by_id.get(verdict.loser)
-        if winner is None or loser is None:
-            return
-        fresh_loser = self.db.get_storage_node_by_id(loser.get_id())
-        lvs_name = getattr(fresh_loser, "lvstore", "")
-        vuid = getattr(fresh_loser, "jm_vuid", 0)
-        if not lvs_name or not vuid or getattr(fresh_loser, "is_secondary_node", False):
-            return
-        if verdict.grant.get(int(vuid)) != winner.get_id():
-            return
-        done = (rec.promoted or {}).get(lvs_name) or {}
-        if done.get("node") == winner.get_id() and done.get("ok"):
-            return                                  # already leader since this loss
-        key = (rec.cluster_id, lvs_name, winner.get_id())
-        if key in self.promoted:
-            return                                  # running
-        self.promoted.add(key)
-        cid, epoch = rec.cluster_id, rec.epoch
-
-        def run():
-            ok = False
-            try:
-                ok = bool(self.promote_survivor(cid, winner, fresh_loser, lvs_name))
-            except Exception as e:                  # noqa: BLE001 - leaderless recovery remains
-                logger.error("Promoting %s for %s after the grant failed: %s",
-                             winner.get_id(), lvs_name, e)
-            now = self.clock()
-
-            def put(fresh):
-                fresh.promoted = dict(fresh.promoted or {})
-                fresh.promoted[lvs_name] = {"node": winner.get_id(), "epoch": epoch,
-                                            "at": now, "ok": ok}
-            cur = self.db.get_cluster_arbitration(cid)
-            if cur is not None:
-                self.db.atomic_update(cur, put)
-            self.promoted.discard(key)              # a failed one is retried by the next grant
-            if ok:
-                logger.warning("LVS %s: survivor %s is leader after the grant at epoch %s",
-                               lvs_name, winner.get_id(), epoch)
-            else:
-                logger.error("LVS %s: survivor %s could not take leadership after the "
-                             "grant at epoch %s; the leaderless recovery stays the fallback",
-                             lvs_name, winner.get_id(), epoch)
-        self.run_async(run)
-
     # ---- partition recovery (campaign c2, F6) ----------------------------------
 
     def recover_partition(self, rec: ClusterArbitration, nodes: list) -> None:
@@ -1453,7 +1385,6 @@ class Arbiter:
         if pending is not None:
             if self.send(rec, pending, nodes):
                 self.undelivered.pop(cluster_id, None)
-                self.promote_after_grant(rec, pending, nodes)
             return pending
 
         snap = self.snapshot(rec, nodes)
@@ -1479,10 +1410,6 @@ class Arbiter:
                                       % (verdict.winner, rec.epoch))
             if not self.send(rec, verdict, nodes):
                 self.undelivered[cluster_id] = verdict
-            else:
-                # Campaign c4, F13: fence-then-grant has landed; the survivor
-                # takes the lost primary's LVS leadership at once.
-                self.promote_after_grant(rec, verdict, nodes)
         elif verdict.kind == dec.V_UNAVAILABLE:
             self.report_unavailable(rec, verdict, nodes)
             if verdict.new_state != rec.state:
@@ -1652,7 +1579,6 @@ class Arbiter:
             fresh.healthy_since = 0
             for entry in fresh.lvs:
                 entry.update(state="normal", fenced_node="", since=now)
-            fresh.promoted = {}                     # F13: the next loss promotes again
         self.db.atomic_update(rec, put)
         self.readmitted.pop(rec.cluster_id, None)
         logger.info("Cluster %s healed; arbitration back to steady", rec.cluster_id)
@@ -1743,49 +1669,6 @@ def default_rebuild_task_errors(db, cluster_id: str) -> int:
     return bits
 
 
-def default_promote_survivor(cluster_id: str, survivor: StorageNode, primary: StorageNode,
-                             lvs_name: str) -> bool:
-    """Campaign c4, F13: the survivor takes the lost primary's LVS.
-
-    The same reload-then-grant order as the leaderless recovery
-    (``storage_node_ops._recover_leaderless_lvs`` step 2): the lvstore metadata
-    is reloaded from disk with ``bdev_lvol_update_lvstore`` BEFORE
-    ``bdev_lvol_set_leader``, so the new leader never serves stale metadata;
-    the grant is verified; then the primary's volumes go ANA optimized on the
-    survivor (``_failover_primary_ana``). That recovery is not called itself:
-    its hublvol repair and its wait for a self-promotion through redirected IO
-    are exactly what does not work against a fenced primary, its JM quorum
-    check counts the lost peer's JM, and it is a shared path of every cluster
-    (left untouched). Skipped while a restart or port-allow task moves
-    leadership on either node: that flow owns the handoff."""
-    from simplyblock_core import storage_node_ops as sno
-    from simplyblock_core.controllers.lvol_controller import is_node_leader
-    from simplyblock_core.db_controller import DBController
-
-    db = DBController()
-    taker = db.get_storage_node_by_id(survivor.get_id())
-    if sno._leadership_moving_tasks_active(cluster_id, [taker.get_id(), primary.get_id()]):
-        logger.warning("LVS %s: a restart/port-allow task moves leadership; not promoting %s",
-                       lvs_name, taker.get_id())
-        return False
-    if not is_node_leader(taker, lvs_name):
-        rpc = taker.rpc_client(timeout=10, retry=0)
-        if not rpc.bdev_lvol_update_lvstore(lvs_name):
-            logger.error("bdev_lvol_update_lvstore %s on %s returned False; not granting "
-                         "leadership on top of un-reloaded metadata", lvs_name, taker.get_id())
-            return False
-        rpc.bdev_lvol_set_leader(lvs_name, leader=True)
-        deadline = time.monotonic() + float(constants.TWO_NODE_PROMOTE_VERIFY_S)
-        while not is_node_leader(taker, lvs_name):
-            if time.monotonic() >= deadline:
-                logger.error("bdev_lvol_set_leader %s on %s did not take effect",
-                             lvs_name, taker.get_id())
-                return False
-            time.sleep(0.1)
-    sno._failover_primary_ana(db.get_storage_node_by_id(primary.get_id()))
-    return True
-
-
 def _leadership_task_blocks(db, cluster_id: str, node_ids: list, lvs_name: str) -> bool:
     """A restart or port-allow task on either node owns leadership movement
     (``storage_node_ops._leadership_moving_tasks_active``), so the restoration
@@ -1824,13 +1707,13 @@ def default_restore_leadership(cluster_id: str, primary: StorageNode, peer: Stor
     """Campaign c5, 07/08: put the LVS's leadership back on its primary after
     an unfence, and the primary's volumes' ANA with it.
 
-    Same reload-then-grant order as ``default_promote_survivor`` (and the
-    leaderless recovery): ``bdev_lvol_update_lvstore`` before
-    ``bdev_lvol_set_leader``, the grant verified. True when the LVS is led and
+    Same reload-then-grant order as the leaderless recovery:
+    ``bdev_lvol_update_lvstore`` before ``bdev_lvol_set_leader``, the grant
+    verified. True when the LVS is led and
     ANA is set: optimized on the primary, non_optimized on its secondary
     (``_failback_primary_ana``). Left alone (True) when the peer already leads
-    it: the survivor took it after a grant (F13) and the failback belongs to
-    the restart flow. False (retried) while a restart or port-allow task moves
+    it: the survivor took it over after its peer was lost, and the failback
+    belongs to the restart flow. False (retried) while a restart or port-allow task moves
     leadership on either node, or when the grant does not take."""
     from simplyblock_core import storage_node_ops as sno
     from simplyblock_core.controllers.lvol_controller import is_node_leader

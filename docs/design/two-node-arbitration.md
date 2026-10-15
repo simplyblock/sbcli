@@ -356,8 +356,8 @@ client got EIO. Every other node call the tick needs therefore runs on a second 
 or self-fence re-admission, and the leadership reconciliation pass. At most one call per node (per
 cluster for the reconciliation) is in flight; the tick never waits for them and applies, on the
 decision thread, whatever has finished (`_drain_work`). The second pool keeps calls blocked on a
-frozen node from starving the renewals of its healthy peer. Leadership restoration (section 7.13),
-survivor promotion (7.12) and partition recovery (7.9) already ran off the loop. What remains on the
+frozen node from starving the renewals of its healthy peer. Leadership restoration (section 7.13)
+and partition recovery (7.9) already ran off the loop. What remains on the
 decision thread is the verdict send to a node that answers: fence-then-grant of a partition (both
 nodes reachable), the grant to the survivor, and best-effort fences (planned loss, operator
 override), which use a `best_effort_fence_timeout_s` timeout and never hold the grant up. A degraded
@@ -540,35 +540,24 @@ devices, and the rebuild queued for it (section 7.10) failed `mig error: 8` / `5
 The node-side fix (alceml not counting a detected process stall as IO age) is ultra's; this
 check also covers a device lost for any other reason during the fence.
 
-### 7.12 Survivor promotion after a grant (campaign c4, F13)
+### 7.12 No survivor promotion after a grant (campaign c7b, F17; replaces c4 F13)
 
-In c4, 02b froze sn2, the primary of vol1's LVS. sn1 was granted solo at +2.4 s, but kept
-redirecting vol1 IO over the hublvol to the fenced sn2: the fence leaves the hublvol port open
-(section 6.1), so the redirect never failed and sn1 never became leader. IO stalled 52 s, until
-the leaderless recovery (section 7.7) put leadership back on sn2.
+Campaign c4 (02b) added a promotion of the survivor right after a `degraded` grant
+(`bdev_lvol_update_lvstore`, then `bdev_lvol_set_leader` on the survivor), because a frozen,
+self-fenced primary kept its hublvol open and the survivor redirected vol1 IO to it for 52 s.
+In c7b (04, graceful shutdown of the primary) that promotion ran into the shutdown flow's own
+leadership handoff, and the survivor's SPDK died in the `bdev_lvol_update_lvstore` call: both nodes
+down, 160 client IO errors. It was **removed**:
 
-When a `degraded` verdict's grant has landed and the loser is the **primary** of an LVS granted to
-the winner, the arbiter makes the winner that LVS's leader at once, off the decision loop, once per
-loss: `bdev_lvol_update_lvstore` (metadata reloaded from disk first, as the leaderless recovery
-does), then `bdev_lvol_set_leader(leader=true)`, verified within `promote_verify_s`, then the
-primary's volumes go ANA optimized on the winner (`_failover_primary_ana`). The fenced primary is
-already ANA inaccessible (SPDK fence) and its IO-triggered takeover is latched off until the
-control plane sets its leadership again.
+- a frozen primary now aborts on wake (section 3.1), which cuts its hublvol, so the survivor takes
+  over as after a crash;
+- a partition fences both nodes and the leadership restoration after the unfence (section 7.13)
+  puts each LVS back on its primary;
+- a planned loss (section 7.8) is handed over by the shutdown/restart flow.
 
-- **No split-brain.** It runs only after fence-then-grant has landed at the new epoch, i.e. the
-  loser is fenced or positively lost (section 3); the survivor is the only writer.
-- **Not during a handoff.** Skipped while a restart or port-allow task moves leadership on either
-  node (planned loss, section 7.8): that flow owns it.
-- **Recorded** in `promoted` (`{lvs: {node, epoch, at, ok}}`), cleared when healing finishes. A
-  failed promotion is logged; the leaderless recovery stays the fallback, and the next grant retries.
-- The leaderless recovery itself (`_recover_leaderless_lvs`) is not called: its hublvol repair and
-  its wait for a self-promotion through redirected IO are what fails against a fenced primary, and
-  it is a shared path of every cluster, left unchanged.
-
-After the re-admission the LVS stays led by the former secondary; failback to the primary is the
-restart flow's (as after any failover). With the abort on wake (section 3.1) a frozen primary's
-hublvol breaks, so this promotion matters mainly for fences that do not abort: the arbiter's own
-fence of a reachable primary, and a deadline or lease self-fence.
+A `degraded` verdict therefore only fences the loser (best effort when it is leaving) and grants
+the survivor; the arbiter sends no leadership RPC to the survivor. The record field `promoted` is
+gone (old records still load: unknown keys are ignored).
 
 ### 7.13 Leadership after an unfence (campaign c5, 07/08)
 
@@ -588,7 +577,7 @@ tasks that never completed on a 2-node cluster (below), so nothing restored lead
   within `promote_verify_s`, then sets ANA: optimized on the primary, non_optimized on its
   secondary (`_failback_primary_ana`). The secondary is never granted.
 - **Idempotent.** An LVS already led by its primary only gets ANA set; one led by the survivor
-  (section 7.12) is left to the restart flow's failback; one reported led on both nodes is not
+  (it took over after its peer was lost) is left to the restart flow's failback; one reported led on both nodes is not
   touched (logged). A failed attempt is retried every `leadership_retry_ms` (3 s); a new fence
   verdict drops the queue; nothing runs while `partitioned`.
 - **Tasks.** A restart task on either node always holds it back (the restart owns the handoff). A
@@ -747,7 +736,7 @@ setting brings that below KATO.
 | `rebuild_schedule_retry_s` | 30 | arbiter, re-queue when nothing was queued (section 7.10) |
 | `rebuild_stuck_s` | 120 | arbiter, rebuild failing on unavailable devices before recovery (section 7.11) |
 | `device_recovery_retry_s` | 300 | arbiter, at most one device recovery per node (section 7.11) |
-| `promote_verify_s` | 3 | arbiter, survivor leadership confirmation (section 7.12) |
+| `promote_verify_s` | 3 | arbiter, leadership confirmation after `bdev_lvol_set_leader` (section 7.13) |
 | `leadership_retry_ms` | 3000 | arbiter, retry of a failed leadership restoration (section 7.13) |
 | `leadership_task_stale_s` | 120 | arbiter, a port-allow task older than this no longer holds it back (section 7.13) |
 | client keep-alive | 4 s | connect parameters of arbitrated clusters (section 9.1) |

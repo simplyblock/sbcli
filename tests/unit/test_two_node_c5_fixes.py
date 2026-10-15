@@ -161,7 +161,6 @@ def test_self_fence_readmission_restores_the_primarys_leadership(env):  # noqa: 
     _wire(a)
     a.run_async = lambda fn: fn()
     a.devices_ok = lambda _db, _node: True
-    a.promote_survivor = lambda *_: True
     _b_frozen_and_granted(a, db, nodes, clock)
     _b_back_self_fenced_and_readmitted(a, db, nodes, clock)
     assert calls(nodes[B], "jc_unfence")
