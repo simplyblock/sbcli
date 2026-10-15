@@ -211,12 +211,19 @@ def task_lease_heartbeat(task, owner=None):
         stop.set()
 
 
-def ensure_node_restart_task(node):
+def ensure_node_restart_task(node, function_params=None):
     """Return the id of an unfinished FN_NODE_RESTART task for this node,
-    creating one if none exists. Used by explicit restarts
-    (restart_storage_node wrapper) to make their ownership transferable: the
-    driver claims and heartbeats the task's lease, and if the driving process
-    dies mid-restart, a live tasks-runner claims the stale lease and resumes.
+    creating one if none exists. Used by explicit restarts (the API restart
+    endpoints, and the restart_storage_node wrapper for its own transferable
+    ownership) to make ownership transferable: the driver claims and
+    heartbeats the task's lease, and if the driving process dies mid-restart,
+    a live tasks-runner claims the stale lease and resumes.
+
+    function_params carries the explicit restart options (force, node_address,
+    reattach_volume, new_ssd_pcie) for tasks_runner_restart.task_runner_node to
+    apply when it drives the restart. Ignored when an unfinished task already
+    exists for this node — the existing task's own params (or lack of them)
+    still apply, matching add_node_add_task's dedup semantics.
 
     Deliberately bypasses the auto_restart_disabled guard of
     add_node_to_auto_restart: that flag means "no UNATTENDED restart after a
@@ -227,7 +234,8 @@ def ensure_node_restart_task(node):
     existing = _validate_new_task_node_restart(node.cluster_id, node.get_id())
     if existing:
         return existing
-    return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
+    return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "",
+                     function_params=function_params, max_retry=11)
 
 
 def _validate_new_task_dev_restart(cluster_id, node_id, device_id):

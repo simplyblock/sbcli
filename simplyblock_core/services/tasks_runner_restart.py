@@ -542,7 +542,27 @@ def task_runner_node(task):
             if updated is None:
                 raise TaskAbort("canceled before restart")
             task = updated
-            ret = storage_node_ops.restart_storage_node(node.get_id(), force=True, current_restart_task_id=task.uuid)
+            # Explicit restarts (the API restart endpoints, via
+            # tasks_controller.ensure_node_restart_task) carry their requested
+            # options in function_params. auto-restart (add_node_to_auto_restart)
+            # creates its task with none, so force defaults to True here,
+            # unchanged from before this call read function_params at all
+            # (added in 83ea38b2, 2024, undocumented). By this point in the
+            # handler the preceding cleanup-shutdown step has already driven
+            # the node to OFFLINE -- or the handler raised TaskRetry before
+            # reaching here -- so none of force's three gates in
+            # _restart_storage_node_impl (status != OFFLINE, status ==
+            # RESTARTING, a foreign active-task) should be live in the normal
+            # case; True is kept only to preserve exact prior behaviour,
+            # not because it is known to matter here.
+            restart_params = task.function_params or {}
+            ret = storage_node_ops.restart_storage_node(
+                node.get_id(),
+                force=restart_params.get("force", True),
+                node_address=restart_params.get("node_address"),
+                reattach_volume=restart_params.get("reattach_volume", False),
+                new_ssd_pcie=restart_params.get("new_ssd_pcie"),
+                current_restart_task_id=task.uuid)
             if ret:
                 logger.info("Node restart succeeded")
         except (TaskAbort, TaskDefer, TaskRetry):
