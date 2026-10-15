@@ -1071,20 +1071,26 @@ def volumes_open_on(volumes: Iterable[LVol], owner: StorageNode, site: str) -> l
 
 
 def is_birth_state(lvol: LVol, owner: StorageNode) -> bool:
-    """Whether ``lvol`` has never led from anywhere but its LVS's home: the LVS
-    is still led from home and the volume is still active on that home
-    (``volume_site == owner.site``).
+    """Whether ``lvol`` is active exactly on the site its LVS is currently led
+    from (``volume_site == lvs_active_site_of(owner)``): it has only ever moved
+    WITH the LVS, never been independently promoted to, or left on, a different
+    site. Such a volume has no consumer of its own that a planned promote
+    elsewhere would cut off - under the single-active-site (RWO) contract the only
+    consumer is the pod now being staged on the promote's target (gated, not yet
+    attached), and any previous consumer on the source has already unstaged. A
+    planned promote to another site may therefore demote this site first and move
+    (birth_state_demote_plan, design-sync-replication-csi-addons.md).
 
-    A fresh sync volume is created with ``sync_active_site`` set to its home, not
-    empty (``db_controller`` stamps ``lvs_active_site_of(owner)`` at create), and
-    a demote of a site does not move the volume off its home - so the test is
-    "still at home", not "no record of a promote or demote". Such a volume is
-    open on its home only by that birth default, so a planned promote elsewhere
-    may fence the home without cutting off a consumer - under the
-    single-active-site (RWO) contract a volume still at its home has none
-    (birth_state_demote_plan, design-sync-replication-csi-addons.md)."""
-    return (storage_node_ops.lvs_active_site_of(owner) == owner.site
-            and volume_site(lvol, owner) == owner.site)
+    Anchored to the LVS's CURRENT lead site, not its home (``owner.site``): an LVS
+    left led from a non-home site by an earlier move still hosts such volumes (a
+    fresh volume created on it carries that lead site as its ``sync_active_site``),
+    and following the workload means demoting wherever the LVS is led now, not only
+    its home. The one case this does not by itself make safe is a shared LVS whose
+    co-tenant volume is genuinely served on the source by another pod: leadership
+    is per-LVS, so volumes on one sync LVS must schedule to the same site, and
+    birth_state_demote_plan still demotes only when every source-open volume of the
+    LVS qualifies."""
+    return volume_site(lvol, owner) == storage_node_ops.lvs_active_site_of(owner)
 
 
 def lvs_site_triplet(owner: StorageNode, site: str) -> tuple[str, ...]:

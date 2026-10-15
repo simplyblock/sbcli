@@ -194,14 +194,21 @@ class TestBirthState:
     """
 
     def test_is_birth_state(self):
-        owner = _owner()  # home site-a, LVS never moved (lvs_active_site == "")
-        # Still at home: birth, whether sync_active_site is unset or the home
-        # (a fresh volume is created with sync_active_site == home), and a demote
-        # of a site does not move it off home.
+        owner = _owner()  # home site-a, LVS at home (lvs_active_site == "")
+        # Active where its LVS is led: a planned promote elsewhere may demote this
+        # site and follow the workload. Unset active defaults to the LVS's lead,
+        # the home here, and a demote record does not matter.
         assert src.is_birth_state(_lvol(), owner)
         assert src.is_birth_state(_lvol(sync_active_site=SITE_A), owner)
-        assert src.is_birth_state(_lvol(sync_demoted_sites=[SITE_B]), owner)  # demoted away
-        # Moved off home, or the LVS itself moved: no longer birth.
+        assert src.is_birth_state(_lvol(sync_demoted_sites=[SITE_B]), owner)
+        # An LVS led from a non-home site (left there by an earlier move) still
+        # hosts such volumes: a fresh volume carries that lead site as its
+        # sync_active_site, and following the workload means demoting wherever the
+        # LVS is led now -- not only its home. (This is the first-placement fix:
+        # anchored to the LVS's current lead site, not owner.site.)
+        assert src.is_birth_state(_lvol(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
+        # Not active on the LVS's lead site (an independently-diverged record), or
+        # the LVS is mid-move: left alone.
         assert not src.is_birth_state(_lvol(sync_active_site=SITE_B), owner)
         assert not src.is_birth_state(_lvol(), _owner(lvs_active_site=SITE_B))
         assert not src.is_birth_state(_lvol(), _owner(lvs_active_site="moving:site-b"))
@@ -229,11 +236,14 @@ class TestBirthState:
         v1 = _lvol(sync_demoted_sites=[SITE_B])
         assert self._plan([v1]) == {SITE_A: [v1]}
 
-    def test_a_volume_active_on_a_moved_lvs_is_not_auto_demoted(self):
-        # Genuinely active elsewhere (the LVS moved to site-b, the volume served
-        # there): promoting it back is a real move and is refused as before.
+    def test_a_volume_on_a_non_home_led_lvs_is_auto_demoted(self):
+        # The LVS is led from site-b (left there by an earlier move); a fresh
+        # volume on it carries site-b as its sync_active_site. A pod landing on
+        # site-a follows the workload: demote site-b (no consumer, under RWO) and
+        # move, rather than refusing because the LVS is not at home.
         owner = _owner(lvs_active_site=SITE_B)
-        assert self._plan([_lvol(sync_active_site=SITE_B)], owner=owner, site=SITE_A) == {}
+        v = _lvol(sync_active_site=SITE_B)
+        assert self._plan([v], owner=owner, site=SITE_A) == {SITE_B: [v]}
 
     def test_all_fresh_volumes_of_the_lvs_are_demoted_together(self):
         v1, v2 = _lvol("v1"), _lvol("v2")

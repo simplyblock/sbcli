@@ -243,21 +243,22 @@ class TestPromoteApi:
         assert [e.ip for e in result.connection_strings[vol.get_id()]] == [_ip(n) for n in a]
         gate.assert_not_called()
 
-    def test_a_volume_active_on_a_moved_lvs_is_refused(self, db, spdk, gate):
-        # A genuine refusal: the LVS has moved to site-b and the volume is served
-        # there (not at its home), so promoting it back to site-a is a real move
-        # that must demote site-b first. Only a volume still at its home is
-        # auto-demoted; this one is not, so nothing is fenced and no task queued.
+    def test_a_volume_on_a_non_home_led_lvs_is_fenced_and_moved(self, db, spdk, gate):
+        # Option A (design §6.3): the LVS was left led from site-b by an earlier
+        # move and a fresh volume on it carries site-b, but has no consumer of its
+        # own. A pod landing on site-a follows the workload -- the promote fences
+        # site-b (demotes it) and queues the move, rather than refusing it as "not
+        # demoted". is_birth_state is anchored to the LVS's current lead site, not
+        # its home, so this volume qualifies even though site-b is not its home.
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         _update(db, owner, lvs_active_site=SITE_B)
         vol.sync_active_site = SITE_B
         vol.write_to_db(db.kv_store)
-        with pytest.raises(SyncPromoteRefusedError) as exc:
-            src.sync_promote_lvol(vol.get_id(), SITE_A)
-        assert exc.value.volumes == [vol.get_id()]
-        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
-        assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
-        gate.assert_not_called()
+        first = src.sync_promote_lvol(vol.get_id(), SITE_A)
+        assert first.in_progress and first.task_id
+        # site-b (the current lead, no consumer) was fenced and recorded demoted
+        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_B]
+        assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is not None
 
     def test_a_birth_state_volume_is_fenced_at_home_and_moved(self, db, spdk, gate, moves):
         """First placement: a brand-new volume (never served, born on its home)
