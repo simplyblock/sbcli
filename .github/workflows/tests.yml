@@ -70,6 +70,53 @@ jobs:
         env:
           PYTEST_ADDOPTS: -v
 
+  two-node-sim:
+    name: Two-node simulation
+    runs-on: ubuntu-latest
+    # The two-node HA simulator's fast tier: one scenario per failure class of
+    # the AWS campaign, against the real arbiter on simulated nodes and a real
+    # FDB (tests/integration/two_node_sim/AGENTS.md).
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install FoundationDB client library
+        run: |
+          curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb -o /tmp/fdb-clients.deb
+          sudo dpkg -i /tmp/fdb-clients.deb
+      - name: Install tox
+        run: pip install tox tox-uv
+      - name: Run the two-node simulation (fast tier)
+        run: tox run -e two-node-sim
+        env:
+          PYTEST_ADDOPTS: -v -rxX
+
+  two-node-sim-full:
+    name: Two-node simulation (full)
+    runs-on: ubuntu-latest
+    # Every bed scenario and, per campaign finding, the proof that its
+    # scenario passes on this code and fails with the finding's bug put back.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install FoundationDB client library
+        run: |
+          curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb -o /tmp/fdb-clients.deb
+          sudo dpkg -i /tmp/fdb-clients.deb
+      - name: Install tox
+        run: pip install tox tox-uv
+      - name: Run the two-node simulation (full)
+        run: tox run -e two-node-sim-full
+        env:
+          PYTEST_ADDOPTS: -v -rxX
+
   integration-slow:
     name: Integration tests (slow)
     runs-on: ubuntu-latest
