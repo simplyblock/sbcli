@@ -1246,6 +1246,31 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             self.sbcli_utils.wait_for_storage_node_status(
                 self.current_outage_node, "online", timeout=1200
             )
+            # Second remount, because the first one can be missed. A reboot
+            # drops /mnt/nfs_share -- there is no fstab entry -- and
+            # SshUtils.reboot_node remounts it, but only if ssh comes back
+            # inside ITS budget, which is 300s against the 1200s allowed
+            # here. A reboot whose ssh returns late therefore carries on
+            # with the path unmounted, and nothing notices: writes still
+            # succeed, straight onto the root filesystem. That is how
+            # 192.168.10.201 accumulated 20G, hit 95% and stopped coming
+            # back in run 20261004-082535.
+            #
+            # Goes through _remount_nfs_after_reboot rather than calling
+            # ensure_nfs_mounted directly: that helper is where the
+            # SKIP_NFS escape hatch and the "it landed on the root
+            # filesystem" warning live, and calling the mount underneath it
+            # would quietly ignore both. It greps the mount table first, so
+            # on the normal path -- where reboot_node already remounted --
+            # this is a no-op.
+            try:
+                node_ip = self.sbcli_utils.get_storage_node_details(
+                    self.current_outage_node)[0]["mgmt_ip"]
+                self.ssh_obj._remount_nfs_after_reboot(node_ip)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[nfs] post-reboot remount check on %s failed: %s",
+                    self.current_outage_node, str(exc)[:160])
 
         elif "network_interrupt" in outage_type:
             self.sbcli_utils.wait_for_storage_node_status(
