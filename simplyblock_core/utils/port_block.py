@@ -122,3 +122,53 @@ def _is_port_blocked_iptables(node, port_id, timeout, retry):
                     if str(port_id) in rule['options'] and rule['target'] == 'DROP':  # type: ignore
                         return True
     return False
+
+
+def host_fence_ports(node, db_controller):
+    """Every TCP port the control plane may have fenced on ``node``'s host
+    for this SPDK instance, sorted and de-duplicated.
+
+    The SPDK pod entrypoint (ultra ``run_distr_with_ssd.sh``) deletes stale
+    iptables DROP/REJECT rules for exactly these ports before SPDK starts,
+    instead of flushing the host table. It used to run ``iptables -F``,
+    which wipes the CNI's own chains too (cilium lost its host chains on
+    every SPDK restart of the ams1 cluster, 2026-09/10). The entrypoint
+    cannot derive the list itself: it only sees ``RPC_PORT``/``FW_PORT``,
+    while the lvol and hublvol ports are allocated here.
+
+    Fences on a host are placed on the client-facing ports of every lvstore
+    the host serves: its own primary lvstore and every lvstore it backs as
+    secondary or tertiary. Both the per-lvstore map (``lvstore_ports``) and
+    the legacy node-level fields are read, because records written by
+    25.10.x only carry the latter -- and the 25.10.x control plane is the
+    one that leaves iptables fences behind during an online upgrade. Hublvol
+    ports are included for the same reason: 25.10.x fenced them, 26.x does
+    not.
+    """
+    ports = set()
+
+    def _add(p):
+        if p:
+            ports.add(int(p))
+
+    def _add_node_ports(n):
+        for entry in (n.lvstore_ports or {}).values():
+            if isinstance(entry, dict):
+                _add(entry.get("lvol_subsys_port"))
+                _add(entry.get("hublvol_port"))
+        _add(n.lvol_subsys_port)
+        if n.hublvol:
+            _add(n.hublvol.nvmf_port)
+
+    _add_node_ports(node)
+    for primary in db_controller.get_primary_storage_nodes_by_secondary_node_id(node.get_id()):
+        _add_node_ports(primary)
+    return sorted(ports)
+
+
+def fence_ports_env(ports):
+    """Render ``ports`` as the ``FENCE_PORTS`` environment value the SPDK
+    entrypoint reads: space-separated, so a POSIX ``case`` pattern can match
+    one port exactly. Empty input renders empty, which the entrypoint treats
+    as "no list from the control plane"."""
+    return " ".join(str(int(p)) for p in (ports or []))

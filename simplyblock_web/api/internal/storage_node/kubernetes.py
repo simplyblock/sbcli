@@ -4,7 +4,7 @@ import logging
 import os
 import time
 import traceback
-from typing import List, Optional, Union
+from typing import Annotated, List, Optional, Union
 
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
@@ -13,6 +13,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
+from simplyblock_core.utils import port_block
 from simplyblock_core.settings import Settings
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
@@ -223,6 +224,10 @@ class SPDKParams(BaseModel):
     firewall_port: Optional[int] = Field(constants.FW_PORT_START)
     cluster_id: str
     mcp_max_unavailable: Optional[int] = Field(None)
+    # Ports the entrypoint may delete stale iptables DROP/REJECT fences for
+    # before SPDK starts (port_block.host_fence_ports). Rendered as the
+    # space-separated FENCE_PORTS env of the SPDK container.
+    fence_ports: Annotated[List[int], Field(default_factory=list)]
 
 
 @api.post('/spdk_process_start', responses={
@@ -335,6 +340,7 @@ def spdk_process_start(body: SPDKParams):
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
             'FW_PORT': body.firewall_port,
+            'FENCE_PORTS': port_block.fence_ports_env(body.fence_ports),
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
