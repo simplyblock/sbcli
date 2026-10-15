@@ -1055,9 +1055,12 @@ TWO_NODE_SPDK_DOWN_HTTP500_STREAK = 2
 #: Seconds between two leadership reconciliation passes, and how long an LVS
 #: must stay leaderless (two passes) before leadership is restored.
 TWO_NODE_LEADERSHIP_RECONCILE_S = 10
-#: Client keep-alive for clusters with two-node arbitration: hosts must detect
-#: a silent path within the hold window (hold_ms 2500 < KATO).
-TWO_NODE_CLIENT_KEEP_ALIVE_TO = 4
+#: Client keep-alive for clusters with two-node arbitration. A frozen storage
+#: node keeps its TCP connections open, so a host notices the dead path only
+#: through the NVMe keep-alive, 1-2 KATO intervals after the last answered
+#: keep-alive (campaign c8, F20: 7.1 s with KATO 4). KATO 2 bounds that to
+#: 2-4 s, inside the client-path stall limit of KATO + 1 s = 3 s.
+TWO_NODE_CLIENT_KEEP_ALIVE_TO = 2
 #: The node RPCs a storage node must expose before the arbiter drives it.
 TWO_NODE_ARBITRATION_RPCS = (
     "jc_wait_events", "jc_ha_status", "jc_lease_renew",
