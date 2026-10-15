@@ -440,43 +440,43 @@ FAST = {"01b-crash-sn2", "02b-hang-sn2", "07-partition", "detect:F16", "detect:F
 #: Known failing on main: scenario -> (reason with the fix that flips it, a
 #: text the failure must contain, so it fails for that reason and no other).
 KNOWN_FAILING = {
-    "02a-hang-sn1": ("F23: after its solo grant sn2 still writes vol1's stripes to the frozen "
+    "02a-hang-sn1": (("F23: after its solo grant sn2 still writes vol1's stripes to the frozen "
                      "sn1's data devices and waits until sn1 aborts on wake and its connections "
                      "close (bed run c9/02a: 4 s stall; fix: a solo grant isolates the lost "
-                     "peer's devices, ultra, stacked on #217)",
+                     "peer's devices, ultra, stacked on #217)"),
                      "F23"),
-    "F23-frozen-secondary-data-io": ("F23: the survivor's writes wait on the frozen peer's data "
+    "F23-frozen-secondary-data-io": (("F23: the survivor's writes wait on the frozen peer's data "
                                      "devices after the grant (fix: a solo grant isolates the "
-                                     "lost peer's devices)",
+                                     "lost peer's devices)"),
                                      "F23"),
-    "F19-long-freeze-primary": ("F19: after #1485 (no promote-at-grant) the survivor does not take "
+    "F19-long-freeze-primary": (("F19: after #1485 (no promote-at-grant) the survivor does not take "
                                 "a frozen primary's LVS over; its volume stalls until the hublvol "
                                 "keep-alive (5 s) expires or the frozen node aborts on wake "
-                                "(fix: on a solo grant stop redirecting to the lost peer)",
+                                "(fix: on a solo grant stop redirecting to the lost peer)"),
                                 "client stall"),
-    "F20-frozen-leader-client-kato": ("F19 on what main deploys: the survivor keeps redirecting "
-                                      "to the frozen primary (fix: SPDK #81 + ultra #215)",
+    "F20-frozen-leader-client-kato": (("F19 on what main deploys: the survivor keeps redirecting "
+                                      "to the frozen primary (fix: SPDK #81 + ultra #215)"),
                                       "client stall"),
-    "F18-ana-groups-restored": ("F18: the fence restore puts back only the namespaces' ANA "
-                                "groups (fix: restore every group the fence changed)",
+    "F18-ana-groups-restored": (("F18: the fence restore puts back only the namespaces' ANA "
+                                "groups (fix: restore every group the fence changed)"),
                                 "ANA 44"),
-    "F24-frozen-primary-takeover-read": ("F23 on what main deploys: the follower survivor's takeover "
+    "F24-frozen-primary-takeover-read": (("F23 on what main deploys: the follower survivor's takeover "
                                          "metadata read waits on the frozen primary's data devices "
                                          "until it aborts on wake (bed c9/c10 02c: 9 s; fix: ultra "
-                                         "#219 with F24, isolate by marking the devices unavailable)",
+                                         "#219 with F24, isolate by marking the devices unavailable)"),
                                          "F23"),
-    "F25-frozen-primary-takeover-append-lock": ("F23 on what main deploys: the follower survivor's "
+    "F25-frozen-primary-takeover-append-lock": (("F23 on what main deploys: the follower survivor's "
                                                 "takeover waits on the frozen primary's data devices "
-                                                "(fix: ultra #219 with F24 and F25)",
+                                                "(fix: ultra #219 with F24 and F25)"),
                                                 "F23"),
-    "F26-takeover-read-inflight-on-peer-jm": ("F23 on what main deploys: the follower survivor's "
+    "F26-takeover-read-inflight-on-peer-jm": (("F23 on what main deploys: the follower survivor's "
                                               "takeover waits on the frozen primary's data devices "
-                                              "(fix: ultra #219 with F24, F25 and F26)",
+                                              "(fix: ultra #219 with F24, F25 and F26)"),
                                               "F23"),
-    "F21-takeover-reader-frozen-peer-jm": ("F21: the survivor's takeover reader picks the frozen "
+    "F21-takeover-reader-frozen-peer-jm": (("F21: the survivor's takeover reader picks the frozen "
                                            "peer's JM and waits for the 8 s NVMe IO timeout "
                                            "(fix: a solo LVS skips the peer JM the HA layer knows "
-                                           "is dead)",
+                                           "is dead)"),
                                            "F21"),
 }
 

@@ -374,8 +374,8 @@ def configure_secondary_nics(ip, nic_names, jump_ip=None):
     for nic in nic_names:
         cmds.extend([
             # Create a NetworkManager connection profile if one doesn't exist
-            f"sudo nmcli -g GENERAL.STATE device show {nic} 2>/dev/null | grep -q connected"
-            f" || sudo nmcli con add type ethernet con-name {nic} ifname {nic} ipv4.method auto",
+            (f"sudo nmcli -g GENERAL.STATE device show {nic} 2>/dev/null | grep -q connected"
+            f" || sudo nmcli con add type ethernet con-name {nic} ifname {nic} ipv4.method auto"),
             f"sudo nmcli device connect {nic} 2>/dev/null || true",
         ])
     # Wait for IPs
@@ -605,8 +605,8 @@ def main():
         "sudo dnf install git python3-pip nvme-cli -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
-        " --upgrade --force --ignore-installed requests",
+        (f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
+        " --upgrade --force --ignore-installed requests"),
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
     ]
     install_targets = [(mgmt_ip, None)] + [(ip, mgmt_ip) for ip in sn_priv_ips]
@@ -620,9 +620,9 @@ def main():
     # ── Phase 4: Create cluster ──────────────────────────────────────────
     print("\n--- Phase 4: Create cluster ---")
     ssh_exec(mgmt_ip, [
-        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
+        (f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
         f" --data-chunks-per-stripe {DATA_CHUNKS}"
-        f" --parity-chunks-per-stripe {PARITY_CHUNKS}"
+        f" --parity-chunks-per-stripe {PARITY_CHUNKS}")
     ], check=True)
 
     cluster_out = ssh_exec(mgmt_ip, [
@@ -688,11 +688,11 @@ def main():
                 ssh_exec(mgmt_ip, [
                     # --dev (not -d) is what sets developer_mode in cli.py:16, and
                     # --spdk-image is registered only under it.
-                    f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid}"
+                    (f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid}"
                     f" {priv_ip}:5000 {MGMT_IFACE}"
                     f" --data-nics {data_nics_arg}"
                     f" --ha-jm-count {HA_JM_COUNT}"
-                    f"{spdk_image_arg}"
+                    f"{spdk_image_arg}")
                 ], check=True)
                 break
             except RuntimeError:

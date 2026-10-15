@@ -210,8 +210,8 @@ def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
         rec = by_bdev.get(cur)
         if rec is None:
             return ("blocked", None,
-                    f"chain blob {cur} has no snapshot record; its data cannot "
-                    f"be replicated and the copy would have holes")
+                    (f"chain blob {cur} has no snapshot record; its data cannot "
+                    f"be replicated and the copy would have holes"))
         if getattr(rec, attr, ""):
             # Everything below this point already exists on the remote side.
             return ("pending", deepest, "") if deepest else ("ok", None, "")

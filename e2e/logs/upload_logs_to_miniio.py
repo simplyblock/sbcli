@@ -172,8 +172,8 @@ except Exception as e:
         f"{HOME_DIR}/*.txt*",
         f"{HOME_DIR}/*.log",
         f"{HOME_DIR}/*.state",
-        f"{HOME_DIR}/*.json"
-        f"{HOME_DIR}/*fio_iolog*",
+        (f"{HOME_DIR}/*.json"
+        f"{HOME_DIR}/*fio_iolog*"),
         "/etc/simplyblock/*",
         "/var/simplyblock/*"
     ]:

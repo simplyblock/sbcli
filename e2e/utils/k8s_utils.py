@@ -1974,17 +1974,17 @@ class K8sUtils:
             # Delete FIO jobs by label
             f"kubectl delete jobs -n {ns} -l app=fio-benchmark --ignore-not-found",
             # Delete FIO configmaps (prefixed fiocfg- or fio-cfg-)
-            f"kubectl get configmaps -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
-            f"2>/dev/null | grep -E '^(fiocfg-|fio-cfg-)' | xargs -r kubectl delete configmap -n {ns} --ignore-not-found",
+            (f"kubectl get configmaps -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep -E '^(fiocfg-|fio-cfg-)' | xargs -r kubectl delete configmap -n {ns} --ignore-not-found"),
             # Delete clone PVCs (prefixed clone-)
-            f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
-            f"2>/dev/null | grep '^clone-' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
+            (f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep '^clone-' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found"),
             # Delete VolumeSnapshots (prefixed snap- or snapshot-)
-            f"kubectl get volumesnapshot -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
-            f"2>/dev/null | grep -E '^(snap-|snapshot-)' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found --wait=true",
+            (f"kubectl get volumesnapshot -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep -E '^(snap-|snapshot-)' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found --wait=true"),
             # Delete test PVCs (various prefixes)
-            f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
-            f"2>/dev/null | grep -E '^(pvc-|mig-pvc-|add-pvc-)' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
+            (f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep -E '^(pvc-|mig-pvc-|add-pvc-)' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found"),
         ]
         for cmd in cmds:
             try:

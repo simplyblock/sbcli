@@ -329,8 +329,8 @@ def main():
     # Step 5a: Create cluster on mgmt (sequential, must complete first)
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
-        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
-        " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
+        (f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
+        " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2")
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
