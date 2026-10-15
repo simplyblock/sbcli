@@ -851,7 +851,7 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
-            for _, lvols in self.node_vs_lvol.items():
+            for lvols in self.node_vs_lvol.values():
                 if lvol in lvols:
                     lvols.remove(lvol)
                     break
@@ -1143,13 +1143,13 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
-            for clone, clone_details in self.clone_mount_details.items():
+            for clone_details in self.clone_mount_details.values():
                 self.common_utils.validate_fio_test(clone_details["Client"],
                                                     log_file=clone_details["Log"])
                 # self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
                 # self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])
             
-            for lvol, lvol_details in self.lvol_mount_details.items():
+            for lvol_details in self.lvol_mount_details.values():
                 self.common_utils.validate_fio_test(lvol_details["Client"],
                                                     log_file=lvol_details["Log"])
                 # self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])

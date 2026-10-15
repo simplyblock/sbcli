@@ -471,8 +471,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                 n for n in self.sn_primary_secondary_map
                 if self.sn_primary_secondary_map[n] in self.current_outage_nodes
             ]
-            for n in self.current_outage_nodes:
-                skip_nodes.append(n)
+            skip_nodes += self.current_outage_nodes
             candidates = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
             host_id = candidates[0] if candidates else None
 

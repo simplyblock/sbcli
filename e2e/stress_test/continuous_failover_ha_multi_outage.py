@@ -809,7 +809,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
-            for _, lvols in self.node_vs_lvol.items():
+            for lvols in self.node_vs_lvol.values():
                 if lvol in lvols:
                     lvols.remove(lvol)
                     break
@@ -854,8 +854,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         """Create snapshots and clones during an outage, avoiding lvols on outage nodes."""
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] in self.current_outage_nodes]
         self.logger.info(f"Skip Nodes: {skip_nodes}")
-        for node in self.current_outage_nodes:
-            skip_nodes.append(node)
+        skip_nodes += self.current_outage_nodes
         skip_nodes = []
         self.logger.info(f"Skip Nodes: {skip_nodes}")
         available_lvols = [

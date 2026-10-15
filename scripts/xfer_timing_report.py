@@ -181,7 +181,7 @@ def report(events, csv_path=None):
             passes[e.get("lvol")].append(e["t"])
     if passes:
         gaps = []
-        for _lvol, times in passes.items():
+        for times in passes.values():
             times.sort()
             gaps += [b - a for a, b in itertools.pairwise(times)]
         if gaps:

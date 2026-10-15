@@ -786,9 +786,9 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                 self.collect_outage_diagnostics("validation_checkpoint")
 
                 # Validate logs
-                for lvol, det in self.lvol_mount_details.items():
+                for det in self.lvol_mount_details.values():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
-                for cname, det in self.clone_mount_details.items():
+                for det in self.clone_mount_details.values():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
 
                 # Optional: wait for migration window after FIO completes
@@ -2086,9 +2086,9 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 self.check_core_dump(nodes=self._outaged_since_checkpoint)
                 self._outaged_since_checkpoint.clear()
 
-                for lvol, det in self.lvol_mount_details.items():
+                for det in self.lvol_mount_details.values():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
-                for cname, det in self.clone_mount_details.items():
+                for det in self.clone_mount_details.values():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
 
                 self._run_checkpoint_churn()

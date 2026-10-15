@@ -3293,7 +3293,7 @@ class TestClusterBase:
                                                 device=self.mount_path)
                     sleep_n_sec(2)
                     if lvols is not None:
-                        for _, lvol_id in lvols.items():
+                        for lvol_id in lvols.values():
                             lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
                             nqn = lvol_details[0]["nqn"]
                             for node in fio_nodes:

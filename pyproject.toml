@@ -115,9 +115,6 @@ ignore = [
     "FLY002",
     "ISC004",
     "LOG015",
-    "PERF101",
-    "PERF102",
-    "PERF402",
     "PLC0206",
     "PLR0402",
     "PLR1704",
@@ -178,6 +175,8 @@ norecursedirs = ['tests/perf']
 addopts = "-p randomly --randomly-dont-reorganize"
 markers = [
     "slow: long-running integration tests (e.g. live migration); excluded from the default integration run, opt in with -m slow",
+    "two_node_sim: the two-node HA simulator (tests/integration/two_node_sim); tox -e two-node-sim-full",
+    "two_node_sim_fast: the simulator's fast tier, required on every PR; tox -e two-node-sim",
 ]
 # Per-test time BUDGET, not a safety net. The previous 900s ceiling was larger
 # than every stall it was meant to catch — a 300s hot-spin in cluster activation

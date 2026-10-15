@@ -1090,6 +1090,18 @@ TWO_NODE_RPC_WORKERS = 4
 #: How long a tick waits for the status polls it started before it decides on
 #: what has arrived; a poll still running is applied on a later tick.
 TWO_NODE_POLL_WAIT_MS = 150
+#: Campaign c7 (F16): the decision thread never makes a blocking RPC to a
+#: node. Node work that is not a renewal or status poll (jc_set_dual_node,
+#: device check + jc_unfence, the leadership reconciliation probe) runs on a
+#: second bounded pool, one call per node (or cluster) in flight, so it can
+#: neither delay a verdict nor starve the renewals of a healthy peer.
+TWO_NODE_WORK_WORKERS = 4
+#: Timeout of the leadership reconciliation's ``get_lvstore`` probe (B6),
+#: no retry: a frozen node is "unknown", never waited for (c7, F16).
+TWO_NODE_LEADER_PROBE_TIMEOUT_S = 1
+#: Timeout of a best-effort fence (planned loss, operator override): the
+#: grant to the peer does not depend on it (c7, F16).
+TWO_NODE_BEST_EFFORT_FENCE_TIMEOUT_S = 1
 #: Campaign c3 (F10): after a node is re-admitted (it was fenced while its
 #: peer may have written alone), the arbiter schedules the data rebuild and
 #: checks every this many seconds whether it has finished ...
@@ -1097,6 +1109,22 @@ TWO_NODE_REBUILD_CHECK_S = 5
 #: ... and schedules it again this often while nothing was queued (e.g. the
 #: node was not ONLINE yet).
 TWO_NODE_REBUILD_SCHEDULE_RETRY_S = 30
+#: Campaign c4, F12: a rebuild whose migration tasks keep failing because a
+#: source or destination device is not available for this long is stuck; the
+#: arbiter flags it and hands the node to the restart flow.
+TWO_NODE_REBUILD_STUCK_S = 120
+#: Campaign c4, F12: at most one device recovery (restart) per node in this window.
+TWO_NODE_DEVICE_RECOVERY_RETRY_S = 300
+#: How long the arbiter's leadership restoration (after an unfence) waits for
+#: the leadership to be confirmed after bdev_lvol_set_leader.
+TWO_NODE_PROMOTE_VERIFY_S = 3
+#: Campaign c5, 07/08: after a heal or a re-admission unfences, the arbiter
+#: puts each LVS's leadership back on its primary; a failed attempt is
+#: retried after this long.
+TWO_NODE_LEADERSHIP_RETRY_MS = 3000
+#: Campaign c5: a port-allow task open longer than this no longer holds back
+#: the arbiter's leadership restoration (it targets the same primary).
+TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60
