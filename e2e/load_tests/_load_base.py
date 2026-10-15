@@ -82,8 +82,7 @@ class LoadSweepMixin:
             return []
         out = []
         with open(self.output_file, newline="") as f:
-            for r in csv.DictReader(f):
-                out.append(r)
+            out.extend(csv.DictReader(f))
         return out
 
     def done_steps(self):

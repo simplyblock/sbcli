@@ -1813,7 +1813,7 @@ class MigrationTestBase(TestClusterBase):
         what the operator addresses a migration by, which is a different
         question and already has :meth:`_pv_for_vol`.
         """
-        for name, reg in self._volume_registry.items():
+        for reg in self._volume_registry.values():
             if reg.get("lvol_id") == vol_id and reg.get("pvc_name"):
                 return reg["pvc_name"]
         return None

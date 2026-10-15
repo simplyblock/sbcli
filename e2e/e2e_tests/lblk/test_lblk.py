@@ -533,7 +533,7 @@ class _LblkBase(TestClusterBase):
     def _churn_all(self, runtime=None):
         if not self.RAW_VERIFY:
             return
-        for _name, (client, dev) in self._lblk_devices.items():
+        for client, dev in self._lblk_devices.values():
             self._verifier.churn(client, dev,
                                  runtime=runtime or self.CHURN_RUNTIME)
 
