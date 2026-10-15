@@ -4,7 +4,7 @@ real FoundationDB.
 
 What is real (imported, not modelled): the arbiter (``arbitration.arbiter``,
 ``decision``, ``events``), its default helpers (leadership restoration,
-promote-at-grant, device check, rebuild-task bookkeeping, the leaderless
+device check, rebuild-task bookkeeping, the leaderless
 reconcile and its probe), the planned-loss marker, the port guards the flows
 consult (``_single_peer_jm_is_complete``, ``_two_node_fence_holds_ports``,
 ``_may_unblock_peer_port``), the ANA helpers, every ``RPCClient`` wrapper
@@ -157,6 +157,7 @@ class World:
         self.collector_instance: dict = {}
         self.decision_blocked_ms: list[int] = []
         self.grants: list = []
+        self.granted_until_heal: set = set()   # survivors since their grant (F17)
         self.fault_at: float | None = None     # when the first fault hit (timing base)
         self.fences: list = []
         self.ana_changed: dict = {}            # (node, port, group) -> last change
@@ -219,6 +220,12 @@ class World:
             raise RPCRemoteError("Method may only be called after framework is initialized "
                                  "using framework_start_init RPC.", -1)
         vt.charge(0.002)
+        if method in ("bdev_lvol_update_lvstore", "bdev_lvol_set_leader_all") and \
+                node.uuid in self.granted_until_heal and \
+                not self.peer_of(node).up:
+            # campaign c7b, F17: nothing moves leadership onto a survivor
+            # after its grant while its peer is gone (#1485)
+            self.violate("%s sent to the survivor %s after its grant" % (method, node.name))
         try:
             return node.rpc(method, params)
         except NotImplementedError:
@@ -240,6 +247,7 @@ class World:
 
     def on_grant(self, node: SimNode, vuids):
         self.log("%s: granted solo %s" % (node.name, vuids))
+        self.granted_until_heal.add(node.uuid)
         self.grants.append((self.vt.time(), node.name))
         self.client.note_grant(node)
 
@@ -502,6 +510,7 @@ class World:
 
     def node_tick(self):
         t = self.vt.time()
+        self.end_grant_window()
         for node in self.nodes:
             if node.proc == "frozen" and t >= node.frozen_until:
                 node.proc = "up"
@@ -544,6 +553,11 @@ class World:
                        and not n.lvstores[lvs].fenced]
             if len(writers) > 1:
                 self.violate("two leaders for %s: %s" % (lvs, [n.name for n in writers]))
+
+    def end_grant_window(self):
+        """Both nodes up again: a later leadership move is the failback's."""
+        if all(n.up for n in self.nodes):
+            self.granted_until_heal.clear()
 
     def unhealthy_reasons(self, all_groups: bool = False) -> list:
         """Everything that keeps the pair from being healthy, without a manual step."""

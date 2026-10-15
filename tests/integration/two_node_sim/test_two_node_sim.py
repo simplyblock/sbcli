@@ -74,7 +74,8 @@ def test_finding_is_detected(make_world, finding):
     out = run(world, sc, stop_on_failure=True, heal_s=60.0)
     assert not out.passed, ("the %s scenario did not detect the bug %s:\n%s"
                             % (finding, sorted(bugs), out.report()))
-    assert any(signature in f for f in out.failures), (
+    signatures = signature if isinstance(signature, tuple) else (signature,)
+    assert any(sig in f for f in out.failures for sig in signatures), (
         "the %s scenario failed, but not for %r:\n%s" % (finding, signature, out.report()))
 
 

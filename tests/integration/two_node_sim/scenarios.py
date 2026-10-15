@@ -25,7 +25,8 @@ BUGS = {
     "no_rebuild_mark": "F10: a re-admitted node is not marked for a data rebuild",
     "no_device_check": "F12: re-admission does not check the node's data devices",
     "no_stuck_rebuild_recovery": "F12: a rebuild failing on unavailable devices retries forever",
-    "no_promote_at_grant": "F13: the survivor is not made leader of the lost primary's LVS",
+    "promote_at_grant": "F17: #1476's promote-at-grant (bdev_lvol_update_lvstore + set_leader on "
+                        "the survivor right after the grant), removed by #1485",
     "port_allow_two_jms": "F14: port_allow requires 2 remote JMs",
     "port_allow_ignores_fence": "F15: port_allow lifts a fenced LVS's client port",
     "blocking_leader_probe": "F16: the leadership probe runs on the decision thread (5 s + retry)",
@@ -68,8 +69,24 @@ def apply_bugs(world, monkeypatch, bugs: set) -> None:
         monkeypatch.setattr(arb, "default_devices_ok", lambda db, node: True)
     if "no_stuck_rebuild_recovery" in bugs:
         monkeypatch.setattr(arb.Arbiter, "_check_rebuild_stuck", lambda self, *a, **k: None)
-    if "no_promote_at_grant" in bugs:
-        monkeypatch.setattr(arb.Arbiter, "promote_after_grant", lambda self, *a, **k: None)
+    if "promote_at_grant" in bugs:
+        real_send = arb.Arbiter.send
+
+        def send(self, rec, verdict, nodes):
+            ok = real_send(self, rec, verdict, nodes)
+            if ok and verdict.kind == dec.V_DEGRADED and verdict.winner and verdict.loser:
+                # pre-#1485: the survivor takes the lost primary's LVS at once
+                taker = next(n for n in nodes if n.get_id() == verdict.winner)
+                lost = next(n for n in nodes if n.get_id() == verdict.loser)
+                if lost.lvstore:
+                    rpc = taker.rpc_client(timeout=10, retry=0)
+                    try:
+                        rpc.bdev_lvol_update_lvstore(lost.lvstore)
+                        rpc.bdev_lvol_set_leader(lost.lvstore, leader=True)
+                    except Exception:               # noqa: BLE001 - logged by the old code
+                        pass
+            return ok
+        monkeypatch.setattr(arb.Arbiter, "send", send)
     if "port_allow_two_jms" in bugs:
         monkeypatch.setattr(pa, "_single_peer_jm_is_complete", lambda db, node, jms: False)
     if "port_allow_ignores_fence" in bugs:
@@ -129,6 +146,7 @@ def hang(name, seconds=4.0):
         w.mark_fault()
         n = w.node(name)
         n.proc, n.frozen_until = "frozen", w.vt.time() + seconds
+        n.frozen_since = w.vt.time()
         w.log("%s: frozen for %.1f s" % (name, seconds))
     return inject
 
@@ -330,11 +348,12 @@ REGRESSIONS = {
            {"no_planned_loss"}, 'grant'),
     "F4": (Scenario("F4-self-fence-readmit", ("F4",), cp_down_during_crash("sn2"), io_errors_ok=True,
                     stall_limit_s=None, aborts_ok=("sn2",)), {"no_self_fence_readmit"}, 'fenced'),
-    "F5": (Scenario("F5-frozen-peer-detection", ("F5",), hang("sn2"), aborts_ok=("sn2",)),
-           {"slow_frozen_detect", "no_lease_expiry_grant"}, 'client stall'),
+    "F5": (Scenario("F5-frozen-peer-detection", ("F5",), hang("sn2"), aborts_ok=("sn2",),
+                    grant_within_s=2.6), {"slow_frozen_detect", "no_lease_expiry_grant"}, "grant"),
     "F6": (Scenario("F6-partition-recovery", ("F6",), partition(), io_errors_ok=True, stall_limit_s=None,
                     heal_s=300, conditions=("jm_needs_reconnect",)), {"no_partition_recovery"}, 'remote JM'),
-    "F7": (Scenario("F7-takeover-time", ("F7",), crash("sn2"), aborts_ok=("sn2",)), {"slow_takeover"}, 'client stall'),
+    "F7": (Scenario("F7-takeover-time", ("F7",), crash("sn2"), aborts_ok=("sn2",)), {"slow_takeover"},
+           "lvstore takeover"),
     "F8": (Scenario("F8-unfence-lifts-ports", ("F8",), partition(), io_errors_ok=True, stall_limit_s=None,
                     heal_s=300), {"unfence_keeps_ports"}, 'unfence of'),
     "F10": (Scenario("F10-stale-node-takeover", ("F10",), stale_takeover("sn2"), io_errors_ok=True,
@@ -343,13 +362,19 @@ REGRESSIONS = {
     "F12": (Scenario("F12-freeze-devices", ("F12",), hang("sn1"), aborts_ok=("sn1",)),
             {"stall_fence", "alceml_stall", "no_device_check", "no_stuck_rebuild_recovery"}, 'not healthy'),
     "F13": (Scenario("F13-frozen-primary-takeover", ("F13",), hang("sn2"), aborts_ok=("sn2",)),
-            {"stall_fence", "no_promote_at_grant"}, 'client stall'),
+            {"stall_fence"}, ("client stall", "not healthy")),
     "F14": (Scenario("F14-port-allow-two-node", ("F14",), partition(), io_errors_ok=True,
                      stall_limit_s=None, heal_s=200), {"port_allow_two_jms"}, 'port_allow'),
     "F15": (Scenario("F15-port-allow-respects-fence", ("F15",), partition(60.0), io_errors_ok=True,
                      stall_limit_s=None, heal_s=300), {"port_allow_ignores_fence"}, 'port_allow lifted fenced port'),
+    "F17": (Scenario("F17-no-leadership-move-after-grant", ("F17",), shutdown_then_restart("sn2"),
+                     grant_within_s=2.2), {"promote_at_grant"}, "after its grant"),
+    # F16 is judged on its own property: the grant arrives although the
+    # leadership probe ran against the frozen node (the stall of a frozen
+    # primary is 02b's and F19's)
     "F16": (Scenario("F16-blocking-leader-probe", ("F16",), freeze_at_leader_probe("sn2"),
-                     aborts_ok=("sn2",), grant_within_s=2.6), {"blocking_leader_probe"}, 'grant'),
+                     aborts_ok=("sn2",), grant_within_s=2.6, stall_limit_s=None),
+            {"blocking_leader_probe"}, 'grant'),
 }
 
 #: finding -> check that the scenario on main really went through the step
@@ -372,18 +397,19 @@ FAST = {"01b-crash-sn2", "02b-hang-sn2", "07-partition", "detect:F16", "detect:F
 #: Known failing on main: scenario -> (reason with the fix that flips it, a
 #: text the failure must contain, so it fails for that reason and no other).
 KNOWN_FAILING = {
-    "04-shutdown-sn2": ("F17: promote-at-grant crashes the survivor on a planned shutdown "
-                        "(fix: remove promote-at-grant)", "JCERR"),
-    "F17-planned-shutdown-promote": ("F17: promote-at-grant crashes the survivor on a planned "
-                                     "shutdown (fix: remove promote-at-grant)", "JCERR"),
+    "F19-long-freeze-primary": ("F19: after #1485 (no promote-at-grant) the survivor does not take "
+                                "a frozen primary's LVS over; its volume stalls until the hublvol "
+                                "keep-alive (5 s) expires or the frozen node aborts on wake "
+                                "(fix: on a solo grant stop redirecting to the lost peer)",
+                                "client stall"),
     "F18-ana-groups-restored": ("F18: the fence restore puts back only the namespaces' ANA "
                                 "groups (fix: restore every group the fence changed)",
                                 "ANA 44"),
 }
 
 EXTRA = [
-    Scenario("F17-planned-shutdown-promote", ("F17",), shutdown_then_restart("sn2"),
-             grant_within_s=2.2),
+    Scenario("F19-long-freeze-primary", ("F19",), hang("sn2", 6.0), aborts_ok=("sn2",),
+             grant_within_s=2.6),
     Scenario("F18-ana-groups-restored", ("F18",), partition(), io_errors_ok=True, stall_limit_s=None,
              heal_s=300, ana_all_groups=True),
 ]

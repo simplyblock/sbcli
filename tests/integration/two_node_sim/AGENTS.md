@@ -16,7 +16,7 @@ and one regression scenario per finding, in CI:
 | Real (the production code runs) | Modelled (`simnode.py`, `actors.py`) |
 |---|---|
 | `arbitration/arbiter.py`, `decision.py`, `events.py`, `planned.py` | the two storage nodes: JC HA state machine (ported rule by rule from ultra `alg_two_node_ha.cpp`), SPDK lvol fence/unfence, port blocks with ownership, ANA groups, takeover latch, devices |
-| the arbiter's default helpers: leadership restore, promote-at-grant, device check, rebuild-task bookkeeping, the leaderless reconcile and its probe | the network (storage link, management link, client link, lossy link) |
+| the arbiter's default helpers: leadership restore, device check, rebuild-task bookkeeping, the leaderless reconcile and its probe | the network (storage link, management link, client link, lossy link) |
 | every `RPCClient` wrapper — only `RPCClient._request` is routed to the simulated node | the client's NVMe multipath IO (KATO 4 s, fast_io_fail 8 s) |
 | the guards the flows consult: `_single_peer_jm_is_complete`, `_two_node_fence_holds_ports`, `_may_unblock_peer_port`, `_jc_compression_status_with_retry`, `_failover_primary_ana`, `_failback_primary_ana`, `_set_lvol_ana_on_node` | the outer shell of the flows the arbiter does not own: monitor (offline, auto-restart, stale-port remediation), restart runner, port-allow runner, migration runner, shutdown flow. Each keeps the real guard calls and models only the RPC-heavy work |
 | `tasks_controller` task records, `set_node_status`, all FDB reads and writes (real FoundationDB, as the integration tier requires) | the Go event collector (same contract: in order per node, `ha_resync` on a new instance) |
@@ -38,14 +38,15 @@ virtual time:
 round trips of the real code (the arbiter alone does about 13 reads per 100 ms
 tick, about 6 of them of the same `ClusterArbitration` record). Measured on a
 developer box with ~2 ms per FDB round trip (WSL2): fast tier 28 s, full tier
-6 min. A native Linux runner has a fraction of that latency.
+8.5 min. A native Linux runner has a fraction of that latency.
 
 ## Invariants (checked continuously or at the end, `runner.py`)
 
 - never two writers for one LVS;
 - no write served by a node missing writes while its up-to-date peer is down (F10);
 - the survivor is granted within lease TTL + margin + a tick (scenario `grant_within_s`);
-- client stall ≤ 3 s for node failures, ≤ 5 s for the client path; no IO errors outside partitions;
+- after a grant, no `bdev_lvol_update_lvstore`/`set_leader` reaches the survivor while its peer is gone (F17);
+- client stall ≤ 3 s for node failures, ≤ 5 s for the client path -- measured as the bed does (tn2 `it/analyze.py`): whole seconds of fio's 1 s IOPS log without a completion, from the injection; no IO errors outside partitions;
 - no node abort except the frozen node's abort-on-wake;
 - the pair is healthy again **without a manual step**: arbiter steady, every LVS normal, remote JMs healthy, no port blocked, devices present, the primary leads its LVS, ANA optimized/non_optimized on the namespaces' groups (all groups for F18), no open task, no pending rebuild.
 
@@ -60,7 +61,9 @@ main and asserts that it passes.
 
 - F9 (distribs rejecting the cluster map after a reboot) is below the RPC level and not modelled.
 - F11 (remote JMs not reconnecting after both links healed) had no identified root cause and did not recur; not modelled beyond 08-both-links.
-- F17 and F18 are open on main: their scenarios (and the bed's 04) are `xfail(strict=True)`; flip them with the fix. F18's node behaviour is `simnode.RESTORE_ALL_ANA_GROUPS`.
+- F18 is open on main: its scenario is an xfail checked against its failure signature; flip it with the fix (`simnode.RESTORE_ALL_ANA_GROUPS`).
+- F19 is open on main (since #1485): a primary frozen for 6 s stalls its volume 4 s, because nothing moves its LVS to the granted survivor; IO resumes when the hublvol keep-alive (`constants.KATO`, 5 s) fails the redirect. Xfail `F19-long-freeze-primary`.
+- Faults are injected 0.5 s into a second of fio's log; the bed's alignment was random, so a bed stall can be one second shorter or longer.
 - The flows' shells are models: a change inside `exec_port_allow_task`, the restart flow or the monitor that is not one of the guards above is not exercised here.
 - `TWO_NODE_STABLE_FOR_S` is 5 s in the simulator (30 s in production); it only delays the heal.
 

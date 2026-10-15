@@ -41,6 +41,8 @@ FAST_IO_FAIL_S = 8.0
 #: optimized path (the bed measured 2-3 s, not KATO, in 02b).
 DEPTH = 256
 CLIENT_KATO_S = float(constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO)
+#: keep-alive of the node-to-node NVMe controllers (hublvol, remote JM)
+HUBLVOL_KATO_S = float(constants.KATO) / 1000.0
 
 
 class ControlPlane:
@@ -342,6 +344,17 @@ class ControlPlane:
         w.vt.after(3.0, self.migration_tick)
 
 
+def zero_run(per_sec: dict, first: int, last: int) -> int:
+    """Longest run of consecutive seconds without a completion in
+    ``[first, last]`` -- the bed's ``max_stall_after_inject_s`` (tn2
+    it/analyze.py over fio's 1 s IOPS log)."""
+    longest = cur = 0
+    for sec in range(first, last + 1):
+        cur = cur + 1 if per_sec.get(sec, 0) == 0 else 0
+        longest = max(longest, cur)
+    return longest
+
+
 class Client:
     """NVMe/TCP multipath client writing to every volume (KATO 4, fast_io_fail 8)."""
 
@@ -349,7 +362,10 @@ class Client:
         self.world = world
         self.pending: dict = {}          # vol -> outstanding writes
         self.last_ack: dict = {}
-        self.max_stall: dict = {}
+        self.max_stall: dict = {}      # longest continuous gap (diagnostic)
+        self.completions: dict = {}    # vol -> {second since fio start: completions}
+        self.fio_start = 0.0
+        self.measure_from = 0.0
         self.stalls: list = []
         self.io_errors: dict = {}
         self.acks_by: dict = {}          # (lvs, node) -> last ack time
@@ -359,6 +375,7 @@ class Client:
 
     def start(self):
         now = self.world.vt.time()
+        self.fio_start = now
         for v in self.world.vols:
             self.last_ack[v] = now
             self.max_stall[v] = 0.0
@@ -368,8 +385,16 @@ class Client:
     def note_grant(self, node):
         pass
 
+    def stall_s(self, inject_at: float) -> dict:
+        """Per volume, the bed's stall metric from ``inject_at`` to now."""
+        now = self.world.vt.time()
+        first = max(0, int(inject_at - self.fio_start))
+        last = int(now - self.fio_start) - 1          # the current second is not complete
+        return {v: zero_run(self.completions.get(v, {}), first, last) for v in self.world.vols}
+
     def reset_metrics(self):
         now = self.world.vt.time()
+        self.measure_from = now
         for v in self.world.vols:
             self.last_ack[v] = now
             self.max_stall[v] = 0.0
@@ -429,16 +454,24 @@ class Client:
         plvs = peer.lvstores[lvs_name]
         if peer.proc in ("up", "frozen") and w.net.data_ok(node, peer) and depth == 0:
             if peer.proc == "frozen":
-                return "wait"
-            if plvs.leader:
+                # the hublvol controller to a frozen peer stays connected until
+                # its keep-alive expires (SPDK-to-SPDK KATO); then the redirect
+                # fails and the next IO takes the LVS over
+                if w.vt.time() - peer.frozen_since < HUBLVOL_KATO_S:
+                    return "wait"
+                plvs = None
+            if plvs is not None and plvs.leader:
                 return self._serve(peer, lvs_name, depth=1)
-            if plvs.fenced:
+            if plvs is not None and plvs.fenced:
                 return "wait"                        # F13: redirect to a fenced primary
         if lvs.takeover_blocked:
             return "error"
         # IO-triggered takeover: lvstore update, 73 ms on new_md_journal
         # (4.05 s on master's md-journal, campaign c3 F7)
         delay = 4.05 if "slow_takeover" in node.bugs else w.takeover_s
+        if delay > 1.0:
+            # campaign c3, F7: the takeover held client IO for 4 s
+            w.violate("%s: lvstore takeover of %s takes %.2f s (> 1 s)" % (node.name, lvs_name, delay))
         lvs.takeover_until = w.vt.time() + delay
         w.log("%s: takes over %s on new IO (%.0f ms)" % (node.name, lvs_name, delay * 1000))
         return "wait"
@@ -486,6 +519,9 @@ class Client:
                     queue.remove(io)
                     self.io_errors[vname] += 1
             if done_any:
+                sec = int(now - self.fio_start)
+                per = self.completions.setdefault(vname, {})
+                per[sec] = per.get(sec, 0) + 1
                 gap = now - self.last_ack[vname]
                 if gap > self.max_stall[vname]:
                     self.max_stall[vname] = gap

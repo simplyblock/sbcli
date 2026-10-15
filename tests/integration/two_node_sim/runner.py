@@ -10,6 +10,7 @@ class Outcome:
     name: str
     failures: list = field(default_factory=list)
     max_stall_s: float = 0.0
+    max_gap_s: float = 0.0
     io_errors: int = 0
     grant_after_s: float | None = None
     healed_after_s: float | None = None
@@ -21,8 +22,9 @@ class Outcome:
         return not self.failures
 
     def report(self) -> str:
-        head = "%s: %s (stall %.2f s, IO errors %d, grant %s, healed %s)" % (
-            self.name, "PASS" if self.passed else "FAIL", self.max_stall_s, self.io_errors,
+        head = "%s: %s (stall %d s [gap %.2f s], IO errors %d, grant %s, healed %s)" % (
+            self.name, "PASS" if self.passed else "FAIL", self.max_stall_s, self.max_gap_s,
+            self.io_errors,
             "-" if self.grant_after_s is None else "%.2f s" % self.grant_after_s,
             "-" if self.healed_after_s is None else "%.0f s" % self.healed_after_s)
         return "\n".join([head] + ["  - " + f for f in self.failures] +
@@ -36,6 +38,11 @@ def run(world, sc, stop_on_failure: bool = False, heal_s: float | None = None) -
     the buggy variant only needs to be caught, not run to the end)."""
     out = Outcome(sc.name)
     vt = world.vt
+    # Inject half a second into a second of fio's 1 s IOPS log: the bed's
+    # stall metric counts whole empty seconds, so the alignment of a fault
+    # changes the count by one; the bed's was random, ours is fixed.
+    phase = (vt.time() - world.client.fio_start) % 1.0
+    world.run((0.5 - phase) % 1.0)
     t0 = vt.time()
     world.log("=== scenario %s ===" % sc.name)
     sc.inject(world)
@@ -73,10 +80,14 @@ def run(world, sc, stop_on_failure: bool = False, heal_s: float | None = None) -
                                 % (vt.time() - t0, world.unhealthy_reasons(all_groups=sc.ana_all_groups)))
 
     out.failures[:0] = hard_failures()
-    out.max_stall_s = max(world.client.max_stall.values())
+    # The bed's metric: whole seconds of fio's 1 s IOPS log without a
+    # completion, counted from the injection (c5 02b: a ~4 s gap = 3).
+    out.max_stall_s = max(world.client.stall_s(world.fault_at or t0).values())
+    out.max_gap_s = max(world.client.max_stall.values())
     out.io_errors = sum(world.client.io_errors.values())
     if sc.stall_limit_s is not None and out.max_stall_s > sc.stall_limit_s:
-        out.failures.append("client stall %.2f s > %.1f s" % (out.max_stall_s, sc.stall_limit_s))
+        out.failures.append("client stall %d s > %.0f s (gap %.2f s)"
+                            % (out.max_stall_s, sc.stall_limit_s, out.max_gap_s))
     base = world.fault_at if world.fault_at is not None else t0
     grants = [t - base for t, _ in world.grants if t >= base]
     out.grant_after_s = grants[0] if grants else None

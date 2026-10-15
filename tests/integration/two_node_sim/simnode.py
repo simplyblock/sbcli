@@ -86,6 +86,7 @@ class SimNode:
         # process: up | frozen | dead (SPDK gone, proxy answers 500) | down (host off)
         self.proc = "up"
         self.frozen_until = 0.0
+        self.frozen_since = 0.0
         self.started_at = 0.0
         self.aborts: list[tuple[float, str]] = []
         self.shutting_down = False       # planned stop in progress (CP flow)
