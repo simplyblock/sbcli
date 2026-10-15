@@ -379,9 +379,14 @@ class LblkRapidOutageStressDocker(_LblkQuickHooks, _LblkStressMixin,
     migration the outage triggers. Between the two, an lblk failure that only
     appears under migration is attributable to it.
 
-    Opts in to storage_node_reboot on top of the base's three. That type has a
-    branch in the base but is deliberately absent from its default list, so
-    adding it here changes this test and nothing else.
+    storage_node_reboot used to be opted into here, on top of the base's
+    three. The base now carries it as well, so that the nvme and lblk soaks
+    inject the same four outages and a failure in one is comparable with a
+    failure in the other. The append below is therefore a no-op today; it is
+    kept, and guarded, so this class still gets the reboot if the base's list
+    is ever narrowed again -- on lblk it is the outage that matters most,
+    being the only one that reloads the lvstore from disk through the kernel
+    block layer.
     """
 
     def __init__(self, **kwargs):

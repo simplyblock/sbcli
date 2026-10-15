@@ -830,6 +830,19 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         self.max_fault_tolerance = 1       # overwritten in run()
         self._last_outage_node = None      # for non-related node selection
         self.k8s_utils = None              # initialised in run() when k8s_test=True
+        # Same four outages as LblkRapidOutageStressDocker, so a failure here
+        # and a failure there are comparable. The base deliberately leaves
+        # storage_node_reboot out of its default list and documents the branch
+        # at _perform_outage as opt-in; lblk_stress.py opts in the same way.
+        #
+        # It is the only outage that reloads a node's lvstore from disk rather
+        # than restarting a process, so without it this lane never exercises
+        # the path a node actually takes after a host reboot -- and on lblk
+        # that path goes back through the kernel block layer, where the
+        # 512-byte sector handling lives. The k8s filters later in run() strip
+        # network_interrupt types only, so this survives them.
+        if "storage_node_reboot" not in self.outage_types:
+            self.outage_types.append("storage_node_reboot")
         # Gap pacing (MIN/MAX_OUTAGE_GAP_SEC, _node_online_ts,
         # _outaged_since_checkpoint) comes from TestClusterBase.
         # Bootstrap objects are pinned: mounted, running FIO, never deleted, so
