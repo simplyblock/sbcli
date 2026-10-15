@@ -16,7 +16,7 @@ import threading
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.arbitration.arbiter import Arbiter, rpc_pool
+from simplyblock_core.arbitration.arbiter import Arbiter, rpc_pool, work_pool
 
 logger = utils.get_logger(__name__)
 
@@ -36,7 +36,7 @@ def main() -> None:
     db = db_controller.DBController()
     # Renewals and status polls run on a bounded pool, one per node in flight
     # (campaign c3, 02a); decisions stay on this loop.
-    arbiter = Arbiter(db, rpc_pool=rpc_pool())
+    arbiter = Arbiter(db, rpc_pool=rpc_pool(), work_pool=work_pool())
     stop = threading.Event()
     threading.Thread(target=_lease_loop, args=(arbiter, stop), daemon=True,
                      name="lease-loop").start()

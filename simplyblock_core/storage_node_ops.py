@@ -11281,14 +11281,14 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     return None
 
 
-def _lvs_leader_probe(nodes, lvs_name):
+def _lvs_leader_probe(nodes, lvs_name, timeout=5, retry=1):
     """``(leaders, unknown)`` for ``lvs_name`` over ``nodes``: the nodes that
     report "lvs leadership", and whether any node could not be asked (then
     "no leader" cannot be concluded)."""
     leaders, unknown = [], False
     for node in nodes:
         try:
-            info = node.rpc_client(timeout=5, retry=1).get_lvstore(lvs_name)
+            info = node.rpc_client(timeout=timeout, retry=retry).get_lvstore(lvs_name)
         except Exception as e:                      # noqa: BLE001 - unknown, not "no"
             logger.debug("get_lvstore %s on %s failed: %s", lvs_name, node.get_id()[:8], e)
             unknown = True
@@ -11298,7 +11298,8 @@ def _lvs_leader_probe(nodes, lvs_name):
     return leaders, unknown
 
 
-def reconcile_lvs_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=()):
+def reconcile_lvs_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=(),
+                             probe_timeout=5, probe_retry=1):
     """Restore leadership of an LVS that lost it while its primary is healthy.
 
     Two-node campaign c1, B6: after fence -> resync -> unfence an LVS can be
@@ -11316,7 +11317,9 @@ def reconcile_lvs_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=()):
     grant, grant verified). No ad-hoc leadership RPC is sent from here.
 
     ``skip_jm_vuids``: LVS the caller knows to be fenced, holding or solo on a
-    node (arbitration owns them). Returns ``(restored, leaderless)`` LVS names.
+    node (arbitration owns them). ``probe_timeout``/``probe_retry``: the
+    ``get_lvstore`` probe of each member (the arbiter asks with 1 s, no retry;
+    campaign c7, F16). Returns ``(restored, leaderless)`` LVS names.
     """
     restored: list[str] = []
     leaderless: list[str] = []
@@ -11335,7 +11338,8 @@ def reconcile_lvs_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=()):
             continue
         if int(primary.jm_vuid) in skip or primary.health_check is False:
             continue
-        leaders, unknown = _lvs_leader_probe(members, lvs_name)
+        leaders, unknown = _lvs_leader_probe(members, lvs_name, timeout=probe_timeout,
+                                             retry=probe_retry)
         if leaders or unknown:
             continue
         leaderless.append(lvs_name)
