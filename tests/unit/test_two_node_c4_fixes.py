@@ -4,8 +4,8 @@ F12: a node woken from a freeze can have lost its data devices (alceml's
 stuck-IO watchdog shut them down) while every status still says online. It is
 never re-admitted by unfence alone; it goes through the restart flow, and a
 rebuild stuck on unavailable devices is flagged and recovered the same way.
-F13: the survivor of a lost primary takes that LVS's leadership right after
-the grant instead of redirecting IO to the fenced primary.
+F17 (campaign c7b, replaces F13): no survivor promotion after the grant; the
+survivor's SPDK died in that promotion during a graceful shutdown.
 
 The arbiter is gated per cluster (``two_node_arbitration``); nothing here runs
 on any other cluster.
@@ -17,7 +17,6 @@ import pytest
 
 from simplyblock_core import constants
 from simplyblock_core.arbitration import arbiter as arb
-from simplyblock_core.arbitration import decision as d
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from tests.unit.test_two_node_arbiter import (  # noqa: F401 - fixture
@@ -167,70 +166,42 @@ def test_f12_rebuild_errors_cleared_restart_the_clock(env):  # noqa: F811
     assert not db.rec.rebuild[B].get("stuck") and B not in db.rec.device_recovery
 
 
-# ---- F13: survivor promotion -------------------------------------------------------
+# ---- F17: no survivor promotion after the grant ----------------------------------
+# Campaign c7b, 04: #1476's promote-at-grant (bdev_lvol_update_lvstore +
+# bdev_lvol_set_leader on the survivor right after the grant) ran into the
+# graceful-shutdown handoff and the survivor's SPDK died in the update RPC
+# (160 client EIO). It was removed: abort-on-wake covers a frozen primary, the
+# leadership restoration after an unfence covers partitions, and the shutdown /
+# restart flow hands leadership over on a planned loss.
+
+_LEADERSHIP_RPCS = ("bdev_lvol_update_lvstore", "bdev_lvol_set_leader")
+
 
 def _primary(nodes, nid, lvs, secondary=False):
     nodes[nid].lvstore = lvs
     nodes[nid].is_secondary_node = secondary
 
 
-def _wire_promote(a, result=True):
+def _leadership_rpcs(node):
+    return [c for c in node.calls if c[0] in _LEADERSHIP_RPCS]
+
+
+def test_f17_the_grant_sends_no_leadership_rpc_to_the_survivor(env):  # noqa: F811
+    a, db, nodes, clock, _ = env
+    _primary(nodes, B, "LVS_B")
     a.run_async = lambda fn: fn()
-    a.promotions = []
-
-    def promote(cid, survivor, primary, lvs):
-        a.promotions.append((cid, survivor.get_id(), primary.get_id(), lvs))
-        return result
-    a.promote_survivor = promote
-
-
-def test_f13_survivor_takes_the_lost_primarys_lvs_after_the_grant(env):  # noqa: F811
-    a, db, nodes, clock, _ = env
-    _primary(nodes, B, "LVS_B")
-    _wire_promote(a)
     _b_frozen_and_granted(a, db, nodes, clock)
-    assert a.promotions == [(CL, A, B, "LVS_B")]
-    entry = db.rec.promoted["LVS_B"]
-    assert entry["node"] == A and entry["ok"] is True and entry["epoch"] == db.rec.epoch
-    # fence-then-grant: the grant (and so the promotion) came after the fence
-    names = [c[0] for c in nodes[A].calls]
-    assert "jc_grant_solo" in names
-
-
-def test_f13_promotion_happens_once_per_loss(env):  # noqa: F811
-    a, db, nodes, clock, _ = env
-    _primary(nodes, B, "LVS_B")
-    _wire_promote(a)
-    _b_frozen_and_granted(a, db, nodes, clock)
+    assert calls(nodes[A], "jc_grant_solo")
     for _ in range(3):
         tick(a, nodes)
-    assert len(a.promotions) == 1
+    assert _leadership_rpcs(nodes[A]) == []
 
 
-def test_f13_failed_promotion_is_recorded(env):  # noqa: F811
-    a, db, nodes, clock, _ = env
-    _primary(nodes, B, "LVS_B")
-    _wire_promote(a, result=False)
-    _b_frozen_and_granted(a, db, nodes, clock)
-    assert db.rec.promoted["LVS_B"]["ok"] is False
-
-
-def test_f13_no_promotion_when_the_lost_node_is_a_secondary(env):  # noqa: F811
-    a, db, nodes, clock, _ = env
-    _primary(nodes, B, "LVS_B", secondary=True)
-    _wire_promote(a)
-    _b_frozen_and_granted(a, db, nodes, clock)
-    assert a.promotions == []
-
-
-def test_f13_not_on_a_partition(env):  # noqa: F811
-    a, db, nodes, clock, _ = env
-    _primary(nodes, B, "LVS_B")
-    _wire_promote(a)
-    v = d.Verdict(d.V_PARTITION, "partitioned", grant={}, fence_all={3: [A, B], 4: [A, B]})
-    a.promote_after_grant(db.rec or a.record(CL, [nodes[A], nodes[B]]), v,
-                          [nodes[A], nodes[B]])
-    assert a.promotions == []
+def test_f17_promote_at_grant_is_gone():
+    assert not hasattr(arb.Arbiter, "promote_after_grant")
+    assert not hasattr(arb, "default_promote_survivor")
+    from simplyblock_core.models.arbitration import ClusterArbitration
+    assert "promoted" not in ClusterArbitration().get_attrs_map()
 
 
 # ---- defaults ----------------------------------------------------------------------
