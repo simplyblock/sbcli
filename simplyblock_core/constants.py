@@ -1128,3 +1128,6 @@ TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60
+
+# TEST REVERT: lvstore cluster size as a ratio of the distrib page (pre-#1296).
+LVOL_CLUSTER_RATIO = 1
