@@ -2174,14 +2174,11 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "crypto" and not sync:
-            # Mirrors the bdev_lvol/bdev_lvol_clone handling below: a retried
-            # teardown pass can reach this branch after the crypto bdev (and
-            # its key) were already removed on a prior pass, and
-            # lvol_crypto_delete/lvol_crypto_key_delete raise RPCRemoteError
-            # (-ENODEV) in that case rather than returning falsy. Left
-            # unhandled, that exception escaped _remove_bdev_stack entirely —
-            # skipping the all_removed=False path and the RuntimeError below —
-            # so the delete never converged (SFAM-2826).
+            # A retried teardown pass can reach this branch after the crypto
+            # bdev (and its key) were already removed on a prior pass. The
+            # already-absent case is handled inside the RPC calls themselves
+            # (idempotent=True) rather than here, so a genuine failure is the
+            # only thing left to turn into "not removed" below (SFAM-2826).
             try:
                 present = rpc_client.bdev_get(name) is not None
             except RPCException as e:
@@ -2194,22 +2191,11 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
                 bdev['status'] = 'deleted'
                 continue
             try:
-                ret = rpc_client.lvol_crypto_delete(name)
-            except RPCRemoteError as e:
-                if e.code == -errno.ENODEV:
-                    logger.info(f"BDev {name} reported absent by the delete")
-                    bdev['status'] = 'deleted'
-                    continue
+                rpc_client.lvol_crypto_delete(name, idempotent=True)
+                rpc_client.lvol_crypto_key_delete(f'key_{name}', idempotent=True)
+                ret = True
+            except RPCRemoteError:
                 ret = None
-            if ret:
-                try:
-                    ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
-                except RPCRemoteError as e:
-                    if e.code == -errno.ENODEV:
-                        logger.info(f"Crypto key key_{name} reported absent by delete")
-                        bdev['status'] = 'deleted'
-                        continue
-                    ret = None
 
         elif type == "bdev_lvstore":
             try:
