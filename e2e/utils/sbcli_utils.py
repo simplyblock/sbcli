@@ -582,7 +582,7 @@ class SbcliUtils:
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
                  crypto=False, fabric="tcp", cluster_id=None,
-                 max_namespace_per_subsys=30, namespace=None):
+                 max_namespace_per_subsys=None, namespace=None):
         """Adds lvol with given params
         """
         lvols = self.list_lvols(exclude_in_deletion=True)
@@ -611,6 +611,20 @@ class SbcliUtils:
         if crypto:
             body["crypto"] = True
         
+        # Default None, i.e. omitted, and that matters for the namespaced
+        # path below. It was briefly defaulted to 30 (2026-10-14) to make
+        # every test exercise a shared subsystem; that broke the children.
+        # A child created with namespace=True joins a parent whose ceiling
+        # the parent chose -- 10 in the rapid-failover lane -- and sending
+        # a different ceiling alongside "namespaced" made the join stop
+        # producing a block device on the client. The control plane still
+        # reported the child as joined, so it failed silently: 0 of 4
+        # children lost a device on 10-13 before the change, then 2 of 6,
+        # 2 of 5, 5 of 6 and finally 6 of 6, at which point the lane could
+        # not find a single shared subsystem and failed in bootstrap.
+        #
+        # A test that wants a specific ceiling passes one. A child that is
+        # joining an existing subsystem must inherit it.
         if max_namespace_per_subsys is not None:
             body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
 
