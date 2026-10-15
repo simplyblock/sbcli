@@ -441,6 +441,7 @@ class Client:
                 return "wait"                        # lvstore update after the takeover
             lvs.takeover_until = 0.0
             lvs.leader = True
+            lvs.redirect_stopped = False
             w.on_leader(node, lvs, "IO takeover")
         if lvs.leader:
             if lv.state == SOLO:
@@ -452,7 +453,8 @@ class Client:
             return "wait"                            # remote JM not acking yet
         # non-leader: redirect over the hublvol to the leader
         plvs = peer.lvstores[lvs_name]
-        if peer.proc in ("up", "frozen") and w.net.data_ok(node, peer) and depth == 0:
+        if (not lvs.redirect_stopped and peer.proc in ("up", "frozen")
+                and w.net.data_ok(node, peer) and depth == 0):
             if peer.proc == "frozen":
                 # the hublvol controller to a frozen peer stays connected until
                 # its keep-alive expires (SPDK-to-SPDK KATO); then the redirect

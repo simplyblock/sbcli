@@ -61,7 +61,7 @@ main and asserts that it passes.
 
 - F9 (distribs rejecting the cluster map after a reboot) is below the RPC level and not modelled.
 - F11 (remote JMs not reconnecting after both links healed) had no identified root cause and did not recur; not modelled beyond 08-both-links.
-- F18 is open on main: its scenario is an xfail checked against its failure signature; flip it with the fix (`simnode.RESTORE_ALL_ANA_GROUPS`).
+- F18 and F19 are open on main: their scenarios are xfails checked against their failure signature. Their fixes exist as pending PRs (SPDK #80, #81; ultra #215), modelled as node capabilities in `simnode.py` (`CAP_ANA_RESTORE_ALL`, `CAP_GRANT_STOPS_REDIRECT`). `test_pending_fix_passes` runs each with its fix's capability and must pass; `test_bed_scenario_with_pending_caps` runs every bed scenario with all pending capabilities. When a fix merges into the deployed node image, add its capability to `simnode.DEPLOYED_CAPS` and remove the scenario from `KNOWN_FAILING` and `PENDING_FIX`.
 - F19 is open on main (since #1485): a primary frozen for 6 s stalls its volume 4 s, because nothing moves its LVS to the granted survivor; IO resumes when the hublvol keep-alive (`constants.KATO`, 5 s) fails the redirect. Xfail `F19-long-freeze-primary`.
 - Faults are injected 0.5 s into a second of fio's log; the bed's alignment was random, so a bed stall can be one second shorter or longer.
 - The flows' shells are models: a change inside `exec_port_allow_task`, the restart flow or the monitor that is not one of the guards above is not exercised here.

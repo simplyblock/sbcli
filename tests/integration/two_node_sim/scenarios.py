@@ -407,6 +407,15 @@ KNOWN_FAILING = {
                                 "ANA 44"),
 }
 
+#: Open findings whose fix exists as a pending PR stack: scenario -> the node
+#: capabilities (``simnode``) that model the fix. On DEPLOYED_CAPS the scenario
+#: stays in KNOWN_FAILING; with these capabilities it must pass (bed run c8:
+#: SPDK #80 + #81 on new_md_journal, ultra #214 + #215).
+PENDING_FIX = {
+    "F19-long-freeze-primary": frozenset({"grant_stops_redirect"}),
+    "F18-ana-groups-restored": frozenset({"ana_restore_all_groups"}),
+}
+
 EXTRA = [
     Scenario("F19-long-freeze-primary", ("F19",), hang("sn2", 6.0), aborts_ok=("sn2",),
              grant_within_s=2.6),

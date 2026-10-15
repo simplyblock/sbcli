@@ -20,6 +20,7 @@ from .scenarios import (
     FAST,
     KNOWN_FAILING,
     NOT_MODELLED,
+    PENDING_FIX,
     REGRESSIONS,
 )
 
@@ -77,6 +78,29 @@ def test_finding_is_detected(make_world, finding):
     signatures = signature if isinstance(signature, tuple) else (signature,)
     assert any(sig in f for f in out.failures for sig in signatures), (
         "the %s scenario failed, but not for %r:\n%s" % (finding, signature, out.report()))
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+@pytest.mark.parametrize("sc", [s for s in EXTRA if s.name in PENDING_FIX], ids=lambda s: s.name)
+def test_pending_fix_passes(make_world, sc):
+    """An open finding passes with the capabilities of its pending fix (the PR
+    stack under test on the bed), while ``test_bed_scenario`` keeps it failing
+    for its known reason on what main deploys."""
+    from .simnode import DEPLOYED_CAPS
+    caps = DEPLOYED_CAPS | PENDING_FIX[sc.name]
+    world = make_world(conditions=sc.conditions, caps=caps)
+    out = run(world, sc)
+    assert out.passed, "%s with %s:\n%s" % (sc.name, sorted(caps), out.report())
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+@pytest.mark.parametrize("sc", BED, ids=lambda s: s.name)
+def test_bed_scenario_with_pending_caps(make_world, sc):
+    """The pending capabilities must not break any bed scenario."""
+    from .simnode import ALL_CAPS
+    world = make_world(conditions=sc.conditions, caps=ALL_CAPS)
+    out = run(world, sc)
+    assert out.passed, "%s with %s:\n%s" % (sc.name, sorted(ALL_CAPS), out.report())
 
 
 @pytest.mark.parametrize("finding", sorted(NOT_MODELLED))

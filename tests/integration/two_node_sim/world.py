@@ -135,10 +135,12 @@ VUIDS = {"LVS_1": 1, "LVS_6": 6}
 
 
 class World:
-    def __init__(self, db, seed: int = 1, bugs: set | None = None):
+    def __init__(self, db, seed: int = 1, bugs: set | None = None, caps=None):
+        from .simnode import DEPLOYED_CAPS
         self.db = db
         self.seed = seed
         self.bugs = set(bugs or ())
+        self.caps = frozenset(DEPLOYED_CAPS if caps is None else caps)
         self.vt = VirtualTime()
         self.t0 = self.vt.now
         self.net = Net(self)
@@ -391,6 +393,7 @@ class World:
             sim = SimNode(self, n.hostname, n.uuid, n.mgmt_ip, n.rpc_port,
                           n.data_nics[0].ip4_address, int(n.jm_vuid))
             sim.bugs = self.bugs
+            sim.caps = self.caps
             self.nodes.append(sim)
             self.by_ep[(n.mgmt_ip, n.rpc_port)] = sim
         for i, n in enumerate(recs):
