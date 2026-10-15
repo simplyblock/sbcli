@@ -628,6 +628,30 @@ the node's LVS is fenced or holding, or the HA state cannot be read
 - Only a node with exactly one remote JM is checked, so a cluster with 3 or more members never
   reaches it (no extra read or call).
 
+### 7.14 Availability without the arbiter
+
+With arbitration on, a node never continues alone on its own judgement. A node that loses its peer goes to `holding` and needs the arbiter's grant (`jc_grant_solo`); without a verdict it fences itself at the hold deadline (`hold_ms`, 2500 ms) or when its lease (`lease_ttl_ms`, 1500 ms) runs out while holding. There is no preferred node (removed 2026-10-12, campaign c1: at a partition it let the preferred node continue while the other was still writing). The arbiter (`TwoNodeArbiter`, a control-plane service) is therefore part of the failover path.
+
+| Situation | Behaviour |
+|---|---|
+| Node fails, arbiter reachable | Survivor granted solo: on peer loss via HTTP 500 at once, otherwise on peer lease expiry (TTL + margin, about 2 s). |
+| Node fails, arbiter unreachable | Survivor fences itself at the hold deadline. No failover; the LVS stays unavailable until the arbiter returns and re-admits a node. |
+| Arbiter unreachable, both nodes healthy | No effect. Lease expiry fences only a `holding` LVS, never a healthy LVS in `normal`. |
+| Partition between the nodes, arbiter reachable | `fence_both` (epoch raised). After the link heals: unfence both, then the arbiter restores leadership and ANA on each LVS's primary (7.13). |
+| Partition and arbiter unreachable | Both nodes fence themselves at the hold deadline. |
+| Node frozen (SIGSTOP, reactor stall) | Peer detected unavailable after `remote_jm_timeout_ms` (1000 ms); survivor granted on lease expiry; the frozen node aborts on wake (ultra #211) and comes back through restart. |
+| Client path loss to one node | NVMe multipath/ANA on the host; no arbiter involvement. |
+| Two-node cluster without arbitration (plain `dual_node`) | Survivor continues alone (JC dual-node tolerance), no split-brain protection. |
+
+**Why:** with two nodes, a survivor cannot tell a dead peer from a broken link; continuing alone risks two writers. The arbiter is the third vote; the design chooses consistency over availability when the third vote is missing.
+
+**Deployment requirement:** the control plane that hosts the arbiter must be highly available, or placed in a third failure domain relative to the two storage nodes (no shared power, network or location). A node failure during a control-plane outage means downtime for that cluster.
+
+**Options considered:**
+- A lightweight external witness (independent of the full control plane): possible future work.
+- A preferred-node fallback at the hold deadline: removed 2026-10-12 because it reintroduces split brain on partitions.
+- Documenting the requirement: done here and in the user documentation (edge clusters, hardware requirements).
+
 ## 8. Healing and re-admission
 
 1. Both nodes report `remote_jm_healthy`; after `stable_for_s` the arbiter enters `healing`.
