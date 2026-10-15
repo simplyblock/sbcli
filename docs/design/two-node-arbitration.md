@@ -347,6 +347,22 @@ running is applied on a later tick and never started twice. The capability probe
 pool too. Decisions stay single-threaded and deterministic. Expected grant for a frozen peer:
 last renewal + `lease_ttl_ms` + `lease_margin_ms`, plus at most one decision tick.
 
+**Rule (campaign c7, F16): the decision thread never makes a blocking RPC to a node.** In c7/02b
+the leadership reconciliation (section 7.7) probed a node with `get_lvstore` on the decision
+thread just as that node froze; the call waited its 5 s timeout, the grant to the healthy peer on
+the frozen node's expired lease never came, the peer fenced itself at its hold deadline and the
+client got EIO. Every other node call the tick needs therefore runs on a second bounded pool
+(`work_workers`): `jc_set_dual_node` (`configure_due`), the device check + `jc_unfence` of a heal
+or self-fence re-admission, and the leadership reconciliation pass. At most one call per node (per
+cluster for the reconciliation) is in flight; the tick never waits for them and applies, on the
+decision thread, whatever has finished (`_drain_work`). The second pool keeps calls blocked on a
+frozen node from starving the renewals of its healthy peer. Leadership restoration (section 7.13),
+survivor promotion (7.12) and partition recovery (7.9) already ran off the loop. What remains on the
+decision thread is the verdict send to a node that answers: fence-then-grant of a partition (both
+nodes reachable), the grant to the survivor, and best-effort fences (planned loss, operator
+override), which use a `best_effort_fence_timeout_s` timeout and never hold the grant up. A degraded
+verdict for a frozen (lease-expired) peer carries no fence at all.
+
 ### 7.4 CP API
 
 | Method | Path | Body / result | Use |
@@ -402,7 +418,9 @@ After fence -> resync -> unfence an LVS can be left without a leader on either n
 B6). Every `leadership_reconcile_s` (10 s), while the cluster is `steady`, the arbiter checks
 each node's primary LVS. One whose primary is online and healthy, whose members are all online
 and answer, whose HA state is `normal` on both nodes, and that no member leads on two
-consecutive passes, is restored through the existing guarded leaderless-recovery path
+consecutive passes (each member asked with `get_lvstore`, `leader_probe_timeout_s`, no retry; the
+pass runs on the work pool and is skipped while a node is unreachable, lost, stopped by the
+control plane or holding: campaign c7, F16), is restored through the existing guarded leaderless-recovery path
 (`storage_node_ops._recover_leaderless_lvs`: single-flight lock with cooldown, no restart or
 port-allow task active, JM quorum on the primary, metadata reload before the grant, grant
 verified), never by ad-hoc RPCs. A restore, and every verdict epoch, resets the migration
@@ -698,6 +716,9 @@ setting brings that below KATO.
 | `jc_compression` precheck retry | 60 s | restart flow, while the leader re-levels the returning JM (section 8.1) |
 | `rpc_workers` | 4 | arbiter, pool for renewals and status polls (section 7.3) |
 | `poll_wait_ms` | 150 | arbiter, longest wait of a tick for its status polls (section 7.3) |
+| `work_workers` | 4 | arbiter, pool for configure, unfence and leadership reconciliation (section 7.3) |
+| `leader_probe_timeout_s` | 1 | arbiter, leadership reconciliation probe, no retry (section 7.7) |
+| `best_effort_fence_timeout_s` | 1 | arbiter, fence of a planned loss or operator override (section 7.3) |
 | `rebuild_check_s` | 5 | arbiter, rebuild progress check (section 7.10) |
 | `rebuild_schedule_retry_s` | 30 | arbiter, re-queue when nothing was queued (section 7.10) |
 | `rebuild_stuck_s` | 120 | arbiter, rebuild failing on unavailable devices before recovery (section 7.11) |

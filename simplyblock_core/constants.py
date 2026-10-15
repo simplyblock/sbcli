@@ -1090,6 +1090,18 @@ TWO_NODE_RPC_WORKERS = 4
 #: How long a tick waits for the status polls it started before it decides on
 #: what has arrived; a poll still running is applied on a later tick.
 TWO_NODE_POLL_WAIT_MS = 150
+#: Campaign c7 (F16): the decision thread never makes a blocking RPC to a
+#: node. Node work that is not a renewal or status poll (jc_set_dual_node,
+#: device check + jc_unfence, the leadership reconciliation probe) runs on a
+#: second bounded pool, one call per node (or cluster) in flight, so it can
+#: neither delay a verdict nor starve the renewals of a healthy peer.
+TWO_NODE_WORK_WORKERS = 4
+#: Timeout of the leadership reconciliation's ``get_lvstore`` probe (B6),
+#: no retry: a frozen node is "unknown", never waited for (c7, F16).
+TWO_NODE_LEADER_PROBE_TIMEOUT_S = 1
+#: Timeout of a best-effort fence (planned loss, operator override): the
+#: grant to the peer does not depend on it (c7, F16).
+TWO_NODE_BEST_EFFORT_FENCE_TIMEOUT_S = 1
 #: Campaign c3 (F10): after a node is re-admitted (it was fenced while its
 #: peer may have written alone), the arbiter schedules the data rebuild and
 #: checks every this many seconds whether it has finished ...

@@ -76,6 +76,16 @@ def rpc_pool() -> ThreadPoolExecutor:
                               thread_name_prefix="arbiter-rpc")
 
 
+def work_pool() -> ThreadPoolExecutor:
+    """The bounded pool for node work that is not a renewal or status poll
+    (campaign c7, F16): jc_set_dual_node, device check + jc_unfence and the
+    leadership reconciliation run there, never on the decision thread, and
+    never on ``rpc_pool`` where calls blocked on a frozen node could starve
+    the renewals of its healthy peer."""
+    return ThreadPoolExecutor(max_workers=int(constants.TWO_NODE_WORK_WORKERS),
+                              thread_name_prefix="arbiter-work")
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -96,6 +106,7 @@ class Arbiter:
                  reconnect_jms: Callable | None = None,
                  run_async: Callable | None = None,
                  rpc_pool=None,
+                 work_pool=None,
                  schedule_rebuild: Callable | None = None,
                  open_rebuild_tasks: Callable | None = None,
                  devices_ok: Callable | None = None,
@@ -118,6 +129,11 @@ class Arbiter:
         #: Runs lease renewals and status polls; one call per node in flight
         #: (campaign c3, 02a). InlinePool by default (deterministic tests).
         self.rpc_pool = rpc_pool or InlinePool()
+        #: Runs every other node RPC the tick needs (campaign c7, F16): the
+        #: decision thread never blocks on a node. InlinePool by default.
+        self.work_pool = work_pool or InlinePool()
+        #: (kind, id) -> context of a work-pool call still to be applied
+        self.work_ctx: dict = {}
         #: (kind, node_id) -> Future of a renewal or status poll still running
         self.inflight: dict = {}
         #: No arbitrated cluster at the last scan: clock (ms) of the next scan.
@@ -318,6 +334,76 @@ class Arbiter:
             logger.warning("Node %s does not take remote_jm_timeout_ms (older build); "
                            "frozen peers are detected late (campaign c2, F5)", nid)
         self.configured[nid] = instance
+
+    def configure_due(self, rec: ClusterArbitration, nodes: list) -> None:
+        """``configure`` for every node that needs it, on the work pool.
+
+        Campaign c7 (F16): a jc_set_dual_node to a frozen node (its proxy up,
+        SPDK not answering) blocked the decision thread for its whole timeout.
+        At most one call per node in flight; a node is configured for the SPDK
+        instance it had when the call was started."""
+        for node in nodes:
+            nid = node.get_id()
+            if not self.capable.get(nid):
+                continue
+            instance = (self.signals.get(nid) or ev.NodeSignals()).instance
+            if self.configured.get(nid) == instance and nid in self.configured:
+                continue
+            self._work(("configure", nid), {"node": node, "instance": instance},
+                       self._configure_rpc, node)
+        self._drain_work(rec, nodes)
+
+    @staticmethod
+    def _configure_rpc(node: StorageNode) -> str:
+        err, level = set_dual_node(node.rpc_client(timeout=3, retry=0), True, True)
+        if err or level == "plain":
+            raise RuntimeError("jc_set_dual_node rejected the arbitration fields: %s" % (err,))
+        return level
+
+    def _work(self, key: tuple, ctx: dict, fn, *args) -> bool:
+        """Start ``fn(*args)`` on the work pool unless ``key`` is in flight."""
+        fut = self.inflight.get(key)
+        if fut is not None and not fut.done():
+            return False
+        if fut is not None:
+            return False                            # done, not applied yet: drained first
+        self.work_ctx[key] = ctx
+        self.inflight[key] = self.work_pool.submit(fn, *args)
+        return True
+
+    def _drain_work(self, rec: ClusterArbitration, nodes: list) -> None:
+        """Apply, on the decision thread, every finished work-pool call.
+        Never waits: a call still running is applied on a later tick."""
+        by_id = {n.get_id(): n for n in nodes}
+        for key in sorted(k for k in self.inflight if k[0] in _WORK_KINDS):
+            fut = self.inflight[key]
+            if not fut.done():
+                continue
+            del self.inflight[key]
+            ctx = self.work_ctx.pop(key, {})
+            try:
+                result = ("ok", fut.result())
+            except Exception as e:                  # noqa: BLE001 - per kind below
+                result = ("err", e)
+            kind = key[0]
+            if kind == "configure":
+                self._apply_configure(key[1], ctx, result)
+            elif kind == "unfence":
+                node = by_id.get(key[1])
+                if node is not None:
+                    self._apply_unfence(rec, nodes, node, ctx, result)
+            elif kind == "leadership":
+                self._apply_leadership(key[1], ctx, result)
+
+    def _apply_configure(self, nid: str, ctx: dict, result: tuple) -> None:
+        kind, value = result
+        if kind == "err":
+            logger.debug("jc_set_dual_node on %s: %s", nid, value)
+            return
+        if value != "full":
+            logger.warning("Node %s does not take remote_jm_timeout_ms (older build); "
+                           "frozen peers are detected late (campaign c2, F5)", nid)
+        self.configured[nid] = ctx.get("instance")
 
     def renew(self, rec: ClusterArbitration, node: StorageNode,
               peer: StorageNode | None = None) -> None:
@@ -610,8 +696,12 @@ class Arbiter:
                 if int(vuid) not in fences.setdefault(nid, []):
                     fences[nid].append(int(vuid))
         for nid, vuids in fences.items():
+            # A best-effort fence (planned loss) never holds the grant up for
+            # long (campaign c7, F16); a required one may take its full timeout.
+            timeout = (int(constants.TWO_NODE_BEST_EFFORT_FENCE_TIMEOUT_S)
+                       if verdict.fence_best_effort else 5)
             try:
-                by_id[nid].rpc_client(timeout=5, retry=0).jc_fence(rec.epoch, sorted(vuids))
+                by_id[nid].rpc_client(timeout=timeout, retry=0).jc_fence(rec.epoch, sorted(vuids))
             except Exception as e:                  # noqa: BLE001
                 stale = isinstance(e, RPCRemoteError) and e.code == -errno.ESTALE
                 if verdict.fence_best_effort and not stale:
@@ -656,33 +746,90 @@ class Arbiter:
             sig = self.signals.get(nid) or ev.NodeSignals()
             fenced = sorted(v for v, s in sig.lvs_state.items() if s == LVS_FENCED)
             if fenced:
-                if not self.devices_ready(rec, node, "heal"):
+                # Device check + jc_unfence on the work pool (campaign c7,
+                # F16): a node freezing mid-heal never blocks the decisions.
+                self._work(("unfence", nid),
+                           {"why": "heal", "epoch": rec.epoch, "vuids": fenced,
+                            "from_partition": from_partition},
+                           self._unfence_rpc, node, rec.epoch, fenced)
+        self._drain_work(rec, nodes)
+
+    def _unfence_rpc(self, node: StorageNode, epoch: int, vuids: list) -> tuple:
+        """The node half of an unfence (work pool): the device check
+        (campaign c4, F12), then ``jc_unfence``. No arbiter state is touched.
+        ("devices", True|False|None|exc) when the check did not pass, else
+        ("unfence", None) or ("unfence", RPC error)."""
+        try:
+            ok = self.devices_ok(self.db, node)
+        except Exception as e:                      # noqa: BLE001 - applied as "could not tell"
+            return "devices", e
+        if not ok:
+            return "devices", ok
+        try:
+            node.rpc_client(timeout=5, retry=0).jc_unfence(epoch, vuids)
+        except Exception as e:                      # noqa: BLE001 - applied per code
+            return "unfence", e
+        return "unfence", None
+
+    def _apply_unfence(self, rec: ClusterArbitration, nodes: list, node: StorageNode,
+                       ctx: dict, result: tuple) -> None:
+        """The bookkeeping half of a heal or self-fence unfence (decision
+        thread): the same steps the synchronous version took."""
+        nid, why, vuids = node.get_id(), ctx.get("why", ""), ctx.get("vuids", [])
+        heal = why == "heal"
+        done = self.readmitted.setdefault(rec.cluster_id, set())
+        kind, value = result
+        # ("ok", (step, value)) from _unfence_rpc; a raised call counts as a
+        # failed jc_unfence.
+        kind, value = value if kind == "ok" else ("unfence", value)
+        what = "heal" if heal else "self-fence re-admission"
+        if kind == "devices":
+            if isinstance(value, Exception):
+                logger.warning("Device check of %s before %s failed: %s", nid, what, value)
+            elif value is None:
+                logger.info("Device check of %s before %s inconclusive; re-admission later",
+                            nid, what)
+            else:
+                self.recover_devices(rec, node, "data devices missing or not online at %s"
+                                     % what)
+                if heal:
                     done.add(nid)                   # handed to the restart flow (F12)
-                    continue
-                try:
-                    node.rpc_client(timeout=5, retry=0).jc_unfence(rec.epoch, fenced)
-                except RPCRemoteError as e:
-                    if e.code == -errno.EAGAIN:
-                        logger.info("Node %s resyncing; unfence later", nid)
-                    else:
-                        logger.warning("jc_unfence on %s failed: %s", nid, e)
-                    continue
-                except Exception as e:              # noqa: BLE001
-                    logger.warning("jc_unfence on %s unreachable: %s", nid, e)
-                    continue
-                for v in fenced:
-                    sig.lvs_state[v] = LVS_NORMAL
-                # Campaign c5, 07/08: the fence demoted the LVS and only
-                # bdev_lvol_set_leader brings leadership (and the primary's
-                # ANA) back; nothing else does that promptly after an unfence.
-                self.request_leadership(rec, nodes, "heal unfence of %s" % nid)
-                if not from_partition:
-                    # Its peer ran alone meanwhile (F10): rebuild before the
-                    # pair counts as redundant again.
-                    self.mark_rebuild(rec, node, "re-admitted after a degraded verdict")
-                if nid not in done:
-                    self.readmit(node)
-                    done.add(nid)
+            return
+        if value is not None:
+            e = value
+            if isinstance(e, RPCRemoteError) and e.code == -errno.EAGAIN:
+                logger.info("Node %s resyncing (%s); unfence later", nid, what)
+            elif isinstance(e, RPCRemoteError) and e.code == -errno.ESTALE and not heal:
+                self.raise_epoch(rec.cluster_id, at_least=self._seen_epoch(nid) + 1)
+            elif isinstance(e, RPCRemoteError):
+                logger.warning("jc_unfence (%s) of %s on %s failed: %s", what, vuids, nid, e)
+            else:
+                logger.warning("jc_unfence (%s) on %s unreachable: %s", what, nid, e)
+            return
+        sig = self.signals.setdefault(nid, ev.NodeSignals())
+        for v in vuids:
+            sig.lvs_state[v] = LVS_NORMAL
+        if heal:
+            # Campaign c5, 07/08: the fence demoted the LVS and only
+            # bdev_lvol_set_leader brings leadership (and the primary's
+            # ANA) back; nothing else does that promptly after an unfence.
+            self.request_leadership(rec, nodes, "heal unfence of %s" % nid)
+            if not ctx.get("from_partition"):
+                # Its peer ran alone meanwhile (F10): rebuild before the
+                # pair counts as redundant again.
+                self.mark_rebuild(rec, node, "re-admitted after a degraded verdict")
+            if nid not in done:
+                self.readmit(node)
+                done.add(nid)
+            return
+        self.request_leadership(rec, nodes, "self-fence re-admission of %s" % nid)
+        self.needs_resync.add(nid)
+        logger.warning("Self-fenced node %s re-admitted for LVS %s at epoch %s "
+                       "(remote JM healthy again)", nid, vuids, ctx.get("epoch"))
+        # Campaign c3, F10: the unfence alone left the writes its peer took
+        # meanwhile on the peer only (02b -> 03: EIO). Rebuild first.
+        self.mark_rebuild(rec, node, "re-admitted after a self-fence (%s)" % ",".join(
+            str(v) for v in vuids))
 
     @staticmethod
     def _healing_from(rec: ClusterArbitration) -> str:
@@ -742,6 +889,7 @@ class Arbiter:
         the remote JM is healthy: ``jc_unfence`` answers EAGAIN until it is.
         Leadership then comes back through ``maybe_reconcile_leadership``."""
         if rec.state not in (ARB_STEADY, ARB_DEGRADED):
+            self._drain_work(rec, nodes)
             return
         now = self.clock()
         arbiter_fenced: dict = {}
@@ -761,32 +909,11 @@ class Arbiter:
                 continue
             if now - self.self_fence_tried_at.get(nid, 0) < int(constants.TWO_NODE_SELF_FENCE_READMIT_MS):
                 continue
-            self.self_fence_tried_at[nid] = now
-            if not self.devices_ready(rec, node, "self-fence re-admission"):
-                continue
-            try:
-                node.rpc_client(timeout=5, retry=0).jc_unfence(rec.epoch, vuids)
-            except RPCRemoteError as e:
-                if e.code == -errno.ESTALE:
-                    self.raise_epoch(rec.cluster_id, at_least=self._seen_epoch(nid) + 1)
-                elif e.code == -errno.EAGAIN:
-                    logger.info("Self-fenced node %s not resynced yet for %s; unfence later", nid, vuids)
-                else:
-                    logger.warning("jc_unfence of self-fenced %s on %s failed: %s", vuids, nid, e)
-                continue
-            except Exception as e:                  # noqa: BLE001 - next tick retries
-                logger.debug("jc_unfence on %s unreachable: %s", nid, e)
-                continue
-            for v in vuids:
-                sig.lvs_state[v] = LVS_NORMAL
-            self.request_leadership(rec, nodes, "self-fence re-admission of %s" % nid)
-            self.needs_resync.add(nid)
-            logger.warning("Self-fenced node %s re-admitted for LVS %s at epoch %s "
-                           "(remote JM healthy again)", nid, vuids, rec.epoch)
-            # Campaign c3, F10: the unfence alone left the writes its peer took
-            # meanwhile on the peer only (02b -> 03: EIO). Rebuild first.
-            self.mark_rebuild(rec, node, "re-admitted after a self-fence (%s)" % ",".join(
-                str(v) for v in vuids))
+            if self._work(("unfence", nid),
+                          {"why": "self-fence", "epoch": rec.epoch, "vuids": vuids},
+                          self._unfence_rpc, node, rec.epoch, vuids):
+                self.self_fence_tried_at[nid] = now
+        self._drain_work(rec, nodes)
 
     # ---- device check before re-admission (campaign c4, F12) -------------------
 
@@ -1308,12 +1435,8 @@ class Arbiter:
         # The per-node view is reconciled from jc_ha_status before anything
         # decides on it (bookkeeping requirement, campaign c1).
         self.reconcile_due(nodes)
-        for node in nodes:
-            if self.capable.get(node.get_id()):
-                try:
-                    self.configure(rec, node)
-                except Exception as e:              # noqa: BLE001
-                    logger.debug("jc_set_dual_node on %s: %s", node.get_id(), e)
+        # jc_set_dual_node on the work pool (campaign c7, F16).
+        self.configure_due(rec, nodes)
 
         if cluster_id not in self.resumed:
             self.resumed.add(cluster_id)
@@ -1401,32 +1524,54 @@ class Arbiter:
         ad-hoc leadership RPC. A primary whose own HA state for the LVS is
         fenced or holding, or whose peer leads it solo, is left alone."""
         now = self.clock()
+        rec = self.db.get_cluster_arbitration(cluster_id)
+        if rec is not None:
+            self._drain_work(rec, nodes)            # apply a finished pass first
         last = self.leadership_checked_at.get(cluster_id, 0)
         if now - last < int(constants.TWO_NODE_LEADERSHIP_RECONCILE_S) * 1000:
             return
         self.leadership_checked_at[cluster_id] = now
-        rec = self.db.get_cluster_arbitration(cluster_id)
         rebuild_only = rec is not None and rec.state == ARB_HEALING and bool(rec.rebuild)
         if rec is None or (rec.state != ARB_STEADY and not rebuild_only):
             self.leaderless_seen.pop(cluster_id, None)
             return
+        # Campaign c7 (F16): never probe a node that is unreachable or lost,
+        # stopped by the control plane, or while one holds (its peer is gone);
+        # fenced LVS are only skipped below. And never on the
+        # decision thread (the probe of a frozen node blocked it ~5 s, the
+        # grant to its peer never came, 02b: EIO).
+        for node in nodes:
+            nid = node.get_id()
+            sig = self.signals.get(nid) or ev.NodeSignals()
+            if not self.reachable.get(nid, True) or self.spdk_lost.get(nid) \
+                    or nid in (rec.planned_loss or {}) \
+                    or any(st == LVS_HOLDING for st in sig.lvs_state.values()):
+                return
         blocked = set()
         for node in nodes:
             sig = self.signals.get(node.get_id()) or ev.NodeSignals()
             for vuid, state in sig.lvs_state.items():
                 if state != LVS_NORMAL:
                     blocked.add(int(vuid))
-        try:
-            restored, leaderless = self.reconcile_leadership(
-                cluster_id, nodes, skip_jm_vuids=blocked,
-                confirmed=self.leaderless_seen.get(cluster_id, set()))
-        except Exception as e:                      # noqa: BLE001 - next pass retries
-            logger.warning("Leadership reconciliation for %s failed: %s", cluster_id, e)
+        confirmed = set(self.leaderless_seen.get(cluster_id, set()))
+        self._work(("leadership", cluster_id), {"rec": rec, "at": now},
+                   lambda: self.reconcile_leadership(cluster_id, nodes, skip_jm_vuids=blocked,
+                                                     confirmed=confirmed))
+        self._drain_work(rec, nodes)
+
+    def _apply_leadership(self, cluster_id: str, ctx: dict, result: tuple) -> None:
+        kind, value = result
+        if kind == "err":
+            logger.warning("Leadership reconciliation for %s failed: %s", cluster_id, value)
             return
+        restored, leaderless = value
         self.leaderless_seen[cluster_id] = set(leaderless) - set(restored)
         if restored:
+            at = ctx.get("at", self.clock())
+
             def put(fresh):
-                fresh.leadership_restored_at = now
+                fresh.leadership_restored_at = at
+            rec = self.db.get_cluster_arbitration(cluster_id) or ctx.get("rec")
             self.db.atomic_update(rec, put)
 
     def apply_override(self, rec: ClusterArbitration, nodes: list) -> dec.Verdict:
@@ -1455,7 +1600,9 @@ class Arbiter:
         rec = self.db.atomic_update(rec, clear)
         by_id = {n.get_id(): n for n in nodes}
         try:
-            by_id[loser].rpc_client(timeout=5, retry=0).jc_fence(rec.epoch, vuids)
+            # Operator-asserted, so best effort (campaign c7, F16: short).
+            by_id[loser].rpc_client(timeout=int(constants.TWO_NODE_BEST_EFFORT_FENCE_TIMEOUT_S),
+                                    retry=0).jc_fence(rec.epoch, vuids)
         except Exception as e:                      # noqa: BLE001 - operator-asserted
             logger.warning("Override: fence of %s failed (%s); granting anyway", loser, e)
         grant_only = dec.Verdict(verdict.kind, verdict.new_state, grant=verdict.grant)
@@ -1774,8 +1921,12 @@ def default_reconcile_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=
     """See ``storage_node_ops.reconcile_lvs_leadership``."""
     from simplyblock_core import storage_node_ops
     return storage_node_ops.reconcile_lvs_leadership(
-        cluster_id, nodes, skip_jm_vuids=skip_jm_vuids, confirmed=confirmed)
+        cluster_id, nodes, skip_jm_vuids=skip_jm_vuids, confirmed=confirmed,
+        probe_timeout=int(constants.TWO_NODE_LEADER_PROBE_TIMEOUT_S), probe_retry=0)
 
+
+#: ``inflight`` kinds that run on the work pool (campaign c7, F16).
+_WORK_KINDS = ("configure", "unfence", "leadership")
 
 #: Events that mean the node lost its peer or stopped serving; logged as warnings.
 _WARN_STATUSES = {ev.ST_UNHEALTHY, "ha_hold_started", "ha_self_fenced", "ha_lease_expired", "ha_fenced"}
