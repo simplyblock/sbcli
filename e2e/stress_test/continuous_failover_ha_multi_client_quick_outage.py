@@ -387,9 +387,37 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                             f"[clone_connect] {clone_name} shares a subsystem; "
                             f"resolved nsid={clone_ns} to {new_dev}")
                     elif _dev:
+                        # Name who holds it and on what NQN. Run
+                        # 20261015-174302 failed here and the log could not
+                        # say which of the two resolutions was wrong:
+                        # clnD3SLDSFR9Z4W_ON1TPG6A and _EFGWFS74 are clones
+                        # of DIFFERENT snapshots, so they sit in different
+                        # subsystems, and ns_id=3 in each is legal -- yet
+                        # both resolved to /dev/nvme4n3. Without the NQN and
+                        # the holder there is no way to tell whether the
+                        # first resolution stole this device or the second
+                        # one mis-resolved.
+                        holder = next(
+                            (n for n, d in list(self.lvol_mount_details.items())
+                             + list(self.clone_mount_details.items())
+                             if d.get("Device") == _dev), "unknown")
                         self.logger.warning(
-                            f"[clone_connect] resolved {_dev} for {clone_name} but it "
-                            f"is already in use; refusing it")
+                            f"[clone_connect] resolved {_dev} for {clone_name} "
+                            f"(nqn={clone_nqn} nsid={clone_ns}) but it is "
+                            f"already held by {holder}; refusing it")
+                        try:
+                            self.logger.warning(
+                                "[clone_connect] nvme state on %s: %s",
+                                client,
+                                self.ssh_obj.exec_command(
+                                    node=client,
+                                    command="sudo nvme list-subsys -o json "
+                                            "2>/dev/null || sudo nvme list",
+                                    supress_logs=True)[0])
+                        except Exception as exc:          # noqa: BLE001
+                            self.logger.warning(
+                                "[clone_connect] could not dump nvme state: %s",
+                                exc)
                 else:
                     self.logger.warning(
                         f"[clone_connect] {clone_name} reports ns_id={clone_ns!r}; "
