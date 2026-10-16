@@ -14,6 +14,8 @@ for the cross-runner discovery check, and
 :mod:`tests.unit.tasks.test_task_runner_base` for the ceiling as enforced by the
 shared driver, which the migrated runners delegate it to.
 """
+import logging
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -89,6 +91,46 @@ def test_node_add_failure_during_a_reboot_does_not_count(monkeypatch):
     task = _task(JobSchedule.FN_NODE_ADD, retry=1, max_retry=3, node_id="node-1")
     with pytest.raises(TaskDefer):
         node_add_runner.process_task(task)
+
+
+def test_node_add_failure_carries_the_reason_add_node_logged(monkeypatch):
+    """add_node reports why it failed only by logging an error and returning
+    False, so the task result read just "Node add result: False" and the reason
+    existed only in the runner's log."""
+    def add_node(**_):
+        logging.getLogger("storage_node_ops").error(
+            "--failure-domain <id> (a non-negative integer) is required")
+        return False
+
+    sops = MagicMock()
+    sops.add_node.side_effect = add_node
+    monkeypatch.setattr(node_add_runner, "storage_node_ops", sops)
+    monkeypatch.setattr(node_add_runner, "_wait_node_reachable", lambda task: False)
+
+    task = _task(JobSchedule.FN_NODE_ADD, retry=0, max_retry=3, node_id="node-1")
+    with pytest.raises(TaskRetry, match="failure-domain <id> .* is required"):
+        node_add_runner.process_task(task)
+
+
+def test_node_add_failure_does_not_carry_another_threads_error(monkeypatch):
+    """Node adds run concurrently, so an error a sibling add logs meanwhile is
+    not this add's reason."""
+    def add_node(**_):
+        other = threading.Thread(
+            target=lambda: logging.getLogger("storage_node_ops").error("sibling failed"))
+        other.start()
+        other.join()
+        return False
+
+    sops = MagicMock()
+    sops.add_node.side_effect = add_node
+    monkeypatch.setattr(node_add_runner, "storage_node_ops", sops)
+    monkeypatch.setattr(node_add_runner, "_wait_node_reachable", lambda task: False)
+
+    task = _task(JobSchedule.FN_NODE_ADD, retry=0, max_retry=3, node_id="node-1")
+    with pytest.raises(TaskRetry) as raised:
+        node_add_runner.process_task(task)
+    assert "sibling failed" not in str(raised.value)
 
 
 def test_node_add_exception_is_handled_like_a_failed_add(monkeypatch):
