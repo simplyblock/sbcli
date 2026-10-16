@@ -838,7 +838,7 @@ jobs:
               spec:
                 containers:
                 - name: minio
-                  image: minio/minio:latest
+                  image: quay.io/simplyblock-io/minio:RELEASE.2024-01-16T16-07-38Z
                   args: ["server", "/data"]
                   ports:
                   - containerPort: 9000
