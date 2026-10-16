@@ -30,6 +30,9 @@ BUGS = {
     "port_allow_two_jms": "F14: port_allow requires 2 remote JMs",
     "port_allow_ignores_fence": "F15: port_allow lifts a fenced LVS's client port",
     "blocking_leader_probe": "F16: the leadership probe runs on the decision thread (5 s + retry)",
+    # hosts (client connect parameters)
+    "client_kato4": "F20: hosts connect with keep-alive 4 s, so a frozen node's path is "
+                    "detected only about 7 s after the freeze",
 }
 
 
@@ -43,6 +46,8 @@ def apply_bugs(world, monkeypatch, bugs: set) -> None:
 
     unknown = bugs - set(BUGS)
     assert not unknown, unknown
+    if "client_kato4" in bugs:
+        world.client_kato_s = 4.0
     if "no_compression_retry" in bugs:
         monkeypatch.setattr(constants, "RESTART_JC_COMPRESSION_RETRY_S", 0)
     if "no_regrant_degraded" in bugs:
@@ -402,6 +407,9 @@ KNOWN_FAILING = {
                                 "keep-alive (5 s) expires or the frozen node aborts on wake "
                                 "(fix: on a solo grant stop redirecting to the lost peer)",
                                 "client stall"),
+    "F20-frozen-leader-client-kato": ("F19 on what main deploys: the survivor keeps redirecting "
+                                      "to the frozen primary (fix: SPDK #81 + ultra #215)",
+                                      "client stall"),
     "F18-ana-groups-restored": ("F18: the fence restore puts back only the namespaces' ANA "
                                 "groups (fix: restore every group the fence changed)",
                                 "ANA 44"),
@@ -423,9 +431,15 @@ PENDING_FIX = {
     "F21-takeover-reader-frozen-peer-jm": frozenset({"grant_stops_redirect",
                                                      "reader_skips_dead_peer_jm"}),
     "F18-ana-groups-restored": frozenset({"ana_restore_all_groups"}),
+    "F20-frozen-leader-client-kato": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm"}),
 }
 
 EXTRA = [
+    # F20 (bed c8/02c): the vol1 primary frozen 8 s. With F19 fixed, the stall
+    # is the host's keep-alive detection of the frozen path: within the limit
+    # with KATO 2, about 7 s with KATO 4 (test_f20_client_kato4_detected).
+    Scenario("F20-frozen-leader-client-kato", ("F20",), hang("sn2", 8.0), aborts_ok=("sn2",),
+             grant_within_s=2.6),
     Scenario("F19-long-freeze-primary", ("F19",), hang("sn2", 6.0), aborts_ok=("sn2",),
              grant_within_s=2.6),
     Scenario("F18-ana-groups-restored", ("F18",), partition(), io_errors_ok=True, stall_limit_s=None,
