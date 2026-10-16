@@ -1000,32 +1000,6 @@ def _get_cluster_port_config(cluster_id):
     return constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT, constants.SNODE_API_PORT
 
 
-def get_next_fw_port(cluster_id, mgmt_ip=None):
-    """Get the SNodeAPI/firewall port. One per SPDK storage node.
-
-    In Kubernetes hyper-converged layouts, multiple SPDK pods can land on the
-    same worker host (one per NUMA socket). Each pod runs its own SnodeAPI
-    sidecar, which binds `FW_PORT` in its pod network namespace, so two co-
-    located pods must get DIFFERENT ports or only one sidecar wins the bind
-    and firewall RPCs for the others fail with ECONNREFUSED.
-
-    `mgmt_ip` is kept for signature compatibility but is no longer used for
-    port sharing — allocation is strictly per-node.
-    """
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-
-    _, _, snode_api_port = _get_cluster_port_config(cluster_id)
-    used_ports = set()
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.firewall_port > 0:
-            used_ports.add(node.firewall_port)
-    next_port = snode_api_port
-    while next_port in used_ports:
-        next_port += 1
-    return next_port
-
-
 def get_node_nvmf_ports(cluster_id):
     """NVMe-oF ports persisted on the cluster's node records (lvol, hublvol,
     device, rpc, per-lvstore)."""
