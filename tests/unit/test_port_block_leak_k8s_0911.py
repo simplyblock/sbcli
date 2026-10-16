@@ -19,9 +19,10 @@ worker-3 (primary of LVS_16, port 4442) began a graceful shutdown at
    on the observation: a fence nobody is looking at is a fence nobody can
    remediate.
 
-3. ``port_block.is_port_blocked`` tested ``port_id in
+3. The single-port check tested ``port_id in
    rpc.nvmf_get_blocked_ports()``, a ``{"blocked_ports": [...]}`` dict, so it
    compared against the dict's keys and returned False for every port.
+   ``RPCClient.nvmf_get_blocked_ports`` now returns the set of ports itself.
 
 The client budget this races is ctrl_loss_tmo = 30 x 2s = 60s, after which
 the kernel deletes the controller and the namespace fails IO.
@@ -32,8 +33,8 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.services import storage_node_monitor
-from simplyblock_core.utils import port_block
 
 # --------------------------------------------------------------------------
 # 3. is_port_blocked parsed the wrong shape
@@ -42,38 +43,42 @@ from simplyblock_core.utils import port_block
 class TestIsPortBlockedParsesPayload(unittest.TestCase):
     """``nvmf_get_blocked_ports`` answers with a dict, not a list of ports."""
 
-    @staticmethod
-    def _node(payload):
+    def _node(self, payload):
+        from pydantic import SecretStr
+
+        client = RPCClient("127.0.0.1", 8080, "user", SecretStr("pass"), timeout=1, retry=0)
+        request = patch.object(client, "_request", return_value=payload)
+        request.start()
+        self.addCleanup(request.stop)
         node = MagicMock()
-        node.rpc_client.return_value.nvmf_get_blocked_ports.return_value = payload
+        node.rpc_client.return_value = client
         return node
 
     def test_blocked_port_reads_blocked(self):
         node = self._node({"blocked_ports": [{"port": 4442, "is_reject": False}]})
-        self.assertTrue(port_block.is_port_blocked(node, 4442))
+        self.assertFalse(health_controller.check_port_on_node(node, 4442))
 
     def test_open_port_reads_open(self):
         node = self._node({"blocked_ports": [{"port": 4436}]})
-        self.assertFalse(port_block.is_port_blocked(node, 4442))
+        self.assertTrue(health_controller.check_port_on_node(node, 4442))
 
     def test_no_blocked_ports_reads_open(self):
-        self.assertFalse(port_block.is_port_blocked(self._node({}), 4442))
-        self.assertFalse(
-            port_block.is_port_blocked(self._node({"blocked_ports": []}), 4442))
+        self.assertTrue(health_controller.check_port_on_node(self._node({}), 4442))
+        self.assertTrue(health_controller.check_port_on_node(
+            self._node({"blocked_ports": []}), 4442))
 
     def test_string_port_is_accepted(self):
         node = self._node({"blocked_ports": [{"port": 4442}]})
-        self.assertTrue(port_block.is_port_blocked(node, "4442"))
+        self.assertFalse(health_controller.check_port_on_node(node, "4442"))
 
     def test_agrees_with_the_batched_reader(self):
         # The batched path always parsed this correctly, which is why the
-        # monitor saw the fences and this function never did.
-        payload = {"blocked_ports": [{"port": 4442}, {"port": 4436}]}
-        node = self._node(payload)
-        batched = port_block.get_blocked_ports_set(node)
+        # monitor saw the fences and the single-port check never did.
+        node = self._node({"blocked_ports": [{"port": 4442}, {"port": 4436}]})
+        batched = health_controller.check_ports_on_node(node, [4434, 4436, 4442])
         for port in (4434, 4436, 4442):
-            self.assertEqual(port_block.is_port_blocked(node, port),
-                             port in batched, port)
+            self.assertEqual(health_controller.check_port_on_node(node, port),
+                             batched[port], port)
 
     def test_rpc_absent_raises_instead_of_reading_iptables(self):
         # There is no iptables fallback any more: the firewall API it went
@@ -84,7 +89,7 @@ class TestIsPortBlockedParsesPayload(unittest.TestCase):
         node.rpc_client.return_value.nvmf_get_blocked_ports.side_effect = (
             RPCRemoteError("no such method", RPCErrorCode.method_not_found))
         with self.assertRaises(RPCRemoteError):
-            port_block.is_port_blocked(node, 4442)
+            health_controller.check_port_on_node(node, 4442)
 
 
 # --------------------------------------------------------------------------

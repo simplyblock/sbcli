@@ -24,6 +24,7 @@ from simplyblock_core.models.arbitration import (
     LVS_SOLO,
 )
 from simplyblock_core.models.storage_node import StorageNode
+from tests._mocks import route_fences
 from tests.unit.test_two_node_arbiter import (  # noqa: F401 - fixture
     CL,
     calls,
@@ -365,8 +366,8 @@ def test_defensive_unblock_skips_the_stale_peer_only(monkeypatch):
     stale = _Peer(B, [{"jm_vuid": 4, "state": "normal"}])
     db = _DB(rebuild={B: {"queued": True}}, peers=(survivor, stale))
     opened = []
-    monkeypatch.setattr(sno.port_block, "set_port",
-                        lambda node, port, block, **kw: opened.append((node.get_id(), port, block)))
+    route_fences([survivor, stale],
+                 lambda node, port, block, **kw: opened.append((node.get_id(), port, block)))
     monkeypatch.setattr(sno.tcp_ports_events, "port_allowed", lambda *a, **k: None)
 
     class LvsNode:

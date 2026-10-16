@@ -284,8 +284,9 @@ class RpcServerSim:
         return True
 
     def nvmf_get_blocked_ports(self, **_):
-        return {"blocked_ports": [{"port": port} for (port, _proto), blocked
-                                  in self.firewall.items() if blocked]}
+        # RpcRouter stands in for RPCClient, whose method already projects
+        # the SPDK reply to a set of port numbers.
+        return {port for (port, _proto), blocked in self.firewall.items() if blocked}
 
     # -- NVMe controller (cross-node) ---------------------------------------
 

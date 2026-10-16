@@ -88,7 +88,6 @@ from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
     nvmf_listener,
-    port_block,
     pull_docker_image_with_retry,
     rpc_budget,
 )
@@ -9378,7 +9377,7 @@ def _fenced_secondary_of(snode: StorageNode, not_online_nodes):
             continue
         port = sec.get_lvol_subsys_port(snode.lvstore)
         try:
-            blocked = port_block.get_blocked_ports_set(sec, timeout=5, retry=1)
+            blocked = sec.rpc_client(timeout=5, retry=1).nvmf_get_blocked_ports()
         except (RPCException, SNodeClientException, OSError) as e:
             logger.warning("Cannot read blocked ports of secondary %s of %s: %s",
                            sec.get_id(), snode.get_id(), e)
@@ -12723,7 +12722,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                 leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
                 "Restart abort"):
             try:
-                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=0.5, retry=2)
+                leader_node.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(leader_lvs_port)
                 _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                 _mark_leader_unblocked()
             except Exception as ue:
@@ -12775,7 +12774,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             attempts = 3
             for attempt in range(1, attempts + 1):
                 try:
-                    port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
+                    leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_lvs_port)
                     _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                     leader_port_blocked = True
                     _mark_leader_blocked()
@@ -13084,7 +13083,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                             leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
                             "Attach-retry gap"):
                         try:
-                            port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                            leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_lvs_port)
                             _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                             leader_port_blocked = False
                             _mark_leader_unblocked()
@@ -13094,7 +13093,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                                 "failed: %s", leader_node.get_id(), ue)
                     time.sleep(ATTACH_RETRY_GAP_SEC)
                     try:
-                        port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_lvs_port)
                         _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                         leader_port_blocked = True
                         _mark_leader_blocked()
@@ -13126,7 +13125,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                 attempts = 3
                 for attempt in range(1, attempts + 1):
                     try:
-                        port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_lvs_port)
                         _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                         unblocked = True
                         _mark_leader_unblocked()
@@ -13313,7 +13312,7 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
                                           "Defensive unblock after failed recreate of %s"
                                           % lvs_node.lvstore):
                 continue
-            port_block.set_port(peer, port, block=False, timeout=0.5, retry=2)
+            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(port)
             tcp_ports_events.port_allowed(peer, port)
             logger.info("Defensive unblock: allowed LVS port %s on peer %s after "
                         "failed recreate of %s", port, pid, lvs_node.lvstore)
@@ -13859,7 +13858,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 pass
             return
         try:
-            port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
+            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(snode_lvs_port)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))
             _t0 = _block_started.pop(peer.get_id(), None)
             if _t0 is not None:
@@ -14224,7 +14223,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 if sec_node in blocked_peers:
                     continue
                 try:
-                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                    sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
                     _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                     blocked_peers.append(sec_node)
                     _block_started[sec_node.get_id()] = time.monotonic()
@@ -14302,7 +14301,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         db_controller.atomic_update(
                             current_leader,
                             lambda x: setattr(x, "lvstore_status", "in_creation"))
-                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                        current_leader.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
                         _block_started[current_leader.get_id()] = time.monotonic()

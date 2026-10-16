@@ -1997,6 +1997,19 @@ class RPCClient:
         return self._request("jc_compression", jm_vuid=jm_vuid)
 
     def nvmf_port_block(self, port, is_reject=False):
+        """Fence ``port``: SPDK stops serving client connections on it.
+
+        Callers fencing a peer's client listener build this client with a
+        short budget, e.g. ``node.rpc_client(timeout=0.5, retry=1)``.
+        ``timeout`` is per HTTP attempt and the client retries ``retry``
+        times with backoff, so the wall clock is roughly (retry+1) x timeout
+        plus backoff. While the port is blocked the peer cannot answer
+        keep-alives, and the client KATO is 4s: a fence window longer than
+        that is an outage. On 2026-08-31 a failing block on a rebooting peer
+        with a (5s, 2) budget took 12s, left a healthy survivor fenced, and
+        the client lost its last path at 4.1s. A healthy peer answers in
+        ~11ms, so 0.5s is ~45x the observed latency.
+        """
         params = {"port": port}
         if is_reject:
             params["reject"] = is_reject
@@ -2005,8 +2018,18 @@ class RPCClient:
     def nvmf_port_unblock(self, port):
         return self._request("nvmf_port_unblock", port=port)
 
-    def nvmf_get_blocked_ports(self):
-        return self._request("nvmf_get_blocked_ports")
+    def nvmf_get_blocked_ports(self) -> set[int]:
+        """Ports currently fenced on this SPDK.
+
+        The RPC returns ``{"blocked_ports": [{"port": N, ...}, ...]}``. Test
+        membership against the projected set, never against the raw reply:
+        ``port in reply`` tested the dict's keys and read every fenced port as
+        open (2026-09-11, k8s rapid failover)."""
+        blocked = self._request("nvmf_get_blocked_ports")
+        if not blocked:
+            return set()
+        entries = blocked.get("blocked_ports", []) if isinstance(blocked, dict) else []
+        return {int(e.get("port", -1)) for e in entries}
 
     def bdev_raid_get_bdevs(self):
         return self._request("bdev_raid_get_bdevs", category="online")
