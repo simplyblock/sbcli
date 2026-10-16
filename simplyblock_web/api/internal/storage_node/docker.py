@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Annotated, List, Optional, Set, Union
+from typing import List, Optional, Set, Union
 
 import docker
 import psutil
@@ -15,7 +15,6 @@ from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
 
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
-from simplyblock_core.utils import port_block
 import simplyblock_core.utils.pci as pci_utils
 import simplyblock_core.utils as init_utils
 from simplyblock_web import utils, node_utils
@@ -91,8 +90,6 @@ class SPDKParams(BaseModel):
     firewall_port: int = Field(constants.FW_PORT_START)
     cluster_id: str
     mcp_max_unavailable: Optional[int] = Field(None)  # OpenShift-only (MCP); ignored here
-    # See kubernetes.SPDKParams.fence_ports.
-    fence_ports: Annotated[List[int], Field(default_factory=list)]
 
 
 @api.post('/spdk_process_start', responses={
@@ -172,7 +169,6 @@ def spdk_process_start(body: SPDKParams):
             f"TOTAL_HP={total_mem_mib}",
             f"NSOCKET={body.socket}",
             f"FW_PORT={body.firewall_port}",
-            f"FENCE_PORTS={port_block.fence_ports_env(body.fence_ports)}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )

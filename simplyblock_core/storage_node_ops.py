@@ -8157,19 +8157,13 @@ def _restart_storage_node_impl(
         # restarting onto a new host, so snode.client() targets the right one.
         ensure_spdk_stopped(
             snode.client, snode.rpc_port, snode.cluster_id)
-        # The entrypoint clears stale iptables fences for exactly these ports
-        # instead of flushing the host table (which took the CNI's chains
-        # with it). They are the ports a 25.10.x control plane fenced on
-        # this host before the upgrade restart; nothing else removes those
-        # once the node answers the SPDK port-block RPCs.
-        fence_ports = port_block.host_fence_ports(snode, db_controller)
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
-            spdk_proxy_image=snode.spdk_proxy_image, fence_ports=fence_ports)
+            spdk_proxy_image=snode.spdk_proxy_image)
 
     except Exception as e:
         logger.error(e)
