@@ -405,6 +405,11 @@ KNOWN_FAILING = {
     "F18-ana-groups-restored": ("F18: the fence restore puts back only the namespaces' ANA "
                                 "groups (fix: restore every group the fence changed)",
                                 "ANA 44"),
+    "F21-takeover-reader-frozen-peer-jm": ("F21: the survivor's takeover reader picks the frozen "
+                                           "peer's JM and waits for the 8 s NVMe IO timeout "
+                                           "(fix: a solo LVS skips the peer JM the HA layer knows "
+                                           "is dead)",
+                                           "F21"),
 }
 
 #: Open findings whose fix exists as a pending PR stack: scenario -> the node
@@ -412,7 +417,11 @@ KNOWN_FAILING = {
 #: stays in KNOWN_FAILING; with these capabilities it must pass (bed run c8:
 #: SPDK #80 + #81 on new_md_journal, ultra #214 + #215).
 PENDING_FIX = {
-    "F19-long-freeze-primary": frozenset({"grant_stops_redirect"}),
+    # F19 alone is not enough: with the redirect stopped at the grant, the
+    # takeover's reader still waits 8 s on the frozen peer's JM (c8 02c, F21)
+    "F19-long-freeze-primary": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm"}),
+    "F21-takeover-reader-frozen-peer-jm": frozenset({"grant_stops_redirect",
+                                                     "reader_skips_dead_peer_jm"}),
     "F18-ana-groups-restored": frozenset({"ana_restore_all_groups"}),
 }
 
@@ -421,6 +430,10 @@ EXTRA = [
              grant_within_s=2.6),
     Scenario("F18-ana-groups-restored", ("F18",), partition(), io_errors_ok=True, stall_limit_s=None,
              heal_s=300, ana_all_groups=True),
+    # c8 02c: the vol1 primary frozen 8 s. Judged on its own property (no takeover
+    # waits on the frozen peer's JM); the client-side detection (F20) is not part of it.
+    Scenario("F21-takeover-reader-frozen-peer-jm", ("F21",), hang("sn2", 8.0), aborts_ok=("sn2",),
+             grant_within_s=2.6, stall_limit_s=None),
 ]
 
 #: Findings the simulator cannot express, and why.
