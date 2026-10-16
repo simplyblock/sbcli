@@ -80,7 +80,6 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.remote_jm_devices = []
     n.nvme_devices = []
     n.health_check = True
-    n.firewall_port = 50001
     nic = IFace()
     nic.ip4_address = mgmt_ip or f"10.10.10.{hash(uuid) % 254 + 1}"
     nic.trtype = "TCP"
