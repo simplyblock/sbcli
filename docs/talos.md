@@ -24,13 +24,24 @@ kubectl label namespace simplyblock \
 On other distributions the storage node reserves its huge pages while it is
 added: a privileged Job writes `nr_hugepages` per NUMA node and restarts the
 kubelet. The Talos host is immutable and has no shell, so on Talos the node does
-the same through the **Talos API** instead: a Job running `talosctl` against the
-node's own `apid` patches the per-NUMA counts into `machine.sysfs` (applied
-live, no reboot) and restarts the kubelet so the node's `hugepages-2Mi` capacity
-follows. The add waits for both the host and the kubelet to show the pool before
-it creates the SPDK pod, and fails with the numbers if they do not. A pool that
-already covers the request is left alone, so a plain node restart never restarts
-the kubelet.
+the same through the **Talos API** instead, as two Jobs running `talosctl`
+against the node's own `apid`:
+
+1. If the host's pool is short: patch the per-NUMA counts into `machine.sysfs`
+   (applied live, no reboot) and wait until the pool shows in `/proc/meminfo`.
+   Talos writes the kernel parameter asynchronously, a few seconds after the
+   patch is accepted.
+2. If the kubelet's `hugepages-2Mi` capacity is short: restart the kubelet and
+   wait until it advertises the pool. The kubelet reads huge-page capacity at
+   start, which is why the two steps are separate: a restart that races the
+   write boots the kubelet seeing zero and the SPDK pod never schedules (seen on
+   the first Talos deployment, 2026-10-16).
+
+Each step is skipped when its half already holds, so a plain node restart with
+the pool in place touches nothing, and a node whose kubelet merely lags the host
+gets only the restart. The add fails with the numbers if either wait runs out.
+What `talosctl` printed is copied into the node agent's log before a completed
+Job is deleted; a failed Job is left in place with its pod log.
 
 State Talos in the deployment: `spec.environment: Talos` on the
 ClusterDeploymentConfig, which the operator passes to the node agent as
