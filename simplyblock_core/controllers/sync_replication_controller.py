@@ -1254,6 +1254,15 @@ def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None,
     that cleared ``sync_never_connected`` meanwhile, under the same lock, has
     handed out the site's paths)."""
     cluster, owners = _volumes_context(db, volumes, site, group=group)
+    # A site the monitor has authoritatively recorded lost cannot be cleanly
+    # demoted -- the planned gate would refuse it forever on an unplanned failover.
+    # The forced promote fences it, so the demote is a no-op here; this lets the
+    # node's planned flip (demote old -> promote new) converge instead of looping
+    # on "planned gate failed" (2026-10-16, site_recorded_lost).
+    if site_recorded_lost(cluster, site):
+        logger.info("Demote of site %s is a no-op: the site is recorded lost (%s)",
+                    site, cluster.lost_site_state)
+        return []
     todo = [lv for lv in volumes if volume_open_on(lv, owners[lv.node_id], site)]
     if not todo:
         return []
@@ -1411,6 +1420,25 @@ def birth_state_demote_plan(
         if open_here and all(is_birth_state(v, owner) for v in open_here):
             plan.setdefault(source, []).extend(open_here)
     return plan
+
+
+#: The lost-site states in which a site is authoritatively gone, not merely being
+#: drained: the monitor has drained it (``down``) or the disaster fence is acting on
+#: it (``fencing`` / ``done``). ``draining`` is excluded -- the drain has not
+#: converged, so the site is not yet declared lost.
+_SITE_LOST_STATES = (Cluster.LOST_SITE_DOWN, Cluster.LOST_SITE_FENCING, Cluster.LOST_SITE_DONE)
+
+
+def site_recorded_lost(cluster, site: str) -> bool:
+    """Whether ``site`` is authoritatively recorded lost on ``cluster`` -- the
+    storage-node monitor drained it to ``down`` (or the disaster fence has it past
+    that). Such a site cannot be cleanly demoted: its stores are unsynced and its
+    nodes are gone, so the planned demote gate would refuse it forever. A demote of
+    it is therefore a no-op (the forced promote fences it), which is what lets the
+    node's planned flip converge on an unplanned failover instead of looping on
+    "planned gate failed" (2026-10-16). A planned move -- no record, or still
+    ``draining`` -- is not lost, so the planned gate still runs."""
+    return cluster.lost_site == site and cluster.lost_site_state in _SITE_LOST_STATES
 
 
 def promote_move_problems(cluster, owner: StorageNode, volumes: Iterable[LVol], expect: str,

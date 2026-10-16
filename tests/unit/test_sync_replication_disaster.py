@@ -89,6 +89,26 @@ class TestDisasterMoveProblems:
         assert "late" in problem
 
 
+class TestSiteRecordedLost:
+    """A demote of a site the monitor has authoritatively recorded lost (drained to
+    `down` or beyond) is a no-op -- the site cannot be cleanly demoted and the forced
+    promote fences it, so the node's planned flip can converge on an unplanned
+    failover instead of looping on "planned gate failed" (#2026-10-16). A planned
+    move (no record, or still `draining`) is not lost, so the planned gate runs."""
+
+    @pytest.mark.parametrize("lost,state,expected", [
+        (SITE_A, Cluster.LOST_SITE_DOWN, True),
+        (SITE_A, Cluster.LOST_SITE_FENCING, True),
+        (SITE_A, Cluster.LOST_SITE_DONE, True),
+        (SITE_A, Cluster.LOST_SITE_DRAINING, False),   # drain not converged: still gated
+        (SITE_A, "", False),                            # no record
+        ("", "", False),                                # planned move
+        (SITE_B, Cluster.LOST_SITE_DOWN, False),        # a different site is lost
+    ])
+    def test_only_an_authoritatively_lost_site_is_a_noop(self, lost, state, expected):
+        assert src.site_recorded_lost(_cluster(lost, state), SITE_A) is expected
+
+
 class TestZoneNotUp:
 
     def test_zone_not_up_counts_a_failed_device(self):
