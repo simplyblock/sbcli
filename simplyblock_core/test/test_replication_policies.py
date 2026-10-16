@@ -1113,6 +1113,35 @@ def test_group_demote_leaves_the_serving_peer_untouched_on_reprotect(monkeypatch
         result
 
 
+def test_failback_group_refuses_a_retired_group_with_no_live_members(monkeypatch):
+    """Regression: #33 -- a resync (group fail-back) addressed to the RETIRED group
+    after a re-protect must fail loudly, not silently succeed. The retired group
+    holds only superseded failed-over sources (the live data is in the peer's
+    clones), so failing it back configures nothing. Returning success there -- as
+    it did via a no-op replication_start, 204 -- masked the mis-resolution as a
+    healthy re-protect, so the survivor ran unprotected while Ramen saw PeerReady.
+
+    With resolve_group fixed the driver resolves a resync to the live peer, so this
+    is defense in depth: failback_group refuses a group that holds no live members
+    rather than no-op its way to success."""
+    from simplyblock_core.controllers import consistency_group_controller as cgc
+    from simplyblock_core.controllers import lvol_controller as lc
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(cgc, "db", db)
+    local, _ = _reprotect_scenario(monkeypatch, db)
+
+    failed_back: list = []
+    monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
+
+    result = cgc.failback_group(local)
+
+    assert result["configured"] is False, result
+    assert "no live members" in result.get("error", ""), result
+    assert failed_back == [], \
+        "a resync on the retired group must reconfigure nothing, never a silent no-op (#33)"
+
+
 def test_failback_group_clones_peer_members_home_pinned_to_the_demote_cut(monkeypatch):
     """Regression (2026-09-27): promoting an empty local group on fail-back cloned
     NOTHING -- the promote reported success while the workload kept writing to the

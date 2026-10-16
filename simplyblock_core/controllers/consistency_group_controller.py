@@ -942,6 +942,28 @@ def failback_group(group, source_cluster_id=None):
     False`` with per-member detail if any member could not be configured.
     """
     from simplyblock_core.controllers import lvol_controller
+
+    # A resync must land on the group that holds the live data. A group with no
+    # live members -- empty, or holding only superseded failed-over sources whose
+    # writes already moved to the peer -- is the retired end of a move. Failing it
+    # back configures nothing, and reporting success there masks a mis-resolution
+    # (the driver resolves a resync to the group's active end, so a retired group
+    # arriving here means it resolved wrong) as a healthy re-protect -- which is
+    # exactly how #33 stayed invisible: the survivor ran unprotected while Ramen
+    # saw PeerReady. Refuse loudly instead. resolve_group no longer names a retired
+    # group as active (#33), so this is defense in depth.
+    member_lvols = []
+    for member in list_members(group):
+        try:
+            member_lvols.append(db.get_lvol_by_id(member["lvol_id"]))
+        except KeyError:
+            continue
+    if not member_lvols or _members_are_superseded_source(member_lvols):
+        return {"configured": False, "members": [],
+                "error": (f"consistency group {group.group_name} holds no live members "
+                          "to fail back: the resync was addressed to the retired group, "
+                          "resolve to the live peer group first")}
+
     members = []
     configured = True
     for member in list_members(group):
