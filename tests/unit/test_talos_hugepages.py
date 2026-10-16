@@ -8,10 +8,12 @@ pod Pending on ``Insufficient hugepages-2Mi`` whenever the operator's
 pre-provisioned pool was short. It is now stated the way OpenShift is
 (``TALOS_CLUSTER`` on the node agent, set by the operator from the
 StorageCluster's environment), and a stated Talos node reserves the pages
-itself: a Job running ``talosctl`` against the node's own apid patches the
-per-NUMA counts into ``machine.sysfs`` and restarts the kubelet, and the add
-waits for both the host and the kubelet to show the pool before creating the
-SPDK pod.
+itself through ``talosctl`` run as Jobs against the node's own apid, in two
+steps: patch the per-NUMA counts into ``machine.sysfs`` and wait for the pool
+to appear on the host, then restart the kubelet and wait for it to advertise
+the pool. Two steps because Talos writes the kernel parameter asynchronously:
+one Job that restarted the kubelet right after the patch booted it seeing
+zero pages (lab cluster, worker-1, 2026-10-16).
 """
 import json
 import os
@@ -102,7 +104,8 @@ class TestSizingHelpers(unittest.TestCase):
             "devices.system.node.node1.hugepages.hugepages-2048kB.nr_hugepages": "1500",
         }}})
         # A merge patch, not a JSON-6902 array: it adds to machine.sysfs
-        # instead of replacing whatever else the operator keeps there.
+        # instead of replacing whatever else the operator keeps there, and it
+        # is the format a multi-document machine config accepts.
         self.assertIsInstance(patch_, dict)
 
     def test_quantity_to_mib(self):
@@ -121,35 +124,40 @@ class TestSizingHelpers(unittest.TestCase):
 
 class TestTalosJobTemplate(unittest.TestCase):
 
-    def _job(self):
+    def _job(self, step):
         values = {
-            'TALOS_JOBNAME': 'snode-talos-hugepages-worker-1', 'NAMESPACE': 'simplyblock', 'HOSTNAME': 'worker-1',
-            'TALOSCTL_IMAGE': 'ghcr.io/siderolabs/talosctl:v1.14.3', 'TALOS_API_SECRET': 'talos-api-access-talos-secrets',
+            'TALOS_JOBNAME': f'snode-talos-{step}-worker-1', 'NAMESPACE': 'simplyblock', 'HOSTNAME': 'worker-1',
+            'TALOSCTL_IMAGE': 'ghcr.io/siderolabs/talosctl:v1.12.7', 'TALOS_API_SECRET': 'talos-api-access-talos-secrets',
             'TALOS_PATCH': json.dumps(k8s_node._talos_sysfs_patch({0: 6000}), separators=(',', ':')),
+            'TALOS_STEP': step,
         }
         return yaml.safe_load(_env().get_template('storage_talos_hugepages_job.yaml.j2').render(values))
 
-    def test_patch_then_restart_without_a_shell(self):
-        """talosctl's image is scratch + the binary: one container per
-        command, the patch first (init container), the kubelet restart after."""
-        spec = self._job()['spec']['template']['spec']
+    def test_patch_step_is_one_talosctl_patch_without_a_shell(self):
+        spec = self._job('patch')['spec']['template']['spec']
         self.assertEqual(spec['nodeSelector'], {'kubernetes.io/hostname': 'worker-1'})
-        [patch_c] = spec['initContainers']
-        [restart_c] = spec['containers']
-        self.assertEqual(patch_c['args'][:4], ['--nodes', '$(NODE_IP)', '--endpoints', '$(NODE_IP)'])
-        self.assertEqual(patch_c['args'][4:8], ['patch', 'machineconfig', '--mode=no-reboot', '--patch'])
-        self.assertEqual(json.loads(patch_c['args'][8]), k8s_node._talos_sysfs_patch({0: 6000}))
-        self.assertEqual(restart_c['args'][4:], ['service', 'kubelet', 'restart'])
-        for c in (patch_c, restart_c):
-            self.assertEqual(c['image'], 'ghcr.io/siderolabs/talosctl:v1.14.3')
-            self.assertNotIn('command', c)
-            self.assertIn({'name': 'TALOSCONFIG', 'value': '/var/run/secrets/talos.dev/config'}, c['env'])
-            self.assertEqual(c['volumeMounts'][0]['mountPath'], '/var/run/secrets/talos.dev')
+        self.assertNotIn('initContainers', spec)
+        [c] = spec['containers']
+        self.assertEqual(c['name'], 'patch-machine-config')
+        self.assertEqual(c['args'][:4], ['--nodes', '$(NODE_IP)', '--endpoints', '$(NODE_IP)'])
+        self.assertEqual(c['args'][4:8], ['patch', 'machineconfig', '--mode=no-reboot', '--patch'])
+        self.assertEqual(json.loads(c['args'][8]), k8s_node._talos_sysfs_patch({0: 6000}))
+        self.assertEqual(c['image'], 'ghcr.io/siderolabs/talosctl:v1.12.7')
+        self.assertNotIn('command', c)
+        self.assertIn({'name': 'TALOSCONFIG', 'value': '/var/run/secrets/talos.dev/config'}, c['env'])
+        self.assertEqual(c['volumeMounts'][0]['mountPath'], '/var/run/secrets/talos.dev')
         self.assertEqual(spec['volumes'][0]['secret']['secretName'], 'talos-api-access-talos-secrets')
 
+    def test_kubelet_step_is_one_service_restart(self):
+        spec = self._job('kubelet')['spec']['template']['spec']
+        [c] = spec['containers']
+        self.assertEqual(c['name'], 'restart-kubelet')
+        self.assertEqual(c['args'][4:], ['service', 'kubelet', 'restart'])
+        self.assertNotIn('--patch', c['args'])
+
     def test_node_ip_is_the_pods_own_host(self):
-        spec = self._job()['spec']['template']['spec']
-        env = {e['name']: e for e in spec['initContainers'][0]['env']}
+        spec = self._job('patch')['spec']['template']['spec']
+        env = {e['name']: e for e in spec['containers'][0]['env']}
         self.assertEqual(env['NODE_IP']['valueFrom']['fieldRef']['fieldPath'], 'status.hostIP')
 
 
@@ -169,7 +177,9 @@ def _node(hugepages_2mi):
 
 
 class TestSpdkProcessStartOnTalos(unittest.TestCase):
-    """The handler under TALOS_CLUSTER=true."""
+    """The handler under TALOS_CLUSTER=true. The host pool is what
+    ``get_huge_memory`` returns on each call; the kubelet's view is what
+    ``read_node`` returns on each call."""
 
     def setUp(self):
         patches = [
@@ -196,6 +206,7 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
             self.addCleanup(p.stop)
         self.batch = k8s_node.core_utils.get_k8s_batch_client.return_value
         self.core = k8s_node.core_utils.get_k8s_core_client.return_value
+        self.core.list_namespaced_pod.return_value.items = []
         self.create_job = k8s_node._create_job_replacing_stale
 
         def created(batch_v1, namespace, job_yaml):
@@ -209,42 +220,72 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
         return [call.args[2] for call in self.create_job.call_args_list]
 
     def _talos_jobs(self):
-        return [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-hugepages-')]
+        return [j['metadata']['name'] for j in self._jobs_created()
+                if j['metadata']['name'].startswith('snode-talos-')]
 
-    def test_short_pool_is_reserved_through_the_talos_api_then_the_add_proceeds(self):
-        """Pool short at first; after the Job the host and the kubelet both
-        show enough: the Talos Job ran with the per-NUMA patch, the kubelet
-        was restarted, and the SPDK pod was created."""
-        self.core.read_node.return_value = _node('16Gi')
-        with patch.dict(os.environ, self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=[2 * GIB, 16 * GIB]):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+    def _start(self, host_pool, kubelet_capacity, spdk_mem=12 * GIB, env=None):
+        """Run the handler with the host pool and kubelet capacity sequences
+        the agent will observe on successive reads (the last value repeats)."""
+        host = list(host_pool)
+        kube = list(kubelet_capacity)
+        host_iter = (host[min(i, len(host) - 1)] for i in range(10_000))
+        kube_iter = (_node(kube[min(i, len(kube) - 1)]) for i in range(10_000))
+        self.core.read_node.side_effect = lambda name: next(kube_iter)
+        with patch.dict(os.environ, env or self.env, clear=True), \
+                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=lambda: next(host_iter)):
+            return k8s_node.spdk_process_start(_body(spdk_mem=spdk_mem))
+
+    def test_short_pool_is_patched_then_the_kubelet_restarted_then_the_add_proceeds(self):
+        """Host pool short, kubelet at zero: the patch Job runs, the agent
+        waits for the host pool, then the kubelet Job runs, the agent waits
+        for the kubelet, and the SPDK pod is created."""
+        data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'])
         self.assertIsNone(error, error)
         self.assertIn('Pod created', data)
-        [talos_job] = self._talos_jobs()
-        patch_arg = talos_job['spec']['template']['spec']['initContainers'][0]['args'][-1]
+        self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
+        [patch_job, kubelet_job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-')]
+        patch_arg = patch_job['spec']['template']['spec']['containers'][0]['args'][-1]
         self.assertEqual(json.loads(patch_arg), k8s_node._talos_sysfs_patch({0: (12 * GIB + 10**9) // 2_000_000}))
-        self.assertEqual(talos_job['spec']['template']['spec']['containers'][0]['args'][-3:],
+        self.assertEqual(kubelet_job['spec']['template']['spec']['containers'][0]['args'][-3:],
                          ['service', 'kubelet', 'restart'])
-        # The init Job still runs (baseline capture); the pod request is unchanged.
-        self.assertEqual(len(self._jobs_created()), 2)
         self.core.create_namespaced_pod.assert_called()
 
-    def test_pool_already_sufficient_applies_nothing(self):
-        """No Talos Job -- and so no kubelet restart -- when the pool already
-        covers the request, as on a plain node restart."""
-        self.core.read_node.return_value = _node('16Gi')
-        with patch.dict(os.environ, self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', return_value=16 * GIB):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+    def test_kubelet_is_not_restarted_before_the_host_pool_exists(self):
+        """The patch Job completes but Talos has not written the pages yet:
+        the agent keeps waiting on the host and does not create the kubelet
+        Job; when the wait runs out the add fails on the host side."""
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn('after applying the machine config patch', error)
+        self.assertIn('host provides 2048 MiB', error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1'])
+        self.core.create_namespaced_pod.assert_not_called()
+
+    def test_pool_present_but_kubelet_lagging_restarts_only_the_kubelet(self):
+        """The host already has the pool (a previous attempt patched it) but
+        the kubelet booted before it existed: no patch, one kubelet Job."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-worker-1'])
+        self.core.create_namespaced_pod.assert_called()
+
+    def test_pool_and_kubelet_already_sufficient_applies_nothing(self):
+        """No Talos Job -- and so no kubelet restart -- as on a plain node
+        restart with the pool in place."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
         self.assertIsNone(error, error)
         self.assertEqual(self._talos_jobs(), [])
 
+    def test_kubelet_never_following_fails_the_add(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['2Gi'])
+        self.assertFalse(data)
+        self.assertIn('kubelet', error)
+        self.assertIn('2048 MiB', error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-worker-1'])
+
     def test_missing_credentials_secret_fails_before_any_job(self):
         self.core.read_namespaced_secret.side_effect = ApiException(status=404)
-        with patch.dict(os.environ, self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', return_value=2 * GIB):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
         self.assertFalse(data)
         self.assertIn("Secret 'talos-api-access-talos-secrets' not found", error)
         self.assertIn('os:admin', error)
@@ -253,62 +294,46 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
     def test_unreadable_secret_does_not_block(self):
         """No RBAC to read Secrets: the check is skipped and the Job tells."""
         self.core.read_namespaced_secret.side_effect = ApiException(status=403)
-        self.core.read_node.return_value = _node('16Gi')
-        with patch.dict(os.environ, self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=[2 * GIB, 16 * GIB]):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'])
         self.assertIsNone(error, error)
-        self.assertEqual(len(self._talos_jobs()), 1)
+        self.assertEqual(len(self._talos_jobs()), 2)
 
-    def test_job_failure_is_reported_with_the_job_name(self):
+    def test_job_failure_is_reported_with_the_step_and_job_name(self):
         k8s_node.node_utils_k8s.wait_for_job_completion.side_effect = RuntimeError("Job 'x' failed")
-        with patch.dict(os.environ, self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', return_value=2 * GIB):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
         self.assertFalse(data)
-        self.assertIn('did not succeed', error)
+        self.assertIn('Talos patch Job', error)
         self.assertIn('snode-talos-hugepages-worker-1', error)
         self.core.create_namespaced_pod.assert_not_called()
 
-    def test_pool_still_short_after_the_patch_fails_the_add(self):
-        with patch.dict(os.environ, self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', return_value=2 * GIB):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
-        self.assertFalse(data)
-        self.assertIn('after applying the machine config patch', error)
-        self.assertIn('host provides 2048 MiB', error)
-        self.core.create_namespaced_pod.assert_not_called()
-
-    def test_kubelet_not_following_fails_the_add(self):
-        """Host pool is there but the kubelet still advertises the old
-        capacity: the pod would be unschedulable, so the add fails naming it."""
-        self.core.read_node.return_value = _node('2Gi')
-        with patch.dict(os.environ, self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=[2 * GIB, 16 * GIB, 16 * GIB]):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
-        self.assertFalse(data)
-        self.assertIn('kubelet', error)
-        self.assertIn('2048 MiB', error)
+    def test_completed_job_log_is_copied_before_the_job_is_deleted(self):
+        pod = MagicMock()
+        pod.metadata.name = 'snode-talos-hugepages-worker-1-abcde'
+        self.core.list_namespaced_pod.return_value.items = [pod]
+        self.core.read_namespaced_pod_log.return_value = 'patched MachineConfigs\nApplied configuration without a reboot\n'
+        with self.assertLogs(k8s_node.logger, level='INFO') as logs:
+            data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertTrue(any('Applied configuration without a reboot' in line for line in logs.output), logs.output)
+        self.core.read_namespaced_pod_log.assert_any_call('snode-talos-hugepages-worker-1-abcde', 'simplyblock')
+        deleted = [c.kwargs['name'] for c in self.batch.delete_namespaced_job.call_args_list]
+        self.assertEqual([n for n in deleted if n.startswith('snode-talos-')],
+                         ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
 
     def test_image_and_secret_come_from_the_environment(self):
-        self.core.read_node.return_value = _node('16Gi')
         env = dict(self.env, TALOSCTL_IMAGE='mirror.local/talosctl:v1.11.5', TALOS_API_SECRET='sb-talos')
-        with patch.dict(os.environ, env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=[2 * GIB, 16 * GIB]):
-            k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
-        [talos_job] = self._talos_jobs()
-        spec = talos_job['spec']['template']['spec']
-        self.assertEqual(spec['initContainers'][0]['image'], 'mirror.local/talosctl:v1.11.5')
+        self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'], env=env)
+        [patch_job, _] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-')]
+        spec = patch_job['spec']['template']['spec']
+        self.assertEqual(spec['containers'][0]['image'], 'mirror.local/talosctl:v1.11.5')
         self.assertEqual(spec['volumes'][0]['secret']['secretName'], 'sb-talos')
         self.core.read_namespaced_secret.assert_called_with('sb-talos', 'simplyblock')
 
     def test_host_configuration_job_is_skipped_on_talos(self):
         """Core isolation requested: the grubby Job is skipped rather than
         run against a host with no shell."""
-        self.core.read_node.return_value = _node('16Gi')
-        with patch.dict(os.environ, dict(self.env, CORE_ISOLATION='true'), clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', return_value=16 * GIB):
-            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                  env=dict(self.env, CORE_ISOLATION='true'))
         self.assertIsNone(error, error)
         self.batch.create_namespaced_job.assert_not_called()
 
