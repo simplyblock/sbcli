@@ -1,0 +1,80 @@
+{# Reserve a Talos worker's huge pages through the Talos API.
+
+   Talos has no host shell and its root filesystem is immutable, so the
+   nr_hugepages write the init Job makes elsewhere is not available. The
+   machine config is, through apid on the node: the first container patches
+   the per-NUMA counts into machine.sysfs (applied live, no reboot), the
+   second restarts the kubelet so the node's hugepages-2Mi capacity reflects
+   them. talosctl's image is scratch + the binary, hence two containers and
+   no shell. Credentials come from the Secret Talos issues for the
+   talos.dev ServiceAccount in this namespace (Talos API access from
+   Kubernetes), mounted where talosctl looks for them by default. #}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ TALOS_JOBNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      hostNetwork: true
+      serviceAccountName: simplyblock-storage-node-sa
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      volumes:
+        - name: talos-secrets
+          secret:
+            secretName: {{ TALOS_API_SECRET }}
+      initContainers:
+        - name: patch-machine-config
+          image: {{ TALOSCTL_IMAGE }}
+          args:
+            - --nodes
+            - $(NODE_IP)
+            - --endpoints
+            - $(NODE_IP)
+            - patch
+            - machineconfig
+            - --mode=no-reboot
+            - --patch
+            - {{ TALOS_PATCH | tojson }}
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: TALOSCONFIG
+              value: /var/run/secrets/talos.dev/config
+          volumeMounts:
+            - name: talos-secrets
+              mountPath: /var/run/secrets/talos.dev
+              readOnly: true
+      containers:
+        - name: restart-kubelet
+          image: {{ TALOSCTL_IMAGE }}
+          args:
+            - --nodes
+            - $(NODE_IP)
+            - --endpoints
+            - $(NODE_IP)
+            - service
+            - kubelet
+            - restart
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: TALOSCONFIG
+              value: /var/run/secrets/talos.dev/config
+          volumeMounts:
+            - name: talos-secrets
+              mountPath: /var/run/secrets/talos.dev
+              readOnly: true
