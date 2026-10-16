@@ -379,9 +379,23 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                     sleep_n_sec(3)
                     _dev = self.ssh_obj.get_nvme_device_for_nqn(
                         client, clone_nqn, ns_id=clone_ns)
-                    claimed = {d.get("Device") for d in self.lvol_mount_details.values()}
-                    claimed |= {d.get("Device") for d in self.clone_mount_details.values()}
-                    if _dev and _dev not in claimed:
+                    # Keyed by (client, device), not device alone. There
+                    # are two clients and the kernel numbers devices per
+                    # host, so /dev/nvme12n7 on .165 and /dev/nvme12n7 on
+                    # .166 are different disks on different machines that
+                    # happen to share a path string. Comparing bare paths
+                    # made one client's volume reserve the other client's
+                    # device: run 20261015-225408 refused /dev/nvme12n7 for
+                    # clnOCXUWYB9UC70_WVKRKYFU on .166 because
+                    # clnOCXUWYB9UC70_G5GMOBVA already held /dev/nvme12n7
+                    # on .165, and bootstrap failed with "Clone did not
+                    # connect" on a device that was free.
+                    claimed = {
+                        (d.get("Client"), d.get("Device"))
+                        for d in list(self.lvol_mount_details.values())
+                        + list(self.clone_mount_details.values())
+                    }
+                    if _dev and (client, _dev) not in claimed:
                         new_dev = _dev
                         self.logger.info(
                             f"[clone_connect] {clone_name} shares a subsystem; "
@@ -400,7 +414,8 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                         holder = next(
                             (n for n, d in list(self.lvol_mount_details.items())
                              + list(self.clone_mount_details.items())
-                             if d.get("Device") == _dev), "unknown")
+                             if (d.get("Client"), d.get("Device"))
+                             == (client, _dev)), "unknown")
                         self.logger.warning(
                             f"[clone_connect] resolved {_dev} for {clone_name} "
                             f"(nqn={clone_nqn} nsid={clone_ns}) but it is "
