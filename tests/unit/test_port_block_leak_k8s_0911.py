@@ -75,16 +75,16 @@ class TestIsPortBlockedParsesPayload(unittest.TestCase):
             self.assertEqual(port_block.is_port_blocked(node, port),
                              port in batched, port)
 
-    def test_falls_back_to_iptables_when_rpc_absent(self):
+    def test_rpc_absent_raises_instead_of_reading_iptables(self):
+        # There is no iptables fallback any more: the firewall API it went
+        # to does not exist on 26.3 hosts. See test_port_block_rpc_only.
         from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError
 
         node = MagicMock()
         node.rpc_client.return_value.nvmf_get_blocked_ports.side_effect = (
             RPCRemoteError("no such method", RPCErrorCode.method_not_found))
-        with patch.object(port_block, "_is_port_blocked_iptables",
-                          return_value=True) as legacy:
-            self.assertTrue(port_block.is_port_blocked(node, 4442))
-        legacy.assert_called_once()
+        with self.assertRaises(RPCRemoteError):
+            port_block.is_port_blocked(node, 4442)
 
 
 # --------------------------------------------------------------------------
