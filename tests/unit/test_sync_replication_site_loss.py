@@ -109,10 +109,14 @@ class TestSpdkAnswers:
 
 class TestCollectSiteGone:
 
-    PROBED = (StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_SHUTDOWN)
-    NOT_PROBED = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING,
-                  StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED,
-                  StorageNode.STATUS_REMOVED)
+    # RESTARTING is probed too: a frozen node whose auto-restart is stuck sits in
+    # RESTARTING forever, and the site drain must be able to judge it gone to
+    # converge (#2026-10-16 unplanned-failover: a frozen site never left DRAINING).
+    PROBED = (StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE,
+              StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_RESTARTING)
+    NOT_PROBED = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                  StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_CREATION,
+                  StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_REMOVED)
 
     def test_a_transient_node_without_an_enabled_vote_is_gone(self):
         nodes, seen = [], {}
@@ -183,6 +187,62 @@ def _verdict(cluster, nodes, majority=(), veto=()):
 
 def _proposed(verdict):
     return verdict.status, verdict.site, verdict.state
+
+
+IN_SHUTDOWN = StorageNode.STATUS_IN_SHUTDOWN
+
+
+class TestDrainNodesConvergesAFrozenSite:
+    """Regression (2026-10-16 unplanned failover): a frozen site never left
+    ``draining`` -> the forced promote looped forever on "site is being shut down
+    by the monitor". _drain_nodes only escalated ONLINE/DOWN/UNREACHABLE, so a
+    node judged gone but stuck RESTARTING / IN_SHUTDOWN / SCHEDULABLE was left
+    pending and the drain never converged. It must now force every gone node of
+    the site to OFFLINE -- cancelling the stuck restart first for the states
+    set_node_offline deliberately skips (RESTARTING / IN_SHUTDOWN)."""
+
+    def _mk(self, node_id, status):
+        node = _storage_node(node_id, SITE_B, status)
+        node.cluster_id = "cluster-1"
+        return node
+
+    def test_a_gone_restarting_node_is_restart_cancelled_and_forced_offline(self):
+        node = self._mk("b0", RESTARTING)
+        with patch.object(storage_node_monitor.tasks_controller,
+                          "cancel_pending_node_restart_tasks") as cancel, \
+             patch.object(storage_node_monitor.storage_node_ops, "set_node_status") as set_status, \
+             patch.object(storage_node_monitor.device_controller, "device_set_unavailable"), \
+             patch.object(storage_node_monitor, "set_node_offline") as set_offline:
+            storage_node_monitor._drain_nodes([node], "site drain", {"b0": True})
+        cancel.assert_called_once()
+        assert any(len(c.args) >= 2 and c.args[1] == OFFLINE for c in set_status.call_args_list), \
+            f"the gone RESTARTING node was not forced OFFLINE: {set_status.call_args_list}"
+        set_offline.assert_not_called()  # set_node_offline skips RESTARTING; the forced path is used
+
+    def test_a_gone_in_shutdown_node_is_forced_offline(self):
+        node = self._mk("b0", IN_SHUTDOWN)
+        with patch.object(storage_node_monitor.tasks_controller, "cancel_pending_node_restart_tasks"), \
+             patch.object(storage_node_monitor.storage_node_ops, "set_node_status") as set_status, \
+             patch.object(storage_node_monitor.device_controller, "device_set_unavailable"):
+            storage_node_monitor._drain_nodes([node], "site drain", {"b0": True})
+        assert any(len(c.args) >= 2 and c.args[1] == OFFLINE for c in set_status.call_args_list), \
+            f"the gone IN_SHUTDOWN node was not forced OFFLINE: {set_status.call_args_list}"
+
+    def test_a_gone_schedulable_node_is_set_offline(self):
+        node = self._mk("b0", SCHEDULABLE)
+        with patch.object(storage_node_monitor, "set_node_offline") as set_offline:
+            storage_node_monitor._drain_nodes([node], "site drain", {"b0": True})
+        set_offline.assert_called_once()  # not in the skip list, so the normal path converges it
+
+    def test_a_restarting_node_not_judged_gone_is_left_alone(self):
+        node = self._mk("b0", RESTARTING)
+        with patch.object(storage_node_monitor.tasks_controller,
+                          "cancel_pending_node_restart_tasks") as cancel, \
+             patch.object(storage_node_monitor.storage_node_ops, "set_node_status") as set_status:
+            storage_node_monitor._drain_nodes([node], "site drain", {"b0": False})
+        cancel.assert_not_called()
+        assert not any(len(c.args) >= 2 and c.args[1] == OFFLINE for c in set_status.call_args_list), \
+            "a node not judged gone must not be forced offline (it may still recover)"
 
 
 class TestSyncClusterStatus:

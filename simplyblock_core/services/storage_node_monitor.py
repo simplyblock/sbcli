@@ -266,7 +266,7 @@ def _collect_status_probes(snodes):
 
 
 _SITE_GONE_PROBED_STATUSES = (StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE,
-                              StorageNode.STATUS_IN_SHUTDOWN)
+                              StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_RESTARTING)
 
 
 def _collect_site_gone(snodes) -> dict[str, bool]:
@@ -993,6 +993,26 @@ def _spawn_recovery_shutdown(node):
     recovery_shutdown_threads[node_id] = t
 
 
+def _force_offline_lost_site_node(node):
+    """Force a gone node of a lost site to OFFLINE when ``set_node_offline`` would
+    skip it (RESTARTING / IN_SHUTDOWN, where the restart runner normally owns the
+    transition). The node is proven gone this pass (its SPDK does not answer and no
+    peer reports its JM link), so its restart is stuck forever on a site that is not
+    coming back: cancel the pending restart, record the node OFFLINE, and mark its
+    devices unavailable, so the site drain converges (``draining -> down``) and the
+    forced promote's fence can run instead of looping on "being shut down by the
+    monitor" (2026-10-16 unplanned failover)."""
+    if node.status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED):
+        return
+    tasks_controller.cancel_pending_node_restart_tasks(node.cluster_id, node.get_id())
+    storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE,
+                                     caused_by="sync_site_lost")
+    for dev in node.nvme_devices:
+        if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                          NVMeDevice.STATUS_CANNOT_ALLOCATE):
+            device_controller.device_set_unavailable(dev.get_id())
+
+
 def _drain_nodes(nodes, what, gone=None) -> bool:
     """The node loop of a recovery drain - main's suspend drain over the whole
     cluster (_drive_suspend_recovery), the site drain of a sync-replication
@@ -1013,7 +1033,8 @@ def _drain_nodes(nodes, what, gone=None) -> bool:
                 "for clean recovery drain",
                 what, node.get_id(), node.status)
             _spawn_recovery_shutdown(node)
-        elif node.status == StorageNode.STATUS_UNREACHABLE:
+            continue
+        if node.status == StorageNode.STATUS_UNREACHABLE:
             if gone is not None and not gone.get(node.get_id()):
                 logger.info("%s: unreachable node %s is not judged gone in this pass; left alone",
                             what, node.get_id())
@@ -1026,6 +1047,26 @@ def _drain_nodes(nodes, what, gone=None) -> bool:
             except Exception as e:
                 logger.error("Failed to escalate unreachable node %s to OFFLINE: %s",
                              node.get_id(), e)
+            continue
+        # A site drain (gone is not None) must also converge the not-reachably-up
+        # states a cluster-wide drain leaves to their runners: a node this pass
+        # judged gone is forced OFFLINE, or a frozen site never leaves `draining`
+        # and the forced promote loops forever (2026-10-16 unplanned failover).
+        # SCHEDULABLE takes the normal path; RESTARTING / IN_SHUTDOWN are skipped
+        # by set_node_offline (the restart runner owns them), so their stuck
+        # restart is cancelled and the node is forced OFFLINE.
+        if gone is None or not gone.get(node.get_id()):
+            continue
+        try:
+            if node.status == StorageNode.STATUS_SCHEDULABLE:
+                logger.info("%s: escalating gone schedulable node %s to OFFLINE", what, node.get_id())
+                set_node_offline(node)
+            elif node.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+                logger.warning("%s: forcing gone node %s (%s) OFFLINE, cancelling its stuck restart",
+                               what, node.get_id(), node.status)
+                _force_offline_lost_site_node(node)
+        except Exception as e:
+            logger.error("Failed to escalate node %s to OFFLINE: %s", node.get_id(), e)
 
     return all(
         node.auto_restart_disabled or node.status not in _DRAIN_PENDING_STATUSES
