@@ -623,22 +623,21 @@ class TestRestart:
         leader_rebuild.assert_called_once()
         rebuild.assert_not_called()
 
-    @pytest.mark.parametrize("marker, lost_site, restarting, down, as_leader", [
-        (SITE_B, "", 0, (), True),                  # the active primary
-        (SITE_B, "", 1, (), False),                 # the active secondary behind a connected primary
-        (SITE_B, "", 1, (0,), True),                # ... takes over from a disconnected one
-        (SITE_B, "", 2, (), False),                 # the active tertiary never leads
-        (SITE_B, "", 2, (0,), False),
-        (SITE_B, "", 2, (0, 1), False),             # ... and is never skipped
-        ("", "", 0, (), False),                     # the passive triplet
-        ("", "", 1, (0,), False),
-        ("moving:" + SITE_B, "", 0, (), False),     # a move in flight
-        ("moving:" + SITE_A, "", 1, (0,), False),
-        (SITE_B, SITE_B, 0, (), False),             # the lost site
+    @pytest.mark.parametrize("marker, restarting, down, as_leader", [
+        (SITE_B, 0, (), True),                  # the active primary
+        (SITE_B, 1, (), False),                 # the active secondary behind a connected primary
+        (SITE_B, 1, (0,), True),                # ... takes over from a disconnected one
+        (SITE_B, 2, (), False),                 # the active tertiary never leads
+        (SITE_B, 2, (0,), False),
+        (SITE_B, 2, (0, 1), False),             # ... and is never skipped
+        ("", 0, (), False),                     # the passive triplet
+        ("", 1, (0,), False),
+        ("moving:" + SITE_B, 0, (), False),     # a move in flight
+        ("moving:" + SITE_A, 1, (0,), False),
     ])
     def test_a_remote_member_leads_by_its_position(
-            self, db, rpcs, env, marker, lost_site, restarting, down, as_leader):
-        _, a, b, owner = _layout(db, active_site=marker, lost_site=lost_site)
+            self, db, rpcs, env, marker, restarting, down, as_leader):
+        _, a, b, owner = _layout(db, active_site=marker)
         env.down.update(b[i].get_id() for i in down)
         me = b[restarting].get_id()
         with patch.object(ops, "recreate_lvstore", return_value=True) as leader_rebuild, \

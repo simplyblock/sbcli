@@ -1,14 +1,12 @@
-"""Disaster fail-over and site return on a sync-replication cluster, against
-the real FoundationDB: the forced promote of a volume whose LVS is led from a
-lost site (the API row, the disaster gate scoped to the LVS it moves, the
-runner's site steps and their ordering, retries from ``fencing``, the
-check of the lost site's members before each hand-off), the grant guards that
-keep a lost site from leading, the leaderless rebuild of a lost site's nodes,
-the site return (election of the LVS still led from the returned site,
-readiness, catch-up, the transactional clear), the re-activation of a
-cluster with an LVS led from its remote triplet, the cluster verdict with a
-site out, the one writer of the lost-site record and the monitor pass that
-writes the record and clears it under a suspension.
+"""Disaster fail-over on a sync-replication cluster, against the real
+FoundationDB: the forced promote of a volume whose LVS is led from a lost site
+(the API row, the disaster gate scoped to the LVS it moves, the runner's site
+steps and their ordering, retries from ``fencing``, the check of the lost
+site's members before each hand-off), the grant guards that keep a lost site
+from leading, the re-activation of a cluster with an LVS led from its remote
+triplet, the cluster verdict with a site out, the one writer of the lost-site
+record, the record step of a site return (the volumes' sites it leaves alone)
+and the monitor pass that writes the record and clears it under a suspension.
 
 Storage nodes are the stateful nvmf fake of
 test_sync_replication_lvol_publish.py (or the plain RPC mocks of
@@ -766,356 +764,6 @@ class TestLostSiteGrantGuards:
 
 
 # ---------------------------------------------------------------------------
-# the lost site's nodes come back
-# ---------------------------------------------------------------------------
-
-class TestLostSiteRestart:
-
-    def test_a_lost_site_lvs_is_rebuilt_leaderless(self, db, rpcs, hub, env):
-        # Real rebuild of a home secondary: no leader anywhere, the rest of A down.
-        _, a, b, owner = stack._one_owner_layout(db, lost_site=SITE_A)
-        env.down.update(n.get_id() for n in a if n.get_id() != a[1].get_id())
-        with patch.object(ops, "recreate_lvstore") as leader_rebuild, \
-                patch.object(ops, "_rebuild_remote_instance", return_value=True):
-            assert ops.recreate_all_lvstores(_fresh(db, a[1])) is True
-        leader_rebuild.assert_not_called()
-        rpc = rpcs[a[1].get_id()]
-        assert {c.kwargs["name"] for c in rpc.bdev_distrib_create.call_args_list} == {
-            "distrib_11", "distrib_12"}
-        assert stack._roles(rpc) == ["secondary"]
-        assert not stack._took_leadership(rpc)
-        for name, mock in hub.items():
-            assert not mock.called, name
-        assert env.blocked() == []
-
-    @pytest.mark.parametrize("state", [Cluster.LOST_SITE_DONE, Cluster.LOST_SITE_DOWN])
-    def test_routing_per_lvs(self, db, rpcs, env, state):
-        # LVS_1 (a0) moved to B; LVS_3 (a1's own) still led from A; LVS_2 (b0,
-        # S-home) led from its remote triplet on A, whose primary is a1. The
-        # same whether A was failed over (done) or the monitor recorded it down.
-        cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db, lost_site=SITE_A)
-        _seed_record(db, cluster, SITE_A, state)
-        owner_a1 = stack._make_owner(db, a[1], [a[1], a[2], a[0]], b, lvs_id=3)
-        _update(db, owner_b, remote_primary_node_id=a[1].get_id(), remote_secondary_node_id=a[0].get_id(),
-                lvs_active_site=SITE_A)
-        rpcs.lead(b[0])
-        with patch.object(ops, "recreate_lvstore") as leader_rebuild, \
-                patch.object(ops, "recreate_lvstore_on_non_leader", return_value=True) as nl, \
-                patch.object(ops, "_recreate_lvstore_on_non_leader_impl", return_value=True) as impl:
-            assert ops.recreate_all_lvstores(_fresh(db, owner_a1)) is True
-        leader_rebuild.assert_not_called()
-        calls = {c.args[2].get_id(): (c.args[1].get_id(), c.kwargs) for c in nl.call_args_list}
-        assert calls[owner_a1.get_id()] == (owner_a1.get_id(),
-                                            {"activation_mode": True, "force": False, "skip_hublvol": True})
-        assert calls[owner_a.get_id()] == (b[0].get_id(), {"force": False})
-        (remote,) = impl.call_args_list
-        assert (remote.args[0].get_id(), remote.args[1].get_id(), remote.args[2].get_id()) == (
-            a[1].get_id(), owner_b.get_id(), owner_b.get_id())
-        assert remote.kwargs == {"activation_mode": True, "force": False, "skip_hublvol": True}
-
-    def test_a_whole_site_comes_back_one_node_after_the_other(self, db, rpcs, hub, env):
-        # FD off: restarts are sequential. LVS_1 moved to B (behind b0), LVS_3
-        # (a1) and LVS_2 (b0, S-home) still led from A: rebuilt leaderless.
-        cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db, lost_site=SITE_A)
-        owner_a1 = stack._make_owner(db, a[1], [a[1], a[2], a[0]], b, lvs_id=3)   # still led from A
-        _update(db, owner_b, lvs_active_site=SITE_A)        # S-home, led from its triplet on A
-        rpcs.lead(b[0])
-        env.down.update(n.get_id() for n in a)
-        for node in a:
-            env.down.discard(node.get_id())
-            assert ops.recreate_all_lvstores(_fresh(db, node)) is True, node.get_id()
-            assert not stack._took_leadership(rpcs[node.get_id()])
-        for name, mock in hub.items():
-            assert [c for c in mock.call_args_list if c.args[0].site == SITE_A] == [], name
-        assert _fresh(db, owner_a1).lvs_active_site == ""
-
-    def test_a_site_returns_while_the_moved_lvs_has_no_leader(self, db, rpcs, hub, env):
-        # A forced promote to B that no client IO followed: nobody leads LVS_1.
-        # Every node of A rebuilds its instance behind b0, the primary of the
-        # active triplet, and the restart completes.
-        cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db, lost_site=SITE_A)
-        _update(db, owner_b, lvs_active_site=SITE_A)        # S-home, led from its triplet on A
-        env.down.update(n.get_id() for n in a)
-        for node in a:
-            env.down.discard(node.get_id())
-            env.set_port.reset_mock()
-            assert ops.recreate_all_lvstores(_fresh(db, node)) is True, node.get_id()
-            rpc = rpcs[node.get_id()]
-            assert "raid0_1" in [c.args[0] for c in rpc.bdev_examine.call_args_list]
-            assert env.blocked() == [b[0].get_id()] and b[0].get_id() in env.unblocked()
-        for node in (*a, *b):
-            assert not stack._took_leadership(rpcs[node.get_id()]), node.get_id()
-            rpcs[node.get_id()].bdev_lvol_update_lvstore.assert_not_called()
-        for name, mock in hub.items():
-            assert [c for c in mock.call_args_list if c.args[0].site == SITE_A] == [], name
-        assert _fresh(db, owner_a).lvs_active_site == SITE_B
-
-
-# ---------------------------------------------------------------------------
-# the election on the returned site
-# ---------------------------------------------------------------------------
-
-@pytest.fixture()
-def transfer():
-    with patch.object(ops, "transfer_lvs_leadership") as t, \
-            patch.object(ops, "_taker_jm_quorum_ok", return_value=True) as quorum:
-        t.quorum = quorum
-        yield t
-
-
-class TestElection:
-
-    def _returned(self, db, rpcs, state=Cluster.LOST_SITE_DONE):
-        cluster, a, b, owner = stack._one_owner_layout(db, lost_site=SITE_A)
-        cluster.lost_site_state = state
-        cluster.write_to_db(db.kv_store)
-        return cluster, a, b, owner
-
-    @pytest.mark.parametrize("state", [Cluster.LOST_SITE_DONE, Cluster.LOST_SITE_DOWN,
-                                       Cluster.LOST_SITE_DRAINING])
-    def test_nobody_leads_the_active_primary_is_elected(self, db, rpcs, env, transfer, state):
-        cluster, a, b, owner = self._returned(db, rpcs, state)
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) == a[0].get_id()
-        (call,) = transfer.call_args_list
-        assert call.args[0] is None and call.args[1].get_id() == a[0].get_id()
-        assert {n.get_id() for n in call.args[2]} == {n.get_id() for n in (*a[1:], *b)}
-        assert call.kwargs["lvs_node"].get_id() == owner.get_id() and call.kwargs["reload_metadata"]
-
-    @pytest.mark.parametrize("state", [Cluster.LOST_SITE_DONE, Cluster.LOST_SITE_DOWN,
-                                       Cluster.LOST_SITE_DRAINING])
-    def test_a_remote_led_lvs_elects_its_remote_primary(self, db, rpcs, env, transfer, state):
-        """LVS_2 (home B) is led from its remote triplet on the lost site A."""
-        cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db)
-        cluster.lost_site, cluster.lost_site_state = SITE_A, state
-        cluster.write_to_db(db.kv_store)
-        _update(db, owner_b, lvs_active_site=SITE_A)
-        assert ops.elect_lvs_leader_on_site(owner_b.get_id()) == owner_b.remote_primary_node_id
-
-    def test_without_a_local_jm_quorum_nothing_is_granted(self, db, rpcs, env, transfer):
-        _, a, b, owner = self._returned(db, rpcs)
-        transfer.quorum.return_value = False
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) is None
-        transfer.assert_not_called()
-
-    def test_a_leading_triplet_member_needs_no_transfer(self, db, rpcs, env, transfer):
-        _, a, b, owner = self._returned(db, rpcs)
-        rpcs.lead(a[1])
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) == a[1].get_id()
-        transfer.assert_not_called()
-
-    def test_a_leader_on_the_other_site_or_two_leaders_stop_it(self, db, rpcs, env, transfer):
-        _, a, b, owner = self._returned(db, rpcs)
-        rpcs.lead(b[0])
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) is None
-        rpcs.lead(a[0])
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) is None
-        transfer.assert_not_called()
-
-    def test_a_silent_member_stops_it(self, db, rpcs, env, transfer):
-        _, a, b, owner = self._returned(db, rpcs)
-        rpcs[b[2].get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("down")
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) is None
-        transfer.assert_not_called()
-
-    def test_a_task_owning_the_leadership_stops_it(self, db, rpcs, env, transfer):
-        _, a, b, owner = self._returned(db, rpcs)
-        with patch.object(ops, "_leadership_moving_tasks_active", return_value=True):
-            assert ops.elect_lvs_leader_on_site(owner.get_id()) is None
-        transfer.assert_not_called()
-
-    def test_a_failed_transfer_is_retried_by_the_next_call(self, db, rpcs, env, transfer):
-        _, a, b, owner = self._returned(db, rpcs)
-        transfer.side_effect = [ops.LeadershipTransferError("aborted"), None]
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) is None
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) == a[0].get_id()
-
-    def test_an_lvs_moved_away_is_not_elected(self, db, rpcs, env, transfer):
-        _, a, b, owner = self._returned(db, rpcs)
-        _update(db, owner, lvs_active_site=SITE_B)
-        assert ops.elect_lvs_leader_on_site(owner.get_id()) is None
-        transfer.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# the site return
-# ---------------------------------------------------------------------------
-
-class _Return:
-    """Site A lost and back: LVS_1 (a0) moved to B, LVS_3 (a1) and LVS_4
-    (a2, no volumes) still led from A, LVS_2 (b0, S-home) led from its remote
-    triplet on A. Every node online, every device online."""
-
-    def __init__(self, db, rpcs, state=Cluster.LOST_SITE_DONE):
-        self.cluster, self.a, self.b, self.owner_a, self.owner_b = stack._two_owner_layout(
-            db, lost_site=SITE_A)
-        self.cluster.lost_site_state = state
-        self.cluster.write_to_db(db.kv_store)
-        a, b = self.a, self.b
-        self.owner_a1 = stack._make_owner(db, a[1], [a[1], a[2], a[0]], b, lvs_id=3)
-        self.owner_a2 = stack._make_owner(db, a[2], [a[2], a[0], a[1]], b, lvs_id=4)
-        self.owner_b = _update(db, self.owner_b, lvs_active_site=SITE_A)
-        self.db, self.rpcs = db, rpcs
-        self.elected: list = []
-        self.answers: dict = {}
-        leaders = {self.owner_a1.get_id(): a[1], self.owner_a2.get_id(): a[2],
-                   self.owner_b.get_id(): _fresh(db, a[0])}
-        self.leaders = {k: v.get_id() for k, v in leaders.items()}
-        for node in (*a, *b):
-            rpcs[node.get_id()].distr_sync_replication_status.side_effect = self._answer(node.get_id())
-
-    def _answer(self, node_id):
-        def answer(name=None):
-            out = []
-            for owner in (self.owner_a1, self.owner_a2, self.owner_b):
-                if self.leaders[owner.get_id()] != node_id:
-                    continue
-                for bdev in owner.lvstore_stack:
-                    if bdev["type"] == "bdev_distr":
-                        elem = {"name": bdev["name"], "sync_replication_mode": "full",
-                                "status": "replica_unsynced"}
-                        elem.update(self.answers.get(bdev["name"], {}))
-                        out.append(elem)
-            return out
-        return answer
-
-    def elect(self, owner_id):
-        self.elected.append(owner_id)
-        return self.leaders.get(owner_id)
-
-    def settle(self):
-        with patch.object(ops, "elect_lvs_leader_on_site", side_effect=self.elect):
-            return src.settle_site_return(self.cluster.get_id())
-
-    def resync_lvs(self):
-        return sorted(t.function_params["lvs_name"]
-                      for t in self.db.get_active_sync_resync_tasks(self.cluster.get_id()))
-
-    def cluster_now(self):
-        return self.db.get_cluster_by_id(self.cluster.get_id())
-
-
-class TestSiteReturn:
-
-    def test_the_whole_site_back_elects_schedules_and_clears(self, db, rpcs):
-        ret = _Return(db, rpcs)
-        assert ret.settle() is True
-        assert sorted(ret.elected) == sorted([ret.owner_a1.get_id(), ret.owner_a2.get_id(),
-                                              ret.owner_b.get_id()])       # never the moved LVS_1
-        assert ret.resync_lvs() == ["LVS_1", "LVS_2", "LVS_3", "LVS_4"]
-        cluster = ret.cluster_now()
-        assert (cluster.lost_site, cluster.lost_site_state) == ("", "")
-
-    @pytest.mark.parametrize("status,blocks", [(NVMeDevice.STATUS_FAILED, True),
-                                               (NVMeDevice.STATUS_UNAVAILABLE, True),
-                                               (NVMeDevice.STATUS_FAILED_AND_MIGRATED, False),
-                                               (NVMeDevice.STATUS_REMOVED, False)])
-    def test_a_device_of_the_site_not_online(self, db, rpcs, status, blocks):
-        ret = _Return(db, rpcs)
-        node = _fresh(db, ret.a[1])
-        node.nvme_devices[0].status = status
-        node.write_to_db(db.kv_store)
-        assert ret.settle() is (not blocks)
-        assert (ret.cluster_now().lost_site == SITE_A) is blocks
-
-    def test_a_suspended_node_is_not_back(self, db, rpcs):
-        ret = _Return(db, rpcs)
-        _update(db, ret.a[2], status=StorageNode.STATUS_SUSPENDED)
-        assert ret.settle() is False
-        assert ret.elected == [] and ret.resync_lvs() == []
-
-    def test_an_aborted_fence_clears_once_its_task_is_done(self, db, rpcs):
-        ret = _Return(db, rpcs, state=Cluster.LOST_SITE_FENCING)
-        task_id, _ = tasks_controller.add_sync_promote_task(
-            ret.cluster.get_id(), ret.owner_a1.get_id(), site=SITE_B, lvol_ids=["x"],
-            owners={"LVS_3": ret.owner_a1.get_id()}, lost_site=SITE_A, fence=True)
-        assert ret.settle() is False and ret.elected == []
-        assert tasks_controller.cancel_task(task_id)
-        task = db.get_task_by_id(task_id)
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        assert ret.settle() is True
-        assert ret.cluster_now().lost_site == ""
-
-    def test_a_failed_election_schedules_nothing(self, db, rpcs):
-        ret = _Return(db, rpcs)
-        ret.leaders[ret.owner_a2.get_id()] = None
-        assert ret.settle() is False
-        assert ret.resync_lvs() == [] and ret.cluster_now().lost_site == SITE_A
-
-    def test_a_volume_missing_on_the_leader_holds_the_return(self, db, rpcs):
-        ret = _Return(db, rpcs)
-        pool = publish._pool(db, ret.cluster)
-        vol = publish._volume(db, ret.cluster, _fresh(db, ret.owner_a1), pool)
-        rpc = rpcs[ret.a[1].get_id()]
-        rpc.get_bdevs.side_effect = lambda name=None, **kwargs: []
-        with patch.object(src, "_held") as held:
-            assert ret.settle() is False
-        held.assert_called_once()
-        assert held.call_args.args[2] == [vol.get_id()]
-        assert ret.resync_lvs() == [] and ret.cluster_now().lost_site == SITE_A
-        rpc.get_bdevs.side_effect = lambda name=None, **kwargs: [{"name": name}]
-        assert ret.settle() is True
-
-    @pytest.mark.parametrize("override", [{"status": "unknown"}, {"status": 7}, {"status": ""},
-                                          {"sync_replication_mode": "disabled"}])
-    def test_a_distrib_not_replayed_yet_holds_the_return(self, db, rpcs, override):
-        ret = _Return(db, rpcs)
-        ret.answers["distrib_32"] = override
-        assert ret.settle() is False
-        assert ret.resync_lvs() == [] and ret.cluster_now().lost_site == SITE_A
-        ret.answers.clear()
-        assert ret.settle() is True
-
-    def test_a_device_failing_mid_return_keeps_the_site_lost(self, db, rpcs):
-        ret = _Return(db, rpcs)
-        real = ret.elect
-
-        def _elect(owner_id):
-            if owner_id == ret.owner_b.get_id():
-                node = _fresh(db, ret.a[0])
-                node.nvme_devices[0].status = NVMeDevice.STATUS_UNAVAILABLE
-                node.write_to_db(db.kv_store)
-            return real(owner_id)
-
-        with patch.object(ops, "elect_lvs_leader_on_site", side_effect=_elect):
-            assert src.settle_site_return(ret.cluster.get_id()) is False
-        assert ret.cluster_now().lost_site == SITE_A
-
-    def test_a_site_that_was_down_returns_without_a_fail_over(self, db, rpcs):
-        # The monitor's record: A went down and came back, nothing was fenced.
-        ret = _Return(db, rpcs, state=Cluster.LOST_SITE_DOWN)
-        vol = publish._volume(db, ret.cluster, _fresh(db, ret.owner_a1), publish._pool(db, ret.cluster))
-        rpcs[ret.a[1].get_id()].get_bdevs.side_effect = lambda name=None, **kwargs: [{"name": name}]
-        assert ret.settle() is True
-        assert sorted(ret.elected) == sorted([ret.owner_a1.get_id(), ret.owner_a2.get_id(),
-                                              ret.owner_b.get_id()])       # never the moved LVS_1
-        assert ret.resync_lvs() == ["LVS_1", "LVS_2", "LVS_3", "LVS_4"]
-        assert _record(db, ret.cluster.get_id()) == ("", "")
-        fresh = db.get_lvol_by_id(vol.get_id())
-        assert (fresh.sync_active_site, fresh.sync_demoted_sites) == (SITE_A, [])
-
-    @pytest.mark.parametrize("what", ["node", "device"])
-    def test_a_down_site_not_wholly_back_stays_down(self, db, rpcs, what):
-        ret = _Return(db, rpcs, state=Cluster.LOST_SITE_DOWN)
-        if what == "node":
-            _update(db, ret.a[2], status=StorageNode.STATUS_OFFLINE)
-        else:
-            node = _fresh(db, ret.a[1])
-            node.nvme_devices[0].status = NVMeDevice.STATUS_UNAVAILABLE
-            node.write_to_db(db.kv_store)
-        assert ret.settle() is False
-        assert ret.elected == [] and ret.resync_lvs() == []
-        assert _record(db, ret.cluster.get_id()) == (SITE_A, Cluster.LOST_SITE_DOWN)
-
-    def test_a_site_being_drained_does_not_return(self, db, rpcs):
-        # The drain ends at down; until then the return waits.
-        ret = _Return(db, rpcs, state=Cluster.LOST_SITE_DRAINING)
-        assert ret.settle() is False
-        assert ret.elected == [] and ret.resync_lvs() == []
-        assert _record(db, ret.cluster.get_id()) == (SITE_A, Cluster.LOST_SITE_DRAINING)
-
-
-# ---------------------------------------------------------------------------
 # re-activation with an LVS led from its remote triplet
 # ---------------------------------------------------------------------------
 
@@ -1472,6 +1120,30 @@ class TestLostSiteRecord:
         assert (fresh.lost_site, fresh.lost_site_state) == expected
 
 
+class TestRecordSiteReturn:
+
+    @pytest.mark.parametrize("state, active, demoted", [
+        (DOWN, SITE_A, ()),             # the monitor's record: nothing was fenced
+        (DONE, SITE_B, (SITE_A,)),      # a fail-over: the volume stays fenced on A
+    ])
+    def test_a_return_leaves_the_volume_sites(self, db, state, active, demoted):
+        """The site activation's record step clears the record and leaves every
+        volume's active site and fence as they are: after ``down`` the volume
+        is still active on A with no fence, after a fail-over it stays fenced
+        there until it is promoted back."""
+        cluster, a, b, owner_a, _ = stack._two_owner_layout(db)
+        _seed_record(db, cluster, SITE_A, state)
+        vol = publish._volume(db, cluster, _fresh(db, owner_a), publish._pool(db, cluster),
+                              active_site=active, demoted=demoted)
+        token = src.begin_site_activation(cluster.get_id(), SITE_A)
+        assert token
+        assert src.record_site_return(cluster.get_id(), SITE_A, token, {n.get_id() for n in a}) == []
+        assert _record(db, cluster.get_id()) == ("", "")
+        assert db.get_cluster_by_id(cluster.get_id()).site_activation_since == token
+        fresh = db.get_lvol_by_id(vol.get_id())
+        assert (fresh.sync_active_site, fresh.sync_demoted_sites) == (active, list(demoted))
+
+
 # ---------------------------------------------------------------------------
 # the monitor pass and the record
 # ---------------------------------------------------------------------------
@@ -1524,6 +1196,16 @@ def monitor_pass(db, rpcs):
             patch("simplyblock_core.distr_controller.send_dev_status_event"):
         p.shutdown, p.activate = shutdown, activate
         yield p
+        join_site_activations()
+
+
+def join_site_activations(timeout=10.0):
+    """Wait for every site activation thread a pass started, while the patches
+    it runs against are still in place; fails when one does not end."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("site-activation-"):
+            thread.join(timeout)
+            assert not thread.is_alive(), f"{thread.name} did not end"
 
 
 def _site(db, cluster, a_status=StorageNode.STATUS_ONLINE, b_status=StorageNode.STATUS_ONLINE):

@@ -109,6 +109,10 @@ class LVol(BaseModel):
     # [] on non-sync clusters.
     sync_active_site: str = ""
     sync_demoted_sites: list[str] = default_factory(list)
+    # Sync replication: True from the volume's creation until connect_lvol
+    # first hands out its paths - a volume no consumer can have attached yet.
+    # False by default: a record that never set it counts as served.
+    sync_never_connected: bool = False
     # Sync replication: the latest failed promote of this volume per target
     # site not yet reported to a caller, ``{site: {"task_id", "reason"}}``.
     # Written with the task's DONE (DBController.finish_sync_promote_task),

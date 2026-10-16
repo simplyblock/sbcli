@@ -2,7 +2,7 @@ import sys
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import events_controller, snapshot_controller, tasks_controller
+from simplyblock_core.controllers import activation_gate, events_controller, snapshot_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -31,6 +31,25 @@ def get_primary_node(task) -> StorageNode | None:
 # drained from in_deletion. Exit after this many consecutive failures so the
 # orchestrator restarts us with a clean FDB connection (~3 min at the 3s tick).
 _DB_FAILURE_RESTART_THRESHOLD = 60
+
+
+def _site_activation_holds(cl, task) -> str:
+    """activation_gate.site_activation_blocks for the LVS a sync task works
+    on: the owner of its volume (FN_LVOL_SYNC_OP) or the LVS its bdev belongs
+    to (FN_LVOL_SYNC_DEL) - not ``primary_node``, which is the leader that
+    acted on the delete and may own another LVS. A sync delete whose LVS has no
+    owner is held like a node-level operation; a sync op whose volume is gone
+    is not - the task itself finishes it without an RPC."""
+    if not activation_gate.site_activation_blocks(cl):
+        return ""
+    if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
+        try:
+            lvol = db.get_lvol_by_id(task.function_params["lvol_id"])
+        except KeyError:
+            return ""
+        return tasks_controller.site_activation_holds(cl, lvol.node_id)
+    lvs_name = task.function_params.get("lvol_bdev_name", "").split("/")[0]
+    return tasks_controller.site_activation_holds_lvs(cl, lvs_name)
 
 
 def _count_failure_and_maybe_alert(task, node, what, msg):
@@ -145,6 +164,10 @@ def main():
                             task = db.get_task_by_id(task.uuid)
                             if task.status == JobSchedule.STATUS_DONE:
                                 continue
+                            # Left untouched while a site activation holds
+                            # its LVS (the cluster is skipped in_activation).
+                            if _site_activation_holds(cl, task):
+                                continue
                             try:
                                 tasks_controller.run_lvol_sync_op_task(task)
                             except Exception as e:
@@ -156,6 +179,9 @@ def main():
 
                             # get new task object because it could be changed from cancel task
                             task = db.get_task_by_id(task.uuid)
+
+                            if _site_activation_holds(cl, task):
+                                continue
 
                             if task.canceled:
                                 task.function_result = "canceled"

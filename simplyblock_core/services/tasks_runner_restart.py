@@ -826,16 +826,18 @@ def _process_restart_task(task_uuid):
 def _deferred_by_drain(cluster, task) -> bool:
     """Whether a queued node restart waits for a drain: a SUSPENDED cluster
     still being drained to all-offline, or - sync replication - the node's site
-    being drained (tasks_controller.is_auto_restart_paused). A node no longer
-    in the database is judged by the cluster-wide pause alone."""
+    being drained or any site being activated
+    (tasks_controller.is_auto_restart_paused). A node no longer in the
+    database is judged by the cluster-wide pause alone."""
     try:
         node = db.get_storage_node_by_id(task.node_id)
     except KeyError:
         node = None
     if not tasks_controller.is_auto_restart_paused(cluster, node):
         return False
-    logger.info("Cluster %s: a drain is running (cluster suspended, or the node's "
-                "site draining); deferring node-restart task %s", cluster.get_id(), task.uuid)
+    logger.info("Cluster %s: a drain or a site activation is running (cluster suspended, "
+                "the node's site draining, or a site being activated); deferring "
+                "node-restart task %s", cluster.get_id(), task.uuid)
     return True
 
 

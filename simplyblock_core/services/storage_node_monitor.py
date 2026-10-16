@@ -7,12 +7,13 @@ import fdb
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
-from simplyblock_core.controllers import sync_replication_controller
+from simplyblock_core.controllers import activation_gate, sync_replication_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.utils.ttl_cache import TTLCache
 
 logger = utils.get_logger(__name__)
@@ -706,35 +707,17 @@ def _activation_node_gate(cluster_id, nodes, max_fault_tolerance):
         shutdown is still recovering (auto-restart will bring it back) — wait.
       * Prior guards preserved: a node with an active restart task, or one
         ONLINE for < 30s (not yet settled), block activation.
+
+    The status rules are activation_gate.activation_node_status_problem; the
+    restart-task check of the ONLINE nodes follows them.
     """
-    ftt = max_fault_tolerance if isinstance(max_fault_tolerance, int) and max_fault_tolerance >= 1 else 1
-    deliberate_down = 0
+    problem = activation_gate.activation_node_status_problem(nodes, max_fault_tolerance)
+    if problem:
+        return False, problem
     for node in nodes:
-        if node.status == StorageNode.STATUS_REMOVED:
-            continue
-        if node.status in (StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION,
-                            StorageNode.STATUS_RESTARTING, StorageNode.STATUS_UNREACHABLE):
-            return False, f"node {node.get_id()} is still transitioning ({node.status})"
-        if node.status != StorageNode.STATUS_ONLINE:
-            # OFFLINE / DOWN / SCHEDULABLE.
-            if getattr(node, "auto_restart_disabled", False):
-                deliberate_down += 1
-                continue
-            return False, (f"node {node.get_id()} is {node.status} and was not deliberately "
-                           f"shut down; waiting for it to restart and come back online")
-        # ONLINE from here on.
-        if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
+        if (node.status == StorageNode.STATUS_ONLINE
+                and tasks_controller.get_active_node_restart_task(cluster_id, node.get_id())):
             return False, f"node {node.get_id()} has an active restart task"
-        if node.online_since:
-            try:
-                diff = datetime.now(UTC) - datetime.fromisoformat(node.online_since)
-                if diff.total_seconds() < 30:
-                    return False, f"node {node.get_id()} has been online less than 30 seconds"
-            except (ValueError, TypeError):
-                pass
-    if deliberate_down > ftt:
-        return False, (f"{deliberate_down} deliberately-shut-down node(s) exceed the cluster "
-                       f"fault tolerance ({ftt}); not enough nodes to activate safely")
     return True, ""
 
 
@@ -792,6 +775,160 @@ def _watchdog_stuck_activation(cluster):
         "reverting to SUSPENDED so activation re-gates and auto-restart can re-queue",
         cluster.get_id(), elapsed, budget)
     _set_cluster_status(cluster, Cluster.STATUS_SUSPENDED)
+
+
+# The site activations of sync-replication clusters running in this process,
+# keyed by cluster id. An entry counts only while its thread is alive; a dead
+# one is dropped where it is read. The starter inserts the entry and starts the
+# thread under _site_activation_lock, and the thread removes its own entry when
+# it ends. _site_activation_running and _start_site_activation take the lock
+# (not reentrant): never call them while holding it.
+_site_activation_lock = threading.Lock()
+_site_activation_threads: dict[str, threading.Thread] = {}
+
+
+def _live_site_activation(cluster_id) -> threading.Thread | None:
+    """The live site activation thread of the cluster in this process, None
+    when there is none (a dead entry is dropped). Call under _site_activation_lock."""
+    thread = _site_activation_threads.get(cluster_id)
+    if thread is not None and not thread.is_alive():
+        del _site_activation_threads[cluster_id]
+        thread = None
+    return thread
+
+
+def _site_activation_running(cluster_id) -> bool:
+    """True while a live thread of this process runs a site activation of the cluster."""
+    with _site_activation_lock:
+        return _live_site_activation(cluster_id) is not None
+
+
+def _run_site_activation(cluster_id, site):
+    """The body of a site activation thread: cluster_ops.cluster_activate for
+    ``site``, its failures logged; the thread's registry entry removed at the end."""
+    try:
+        cluster_ops.cluster_activate(cluster_id, force=True, site=site)
+        logger.info("Sync replication: the activation of site %s on cluster %s ended", site, cluster_id)
+    except sync_replication_controller.SiteActivationCancelled as e:
+        logger.warning("Sync replication: the activation of site %s on cluster %s stopped: %s",
+                       site, cluster_id, e)
+    except (ValueError, storage_node_ops.LVSRestartRequiredError, RPCException) as e:
+        logger.error("Sync replication: the activation of site %s on cluster %s failed: %s",
+                     site, cluster_id, e)
+    finally:
+        with _site_activation_lock:
+            if _site_activation_threads.get(cluster_id) is threading.current_thread():
+                del _site_activation_threads[cluster_id]
+
+
+def _start_site_activation(cluster_id, site) -> bool:
+    """Start the site activation of ``site`` in a daemon thread unless a live
+    one of this process runs for the cluster; True when one was started. The
+    flag's compare-and-set (begin_site_activation, inside the thread) keeps it
+    single-flight across processes."""
+    with _site_activation_lock:
+        if _live_site_activation(cluster_id) is not None:
+            return False
+        thread = threading.Thread(target=_run_site_activation, args=(cluster_id, site), daemon=True,
+                                  name=f"site-activation-{cluster_id[:8]}")
+        _site_activation_threads[cluster_id] = thread
+        thread.start()
+    return True
+
+
+def _site_return_problem(cluster, nodes) -> str:
+    """The site gate of a sync-replication cluster whose site ``cluster.lost_site``
+    is recorded ready to return; "" when open. main's activation gate, split by
+    scope:
+
+    * the stored cluster status serves (SITE_ACTIVATION_STATUSES) and no
+      FN_SYNC_PROMOTE task of the cluster is open (a canceled one included:
+      its leadership moves are not settled yet);
+    * no node of the cluster is in transition, and no ONLINE one has an
+      active restart task - an OFFLINE node of the other site always has one
+      queued and does not hold the site back;
+    * _activation_node_gate over the site's nodes;
+    * at least SYNC_JC_MIN_LOCAL_JMS of the site's nodes ONLINE."""
+    cluster_id, site = cluster.get_id(), cluster.lost_site
+    if cluster.status not in sync_replication_controller.SITE_ACTIVATION_STATUSES:
+        return f"cluster {cluster_id} is {cluster.status}"
+    if db.get_active_sync_promote_tasks(cluster_id):
+        return "a sync promote task is not done"
+    problem = activation_gate.nodes_in_transition_problem(nodes)
+    if problem:
+        return problem
+    site_nodes = [n for n in nodes if n.site == site]
+    can_activate, problem = _activation_node_gate(cluster_id, site_nodes, cluster.max_fault_tolerance)
+    if not can_activate:
+        return problem
+    for node in nodes:
+        if (node.site != site and node.status == StorageNode.STATUS_ONLINE
+                and tasks_controller.get_active_node_restart_task(cluster_id, node.get_id())):
+            return f"node {node.get_id()} has an active restart task"
+    return activation_gate.site_jc_floor_problem(nodes, site)
+
+
+def _drive_site_return(cluster):
+    """The return of the site a sync-replication cluster records lost in a
+    state other than ``draining``: once the site gate (_site_return_problem)
+    opens, the site activation - cluster_ops.cluster_activate(force=True,
+    site=S) - starts in a background thread and the pass goes on at once.
+    Nothing happens while a site activation runs (the flag is set, or a live
+    thread of this process drives one); a closed gate is logged on every
+    pass, as main's activation gate is."""
+    if (cluster.sync_replication is not True
+            or cluster.lost_site_state not in sync_replication_controller.SITE_ACTIVATION_STATES):
+        return
+    cluster_id, site = cluster.get_id(), cluster.lost_site
+    if cluster.site_activation_site or _site_activation_running(cluster_id):
+        return
+    problem = _site_return_problem(cluster, db.get_storage_nodes_by_cluster_id(cluster_id))
+    if problem:
+        logger.warning("can not activate site %s: %s", site, problem)
+        return
+    if _start_site_activation(cluster_id, site):
+        logger.info("Sync replication: site %s of cluster %s is back; its activation started", site, cluster_id)
+
+
+def _watchdog_stuck_site_activation(cluster):
+    """Reclaim the site activation flag of a sync-replication cluster whose
+    activation driver is gone; the lost-site record and the cluster status are
+    left as they are, so the site gate judges the site again.
+
+    A heartbeat older than ACTIVATION_HEARTBEAT_STALE_SEC means the driving
+    process is gone: cleared at once. Past the node-scaled budget of
+    _watchdog_stuck_activation the flag is cleared only when no live thread of
+    this process runs the cluster's site activation. A live one that stops
+    making progress keeps the flag, as a cluster activation running in the
+    monitor's own pass keeps IN_ACTIVATION."""
+    if cluster.sync_replication is not True or not cluster.site_activation_site:
+        return
+    cluster_id, site = cluster.get_id(), cluster.site_activation_site
+    try:
+        hb_age = (datetime.now(UTC)
+                  - datetime.fromisoformat(cluster.site_activation_heartbeat)).total_seconds()
+    except (ValueError, TypeError):
+        hb_age = None
+    if hb_age is not None and hb_age >= ACTIVATION_HEARTBEAT_STALE_SEC:
+        sync_replication_controller.clear_site_activation(cluster_id)
+        logger.error(
+            "Sync replication: the activation of site %s on cluster %s has a heartbeat %.0fs old "
+            "(> %ds): its driver is gone; activation flag cleared, the site gate re-judges the site",
+            site, cluster_id, hb_age, ACTIVATION_HEARTBEAT_STALE_SEC)
+        return
+    try:
+        elapsed = (datetime.now(UTC)
+                   - datetime.fromisoformat(cluster.site_activation_since)).total_seconds()
+    except (ValueError, TypeError):
+        return
+    budget = _activation_watchdog_budget_sec(cluster)
+    if elapsed < budget or _site_activation_running(cluster_id):
+        return
+    sync_replication_controller.clear_site_activation(cluster_id)
+    logger.error(
+        "Sync replication: the activation of site %s on cluster %s has run %.0fs (> %ds budget for "
+        "this node count) with no thread of this process driving it; activation flag cleared, the "
+        "site gate re-judges the site", site, cluster_id, elapsed, budget)
 
 
 # Node statuses that mean a node is NOT yet drained for suspend recovery:
@@ -1181,6 +1318,12 @@ def _update_cluster_status_impl(cluster_id):
         _clear_site_record_under_suspension(cluster_id)
     except (KeyError, fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
         logger.error("Sync-replication site record clear failed for cluster %s: %s", cluster_id, e)
+    # Sync replication: the flag of a site activation whose driver is gone is
+    # reclaimed before anything of this pass reads it. DB-only; retried next pass.
+    try:
+        _watchdog_stuck_site_activation(db.get_cluster_by_id(cluster_id))
+    except (KeyError, fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+        logger.error("Sync-replication site activation watchdog failed for cluster %s: %s", cluster_id, e)
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
     # stranded whenever the cluster takes a recovery path (e.g.
@@ -1189,13 +1332,13 @@ def _update_cluster_status_impl(cluster_id):
     # Same reasoning for stranded devices: sweep before the status decision so
     # a re-admitted device stops counting toward affected_nodes on this tick.
     _readmit_stranded_devices(cluster_id)
-    # Sync replication: a lost site that is back as a whole gets the leaders
-    # of the LVS still led from it and its record cleared (DB-only early-out
-    # otherwise). Best-effort like the recovery drive below: retried next pass.
+    # Sync replication: a recorded site whose nodes are back gets its site
+    # activation started in the background; this pass does not wait for it.
+    # DB-only here; retried next pass.
     try:
-        sync_replication_controller.settle_site_return(cluster_id)
-    except Exception:
-        logger.exception("Sync-replication site return failed for cluster %s", cluster_id)
+        _drive_site_return(db.get_cluster_by_id(cluster_id))
+    except (KeyError, fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+        logger.error("Sync-replication site return failed for cluster %s: %s", cluster_id, e)
     # Sync replication: an LVS left "moving:" by a promote that ended without
     # settling it (every member must answer) gets settled here - nothing else
     # retries it while nobody deletes, resizes or snapshots on it. Its own
@@ -1260,6 +1403,16 @@ def _update_cluster_status_impl(cluster_id):
     # Recovery is the operator's call — restart the stopped nodes, or run
     # `cluster restart` (clears the deliberate-shutdown markers, which
     # re-arms this path).
+    # Sync replication: while a site activation runs, a suspension waits for
+    # it - no drain, no re-activation, no status write - as it waits behind
+    # IN_ACTIVATION. The activation stops by itself at its next step (the
+    # stored status no longer serves) and clears its flag.
+    if (current_cluster_status == Cluster.STATUS_SUSPENDED and cluster.sync_replication is True
+            and cluster.site_activation_site):
+        logger.info("Cluster %s suspended while site %s is being activated; the suspension is "
+                    "handled once the site activation has stopped", cluster_id, cluster.site_activation_site)
+        return
+
     if current_cluster_status == Cluster.STATUS_SUSPENDED:
         if tasks_controller.is_suspension_operator_caused(cluster):
             logger.info(

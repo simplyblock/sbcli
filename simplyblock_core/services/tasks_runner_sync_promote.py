@@ -60,7 +60,7 @@ import time
 from datetime import UTC, datetime
 
 from simplyblock_core import db_controller, distr_controller, storage_node_ops, utils
-from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
+from simplyblock_core.controllers import activation_gate, device_controller, health_controller, tasks_controller
 from simplyblock_core.controllers import sync_replication_controller as sync_ctl
 from simplyblock_core.exceptions import PreconditionError, SyncAnaError, SyncGateError
 from simplyblock_core.models.cluster import Cluster
@@ -137,7 +137,12 @@ def _end(task, result, outcome=None) -> bool:
 def _gate(cluster_id, when, lost_site="", lvs_names=()):
     """The planned gate, or with ``lost_site`` the disaster gate of that site
     over ``lvs_names`` (the LVS the promote moves: another LVS of the lost
-    site blocks only its own promote)."""
+    site blocks only its own promote). The disaster gate of a site being
+    activated fails: its leaders are being built there."""
+    if lost_site:
+        cluster = db.get_cluster_by_id(cluster_id)
+        if activation_gate.activating_site(cluster) == lost_site:
+            raise _PromoteFailed(f"gate failed {when}: {activation_gate.site_activation_blocks(cluster)}")
     try:
         if lost_site:
             sync_ctl.check_disaster_gate(cluster_id, lost_site, lvs_names)
@@ -304,11 +309,14 @@ def _site_steps(task, site):
 def _lost_members_not_leading(lvs_name, owner_id, site):
     """Right before a disaster hand-off of ``lvs_name``: no member of it on the
     lost ``site`` may lead it. A member counts when it answers and does not
-    report the leadership (rebuilt non-leader under the lost-site rule), or
-    when it does not answer and is gone (_not_gone_reason). No result is no
-    answer, like an RPC error: that is what the RPC proxy of a dead SPDK
-    returns."""
+    report the leadership, when it does not answer and is gone
+    (_not_gone_reason), or when it does not answer and is an ONLINE node of the
+    recorded site, which holds no instance
+    (storage_node_ops.member_absent_on_recorded_site). No result is no answer,
+    like an RPC error: that is what the RPC proxy of a dead SPDK returns, and
+    what an SPDK without the LVS returns."""
     owner = db.get_storage_node_by_id(owner_id)
+    cluster = db.get_cluster_by_id(owner.cluster_id)
     problems = []
     for node_id in storage_node_ops._lvs_member_ids(owner):
         try:
@@ -324,6 +332,8 @@ def _lost_members_not_leading(lvs_name, owner_id, site):
         if ret is not None:
             if ret and ret[0].get("lvs leadership"):
                 problems.append(f"{node_id} reports the leadership")
+            continue
+        if storage_node_ops.member_absent_on_recorded_site(cluster, node):
             continue
         reason = _not_gone_reason(node)
         if reason:

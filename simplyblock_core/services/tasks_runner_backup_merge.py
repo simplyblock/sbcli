@@ -5,7 +5,7 @@ and triggers merges when retention limits are exceeded.
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import backup_controller
+from simplyblock_core.controllers import activation_gate, backup_controller
 from simplyblock_core.models.cluster import Cluster
 
 logger = utils.get_logger(__name__)
@@ -27,8 +27,15 @@ def main():
                 continue
 
             try:
+                # A volume whose LVS a running site activation holds is left
+                # for a later pass; one whose owner is not found too.
+                activating = bool(activation_gate.site_activation_blocks(cl))
+                owners = ({n.get_id(): n for n in db.get_storage_nodes_by_cluster_id(cl.get_id())}
+                          if activating else {})
                 lvols = db.get_lvols(cl.get_id())
                 for lvol in lvols:
+                    if activating and activation_gate.site_activation_blocks(cl, owners.get(lvol.node_id)):
+                        continue
                     try:
                         backup_controller.evaluate_policy(lvol)
                     except Exception as e:

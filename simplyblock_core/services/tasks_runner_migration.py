@@ -2,7 +2,7 @@ import time
 from datetime import datetime, UTC
 
 from simplyblock_core import db_controller, utils, constants
-from simplyblock_core.controllers import tasks_events, tasks_controller, lvol_controller
+from simplyblock_core.controllers import activation_gate, tasks_events, tasks_controller, lvol_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -93,8 +93,9 @@ def task_runner(task):
         return True
 
     cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status not in Cluster.OPERABLE_STATUSES:
-        task.function_result = "cluster is not active, retrying"
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if cluster.status not in Cluster.OPERABLE_STATUSES or site_activation:
+        task.function_result = site_activation or "cluster is not active, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
         task.write_to_db(db.kv_store)

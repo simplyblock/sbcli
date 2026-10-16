@@ -2,7 +2,7 @@ import time
 from datetime import datetime, UTC
 
 from simplyblock_core import db_controller, utils, constants
-from simplyblock_core.controllers import tasks_controller, device_controller
+from simplyblock_core.controllers import activation_gate, tasks_controller, device_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -24,8 +24,9 @@ def task_runner(task):
     # Node removal DEPENDS on this runner: _decommission_node_devices blocks
     # until every data device reaches FAILED_AND_MIGRATED, which only this
     # runner sets — refusing IN_SHRINK deadlocks removal against its own status.
-    if cluster.status not in Cluster.OPERABLE_STATUSES:
-        task.function_result = "cluster is not active, retrying"
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if cluster.status not in Cluster.OPERABLE_STATUSES or site_activation:
+        task.function_result = site_activation or "cluster is not active, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
         task.write_to_db(db.kv_store)

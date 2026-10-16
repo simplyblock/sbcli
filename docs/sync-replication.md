@@ -16,8 +16,10 @@ Scope of this first version (prototype):
 - `EnableVolumeReplication`, `DisableVolumeReplication` and `ResyncVolume` are no-ops.
 
 Implementation: `simplyblock_core/controllers/sync_replication_controller.py` (status, gates, demote,
-promote, site return), `simplyblock_core/services/tasks_runner_sync_promote.py`,
-`simplyblock_core/services/tasks_runner_sync_resync.py`, the ANA site rule in
+promote, the site record and the site activation flag), `simplyblock_core/services/tasks_runner_sync_promote.py`,
+`simplyblock_core/services/tasks_runner_sync_resync.py`, the site return in
+`simplyblock_core/services/storage_node_monitor.py` (the site gate) and `simplyblock_core/cluster_ops.py`
+(`cluster_activate(..., site=S)`, the site activation), the ANA site rule in
 `simplyblock_core/storage_node_ops.py` (`lvol_site_open`, `lvol_ana_state`), the REST routes in
 `simplyblock_web/api/v2/cluster/storage_pool/volume/replication.py` and
 `simplyblock_web/api/v2/cluster/consistency_group.py`.
@@ -60,9 +62,20 @@ promote, site return), `simplyblock_core/services/tasks_runner_sync_promote.py`,
   (the site is beyond its fault tolerance while the other one is healthy; what is left of it is being
   shut down) and `down` (the site was judged gone as a whole, or its drain completed; it may return -
   nodes coming back do not change it). Two are written by a disaster fail-over (a forced promote):
-  `fencing` while its site steps run, `done` after. Only the site return clears a record; any
+  `fencing` while its site steps run, `done` after. Only the site activation clears a record; any
   suspension of the cluster also clears the monitor's two (see
   [Disaster fail-over](#disaster-fail-over-site-t-lost)).
+- While a recorded site is being activated (see [Site return](#6-flows-for-the-operator)), the cluster
+  carries an **activation flag** beside the record (`Cluster.site_activation_site`,
+  `site_activation_since`, `site_activation_heartbeat`): the site, the start time - which is the
+  activation's token - and a heartbeat stamped about every 60 s. It is the site's counterpart of the
+  cluster status `IN_ACTIVATION`; the stored cluster status is left as it is (normally `DEGRADED`, or
+  `READONLY` when set so). Only the
+  activation that set it clears it, when it ends in any way; the storage-node monitor's watchdog clears
+  it when its driver is gone (a heartbeat older than 300 s, or the node-scaled activation budget passed
+  with no activation thread running in the monitor). A suspension never clears it: the activation stops
+  at its next step and clears it itself. The flag and the record are separate: the activation clears the
+  record before its last step and the flag after it.
 
 ### The active and the passive triplet
 
@@ -84,8 +97,8 @@ promote, site return), `simplyblock_core/services/tasks_runner_sync_promote.py`,
   triplet takes it itself when the first IO arrives. Until then every instance reports "not leading".
   That is a normal state: it blocks no node restart, and the automatic catch-up and the scheduled
   snapshots wait for it to end (see [Known limitations](#8-known-limitations)).
-- Specific to sync replication are only the promote and the demote, the passive triplet, the election
-  of a leader when a lost site returns, and the catch-up runner.
+- Specific to sync replication are only the promote and the demote, the passive triplet, the
+  activation of one returning site (the cluster activation narrowed to it), and the catch-up runner.
 
 ### ANA rule (who publishes which path)
 
@@ -192,7 +205,7 @@ Two task runners are new. Both must run on the management plane; without them a 
 - The existing `MainDistrEventCollector` records the sync events (zone desync, remote journal
   dropped / restored) that the status, the disaster gate and the resync depend on, and the
   `StorageNodeMonitor` judges the sites, writes the monitor's site record, drives the site drain and
-  runs the site return; both must run as today.
+  starts the site activation (in a thread of its own process); both must run as today.
 
 ---
 
@@ -404,6 +417,14 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
 | forced while T is online, or a node of T may still run SPDK (ONLINE / DOWN / RESTARTING / IN_CREATION) | 409 - force never acts on a live site |
 | gate fails | 409 with `problems` (never 412) |
 
+- First placement: a planned promote first demotes T itself for the LVSs whose only blockers are volumes
+  that were never connected - a volume is created with `sync_never_connected` set, and the first
+  `connect` (or the connection entries a promote answers with) clears it. When every volume of an LVS
+  still served on T was never connected, all of them are demoted on T (under the planned gate), as an
+  unstage would have done, and the table is judged again; a volume that was ever connected (or whose
+  record does not carry the flag) keeps its 409. The demote re-checks the flag under the LVS's site-rule
+  lock, under which `connect` clears it before it hands out any path. An LVS a running site activation
+  holds is never demoted this way: such a promote is refused with "site S is being activated; retry".
 - A site is "online" when it has an `ONLINE` node and is not the cluster's lost site. That decides the
   move and the disaster rows; the ANA-only row needs an `ONLINE` member of **this LVS's** triplet on S
   (another node of S opens none of its paths).
@@ -415,6 +436,12 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
   the forced promote of a disaster row fences the site; any other promote leaves the record as it is.
   The promote task re-reads the record before it opens a volume and refuses to open one on a site
   recorded since it was queued.
+- While a recorded site T is being activated (the activation flag names T), the disaster gate of T
+  fails with "site T is being activated; retry" - before the site steps, before the move, before each
+  LVS's hand-off and before the opening - so no promote hands off an LVS whose leader the activation is
+  building. The failed task's reason is answered by the next call, as for any failed promote; call
+  again once the activation has ended (the site has returned, or the activation failed and the site is
+  still recorded).
 - The promote task does the whole promote in one pass and always ends DONE, **also when it failed**;
   the task being DONE is not the success condition. A failed task is reported once to each of its
   volumes: the first POST of that volume to S after the failure answers 409 with the task's reason and
@@ -432,7 +459,8 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
   (its role could not be made non-leader), before the hand-off and after it, and so does a taker that
   does not answer; another member on S that does not answer is skipped like a disconnected peer of a
   restart. In a disaster fail-over the members of the lost site T are not asked, fenced or stamped at
-  all: the site steps have fenced them, and they are rebuilt as non-leaders when the site returns.
+  all: the site steps have fenced them, and the site activation rebuilds them as non-leaders when the
+  site returns.
 - The taker takes the leadership **on the first client IO**: its lvstore reloads the metadata from disk
   and promotes itself, and each volume reloads its blob on its own first IO - the in-place update an
   in-site failover runs. A leadership granted by RPC instead would serve every volume with the
@@ -479,6 +507,11 @@ A forced promote of a volume led from T, when T is not online and none of its no
 
 The task does not wait for the proof: a refused proof fails the task, its reason is reported by the
 next call and only the call after that judges the table again (see [Promote](#promote)).
+
+When T comes back, it returns by the same path as after a site loss without a fail-over: its nodes
+restart without lvstores and the site activation rebuilds them, the `fencing` / `done` record cleared by
+it (see [Site return](#6-flows-for-the-operator)). The volumes fenced on T stay closed there until they
+are promoted back.
 
 **The cluster status of a sync cluster** is judged per site:
 
@@ -527,9 +560,9 @@ restarted only by the operator) and then records it `down`; the automatic restar
 resume. The cluster is `DEGRADED` (or stays `READONLY` if it was set so), the healthy site is not
 touched and keeps serving its volumes.
 **Recording a site moves nothing**: an LVS led from the recorded site stays led from it, and its
-volumes stay closed until the site returns as a whole (below) or an operator fails them over with a
-forced promote (which fences the site, `down -> fencing -> done`). No volume is fenced by the record
-itself.
+volumes stay closed until the site activation (see Site return below) opens them or an operator fails
+them over with a forced promote (which fences the site, `down -> fencing -> done`). No volume is fenced
+by the record itself.
 
 **First IO before object operations.** A promote that moved an LVS (planned or forced) leaves it
 without a leader until a client's first IO reaches the new site. Connect a volume of that LVS and
@@ -556,32 +589,88 @@ that was not reloaded. Issue IO on a volume itself before resizing it.
   without sync replication: the tertiary of an active **home** triplet whose primary and secondary
   are both disconnected is not rebuilt at that restart; the node comes online without this instance.
   The tertiary of an active remote triplet is rebuilt in that case too;
-- a member of the passive triplet, every member while the LVS is being moved, and every node of a lost
-  site come back as non-leaders;
+- a member of the passive triplet and every member while the LVS is being moved come back as
+  non-leaders;
+- a node of a recorded site (any record state) comes back `ONLINE` **without lvstores**, as every node
+  of a cluster that serves nothing does: its devices, its own journal (JM) and its links to the peers
+  are brought up, no LVS instance is built. The site activation builds them once the site is back (see
+  Site return below). While the site is `draining` its automatic restarts are paused;
+- while a site activation runs, no node of either site restarts: a manual restart is refused ("site A
+  is being activated; retry") and the automatic restart tasks wait for it to end;
 - "nobody leads" blocks no restart: a non-leader is then rebuilt behind the first connected member of
   the active triplet, its primary first. A non-leader rebuild is refused, and retried by the restart
   task, only while a connected member of the active triplet does not answer whether it leads, or more
   than one says it does.
 
-**Site return** (A comes back, automatic - nothing to call), after a fail-over (`done`, or `fencing`
-left by a promote that no longer runs) or after a site loss without one (`down`; a site still
-`draining` never returns):
+**Site return** (A comes back, automatic - nothing to call), after a site loss without a fail-over
+(`down`) or after a fail-over (`done`, or `fencing` left by a promote that no longer runs); a site still
+`draining` never returns. One path for all three: the bring-up of a cluster without sync replication
+(its nodes restart without lvstores, then the cluster activation builds every lvstore with every journal
+copy in place), applied to site A while site B keeps serving.
 
-- A's nodes restart as non-leaders: an LVS already moved to B is rebuilt behind the member of B's
-  triplet that leads it - behind the first connected member of that triplet, its primary first, when
-  nobody leads it yet (no client IO since the promote); an LVS still led from A (never promoted, not in
-  sync at the loss, or empty) is rebuilt leaderless.
-- When every A node is ONLINE with its zone up, the storage-node monitor elects a leader on A for each
-  LVS still led from A (on its active triplet's primary, after a full verdict of both triplets and a
-  local journal quorum), checks every expected volume on it and every distrib replayed, schedules the
-  catch-up of every LVS and clears `lost_site`. A degraded surviving site delays the election (every
-  member must answer). Events: "Site A returned: <lvs> leader elected ...", "Site A return held: ...".
-- `lost_site` is cleared **before** the catch-up finishes. Volumes fenced on A by a fail-over stay
-  closed there until promoted; after `down` no volume was fenced (`sync_demoted_sites` is untouched),
-  and once the record is cleared the lvol monitor's ANA repair restores the paths of the eligible
-  volumes according to the [ANA rule](#ana-rule-who-publishes-which-path) - a volume assigned to
-  another site or demoted on A stays closed (asynchronously, on its own passes; clearing the record
-  sends no ANA RPC).
+1. **A's nodes restart without lvstores** (see Node restart above) and turn `ONLINE` one by one, empty
+   until the site activation builds their instances. Until the record is cleared, every reader that asks
+   the members of a triplet whether they lead treats such a node as absent - as if `OFFLINE` - and the
+   background repairs build no volume path on it; publication follows the
+   [ANA rule](#ana-rule-who-publishes-which-path), which keeps a recorded site closed. Restarting it with its LVS instances would not work: a site-aware journal counts only its local
+   journal copies and needs two of them, so the first node of A to come back would be aborted by its
+   own data plane.
+2. **The site gate**, judged on every storage-node monitor pass (a closed gate is logged as
+   `can not activate site A: <reason>`):
+   - the cluster status is `ACTIVE`, `DEGRADED` or `READONLY`, and no promote task (`FN_SYNC_PROMOTE`)
+     of the cluster is open;
+   - no node of either site is `IN_SHUTDOWN`, `IN_CREATION` or `RESTARTING`, and no `ONLINE` node of
+     either site has an active restart task (an `OFFLINE` node of B with its restart queued does not
+     hold A back);
+   - the activation gate of a cluster without sync replication over A's nodes: none `UNREACHABLE`,
+     every one `ONLINE` for at least 30 s, except up to the cluster's fault tolerance (FTT) of nodes an
+     operator shut down;
+   - at least two of A's nodes `ONLINE` - the two local journal copies the data plane needs.
+3. **The site activation** - the cluster activation narrowed to A, in a background thread of the
+   storage-node monitor (B stays monitored meanwhile). It sets the activation flag, waits until every
+   `ONLINE` node is connected to every usable device of the other `ONLINE` nodes (repairing the missing
+   device links, and the journal links with them; it fails when the repair stops making progress), and
+   then:
+   - builds the leader of each LVS led from A on the primary of its active triplet (examined from disk,
+     then granted) - only where that primary is `ONLINE` (see [Known limitations](#8-known-limitations));
+   - builds A's other instances of those LVS behind that leader, and rebuilds A's instances of every
+     LVS led from B behind B's serving leader, and of every LVS whose leadership is moving behind a
+     member of its triplet on B, one LVS at a time, the way a node restart rebuilds a non-leader;
+   - wires the hublvols of the LVS led from A, then checks and repairs the journal mesh best effort
+     (an incomplete mesh is logged, the activation goes on);
+   - schedules the catch-up of every LVS and clears the record - only while it still holds the flag,
+     the cluster still serves, A still passes the gate's node rules and A's `ONLINE` nodes are exactly
+     the ones it built on;
+   - opens the paths of the LVS led from A by the [ANA rule](#ana-rule-who-publishes-which-path), emits
+     the event "Site A returned" and clears the flag.
+
+   It writes no cluster status: the stored status stays as it is while A is recorded (normally
+   `DEGRADED`, or `READONLY` when set so), and the monitor's verdict moves it on its own passes once the
+   record is gone.
+4. **What waits while it runs** - what `IN_ACTIVATION` holds on a cluster without sync replication, as
+   far as it touches A: the restart of any node (see Node restart above), node add and removal, cluster
+   expansion, a cluster activation run by an operator, the device / new-device / failed-device
+   migrations, the catch-up runner, the promotes judged by A's disaster gate (see [Promote](#promote)),
+   and the object operations on an LVS led from A or whose leadership is moving - volume create,
+   resize, clone and delete, snapshot create (of a volume or a group), clone and delete are refused
+   with "site A is being activated; retry"; the backup, backup-merge, journal-compaction and
+   sync-delete tasks of such an LVS wait. The same operations on an LVS led from B, B's volumes and
+   the monitors go on: such an operation also reaches a node of A whose instance of that LVS the site
+   activation has already rebuilt, and a group snapshot of such an LVS is refused with "retry" while
+   one of its nodes on A is being rebuilt.
+   A suspension during the activation (any, `sbctl cluster restart` included) stops it at its next
+   step; the monitor's suspend handling - the drain and the re-activation - waits until it has stopped.
+5. **When it fails** before the record step (any error, a lost flag, a suspension), the flag is cleared,
+   the record kept - except that a suspension clears the monitor's record (`down`) by itself, as
+   always - and the instances already built stay as a failed cluster activation leaves them; the next
+   monitor pass judges the gate again. Once the record is cleared it is not restored: a cancellation at
+   the following step skips the opening of the paths, and an ANA failure while opening them is logged
+   and the event is still emitted. While the cluster serves, the lvol monitor repairs the eligible paths
+   on its later passes; under `SUSPENDED` they reopen only with the cluster's recovery.
+
+`lost_site` is cleared **before** the catch-up finishes. Volumes fenced on A by a fail-over stay closed
+there until promoted; after `down` no volume was fenced (`sync_demoted_sites` is untouched). A volume
+assigned to another site or demoted on A stays closed.
 
 **Fail-back B -> A**: wait until `sync-status` is `healthy` / `peer_ready`, then run the planned
 switchover in reverse (demote on B, promote on A). `POST .../failback` is not part of it (a no-op).
@@ -618,15 +707,35 @@ replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) f
   its loss stops monitoring and fail-over, and a full partition in which it and the surviving site lose
   a site that keeps serving its own clients passes the liveness proof and the disaster gate (the gate
   then judges stale events) - both sites serve. There is no witness and no self-fencing.
-- A recorded site returns **only as a whole**: every node of it `ONLINE` with its zone up. A node that
-  never comes back keeps the site recorded and the LVSs led from it closed. Ways out: remove the dead
-  node, or shut down the returned nodes and fail the site over with a forced promote.
+- A recorded site returns by the activation gate of a cluster without sync replication (see
+  [Site return](#6-flows-for-the-operator)): every node of it `ONLINE`, except up to FTT nodes an
+  operator shut down, and at least two of them `ONLINE` (the journal floor). A node that never comes
+  back and was not shut down by an operator keeps the site recorded and the LVSs led from it closed.
+  Ways out: remove the dead node, or shut down the returned nodes and fail the site over with a forced
+  promote.
+- An LVS led from the returning site whose active primary is not `ONLINE` (an operator-stopped node the
+  gate allows) gets no leader from the site activation: its other instances on the site are rebuilt as
+  non-leaders, and the activation's final step does not open its paths - as a cluster activation does
+  not open the paths of an LVS whose owner is stopped. Restart the stopped primary: its restart rebuilds
+  the LVS as the leader.
+- While a site activation runs, the operations listed in [Site return](#6-flows-for-the-operator) wait
+  for it: an object operation on an LVS led from the activating site is refused with "retry", a node
+  restart is refused or waits, a promote of that site fails its gate. The activation of a large site
+  can take minutes; its connectivity repair extends its wait while it makes progress.
+- The site activation clears the record before it opens the paths: an ANA failure while opening them,
+  or a suspension right after the record step, leaves volumes closed with the site no longer recorded
+  - the lvol monitor reopens them on its later passes while the cluster serves (see
+  [Site return](#6-flows-for-the-operator)).
+- A suspended cluster with a fail-over's record (`fencing` / `done`) has no automatic way back: the
+  re-activation of the suspended cluster refuses to build a leader on the recorded site (below), and the
+  site activation needs a serving cluster. The monitor's own records do not outlive a suspension.
 - A forced promote soon after a loss can be refused while the proof cannot pass yet (a peer still
   reports a JM link `enabled`, a node still in a running state, the site still `draining`); call again
   once the cause has cleared (see [Flows](#6-flows-for-the-operator)).
 - A cluster activation run by an operator while a site is recorded refuses to build a leader on a node
   of that site, as for a fenced site: an activation of a cluster with an LVS still led from the
-  recorded site fails until the site returns.
+  recorded site fails until the site returns. Only the site activation, holding the flag, builds those
+  leaders; an operator's activation is refused outright while a site activation runs.
 - A `SCHEDULABLE` node of a `draining` site is waited for, not shut down (the same rule as the
   cluster-wide suspend drain): a node whose RPC recovers while its SPDK keeps running stays
   `SCHEDULABLE`, and the site stays `draining` with its restarts paused, until the node is restarted
@@ -643,7 +752,8 @@ replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) f
   restart wires it (nothing reconnects it in between); a transient disconnect during a reconnect closes
   a standby path for one monitor cycle. An unknown redirect state changes nothing (see the ANA rule).
 - Activation of a sync cluster fails when an LVS led from its remote triplet cannot be wired; an LVS
-  whose leadership is moving refuses re-activation until the move is settled.
+  whose leadership is moving refuses re-activation until the move is settled (a site activation
+  rebuilds its instances on the returning site as non-leaders instead).
 - The API does not expose sites, `lost_site` or per-volume site records (see
   [Role is not accessibility](#role-is-not-accessibility)).
 

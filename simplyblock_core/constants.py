@@ -876,6 +876,14 @@ SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS = 5
 SYNC_STATUS_CACHE_SEC = 5
 SYNC_STATUS_RPC_TIMEOUT_SEC = 5
 
+#: Fewest ONLINE nodes of a site a site activation needs: a site-aware journal needs this many local JMs
+#: (ultra alg_journal.hpp:108 c_jc_ha_min_required_jms; jc_open refuses fewer, the JC aborts the node).
+SYNC_JC_MIN_LOCAL_JMS = 2
+
+#: ``StorageNode.lvs_active_site`` of an LVS whose leadership is being moved to
+#: the site after the prefix (sync replication promote): ``moving:<site>``.
+LVS_MOVING_PREFIX = "moving:"
+
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)

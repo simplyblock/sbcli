@@ -183,35 +183,40 @@ class TestPromoteDecision:
         assert _decide(member, others=[outsider]).blocking == ("x1",)
 
 
+def _unconnected(uuid="v1", **fields):
+    """A volume no connect has handed out yet (sync_never_connected)."""
+    return _lvol(uuid, sync_never_connected=True, **fields)
+
+
 class TestBirthState:
     """The first-placement relaxation: a planned promote whose only blocker is a
-    volume still at its LVS's home (never moved) may demote that home first and
-    move. Safe under the single-active-site (RWO) contract
-    (design-sync-replication-csi-addons.md): a volume still at its home has no
-    live consumer to cut off. is_birth_state is the record test (still at home,
-    whatever its demote record); birth_state_demote_plan is what the planned
-    promote demotes before it moves.
+    never-connected volume still open on its LVS's lead site may demote that
+    site first and move. is_birth_state is the record test (never connected,
+    active where the LVS is led, whatever its demote record);
+    birth_state_demote_plan is what the planned promote demotes before it moves.
     """
 
     def test_is_birth_state(self):
         owner = _owner()  # home site-a, LVS at home (lvs_active_site == "")
-        # Active where its LVS is led: a planned promote elsewhere may demote this
-        # site and follow the workload. Unset active defaults to the LVS's lead,
-        # the home here, and a demote record does not matter.
-        assert src.is_birth_state(_lvol(), owner)
-        assert src.is_birth_state(_lvol(sync_active_site=SITE_A), owner)
-        assert src.is_birth_state(_lvol(sync_demoted_sites=[SITE_B]), owner)
-        # An LVS led from a non-home site (left there by an earlier move) still
-        # hosts such volumes: a fresh volume carries that lead site as its
-        # sync_active_site, and following the workload means demoting wherever the
-        # LVS is led now -- not only its home. (This is the first-placement fix:
-        # anchored to the LVS's current lead site, not owner.site.)
-        assert src.is_birth_state(_lvol(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
-        # Not active on the LVS's lead site (an independently-diverged record), or
-        # the LVS is mid-move: left alone.
-        assert not src.is_birth_state(_lvol(sync_active_site=SITE_B), owner)
-        assert not src.is_birth_state(_lvol(), _owner(lvs_active_site=SITE_B))
-        assert not src.is_birth_state(_lvol(), _owner(lvs_active_site="moving:site-b"))
+        # Active where its LVS is led; an unset active site defaults to the
+        # LVS's lead, the home here, and a demote record does not matter.
+        assert src.is_birth_state(_unconnected(), owner)
+        assert src.is_birth_state(_unconnected(sync_active_site=SITE_A), owner)
+        assert src.is_birth_state(_unconnected(sync_demoted_sites=[SITE_B]), owner)
+        # Anchored to the LVS's current lead site, not its home.
+        assert src.is_birth_state(_unconnected(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
+        # Not active on the LVS's lead site, or the LVS is mid-move.
+        assert not src.is_birth_state(_unconnected(sync_active_site=SITE_B), owner)
+        assert not src.is_birth_state(_unconnected(), _owner(lvs_active_site=SITE_B))
+        assert not src.is_birth_state(_unconnected(), _owner(lvs_active_site="moving:site-b"))
+
+    def test_a_connected_volume_is_never_birth_state(self):
+        """A connect has handed out its paths (or the record predates the
+        flag): a consumer may hold them, wherever the volume is active."""
+        owner = _owner()
+        assert not src.is_birth_state(_lvol(), owner)
+        assert not src.is_birth_state(_lvol(sync_active_site=SITE_A), owner)
+        assert not src.is_birth_state(_lvol(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
 
     def _plan(self, requested, lvs=None, owner=None, site=SITE_B, online=BOTH, nodes=ALL_NODES):
         owner = owner or _owner()
@@ -222,44 +227,52 @@ class TestBirthState:
         return src.birth_state_demote_plan(decisions, {owner.get_id(): owner}, {owner.get_id(): lvs})
 
     def test_a_fresh_volume_is_demoted_on_its_home(self):
-        v1 = _lvol()
+        v1 = _unconnected()
         assert self._plan([v1]) == {SITE_A: [v1]}
 
     def test_a_volume_created_active_on_its_home_is_demoted(self):
-        # A fresh volume carries sync_active_site == home; it is still birth.
-        v1 = _lvol(sync_active_site=SITE_A)
+        # A fresh volume carries sync_active_site == home.
+        v1 = _unconnected(sync_active_site=SITE_A)
         assert self._plan([v1]) == {SITE_A: [v1]}
 
     def test_a_prior_demote_does_not_block_the_first_move(self):
-        # "demote before": a demote of a site does not move the volume off its
-        # home, so the first cross-site promote still auto-demotes the home.
-        v1 = _lvol(sync_demoted_sites=[SITE_B])
+        # A demote of a site does not move the volume off its home, so the
+        # first cross-site promote still auto-demotes the home.
+        v1 = _unconnected(sync_demoted_sites=[SITE_B])
         assert self._plan([v1]) == {SITE_A: [v1]}
 
     def test_a_volume_on_a_non_home_led_lvs_is_auto_demoted(self):
-        # The LVS is led from site-b (left there by an earlier move); a fresh
-        # volume on it carries site-b as its sync_active_site. A pod landing on
-        # site-a follows the workload: demote site-b (no consumer, under RWO) and
-        # move, rather than refusing because the LVS is not at home.
+        # The LVS is led from site-b; a fresh volume on it carries site-b as
+        # its sync_active_site. A promote to site-a demotes site-b and moves.
         owner = _owner(lvs_active_site=SITE_B)
-        v = _lvol(sync_active_site=SITE_B)
+        v = _unconnected(sync_active_site=SITE_B)
         assert self._plan([v], owner=owner, site=SITE_A) == {SITE_B: [v]}
 
     def test_all_fresh_volumes_of_the_lvs_are_demoted_together(self):
-        v1, v2 = _lvol("v1"), _lvol("v2")
+        v1, v2 = _unconnected("v1"), _unconnected("v2")
         assert self._plan([v1, v2], lvs=[v1, v2]) == {SITE_A: [v1, v2]}
+
+    def test_a_connected_volume_is_not_demoted(self):
+        # Its consumer may still hold the home's paths: refused as not demoted.
+        assert self._plan([_lvol()]) == {}
+
+    def test_a_connected_sibling_pins_the_lvs(self):
+        """A sibling a connect handed out stays open on the home: nothing of
+        the LVS is demoted, the promote is refused as LVS busy."""
+        v1, served = _unconnected("v1"), _lvol("v2")
+        assert self._plan([v1], lvs=[v1, served]) == {}
 
     def test_an_already_demoted_volume_has_nothing_to_demote(self):
         # Demoted on its home: not open there, a clean PROMOTE_MOVE, no blocker.
-        assert self._plan([_lvol(sync_demoted_sites=[SITE_A])]) == {}
+        assert self._plan([_unconnected(sync_demoted_sites=[SITE_A])]) == {}
 
     def test_a_no_op_promote_on_the_home_site_demotes_nothing(self):
         # Promoting to the site it is already led from is never a move.
-        assert self._plan([_lvol()], site=SITE_A) == {}
+        assert self._plan([_unconnected()], site=SITE_A) == {}
 
     def test_an_offline_target_is_not_birth_state_demoted(self):
         # A refusal that is not NOT_DEMOTED / LVS_BUSY never triggers a demote.
-        assert self._plan([_lvol()], online={SITE_A}) == {}
+        assert self._plan([_unconnected()], online={SITE_A}) == {}
 
 
 class TestMoveProblems:

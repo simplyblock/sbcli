@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import object_limits, ops_gate
+from simplyblock_core.controllers import activation_gate, object_limits, ops_gate
 from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
@@ -849,6 +849,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+
+    site_activation = activation_gate.site_activation_blocks(cl, host_node)
+    if site_activation:
+        mgs = f"Cannot create LVol on LVS {host_node.lvstore}: {site_activation}"
+        logger.error(mgs)
+        return False, mgs
 
     limit_error = check_lvstore_object_limit(host_node, all_lvols, all_snaps)
     if limit_error:
@@ -2797,6 +2803,10 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         raise PreconditionError(
             f"Cannot delete lvol {lvol.uuid}: cluster {cluster.get_id()} "
             f"status is {cluster.status}")
+    if not force_delete:
+        site_activation = activation_gate.site_activation_blocks(cluster, snode)
+        if site_activation:
+            raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: {site_activation}")
 
     # Persist deletion intent BEFORE any data-plane RPC. If the leader-side
     # delete then times out or errors (for example: SPDK back-pressure on
@@ -3471,10 +3481,15 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     site - a caller does not have to know it, and should not, since leadership
     is control-plane state. When given it is honored (the promote path asks
     for the site it just brought up) and validated against the cluster's sites.
+    The first connect the host is authorized for clears the volume's
+    ``sync_never_connected`` (under its LVS's site-rule lock) before any path
+    is handed out: from then on a consumer may hold its paths.
 
     Raises:
         SyncReplicationSiteError: ``site`` unknown on a sync-replication
             cluster, or given on a cluster without sites.
+        PreconditionError: the site-rule lock of a first connect not acquired
+            in time.
     """
     db_controller = DBController()
     try:
@@ -3491,6 +3506,8 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         host_entry = HostConnectAuth.resolve(lvol, host_nqn, db_controller)
     except ValueError as e:
         return False, str(e)
+    if site is not None and lvol.sync_never_connected:
+        _mark_connected(db_controller, lvol)
 
     out = []
     for path_lvol in _connect_path_volumes(db_controller, lvol):
@@ -3534,6 +3551,25 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 for entry in out:
                     entry.target_lvol_id = rep.source_lvol.get_id()
     return out, None
+
+
+def _mark_connected(db_controller, lvol) -> None:
+    """Clear ``lvol``'s ``sync_never_connected`` under its LVS's site-rule
+    lock, before any of its paths is handed out. A first-placement demote
+    re-checks the flag under the same lock
+    (sync_replication_controller._demote), so it either fences the volume
+    before this connect or sees it connected and leaves it open."""
+    from simplyblock_core import storage_node_ops
+    owner = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    def _cleared(fresh) -> bool:
+        if not fresh.sync_never_connected:
+            return False
+        fresh.sync_never_connected = False
+        return True
+
+    with storage_node_ops.sync_site_rule_locks(owner.cluster_id, [lvol.lvs_name]):
+        db_controller.atomic_update(lvol, _cleared)
 
 
 def _connect_site(db_controller, lvol, site):
@@ -3788,6 +3824,7 @@ def resize_lvol(id, new_size, lock=True) -> None:
         raise PreconditionError(size_error)
 
     # Block during restart Phase 5
+    snode = None
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         if snode.lvstore_status == "in_creation":
@@ -3811,6 +3848,9 @@ def resize_lvol(id, new_size, lock=True) -> None:
         raise PreconditionError(
             f"Cannot resize lvol {lvol.uuid}: cluster {cluster.get_id()} "
             f"status is {cluster.status}")
+    site_activation = activation_gate.site_activation_blocks(cluster, snode) if snode else ""
+    if site_activation:
+        raise PreconditionError(f"Cannot resize lvol {lvol.uuid}: {site_activation}")
 
     if lvol.size == new_size:
         return  # Nothing to do

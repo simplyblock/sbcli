@@ -873,7 +873,12 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                     sec_node = db.get_storage_node_by_id(sec_id)
                 except KeyError:
                     continue
-                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                # Sync replication: an ONLINE node of the site the cluster
+                # records lost holds no instance until its site activation
+                # builds them - an absent path, like an OFFLINE member's, and
+                # nothing to repair on it.
+                if (sec_node and sec_node.status == StorageNode.STATUS_ONLINE
+                        and not storage_node_ops.member_absent_on_recorded_site(cluster, sec_node)):
                     try:
                         sec_rpc = sec_node.rpc_client()
                         ret = health_controller.check_subsystem(

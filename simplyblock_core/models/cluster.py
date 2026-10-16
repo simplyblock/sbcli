@@ -271,6 +271,17 @@ class Cluster(BaseModel):
     # return clears a record, except that a suspension clears the monitor's.
     lost_site: str = ""
     lost_site_state: str = ""
+    # The site activation running for the recorded site ("" = none): the site
+    # it builds, the ISO time it began - the token its holder checks at every
+    # step and ends with - and the heartbeat its wrapper stamps every ~60s.
+    # Written only by sync_replication_controller.begin_site_activation /
+    # stamp_site_activation / end_site_activation, and by
+    # clear_site_activation, the storage-node monitor's watchdog. While it is
+    # set, the monitor's handling of a stored SUSPENDED waits for it, as it
+    # waits behind IN_ACTIVATION.
+    site_activation_site: str = ""
+    site_activation_since: str = ""
+    site_activation_heartbeat: str = ""
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one

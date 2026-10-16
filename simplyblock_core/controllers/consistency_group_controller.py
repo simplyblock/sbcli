@@ -31,7 +31,7 @@ from datetime import datetime
 from simplyblock_core import constants
 from simplyblock_core import db_controller as db_mod
 from simplyblock_core import utils
-from simplyblock_core.controllers import snapshot_events, tasks_controller
+from simplyblock_core.controllers import activation_gate, snapshot_events, tasks_controller
 from simplyblock_core.controllers.snapshot_controller import (
     _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock,
     object_mutation_lock)
@@ -862,6 +862,9 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
     host_node = db.get_storage_node_by_id(group.node_id)
     pool = db.get_pool_by_id(members[0].pool_uuid)
     cluster = db.get_cluster_by_id(pool.cluster_id)
+    site_activation = activation_gate.site_activation_blocks(cluster, host_node)
+    if site_activation:
+        return None, f"Cannot create group snapshot on LVS {group.lvs_name}: {site_activation}"
 
     # Leader + HA member set, same as the single-snapshot path.
     secondary_ids = [host_node.secondary_node_id]
@@ -880,9 +883,24 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
         return None, (f"No leader available for LVS {group.lvs_name} — "
                       f"rejecting the group snapshot until leadership is "
                       f"re-established")
-    secondary_nodes = [n for n in all_nodes
-                       if n.get_id() != primary_node.get_id()
-                       and n.status == StorageNode.STATUS_ONLINE]
+    from simplyblock_core.storage_node_ops import (
+        check_non_leader_for_operation, member_absent_on_recorded_site)
+    secondary_nodes = []
+    for n in all_nodes:
+        if n.get_id() == primary_node.get_id() or n.status != StorageNode.STATUS_ONLINE:
+            continue
+        if not member_absent_on_recorded_site(cluster, n):
+            secondary_nodes.append(n)
+            continue
+        # Sync replication: an ONLINE node of the recorded site holds its
+        # instance only once the site activation has rebuilt it; one being
+        # rebuilt refuses the generation instead of deferring its registration.
+        action = check_non_leader_for_operation(n.get_id(), group.lvs_name, operation_type="create")
+        if action == "proceed":
+            secondary_nodes.append(n)
+        elif action != "skip":
+            return None, (f"Cannot create group snapshot on LVS {group.lvs_name}: member "
+                          f"{n.get_id()[:8]} of site {n.site} is being rebuilt; retry")
 
     # Serialize concurrent takes on THIS group end to end. Without it, two
     # group snapshots taken with a near-zero gap both read the same

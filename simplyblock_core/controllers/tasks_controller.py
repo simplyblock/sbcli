@@ -8,7 +8,7 @@ import uuid
 
 from simplyblock_core import db_controller, constants, utils
 from simplyblock_core.controllers import (
-    tasks_events, device_controller, events_controller)
+    activation_gate, tasks_events, device_controller, events_controller)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -445,14 +445,45 @@ def is_auto_restart_paused(cluster, node=None):
     node's site is recorded ``draining`` (cluster.lost_site_state), i.e. the
     storage-node monitor is shutting down what is left of it
     (storage_node_monitor._drive_site_drain); restarts of the site resume once
-    it is ``down``."""
+    it is ``down``. And for every node, while a site activation runs
+    (activation_gate.site_activation_blocks), as main holds every restart
+    while the cluster is IN_ACTIVATION."""
     if (cluster.status == Cluster.STATUS_SUSPENDED
             and not cluster.suspend_drain_complete
             and not is_suspension_operator_caused(cluster)):
         return True
+    if activation_gate.site_activation_blocks(cluster):
+        return True
     return (cluster.sync_replication is True and node is not None
             and bool(cluster.lost_site) and node.site == cluster.lost_site
             and cluster.lost_site_state == Cluster.LOST_SITE_DRAINING)
+
+
+def site_activation_holds(cluster, owner_id) -> str:
+    """activation_gate.site_activation_blocks for the LVS owned by the node
+    ``owner_id``: "" or why a task on it waits for the running site activation.
+    The owner is read only while one runs; an owner that is not found is held
+    like a node-level operation."""
+    if not activation_gate.site_activation_blocks(cluster):
+        return ""
+    try:
+        owner = db.get_storage_node_by_id(owner_id)
+    except KeyError:
+        return activation_gate.site_activation_blocks(cluster)
+    return activation_gate.site_activation_blocks(cluster, owner)
+
+
+def site_activation_holds_lvs(cluster, lvs_name) -> str:
+    """activation_gate.site_activation_blocks for the LVS named ``lvs_name``,
+    owned by the node of the cluster that carries that lvstore. The nodes are
+    read only while a site activation runs; an LVS whose owner is not found is
+    held like a node-level operation."""
+    if not activation_gate.site_activation_blocks(cluster):
+        return ""
+    for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        if node.lvstore and node.lvstore == lvs_name:
+            return activation_gate.site_activation_blocks(cluster, node)
+    return activation_gate.site_activation_blocks(cluster)
 
 
 def add_node_to_auto_restart(node):
@@ -524,11 +555,13 @@ def add_node_to_auto_restart(node):
     # one-by-one before the drain completes is exactly what wedged the cluster
     # (stale ONLINE peers / stuck lvstore "in_creation"). Once
     # suspend_drain_complete flips true, the normal path below runs. The same
-    # for a sync-replication site being drained (record ``draining``).
+    # for a sync-replication site being drained (record ``draining``), and for
+    # every node while a site activation runs.
     if is_auto_restart_paused(cluster, node):
         logger.info(
-            "Cluster %s: auto-restart paused while a drain runs (cluster "
-            "suspended, or the node's site draining); not queuing node %s",
+            "Cluster %s: auto-restart paused while a drain or a site activation "
+            "runs (cluster suspended, the node's site draining, or a site being "
+            "activated); not queuing node %s",
             node.cluster_id, node.get_id())
         return False
     # IN_SHRINK: a PEER failing mid-removal must still get an auto-restart —
@@ -1202,6 +1235,12 @@ def run_lvol_sync_op_task(task):
             return
         if node.status != StorageNode.STATUS_ONLINE:
             _defer(f"node is {node.status}, retrying")
+            return
+        if storage_node_ops._sync_site(node) and storage_node_ops.member_absent_on_recorded_site(
+                db.get_cluster_by_id(node.cluster_id), node):
+            # Sync replication: an ONLINE node of the site the cluster records
+            # lost holds no instance until its site activation builds them.
+            _defer(f"node is on the recorded site {node.site} and holds no instance, retrying")
             return
         if storage_node_ops.get_restart_phase(task.node_id, lvol.lvs_name):
             # The owning flow (restart/activation/expansion) re-registers

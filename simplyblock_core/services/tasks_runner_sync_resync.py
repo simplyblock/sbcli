@@ -26,7 +26,7 @@ import time
 from datetime import UTC, datetime
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import events_controller, sync_replication_controller, tasks_controller
+from simplyblock_core.controllers import activation_gate, events_controller, sync_replication_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -222,6 +222,9 @@ def task_runner(task):
     # its return, whatever else is going on.
     if cluster.lost_site:
         return _wait(task, f"site {cluster.lost_site} is lost, waiting for its return")
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if site_activation:
+        return _wait(task, site_activation)
     if cluster.status not in Cluster.OPERABLE_STATUSES:
         return _wait(task, f"cluster is {cluster.status}, waiting")
     if owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):

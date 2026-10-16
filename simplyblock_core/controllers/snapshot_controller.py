@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime
 
-from simplyblock_core.controllers import object_limits, ops_gate
+from simplyblock_core.controllers import activation_gate, object_limits, ops_gate
 from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
@@ -736,6 +736,11 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
+    site_activation = activation_gate.site_activation_blocks(cluster, snode)
+    if site_activation:
+        msg = f"Cannot create snapshot on LVS {snode.lvstore}: {site_activation}"
+        logger.error(msg)
+        return False, msg
 
     # Pool- and cluster-level capacity admission: the snapshot is charged at
     # the source volume's UTILIZED size (see check_snapshot_capacity). This
@@ -1123,6 +1128,10 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
             logger.error(f"Cannot delete snapshot {snapshot_uuid}: cluster "
                          f"{cluster.get_id()} status is {cluster.status}")
             return False
+        site_activation = activation_gate.site_activation_blocks(cluster, snode) if snode else ""
+        if site_activation:
+            logger.error(f"Cannot delete snapshot {snapshot_uuid}: {site_activation}")
+            return False
 
     # Block deletion if the snapshot's parent volume is being migrated
     active_mig = migration_controller.get_active_migration_for_lvol(
@@ -1391,6 +1400,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
+    site_activation = activation_gate.site_activation_blocks(cluster, snode)
+    if site_activation:
+        msg = f"Cannot clone on LVS {snode.lvstore}: {site_activation}"
+        logger.error(msg)
+        return False, msg
 
     # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl

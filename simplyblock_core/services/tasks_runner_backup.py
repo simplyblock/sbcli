@@ -9,7 +9,7 @@ Handles three task types:
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import backup_events
+from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -445,7 +445,13 @@ def process_task(task, cl):
     Terminates on cancellation, on the time-based timeout, or once the
     max_retry ceiling is reached — the last is what stops a backup that keeps
     crashing the data plane from re-issuing its RPC forever.
+
+    Left untouched while a site activation holds the LVS of its node (as the
+    whole cluster is skipped while it is IN_ACTIVATION).
     """
+    if tasks_controller.site_activation_holds(cl, task.node_id):
+        return
+
     if task.canceled:
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE

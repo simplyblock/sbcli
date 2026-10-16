@@ -244,15 +244,15 @@ class TestPromoteApi:
         gate.assert_not_called()
 
     def test_a_volume_on_a_non_home_led_lvs_is_fenced_and_moved(self, db, spdk, gate):
-        # Option A (design §6.3): the LVS was left led from site-b by an earlier
-        # move and a fresh volume on it carries site-b, but has no consumer of its
-        # own. A pod landing on site-a follows the workload -- the promote fences
-        # site-b (demotes it) and queues the move, rather than refusing it as "not
-        # demoted". is_birth_state is anchored to the LVS's current lead site, not
-        # its home, so this volume qualifies even though site-b is not its home.
+        # The LVS is led from site-b and a fresh volume on it carries site-b,
+        # never connected. A pod landing on site-a follows the workload: the
+        # promote fences site-b (demotes it) and queues the move instead of
+        # refusing it as "not demoted". is_birth_state is anchored to the LVS's
+        # current lead site, not its home.
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         _update(db, owner, lvs_active_site=SITE_B)
         vol.sync_active_site = SITE_B
+        vol.sync_never_connected = True
         vol.write_to_db(db.kv_store)
         first = src.sync_promote_lvol(vol.get_id(), SITE_A)
         assert first.in_progress and first.task_id
@@ -261,16 +261,17 @@ class TestPromoteApi:
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is not None
 
     def test_a_birth_state_volume_is_fenced_at_home_and_moved(self, db, spdk, gate, moves):
-        """First placement: a brand-new volume (never served, born on its home)
-        whose pod lands on the site its LVS is not homed on. The promote fences
-        the birth-state home itself - what an unstage would have done - and
-        queues the move, instead of refusing it as not demoted. The move then
-        completes on the far site. Safe under the single-active-site (RWO)
-        contract: a birth-state home has no consumer to cut off."""
+        """First placement: a brand-new volume (never connected, born on its
+        home) whose pod lands on the site its LVS is not homed on. The promote
+        fences the home itself - what an unstage would have done - and queues
+        the move, instead of refusing it as not demoted. The move then
+        completes on the far site; no connect handed out the home's paths, so
+        no consumer is cut off."""
         cluster, a, b, owner = _layout(db)
         pool = _pool(db, cluster)
-        vol = _volume(db, cluster, owner, pool, active_site="")   # birth state
+        vol = _volume(db, cluster, owner, pool, active_site="")
         publish._register_everywhere(db, vol, owner, [*a, *b])
+        vol.sync_never_connected = True
         vol.write_to_db(db.kv_store)
         owner = _fresh(db, owner)
 
@@ -287,31 +288,108 @@ class TestPromoteApi:
         assert [e.ip for e in done.connection_strings[vol.get_id()]] == [_ip(n) for n in b]
 
     def test_a_birth_state_volume_promoted_to_its_own_home_is_a_no_op(self, db, spdk, gate):
-        # Birth state is only relaxed into a move. A birth-state volume promoted
-        # to the site it is already led from is the ordinary served answer, and
-        # nothing is fenced.
+        # A birth-state volume promoted to the site it is already led from gets
+        # the ordinary served answer, and nothing is fenced. Its paths are
+        # handed out, so it is connected from then on.
         cluster, a, b, owner = _layout(db)
         pool = _pool(db, cluster)
         vol = _volume(db, cluster, owner, pool, active_site="")
         publish._register_everywhere(db, vol, owner, [*a, *b])
+        vol.sync_never_connected = True
         vol.write_to_db(db.kv_store)
 
         result = src.sync_promote_lvol(vol.get_id(), SITE_A)
         assert not result.in_progress
-        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
+        after = db.get_lvol_by_id(vol.get_id())
+        assert after.sync_demoted_sites == []
+        assert after.sync_never_connected is False
         gate.assert_not_called()
 
     def test_birth_siblings_of_the_lvs_are_demoted_and_moved_together(self, db, spdk, gate):
-        """The LVS moves as one: a sibling still at its home is demoted together
-        with the move, so the LVS's other fresh volumes do not block a
-        first-placement move. (A sibling genuinely served on the away site would;
-        that is the moved-LVS refusal above.)"""
+        """The LVS moves as one: a never-connected sibling still at its home is
+        demoted together with the move, so the LVS's other fresh volumes do not
+        block a first-placement move. A connected sibling does
+        (test_group_lvs_rule_covers_volumes_outside_the_group)."""
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         other = _another(db, spdk, cluster, owner, pool, a, b)
+        other.sync_never_connected = True
+        other.write_to_db(db.kv_store)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         result = src.sync_promote_lvol(vol.get_id(), SITE_B)
         assert result.in_progress
         assert db.get_lvol_by_id(other.get_id()).sync_demoted_sites == [SITE_A]
+
+    def test_a_connected_volume_is_refused_not_demoted(self, db, spdk, gate):
+        """A connect handed out the home's paths, so a consumer may hold them:
+        the planned promote is refused as not demoted and nothing is fenced."""
+        cluster, a, b, owner, pool, vol = _registered(db, spdk)
+        vol.sync_never_connected = True
+        vol.write_to_db(db.kv_store)
+        entries, err = lvol_controller.connect_lvol(vol.get_id())
+        assert err is None and entries
+        assert db.get_lvol_by_id(vol.get_id()).sync_never_connected is False
+        with pytest.raises(SyncPromoteRefusedError) as exc:
+            src.sync_promote_lvol(vol.get_id(), SITE_B)
+        assert exc.value.volumes == [vol.get_id()]
+        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
+        assert "inaccessible" not in _states(spdk, a, vol)
+
+    def test_a_refused_connect_keeps_never_connected(self, db, spdk, gate):
+        """A connect the host is not authorized for hands out no path, so the
+        volume stays never connected and its first placement still moves."""
+        cluster, a, b, owner, pool, vol = _registered(db, spdk)
+        vol.sync_never_connected = True
+        vol.allowed_hosts = [{"nqn": "nqn.2014-08.org.nvmexpress:uuid:allowed"}]
+        vol.write_to_db(db.kv_store)
+        entries, err = lvol_controller.connect_lvol(
+            vol.get_id(), host_nqn="nqn.2014-08.org.nvmexpress:uuid:other")
+        assert entries is False and "not found in allowed hosts" in err
+        assert db.get_lvol_by_id(vol.get_id()).sync_never_connected is True
+        result = src.sync_promote_lvol(vol.get_id(), SITE_B)
+        assert result.in_progress
+        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_A]
+
+    def test_site_activation_holds_the_auto_demote(self, db, spdk, gate):
+        """While a site activation of A runs, the LVS led from A is not
+        auto-demoted: the activation is opening its paths. The promote is
+        refused with the activation's retry reason, nothing is fenced."""
+        cluster, a, b, owner, pool, vol = _registered(db, spdk)
+        vol.sync_never_connected = True
+        vol.write_to_db(db.kv_store)
+        cluster = db.get_cluster_by_id(cluster.get_id())
+        cluster.site_activation_site = SITE_A
+        cluster.site_activation_since = cluster.site_activation_heartbeat = "2026-01-01T00:00:00+00:00"
+        cluster.write_to_db(db.kv_store)
+        with pytest.raises(SyncPromoteRefusedError, match=f"site {SITE_A} is being activated; retry") as exc:
+            src.sync_promote_lvol(vol.get_id(), SITE_B)
+        assert exc.value.volumes == [vol.get_id()]
+        assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
+        assert "inaccessible" not in _states(spdk, a, vol)
+
+    def test_a_connect_during_the_gate_keeps_the_lvs(self, db, spdk, gate):
+        """The plan holds both never-connected volumes of LVS_1; a connect of
+        the sibling lands while the demote's live gate runs. Under the
+        site-rule lock the demote sees the sibling connected and fences
+        nothing: the promote is refused as not demoted."""
+        cluster, a, b, owner, pool, vol = _registered(db, spdk)
+        other = _another(db, spdk, cluster, owner, pool, a, b)
+        for v in (vol, other):
+            v.sync_never_connected = True
+            v.write_to_db(db.kv_store)
+        connected = []
+
+        def _connect_once(*_args, **_kwargs):
+            if not connected:
+                connected.append(lvol_controller.connect_lvol(other.get_id()))
+        gate.side_effect = _connect_once
+        with pytest.raises(SyncPromoteRefusedError) as exc:
+            src.sync_promote_lvol(vol.get_id(), SITE_B)
+        assert connected and connected[0][1] is None
+        assert db.get_lvol_by_id(other.get_id()).sync_never_connected is False
+        assert exc.value.volumes == [vol.get_id()]
+        for v in (vol, other):
+            assert db.get_lvol_by_id(v.get_id()).sync_demoted_sites == []
+            assert "inaccessible" not in _states(spdk, a, v)
 
     def test_t_offline_is_412_forced_is_a_disaster_failover(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
@@ -956,6 +1034,12 @@ class TestCreateAgainstTheMove:
         problems = db.begin_sync_promote_moves(task, {"LVS_1": (owner.get_id(), "")}, SITE_B, _check())
         assert lvol.get_id() in problems[0]
         assert _fresh(db, owner).lvs_active_site == ""
+
+    def test_a_claimed_volume_starts_never_connected(self, db, spdk, gate):
+        cluster, a, b, owner, pool, vol = _registered(db, spdk)
+        lvol = _new_volume(cluster, owner, pool)
+        db.claim_lvol_ns_slot(lvol, owner, False, standalone_nqn=f"{cluster.nqn}:lvol:{lvol.uuid}")
+        assert db.get_lvol_by_id(lvol.get_id()).sync_never_connected is True
 
     def test_the_claim_replaces_a_stale_computed_site(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)

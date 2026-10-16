@@ -1631,7 +1631,8 @@ class DBController(metaclass=Singleton):
         """Sync replication: a volume is created on the site its LVS is led
         from, read from the owner record IN the claim transaction - a promote
         marking the LVS ``moving:`` (begin_sync_promote_moves) conflicts with
-        it - and refused while the move is in flight. No read outside sync
+        it - and refused while the move is in flight. The volume starts as
+        never connected (``sync_never_connected``). No read outside sync
         replication."""
         from simplyblock_core import storage_node_ops
         from simplyblock_core.exceptions import SyncLeadershipMovingError
@@ -1645,6 +1646,7 @@ class DBController(metaclass=Singleton):
                 f"the leadership of {owner.lvstore} is being moved ({owner.lvs_active_site}); "
                 f"retry the volume creation once the move has completed")
         lvol.sync_active_site = storage_node_ops.lvs_active_site_of(owner)
+        lvol.sync_never_connected = True
 
     def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
                            standalone_namespace="", standalone_allowed_hosts=None,

@@ -2,7 +2,7 @@ import time
 
 
 from simplyblock_core import db_controller, storage_node_ops, utils, constants
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import activation_gate, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -29,8 +29,9 @@ def process_task(task):
         return True
 
     cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status == Cluster.STATUS_IN_ACTIVATION:
-        task.function_result = "cluster is in_activation, waiting"
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if cluster.status == Cluster.STATUS_IN_ACTIVATION or site_activation:
+        task.function_result = site_activation or "cluster is in_activation, waiting"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")

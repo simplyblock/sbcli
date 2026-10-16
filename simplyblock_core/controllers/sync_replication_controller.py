@@ -24,7 +24,7 @@ from typing import NamedTuple
 import fdb
 
 from simplyblock_core import constants, distr_controller, storage_node_ops, utils
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import activation_gate, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
     PreconditionError, SyncAnaError, SyncGateError, SyncGroupMemberError, SyncPromoteFailedError, SyncPromoteRefusedError,
@@ -547,7 +547,7 @@ def zone_not_up(nodes: Iterable[StorageNode], site: str) -> list[str]:
     """What keeps ``site``'s zone from being fully up: its nodes that are not
     online and their devices that are not online (removed / migrated-away ones
     do not count, as for the other migration runners). A FAILED device counts:
-    its zone is not whole. Shared by the resync runner and the site return."""
+    its zone is not whole. Read by the resync runner."""
     down = []
     for node in nodes:
         if node.site != site or node.status in (StorageNode.STATUS_IN_CREATION,
@@ -561,18 +561,6 @@ def zone_not_up(nodes: Iterable[StorageNode], site: str) -> list[str]:
             if dev.status != NVMeDevice.STATUS_ONLINE:
                 down.append(f"dev:{dev.get_id()}")
     return down
-
-
-def site_return_problems(nodes: Iterable[StorageNode], site: str) -> list[str]:
-    """Why the lost ``site`` has not fully returned: a node of it (not removed,
-    not in creation) that is not ONLINE - SUSPENDED is not back - or anything
-    zone_not_up reports."""
-    nodes = list(nodes)
-    problems = [f"node:{n.get_id()} {n.status}" for n in nodes
-                if n.site == site and n.status not in (StorageNode.STATUS_REMOVED,
-                                                       StorageNode.STATUS_IN_CREATION,
-                                                       StorageNode.STATUS_ONLINE)]
-    return problems + [p for p in zone_not_up(nodes, site) if not p.startswith("node:")]
 
 
 def lvs_active_on(owner: StorageNode, site: str) -> bool:
@@ -684,7 +672,9 @@ def _record_live_journal_restore(db: DBController, cluster_id: str, owner: Stora
 
 def _live_lvs_statuses(db: DBController, cluster) -> list[LvsSyncStatus]:
     """Query every online instance once and build the status of every LVS of
-    the cluster (last_replicated_at filled)."""
+    the cluster (last_replicated_at filled). An ONLINE node of the recorded
+    lost site holds no instance (storage_node_ops.member_absent_on_recorded_site)
+    and is not asked, as a node that is not ONLINE."""
     cluster_id = cluster.get_id()
     nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
     node_sites = {n.get_id(): n.site for n in nodes}
@@ -694,7 +684,8 @@ def _live_lvs_statuses(db: DBController, cluster) -> list[LvsSyncStatus]:
     seqs = {owner.lvstore: db.get_sync_state(cluster_id, owner.lvstore)["seq"] for owner in owners}
     wanted = {nid for layout in layouts for nid in layout.members}
     answers = {n.get_id(): _query_node(n) for n in nodes
-               if n.get_id() in wanted and n.status == StorageNode.STATUS_ONLINE}
+               if n.get_id() in wanted and n.status == StorageNode.STATUS_ONLINE
+               and not storage_node_ops.member_absent_on_recorded_site(cluster, n)}
     running = {t.function_params.get("lvs_name") for t in db.get_active_sync_resync_tasks(cluster_id)
                if t.status == JobSchedule.STATUS_RUNNING and not t.canceled}
     now = datetime.now(UTC)
@@ -824,66 +815,6 @@ def group_sync_status(group_id: str, site: str | None = None, *, max_age: float 
 # Site return
 # ---------------------------------------------------------------------------
 
-#: The statuses a distrib reports once it has replayed its journal: anything
-#: else (``unknown`` before the first replay, a missing or malformed element)
-#: is not a fact yet.
-REPLAYED_STATUSES = (STATUS_SYNCED, "primary_unsynced", "replica_unsynced", "primary_syncing",
-                     "replica_syncing")
-
-#: At most one "return held" event per LVS per this many seconds (the return
-#: step runs on every monitor pass).
-_RETURN_EVENT_INTERVAL_SEC = 600
-_return_events = TTLCache()
-
-
-def replay_problems(layout: LvsLayout, answer) -> list[str]:
-    """Why the leader's ``distr_sync_replication_status`` ``answer`` does not
-    show every distrib of the LVS replayed yet: no answer, a distrib absent,
-    not in mode ``full``, or a status outside REPLAYED_STATUSES."""
-    if answer is None:
-        return [f"LVS {layout.lvs_name}: the leader did not answer"]
-    problems = []
-    for name in layout.distribs:
-        elem = _elem_of(answer, name)
-        if elem is None:
-            problems.append(f"LVS {layout.lvs_name}: {name}: no status")
-        elif elem.get("sync_replication_mode") != MODE_FULL:
-            problems.append(f"LVS {layout.lvs_name}: {name}: mode {elem.get('sync_replication_mode')}")
-        elif _elem_status(elem) not in REPLAYED_STATUSES:
-            problems.append(f"LVS {layout.lvs_name}: {name}: {_elem_status(elem)}")
-    return problems
-
-
-def _held(owner: StorageNode, leader: StorageNode, missing: list[str]) -> None:
-    key = (owner.cluster_id, owner.lvstore)
-    if _return_events.get(key, _RETURN_EVENT_INTERVAL_SEC):
-        return
-    _return_events.put(key, True)
-    from simplyblock_core.controllers import storage_events
-    storage_events.sync_site_return_lvols_missing(leader, owner.lvstore, missing)
-
-
-def _elect_on_returned_site(db: DBController, cluster, owner: StorageNode) -> bool:
-    """Give ``owner``'s LVS, led from the returned site, its leader there and
-    check it can serve: every expected volume registered on the leader, every
-    distrib replayed (a status that is a fact). False: not now."""
-    leader_id = storage_node_ops.elect_lvs_leader_on_site(owner.get_id())
-    if not leader_id:
-        return False
-    leader = db.get_storage_node_by_id(leader_id)
-    missing = storage_node_ops.missing_lvols_on(leader, owner, db)
-    if missing:
-        logger.error("Site return: leader %s of LVS %s misses volumes %s", leader_id,
-                     owner.lvstore, missing)
-        _held(owner, leader, missing)
-        return False
-    problems = replay_problems(lvs_layout(owner, cluster.page_size_in_blocks), _query_node(leader))
-    if problems:
-        logger.info("Site return: LVS %s not replayed yet: %s", owner.lvstore, problems)
-        return False
-    return True
-
-
 #: The ``lost_site_state`` values the storage-node monitor writes - and clears
 #: when the cluster is suspended, so its record never outlives a suspension.
 MONITOR_LOST_SITE_STATES = (Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN)
@@ -948,54 +879,156 @@ def clear_monitor_lost_site(cluster_id: str) -> bool:
     return bool(cleared["site"])
 
 
-def settle_site_return(cluster_id: str) -> bool:
-    """The return of a lost site, run by the storage-node monitor on every pass
-    (cheap DB checks until the site is back). With a site recorded as lost -
-    its fence ``done``, ``fencing`` left behind by a disaster promote that no
-    longer runs, or ``down`` (the monitor's record of a site that went down
-    with no fail-over; ``draining`` is not over yet) - and every node of it
-    ONLINE with its zone up (site_return_problems):
+class SiteActivationCancelled(RuntimeError):
+    """The site activation lost its token (watchdog) or the cluster stopped serving (a suspension)."""
 
-    1. every LVS still led from that site (never failed over: not promoted,
-       not promotable, or empty) gets its leader there
-       (storage_node_ops.elect_lvs_leader_on_site) and must show every
-       expected volume on it and every distrib replayed;
-    2. a catch-up task for every LVS (both zones of each have diverged);
-    3. ``lost_site`` / ``lost_site_state`` cleared in one transaction that
-       re-reads the site's nodes (DBController.clear_lost_site).
 
-    Any step not possible now -> False, retried by the next pass. After a
-    fail-over the volumes of the LVS that were active on the site stay fenced
-    there (``sync_demoted_sites``) until promoted; after ``down`` none was
-    fenced. True when the site was cleared."""
+#: The stored cluster statuses under which a site activation runs.
+SITE_ACTIVATION_STATUSES = (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY)
+
+#: The record states of a site a site activation may begin for: every one but
+#: ``draining``, whose drain is not over.
+SITE_ACTIVATION_STATES = (Cluster.LOST_SITE_DOWN, Cluster.LOST_SITE_FENCING, Cluster.LOST_SITE_DONE)
+
+
+def _begin_site_activation_flag(c, site: str, now: str) -> bool:
+    """The mutation of begin_site_activation on the cluster ``c`` read in its
+    transaction: True when the flag was set to ``site`` with the token ``now``."""
+    if (c.sync_replication is not True or c.lost_site != site
+            or c.lost_site_state not in SITE_ACTIVATION_STATES or c.site_activation_site):
+        return False
+    c.site_activation_site, c.site_activation_since, c.site_activation_heartbeat = site, now, now
+    return True
+
+
+def _drop_site_activation_flag(c, token: str | None) -> str:
+    """The mutation of end_site_activation (``token`` given) and of
+    clear_site_activation (None) on the cluster ``c`` read in its transaction:
+    the site whose flag was cleared, "" when nothing was (nothing to write)."""
+    site = c.site_activation_site
+    if not site or (token is not None and (not token or c.site_activation_since != token)):
+        return ""
+    c.site_activation_site, c.site_activation_since, c.site_activation_heartbeat = "", "", ""
+    return site
+
+
+def _stamp_site_activation_flag(c, token: str, now: str) -> bool:
+    """The mutation of stamp_site_activation on the cluster ``c`` read in its
+    transaction: True when the flag holds ``token`` and its heartbeat was set."""
+    if not token or not c.site_activation_site or c.site_activation_since != token:
+        return False
+    c.site_activation_heartbeat = now
+    return True
+
+
+def begin_site_activation(cluster_id: str, site: str) -> str:
+    """Begin the site activation of ``site``: a compare-and-set of the flag
+    (``site_activation_site`` / ``_since`` / ``_heartbeat``) when the cluster
+    records ``site`` lost in a state other than ``draining`` and no flag is set.
+    Returns the token - the ``site_activation_since`` written - or "" when
+    refused (nothing written)."""
+    now = datetime.now(UTC).isoformat()
+    begun = {"ok": False}
+
+    def _mutate(c):
+        begun["ok"] = _begin_site_activation_flag(c, site, now)   # atomic_update may replay this
+        return begun["ok"]
     db = DBController()
-    cluster = db.get_cluster_by_id(cluster_id)
-    lost = cluster.lost_site
-    if not cluster.sync_replication or not lost:
-        return False
-    state = cluster.lost_site_state
-    if state == Cluster.LOST_SITE_FENCING:
-        if any(t.function_params.get("lost_site") == lost
-               for t in db.get_active_sync_promote_tasks(cluster_id)):
-            return False
-    elif state not in (Cluster.LOST_SITE_DONE, Cluster.LOST_SITE_DOWN):
-        return False
+    # None: the record was gone when the transaction committed - nothing begun.
+    if db.atomic_update(db.get_cluster_by_id(cluster_id), _mutate) is None or not begun["ok"]:
+        return ""
+    logger.warning("Sync replication: the activation of site %s began (cluster %s)", site, cluster_id)
+    return now
+
+
+def site_activation_owned(cluster_id: str, token: str) -> None:
+    """A checkpoint of the site activation holding ``token``: raises
+    SiteActivationCancelled unless the flag still holds it and the stored
+    cluster status is one of SITE_ACTIVATION_STATUSES."""
+    cluster = DBController().get_cluster_by_id(cluster_id)
+    if not token or not cluster.site_activation_site or cluster.site_activation_since != token:
+        raise SiteActivationCancelled(
+            f"the activation flag of cluster {cluster_id} no longer holds this activation "
+            f"(site {cluster.site_activation_site or '-'}, since {cluster.site_activation_since or '-'})")
+    if cluster.status not in SITE_ACTIVATION_STATUSES:
+        raise SiteActivationCancelled(
+            f"cluster {cluster_id} is {cluster.status}; the activation of site "
+            f"{cluster.site_activation_site} stops")
+
+
+def end_site_activation(cluster_id: str, token: str) -> None:
+    """Clear the flag when it holds ``token`` (no-op otherwise): the end of the
+    site activation holding it."""
+    def _mutate(c):
+        return bool(_drop_site_activation_flag(c, token))    # atomic_update may replay this
+    db = DBController()
+    db.atomic_update(db.get_cluster_by_id(cluster_id), _mutate)
+
+
+def clear_site_activation(cluster_id: str) -> str:
+    """Clear the flag whoever holds it - the storage-node monitor's watchdog,
+    for an activation whose driver is gone. Returns the site it named, ""
+    when no flag was set."""
+    cleared = {"site": ""}
+
+    def _mutate(c):
+        cleared["site"] = _drop_site_activation_flag(c, None)    # atomic_update may replay this
+        return bool(cleared["site"])
+    db = DBController()
+    if db.atomic_update(db.get_cluster_by_id(cluster_id), _mutate) is None:
+        return ""
+    return cleared["site"]
+
+
+def stamp_site_activation(cluster_id: str, token: str) -> None:
+    """The heartbeat of the site activation holding ``token``: set
+    ``site_activation_heartbeat`` to now while the flag holds it."""
+    now = datetime.now(UTC).isoformat()
+
+    def _mutate(c):
+        return _stamp_site_activation_flag(c, token, now)    # atomic_update may replay this
+    db = DBController()
+    db.atomic_update(db.get_cluster_by_id(cluster_id), _mutate)
+
+
+def record_site_return(cluster_id: str, site: str, token: str, built_ids) -> list[str]:
+    """The record step of the site activation of ``site`` holding ``token``:
+    the catch-up of every LVS queued (both zones of each have diverged), then
+    the lost-site record cleared in one transaction (DBController.clear_lost_site)
+    that re-reads the site's nodes and requires the flag still to hold
+    ``token``, a serving cluster status (SITE_ACTIVATION_STATUSES), the
+    activation gate's node rule and the journal floor over the site's nodes,
+    and the site's ONLINE nodes to be exactly ``built_ids`` - the nodes the
+    activation built instances on. The flag is left alone. Returns the
+    problems; the record is kept when there are any."""
+    db = DBController()
     nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
-    if site_return_problems(nodes, lost):
-        return False
-    for owner in _lvs_owners(nodes):
-        if storage_node_ops._led_from_lost_site(cluster, owner) and \
-                not _elect_on_returned_site(db, cluster, owner):
-            return False
     for owner in _lvs_owners(nodes):
         tasks_controller.add_sync_resync_task(cluster_id, owner.get_id(), owner.lvstore)
-    problems = db.clear_lost_site(cluster_id, lost, (state,), [n.get_id() for n in nodes if n.site == lost],
-                                  lambda _cluster, site_nodes: site_return_problems(site_nodes, lost))
+    holder = activation_gate.SiteActivation(site, token)
+    built = set(built_ids)
+
+    def _check(cluster, site_nodes) -> list[str]:
+        if not holder.holds(cluster):
+            return [f"the activation flag of cluster {cluster_id} no longer holds this activation"]
+        if cluster.status not in SITE_ACTIVATION_STATUSES:
+            return [f"cluster {cluster_id} is {cluster.status}"]
+        problems = [p for p in (activation_gate.activation_node_status_problem(
+                                    site_nodes, cluster.max_fault_tolerance),
+                                activation_gate.site_jc_floor_problem(site_nodes, site)) if p]
+        online = {n.get_id() for n in site_nodes if n.status == StorageNode.STATUS_ONLINE}
+        if online != built:
+            problems.append(f"site {site} ONLINE nodes {sorted(online)} are not the nodes the "
+                            f"activation built on {sorted(built)}")
+        return problems
+
+    problems = db.clear_lost_site(cluster_id, site, SITE_ACTIVATION_STATES,
+                                  [n.get_id() for n in nodes if n.site == site], _check)
     if problems:
-        logger.warning("Site %s return not recorded: %s", lost, problems)
-        return False
-    logger.warning("Site %s returned: lost_site cleared, catch-up scheduled for every LVS", lost)
-    return True
+        logger.warning("Site %s return not recorded: %s", site, problems)
+    else:
+        logger.warning("Site %s: lost_site cleared, catch-up scheduled for every LVS", site)
+    return problems
 
 
 def check_gate(cluster_id: str) -> None:
@@ -1071,26 +1104,20 @@ def volumes_open_on(volumes: Iterable[LVol], owner: StorageNode, site: str) -> l
 
 
 def is_birth_state(lvol: LVol, owner: StorageNode) -> bool:
-    """Whether ``lvol`` is active exactly on the site its LVS is currently led
-    from (``volume_site == lvs_active_site_of(owner)``): it has only ever moved
-    WITH the LVS, never been independently promoted to, or left on, a different
-    site. Such a volume has no consumer of its own that a planned promote
-    elsewhere would cut off - under the single-active-site (RWO) contract the only
-    consumer is the pod now being staged on the promote's target (gated, not yet
-    attached), and any previous consumer on the source has already unstaged. A
-    planned promote to another site may therefore demote this site first and move
-    (birth_state_demote_plan, design-sync-replication-csi-addons.md).
+    """Whether ``lvol`` has never been connected (``sync_never_connected``: no
+    connect handed out its paths, so no consumer can hold them) and is active on
+    the site its LVS is currently led from (``volume_site ==
+    lvs_active_site_of(owner)``). A planned promote to another site may demote
+    such a volume on that site first and move (birth_state_demote_plan): fencing
+    it cuts off nothing.
 
-    Anchored to the LVS's CURRENT lead site, not its home (``owner.site``): an LVS
-    left led from a non-home site by an earlier move still hosts such volumes (a
-    fresh volume created on it carries that lead site as its ``sync_active_site``),
-    and following the workload means demoting wherever the LVS is led now, not only
-    its home. The one case this does not by itself make safe is a shared LVS whose
-    co-tenant volume is genuinely served on the source by another pod: leadership
-    is per-LVS, so volumes on one sync LVS must schedule to the same site, and
-    birth_state_demote_plan still demotes only when every source-open volume of the
-    LVS qualifies."""
-    return volume_site(lvol, owner) == storage_node_ops.lvs_active_site_of(owner)
+    Anchored to the LVS's current lead site, not its home (``owner.site``): a
+    volume created on an LVS led from a non-home site carries that lead site as
+    its ``sync_active_site``. A volume that was ever connected, or whose record
+    does not carry ``sync_never_connected`` (False by default), is never in
+    birth state - its source is demoted only by its own unstage."""
+    return (lvol.sync_never_connected
+            and volume_site(lvol, owner) == storage_node_ops.lvs_active_site_of(owner))
 
 
 def lvs_site_triplet(owner: StorageNode, site: str) -> tuple[str, ...]:
@@ -1219,7 +1246,13 @@ def _volumes_context(db: DBController, volumes: list[LVol], site: str, *, group=
     return cluster, owners
 
 
-def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None) -> list[str]:
+def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None,
+            birth_only: bool = False) -> list[str]:
+    """Fence ``volumes`` on ``site`` (sync_demote_lvol). ``birth_only``: the
+    first-placement demote - inside the site-rule lock every volume still open
+    on ``site`` must still be in birth state, or nothing is fenced (a connect
+    that cleared ``sync_never_connected`` meanwhile, under the same lock, has
+    handed out the site's paths)."""
     cluster, owners = _volumes_context(db, volumes, site, group=group)
     todo = [lv for lv in volumes if volume_open_on(lv, owners[lv.node_id], site)]
     if not todo:
@@ -1227,6 +1260,14 @@ def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None) -> 
     check_gate(cluster.get_id())
     demoted = []
     with storage_node_ops.sync_site_rule_locks(cluster.get_id(), {lv.lvs_name for lv in todo}):
+        if birth_only:
+            for lvol in todo:
+                lvol = db.get_lvol_by_id(lvol.get_id())
+                owner = db.get_storage_node_by_id(lvol.node_id)
+                if volume_open_on(lvol, owner, site) and not is_birth_state(lvol, owner):
+                    logger.info("Volume %s was connected meanwhile: site %s is not demoted for a "
+                                "first placement", lvol.get_id(), site)
+                    return []
         for lvol in todo:
             # Re-read inside the lock: what a writer sees is what counts.
             lvol = db.get_lvol_by_id(lvol.get_id())
@@ -1344,24 +1385,17 @@ def birth_state_demote_plan(
 ) -> dict[str, list[LVol]]:
     """The volumes a planned promote may demote before it moves, keyed by the
     site to demote them on, so a first-placement move can proceed: a brand-new
-    sync volume whose pod lands on the site its LVS is not homed on (the
-    scheduling-driven switchover of design-sync-replication-csi-addons.md). A
-    promote of such a volume is refused today (PROMOTE_NOT_DEMOTED /
-    PROMOTE_LVS_BUSY) because the volume is still open on its home, which a
-    normal move needs demoted first - but nothing demoted it, there having been
-    no pod on the home to unstage.
+    sync volume whose pod lands on a site its LVS is not led from. A move needs
+    the volume demoted on the source (PROMOTE_NOT_DEMOTED / PROMOTE_LVS_BUSY),
+    and no unstage demoted it - no pod was ever staged there.
 
     For every LVS a decision wants to move off (a NOT_DEMOTED or LVS_BUSY
     blocker), when EVERY volume of that LVS still open on the source is in birth
-    state (is_birth_state), all of them are returned to be demoted there - what
-    an unstage would have done. An LVS any of whose source-open volumes was
-    genuinely served is left out: it is pinned and the promote is refused as
-    before. The emptiness of the result is the signal that nothing is to be
-    auto-demoted.
-
-    Safe under the single-active-site (RWO) contract: a birth-state home has no
-    live consumer, so fencing it cuts off nothing (the detection is the record
-    alone; no live consumer query)."""
+    state (is_birth_state: never connected), all of them are returned to be
+    demoted there - what an unstage would have done. An LVS with a source-open
+    volume that was ever connected is left out, and its promote is refused as
+    not demoted / LVS busy. An empty result means nothing is to be
+    auto-demoted."""
     plan: dict[str, list[LVol]] = {}
     seen: set[str] = set()
     for lvol, decision in decisions:
@@ -1583,13 +1617,17 @@ def reconcile_abandoned_moves(cluster_id: str) -> None:
 
 def _auto_demote_birth_state(db: DBController, volumes: list[LVol], site: str, *,
                              group=None) -> list[LVol]:
-    """Before a planned promote to ``site``: demote the home of every volume
-    that is open there only because it was never served (birth state), so a
+    """Before a planned promote to ``site``: demote the source of every volume
+    that is open there only because it was never connected (birth state), so a
     first-placement move can proceed (birth_state_demote_plan). This is what an
-    unstage would have done, done here because a brand-new volume whose pod
-    lands off its LVS's home has had no pod on the home to unstage. The demote
-    runs the live planned gate (``_demote`` -> ``check_gate``), so it fences the
-    home only while replication is healthy.
+    unstage would have done. The demote runs the live planned gate (``_demote``
+    -> ``check_gate``), so it fences the source only while replication is
+    healthy, and re-checks the birth state under the LVS's site-rule lock.
+
+    An LVS a running site activation holds (activation_gate.site_activation_blocks)
+    is never demoted here - that activation is opening its paths: a promote
+    that would demote it is refused with the activation's "retry" reason
+    (SyncPromoteRefusedError), and one that would not goes on to the table.
 
     Returns the request's volumes, re-read when any were demoted so the caller
     judges the promote table against the demoted records. A no-op (the same
@@ -1605,17 +1643,28 @@ def _auto_demote_birth_state(db: DBController, volumes: list[LVol], site: str, *
     plan = birth_state_demote_plan(decisions, owners, lvs_volumes)
     if not plan:
         return volumes
+    held = [lv for vols in plan.values() for lv in vols
+            if activation_gate.site_activation_blocks(cluster, owners[lv.node_id])]
+    if held:
+        raise SyncPromoteRefusedError(
+            activation_gate.site_activation_blocks(cluster, owners[held[0].node_id]),
+            sorted(lv.get_id() for lv in held))
     for source_site, birth_volumes in plan.items():
-        _demote(db, birth_volumes, source_site)
+        by_lvs: dict[str, list[LVol]] = {}
+        for lv in birth_volumes:
+            by_lvs.setdefault(lv.node_id, []).append(lv)
+        for lvs_birth_volumes in by_lvs.values():
+            _demote(db, lvs_birth_volumes, source_site, birth_only=True)
     return [db.get_lvol_by_id(lv.get_id()) for lv in volumes]
 
 
 def _promote(db: DBController, volumes: list[LVol], site: str, force: bool, *,
              group=None) -> SyncPromoteResult:
     if not force:
-        # First-placement: fence the birth-state home of any volume still open
-        # there, so its planned move is no longer refused as "not demoted". A
-        # forced promote never takes this path (it acts only on a lost site).
+        # First placement: fence the source of every never-connected volume
+        # still open there, so its planned move is not refused as "not
+        # demoted". A forced promote never takes this path (it acts only on a
+        # lost site).
         volumes = _auto_demote_birth_state(db, volumes, site, group=group)
     for attempt in range(2):
         # Everything judged fresh on each attempt: a promote may have started

@@ -1,9 +1,7 @@
-"""Pure rules of the disaster fail-over and the site return (sync
-replication): the disaster marker check, the zone / site-return predicates,
-the running-node refusal, the replay readiness of a leader's status answer,
-the whole-site-loss predicate of the cluster status and the activation leader
-builder. The DB-backed flows are in
-tests/integration/test_sync_replication_disaster.py.
+"""Pure rules of the disaster fail-over (sync replication): the disaster
+marker check, the zone predicate, the running-node refusal, the whole-site-loss
+predicate of the cluster status and the activation leader builder. The
+DB-backed flows are in tests/integration/test_sync_replication_disaster.py.
 """
 from unittest.mock import MagicMock
 
@@ -91,7 +89,7 @@ class TestDisasterMoveProblems:
         assert "late" in problem
 
 
-class TestZoneAndReturn:
+class TestZoneNotUp:
 
     def test_zone_not_up_counts_a_failed_device(self):
         nodes = [_node("a0", devices=(NVMeDevice.STATUS_FAILED,)),
@@ -99,19 +97,9 @@ class TestZoneAndReturn:
                  _node("b0", site=SITE_B, devices=(NVMeDevice.STATUS_UNAVAILABLE,))]
         assert src.zone_not_up(nodes, SITE_A) == ["dev:a0-d0"]
 
-    def test_a_suspended_node_is_up_but_not_back(self):
+    def test_zone_not_up_ignores_a_suspended_node(self):
         nodes = [_node("a0", status=StorageNode.STATUS_SUSPENDED), _node("a1")]
         assert src.zone_not_up(nodes, SITE_A) == []
-        assert src.site_return_problems(nodes, SITE_A) == ["node:a0 suspended"]
-
-    def test_removed_and_in_creation_nodes_do_not_count(self):
-        nodes = [_node("a0", status=StorageNode.STATUS_REMOVED, devices=(NVMeDevice.STATUS_UNAVAILABLE,)),
-                 _node("a1", status=StorageNode.STATUS_IN_CREATION), _node("a2")]
-        assert src.site_return_problems(nodes, SITE_A) == []
-
-    def test_an_offline_node_and_its_devices(self):
-        nodes = [_node("a0", status=StorageNode.STATUS_OFFLINE, devices=(NVMeDevice.STATUS_UNAVAILABLE,))]
-        assert src.site_return_problems(nodes, SITE_A) == ["node:a0 offline", "dev:a0-d0"]
 
 
 class TestSiteRunningNodes:
@@ -124,34 +112,6 @@ class TestSiteRunningNodes:
     def test_states_in_which_spdk_may_run(self, status, running):
         nodes = [_node("a0", status=status), _node("b0", site=SITE_B)]
         assert bool(src.site_running_nodes(nodes, SITE_A)) is running
-
-
-class TestReplayProblems:
-
-    LAYOUT = src.LvsLayout("LVS_1", "a0", {"distrib_11": 4096, "distrib_12": 4096}, ("a0",))
-
-    def _answer(self, **override):
-        out = []
-        for name in self.LAYOUT.distribs:
-            elem = {"name": name, "sync_replication_mode": "full", "status": "synced"}
-            elem.update(override.get(name, {}))
-            out.append(elem)
-        return out
-
-    @pytest.mark.parametrize("status", list(src.REPLAYED_STATUSES))
-    def test_a_replayed_status_is_a_fact(self, status):
-        assert src.replay_problems(self.LAYOUT, self._answer(distrib_12={"status": status})) == []
-
-    @pytest.mark.parametrize("elem", [{"status": "unknown"}, {"status": 3}, {"status": ""},
-                                      {"status": "whatever"}, {"sync_replication_mode": "disabled"},
-                                      {"sync_replication_mode": "offset_based"}])
-    def test_anything_else_is_not(self, elem):
-        (problem,) = src.replay_problems(self.LAYOUT, self._answer(distrib_12=elem))
-        assert problem.startswith("LVS LVS_1: distrib_12")
-
-    def test_no_answer_or_a_missing_distrib(self):
-        assert src.replay_problems(self.LAYOUT, None) == ["LVS LVS_1: the leader did not answer"]
-        assert src.replay_problems(self.LAYOUT, self._answer()[:1]) == ["LVS LVS_1: distrib_12: no status"]
 
 
 class TestSiteLost:
@@ -181,15 +141,6 @@ class TestSiteLost:
     def test_no_counted_node_is_no_loss(self):
         assert not storage_node_monitor._site_lost(
             [_node("a0", status=StorageNode.STATUS_IN_CREATION)], {})
-
-
-class TestLedFromLostSite:
-
-    @pytest.mark.parametrize("active,lost,expected", [
-        ("", SITE_A, True), (SITE_A, SITE_A, True), (SITE_B, SITE_A, False),
-        ("moving:" + SITE_B, SITE_A, False), ("", "", False), ("", SITE_B, False)])
-    def test_rule(self, active, lost, expected):
-        assert ops._led_from_lost_site(_cluster(lost), _owner(lvs_active_site=active)) is expected
 
 
 class TestActivationLeaderBuilder:

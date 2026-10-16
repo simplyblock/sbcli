@@ -2,7 +2,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import activation_gate, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -12,6 +12,27 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+
+def _site_activation_holds(cl, task) -> str:
+    """activation_gate.site_activation_blocks for the LVS whose JM group the
+    task resumes - ``function_params["jm_vuid"]``, else the JM of its node, as
+    the resume reads it. That LVS is owned by the node of the cluster whose
+    lvstore carries the jm_vuid; the task's node is only where the RPC goes. An
+    owner that is not found is held like a node-level operation."""
+    if not activation_gate.site_activation_blocks(cl):
+        return ""
+    if "jm_vuid" in task.function_params:
+        jm_vuid = task.function_params["jm_vuid"]
+    else:
+        try:
+            jm_vuid = db.get_storage_node_by_id(task.node_id).jm_vuid
+        except KeyError:
+            return activation_gate.site_activation_blocks(cl)
+    for node in db.get_storage_nodes_by_cluster_id(cl.get_id()):
+        if node.lvstore and node.jm_vuid == jm_vuid:
+            return activation_gate.site_activation_blocks(cl, node)
+    return activation_gate.site_activation_blocks(cl)
 
 
 def main():
@@ -39,6 +60,11 @@ def main():
 
                             # get new task object because it could be changed from cancel task
                             task = db.get_task_by_id(task.uuid)
+
+                            # Left untouched while a site activation holds
+                            # its LVS (the cluster is skipped in_activation).
+                            if _site_activation_holds(cl, task):
+                                continue
 
                             if task.canceled:
                                 task.function_result = "canceled"

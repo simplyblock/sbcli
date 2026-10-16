@@ -1,7 +1,8 @@
 """The LVS stack on the remote triplet of a sync-replication cluster, against
 the real FoundationDB: creation of the six (FTT1: five) instances, the
-non-leader rebuild of a remote-triplet member and of a lost site's nodes on
-restart, the node such a rebuild stands behind, the hublvol site rule, the
+non-leader rebuild of a remote-triplet member on restart and of the
+activating site's nodes next to a serving leader, the node such a rebuild
+stands behind, the hublvol site rule, the
 senders facing a distrib that is not built yet, and node removal (phase 3a
 teardown, phase 3d build). Storage nodes (RPC)
 and the hublvol / port-block side effects are mocked; the database never is.
@@ -16,8 +17,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from simplyblock_core import distr_controller
+from simplyblock_core import cluster_ops, distr_controller
 from simplyblock_core import storage_node_ops as ops
+from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.hublvol import HubLVol
@@ -672,38 +674,42 @@ class TestRebuildAnchor:
 
 
 # ---------------------------------------------------------------------------
-# lost site
+# the activating site, next to a serving leader
 # ---------------------------------------------------------------------------
 
-class TestLostSiteRestart:
+def _activating_site_a(db):
+    """Site A recorded ``done`` (LVS_1 of a0 failed over: led from B) and its
+    site activation running; every node ONLINE."""
+    cluster, a, b, owner_a, owner_b = _two_owner_layout(db, lost_site=SITE_A)
+    cluster = db.get_cluster_by_id(cluster.get_id())
+    cluster.lost_site_state = Cluster.LOST_SITE_DONE
+    cluster.write_to_db(db.kv_store)
+    assert src.begin_site_activation(cluster.get_id(), SITE_A)
+    return cluster, a, b, _fresh(db, owner_a)
 
-    def test_every_lvs_comes_back_non_leader(self, db, rpcs, env):
-        _, a, b, owner_a, owner_b = _two_owner_layout(db, lost_site=SITE_A)
-        # a1 owns LVS_3 on the lost site and is a0's secondary.
-        owner_a1 = _make_owner(db, a[1], [a[1], a[2], a[0]], b, lvs_id=3)
-        owner_a1 = _update(db, owner_a1, lvs_active_site=SITE_B)
-        rpcs.lead(b[0])       # b0 leads LVS_1 (a0's) and LVS_3 (a1's) from site B
-        with patch.object(ops, "recreate_lvstore") as takeover, \
-                patch.object(ops, "recreate_lvstore_on_non_leader", return_value=True) as nl, \
-                patch.object(ops, "_rebuild_remote_instance", return_value=True) as remote:
-            assert ops.recreate_all_lvstores(_fresh(db, owner_a1)) is True
-        takeover.assert_not_called()
-        calls = {c.args[2].get_id(): c.args[1].get_id() for c in nl.call_args_list}
-        assert calls == {owner_a1.get_id(): b[0].get_id(), owner_a.get_id(): b[0].get_id()}
-        assert [c.args[1].get_id() for c in remote.call_args_list] == [owner_b.get_id()]
+
+class TestNextToServingLeader:
+    """The site activation's Pass 2 for a local role of an LVS homed on the
+    activating site and led from the other one
+    (cluster_ops._rebuild_next_to_serving_leader): the restart path's real
+    non-leader rebuild behind the leader that serves it."""
 
     @pytest.mark.parametrize("stamp", [True, False])
     def test_local_secondary_stamped_behind_the_remote_leader(
             self, db, rpcs, hub, env, stamp):
-        # Real rebuild: no hublvol exists to stamp the role again, so the one
-        # stamp must hold or the rebuild aborts.
-        _, a, b, owner_a, _ = _two_owner_layout(db, lost_site=SITE_A)
+        # No hublvol exists to stamp the role again, so the one stamp must
+        # hold or the rebuild aborts (the node killed, the exception raised to
+        # the activation's Pass 2 worker).
+        _, a, b, owner_a = _activating_site_a(db)
         env.down.update(n.get_id() for n in a if n.get_id() != a[1].get_id())
         rpcs.lead(b[0])
         rpcs[a[1].get_id()].bdev_lvol_set_lvs_opts.return_value = stamp
-        with patch.object(ops, "recreate_lvstore") as takeover, \
-                patch.object(ops, "_rebuild_remote_instance", return_value=True):
-            ret = ops.recreate_all_lvstores(_fresh(db, a[1]))
+        with patch.object(ops, "recreate_lvstore") as takeover:
+            if stamp:
+                assert cluster_ops._rebuild_next_to_serving_leader(_fresh(db, a[1]), owner_a) is True
+            else:
+                with pytest.raises(Exception, match="could not be stamped non-leader"):
+                    cluster_ops._rebuild_next_to_serving_leader(_fresh(db, a[1]), owner_a)
         takeover.assert_not_called()
         rpc = rpcs[a[1].get_id()]
         assert {c.kwargs["name"] for c in rpc.bdev_distrib_create.call_args_list} == {
@@ -713,7 +719,6 @@ class TestLostSiteRestart:
         for name, mock in hub.items():
             assert not mock.called, name
         assert env.blocked() == [b[0].get_id()] and b[0].get_id() in env.unblocked()
-        assert ret is stamp
         if not stamp:
             env.set_node_status.assert_any_call(a[1].get_id(), StorageNode.STATUS_OFFLINE,
                                                 caused_by="restart_cleanup")
@@ -721,12 +726,11 @@ class TestLostSiteRestart:
     def test_no_leader_rebuilds_behind_the_remote_primary(
             self, db, rpcs, hub, env):
         # A forced promote to B that no client IO followed: LVS_1 has no leader
-        # yet, and the returning site's nodes come back all the same.
-        _, a, b, owner_a, _ = _two_owner_layout(db, lost_site=SITE_A)
+        # yet, and the activating site's instance is rebuilt all the same.
+        _, a, b, owner_a = _activating_site_a(db)
         env.down.update(n.get_id() for n in a if n.get_id() != a[1].get_id())
-        with patch.object(ops, "recreate_lvstore") as takeover, \
-                patch.object(ops, "_rebuild_remote_instance", return_value=True):
-            assert ops.recreate_all_lvstores(_fresh(db, a[1])) is True
+        with patch.object(ops, "recreate_lvstore") as takeover:
+            assert cluster_ops._rebuild_next_to_serving_leader(_fresh(db, a[1]), owner_a) is True
         takeover.assert_not_called()
         rpc = rpcs[a[1].get_id()]
         assert {c.kwargs["name"] for c in rpc.bdev_distrib_create.call_args_list} == {
@@ -740,11 +744,11 @@ class TestLostSiteRestart:
             assert not mock.called, name
 
     def test_a_raw_failure_reopens_the_surviving_leader(self, db, rpcs, env):
-        _, a, b, owner_a, _ = _two_owner_layout(db, lost_site=SITE_A)
+        _, a, b, owner_a = _activating_site_a(db)
         rpcs.lead(b[0])
         with patch.object(ops, "recreate_lvstore_on_non_leader", side_effect=RPCException("spdk gone")):
             with pytest.raises(RPCException):
-                ops.recreate_all_lvstores(_fresh(db, owner_a))
+                cluster_ops._rebuild_next_to_serving_leader(_fresh(db, a[0]), owner_a)
         assert b[0].get_id() in env.unblocked()
 
 
@@ -914,8 +918,19 @@ class TestRemovalReselection:
                 _update(db, node, lvstore=f"LVS_x{node.get_id()[:3]}")
         return cluster, a, b, owner
 
-    def test_the_new_member_is_built_from_the_fresh_owner(self, db, rpcs):
+    @staticmethod
+    def _record(db, cluster, site, state):
+        cluster = db.get_cluster_by_id(cluster.get_id())
+        cluster.lost_site, cluster.lost_site_state = site, state
+        cluster.write_to_db(db.kv_store)
+
+    @pytest.mark.parametrize("record", [None, (SITE_A, Cluster.LOST_SITE_DOWN)])
+    def test_the_new_member_is_built_from_the_fresh_owner(self, db, rpcs, record):
+        """Built with no record, and with a record of the other site than the
+        replacement's."""
         cluster, a, b, owner = self._layout(db)
+        if record is not None:
+            self._record(db, cluster, *record)
         removed = _update(db, b[1], status=StorageNode.STATUS_IN_REMOVAL)
         with patch.object(ops, "_rebuild_remote_instance", return_value=True) as build:
             assert ops._reselect_remote_roles_held_by(removed) is True
@@ -956,6 +971,25 @@ class TestRemovalReselection:
             assert ops._reselect_remote_roles_held_by(removed) is True
         build.assert_not_called()
         assert _fresh(db, owner).remote_instances_pending == [b[3].get_id()]
+
+    @pytest.mark.parametrize("state", [Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN,
+                                       Cluster.LOST_SITE_FENCING, Cluster.LOST_SITE_DONE])
+    def test_a_member_of_the_recorded_site_is_left(self, db, rpcs, caplog, state):
+        """An ONLINE replacement on the site the cluster records lost, in any
+        state, is re-selected but not built: the site activation builds it.
+        The removal goes on."""
+        cluster, a, b, owner = self._layout(db)
+        self._record(db, cluster, SITE_B, state)
+        removed = _update(db, b[1], status=StorageNode.STATUS_IN_REMOVAL)
+        caplog.set_level(logging.INFO)
+        with patch.object(ops, "_rebuild_remote_instance") as build:
+            assert ops._reselect_remote_roles_held_by(removed) is True
+        build.assert_not_called()
+        refs = ops.remote_triplet_refs(_fresh(db, owner))
+        assert removed.get_id() not in refs and b[3].get_id() in refs
+        assert _fresh(db, owner).remote_instances_pending == [b[3].get_id()]
+        assert any(f"member {b[3].get_id()} of {owner.lvstore} is on the recorded site {SITE_B}; "
+                   "left for the site activation" in r.getMessage() for r in caplog.records)
 
     def test_owners_on_the_removed_site_are_not_built(self, db, rpcs):
         cluster, a, b, owner = self._layout(db)
