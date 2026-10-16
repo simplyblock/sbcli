@@ -40,7 +40,11 @@ FAST_IO_FAIL_S = 8.0
 #: depth every slot pins to the frozen node and no write reaches the newly
 #: optimized path (the bed measured 2-3 s, not KATO, in 02b).
 DEPTH = 256
-CLIENT_KATO_S = float(constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO)
+#: A host detects a frozen node's path only through its NVMe keep-alive (the
+#: TCP connection stays open): per controller, 1-2 KATO intervals after the
+#: last answered keep-alive. Calibrated on bed run c8/02c: 7.1 s with KATO 4
+#: (campaign c8, F20). The KATO itself is ``world.client_kato_s``.
+CLIENT_DETECT_FACTOR = 7.1 / 4.0
 #: keep-alive of the node-to-node NVMe controllers (hublvol, remote JM)
 HUBLVOL_KATO_S = float(constants.KATO) / 1000.0
 
@@ -356,7 +360,7 @@ def zero_run(per_sec: dict, first: int, last: int) -> int:
 
 
 class Client:
-    """NVMe/TCP multipath client writing to every volume (KATO 4, fast_io_fail 8)."""
+    """NVMe/TCP multipath client writing to every volume (two-node KATO, fast_io_fail 8)."""
 
     def __init__(self, world):
         self.world = world
@@ -481,7 +485,8 @@ class Client:
     def tick(self):
         """Every 50 ms: one new write per volume (queue depth ``DEPTH``), and
         every pending write tries its path. A write on a path whose SPDK is
-        frozen stays there until the keep-alive declares the path dead (KATO),
+        frozen stays there until that controller's keep-alive declares the path
+        dead (``CLIENT_DETECT_FACTOR`` x KATO after the freeze, F20),
         then it is retried elsewhere; a write that cannot complete within
         fast_io_fail is an IO error. The stall is the longest gap without any
         completion, as fio's IOPS log shows it on the bed."""
@@ -496,7 +501,8 @@ class Client:
             for io in list(queue):
                 if io["path"] is not None:
                     n = io["path"]
-                    if n.proc == "frozen" and now - io["issued"] < CLIENT_KATO_S:
+                    detect_at = n.frozen_since + w.client_kato_s * CLIENT_DETECT_FACTOR
+                    if n.proc == "frozen" and now < detect_at:
                         continue                     # stuck on the frozen controller
                     if n.proc == "frozen":
                         self.failed_path[(vname, n.uuid)] = now + 1.0

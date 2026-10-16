@@ -170,6 +170,9 @@ class World:
         self.version: dict = {}
         self.arbiter_down_until = 0.0
         self.takeover_s = 0.073
+        # hosts' NVMe keep-alive on two-node clusters (F20: 2 s since c8)
+        from simplyblock_core import constants
+        self.client_kato_s = float(constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO)
 
     # ---- logging -------------------------------------------------------------------
 

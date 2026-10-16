@@ -94,6 +94,20 @@ def test_pending_fix_passes(make_world, sc):
 
 
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+def test_f20_client_kato4_detected(make_world):
+    """F20: with F19's fix in place, the old client keep-alive (4 s) still
+    stalls a frozen primary's volume past the limit; KATO 2 (main) does not
+    (``test_pending_fix_passes[F20-frozen-leader-client-kato]``)."""
+    from .simnode import DEPLOYED_CAPS
+    sc = next(s for s in EXTRA if s.name == "F20-frozen-leader-client-kato")
+    caps = DEPLOYED_CAPS | PENDING_FIX[sc.name]
+    world = make_world(bugs={"client_kato4"}, conditions=sc.conditions, caps=caps)
+    out = run(world, sc, stop_on_failure=True, heal_s=60.0)
+    assert not out.passed, "KATO 4 was not detected:\n%s" % out.report()
+    assert any("client stall" in f for f in out.failures), out.report()
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
 @pytest.mark.parametrize("sc", BED, ids=lambda s: s.name)
 def test_bed_scenario_with_pending_caps(make_world, sc):
     """The pending capabilities must not break any bed scenario."""
