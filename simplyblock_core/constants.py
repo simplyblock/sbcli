@@ -761,6 +761,17 @@ FENCE_DEADLINE_SEC = 7.5
 # budget. 6s is above the 0.5s norm but still inside the 8s reject threshold,
 # and overrunning it releases the fence rather than stretching the block.
 FENCE_WAIT_EXAMINE_TIMEOUT_SEC = 6
+# bdev_lvol_set_leader on the recovering node is the other in-fence call that
+# does real work: it replays the journal and re-levels the blobstore before it
+# returns, so its latency scales with how much the lvstore has outstanding
+# rather than with a healthy node's RPC round trip. 2026-10-14 run 63: a
+# survivor holding a departing node's orphaned replica took 669ms against the
+# 0.5s norm (the other survivors: 74ms and 153ms) and the restart aborted on
+# every cycle, each one draining the cluster back to all-offline. 2s absorbs
+# that with margin; two attempts (FENCE_RPC_RETRY) still fit the 7.5s deadline
+# next to the rest of the window, and the clamp in _fenced() bounds the call to
+# the time actually left on the fence.
+FENCE_SET_LEADER_TIMEOUT_SEC = 2
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
