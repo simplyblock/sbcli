@@ -323,7 +323,10 @@ def _talos_sysfs_patch(pages_per_numa):
     slashes), so this is the same per-NUMA nr_hugepages file sysfs mode
     writes, only applied by Talos. A merge patch adds to the sysfs map
     rather than replacing it, so whatever else the operator keeps there
-    (cpufreq governors, ...) survives. machine.sysfs is deprecated on
+    (cpufreq governors, ...) survives -- and it is the format Talos accepts
+    on a multi-document machine config, where a JSON 6902 patch is refused
+    ("JSON6902 patches are not supported for multi-document machine
+    configuration", Talos v1.12.7). machine.sysfs is deprecated on
     recent Talos in favour of a SysfsConfig document but still honoured,
     and it is what every supported Talos minor understands."""
     return {"machine": {"sysfs": {
