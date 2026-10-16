@@ -273,6 +273,20 @@ class RpcServerSim:
                                     ana_state=None, **_):
         return self.listeners_create(nqn, trtype, ip, port, ana_state=ana_state)
 
+    # -- Port fencing (nvmf_port_block) ------------------------------------
+
+    def nvmf_port_block(self, port, is_reject=False, **_):
+        self.firewall[(int(port), "tcp")] = True
+        return True
+
+    def nvmf_port_unblock(self, port, **_):
+        self.firewall[(int(port), "tcp")] = False
+        return True
+
+    def nvmf_get_blocked_ports(self, **_):
+        return {"blocked_ports": [{"port": port} for (port, _proto), blocked
+                                  in self.firewall.items() if blocked]}
+
     # -- NVMe controller (cross-node) ---------------------------------------
 
     def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid,
@@ -472,73 +486,5 @@ def install_rpc_router(modules: List[str]) -> List[Tuple[Any, str, Any]]:
 
 
 def restore_rpc_router(saved: List[Tuple[Any, str, Any]]) -> None:
-    for mod, attr, value in saved:
-        setattr(mod, attr, value)
-
-
-# ---------------------------------------------------------------------------
-# Firewall client stub
-# ---------------------------------------------------------------------------
-
-
-class FirewallClientSim:
-    """In-process replacement for
-    :class:`simplyblock_core.fw_api_client.FirewallClient`.
-
-    The real client makes HTTP requests to a per-storage-node firewall API
-    on port 5001. In simulation we route the same intent — set/unset a
-    port block — into the target :class:`RpcServerSim`'s ``firewall``
-    dict, so cross-node validation logic (phase 2) can read it back.
-
-    Constructed with ``(snode, timeout=, retry=)`` to match the production
-    signature.
-    """
-
-    _active_cluster: Optional[ClusterSim] = None
-
-    @classmethod
-    def set_active_cluster(cls, sim: Optional[ClusterSim]) -> None:
-        cls._active_cluster = sim
-
-    def __init__(self, snode, timeout=None, retry=None):
-        self.snode = snode
-
-    def _server(self) -> Optional[RpcServerSim]:
-        active = type(self)._active_cluster
-        if active is None:
-            return None
-        return active.get_by_endpoint(self.snode.mgmt_ip, self.snode.rpc_port)
-
-    def firewall_set_port(self, port_id, port_type="tcp",
-                          action="block", rpc_port=None,
-                          is_reject=False, **_):
-        srv = self._server()
-        if srv is None:
-            return True  # silently noop in tests not using cluster sim
-        key = (int(port_id), port_type)
-        srv.firewall[key] = (action == "block")
-        srv.call_log.append(("firewall_set_port",
-                              {"port": port_id, "proto": port_type,
-                               "action": action}))
-        return True
-
-    def firewall_get_status(self, *_, **__):
-        return {"status": "ok"}
-
-
-def install_firewall_stub(modules: List[str]) -> List[Tuple[Any, str, Any]]:
-    """Replace ``FirewallClient`` with :class:`FirewallClientSim` in every
-    named module. Symmetric with :func:`install_rpc_router`."""
-    import importlib
-    saved = []
-    for mod_name in modules:
-        mod = importlib.import_module(mod_name)
-        if hasattr(mod, "FirewallClient"):
-            saved.append((mod, "FirewallClient", mod.FirewallClient))
-            mod.FirewallClient = FirewallClientSim
-    return saved
-
-
-def restore_firewall_stub(saved: List[Tuple[Any, str, Any]]) -> None:
     for mod, attr, value in saved:
         setattr(mod, attr, value)
