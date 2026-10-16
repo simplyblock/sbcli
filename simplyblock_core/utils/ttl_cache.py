@@ -16,7 +16,7 @@ should call ``invalidate`` so their own process re-reads immediately.
 import threading
 import time
 import weakref
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 _NOT_SET = object()
 
@@ -30,7 +30,7 @@ class TTLCache:
     #: outside this module (``storage_node_monitor._status_probe_cache``) as
     #: well as the ones below. Weak so a cache that goes out of scope is not
     #: kept alive by the registry.
-    _instances: "weakref.WeakSet[TTLCache]" = weakref.WeakSet()
+    _instances: ClassVar["weakref.WeakSet[TTLCache]"] = weakref.WeakSet()
 
     def __init__(self):
         self._data: dict[Any, tuple[float, Any]] = {}
