@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,7 @@ def _bucket_config(args) -> BackupConfig:
 class CLIWrapperBase:
 
     def __init__(self):
+        utils.request_id_var.set(uuid.uuid4().hex[:8])
         self.parser.add_argument("--cmd", help='cmd', nargs='+')
 
     def init_parser(self):
