@@ -273,6 +273,34 @@ def _create_job_replacing_stale(batch_v1, namespace: str, job_yaml: dict):
     return batch_v1.create_namespaced_job(namespace=namespace, body=job_yaml)
 
 
+def _env_flag(name):
+    """A boolean the operator sets on the node agent's DaemonSet as the string
+    'true'/'false' (OPENSHIFT_CLUSTER, TALOS_CLUSTER, ...). Unset is False."""
+    return os.environ.get(name, "").strip().lower() == "true"
+
+
+def _hugepage_shortfall(host_hugetlb_bytes, required_mib):
+    """The message to fail the add with when a pre-provisioned host carries
+    fewer huge pages than the SPDK pod is about to request, or None when it
+    carries enough.
+
+    Only meaningful where the node does not reserve the pages itself (Talos:
+    they come from the machine config). Without this check the pod would sit
+    Pending on 'Insufficient hugepages-2Mi' with nothing naming the number
+    to provision. ``host_hugetlb_bytes`` is Hugetlb from /proc/meminfo: the
+    pool across every page size and NUMA node, so this is a lower bound --
+    it can only pass a pod that at least fits the host as a whole.
+    """
+    available_mib = int(host_hugetlb_bytes) // (1024 * 1024)
+    if available_mib >= required_mib:
+        return None
+    pages_2mi = -(-required_mib // 2)  # ceil
+    return (f"host provides {available_mib} MiB of huge pages but the SPDK pod requests "
+            f"{required_mib} MiB (hugepages-2Mi); on Talos the node does not reserve them, "
+            f"set machine.sysctls vm.nr_hugepages to at least {pages_2mi} (2 MiB pages) "
+            f"in the machine config and retry")
+
+
 class SPDKParams(BaseModel):
     server_ip: str = Field(pattern=utils.IP_PATTERN)
     rpc_port: int = Field(ge=1, lt=65536)
@@ -333,6 +361,16 @@ def spdk_process_start(body: SPDKParams):
     openshift = os.environ.get("OPENSHIFT_CLUSTER", False)
     if isinstance(openshift, str):
        openshift = openshift.strip().lower() in ("true")
+
+    # Talos is stated the same way OpenShift is: a flag the operator sets on
+    # the node agent from the StorageCluster's environment, not something
+    # sniffed off the host at run time. On Talos the host is immutable and
+    # has no shell, so the node applies nothing to it -- no nr_hugepages
+    # write, no kubelet restart, no grubby/KubeletConfig Job. Huge pages are
+    # a prerequisite the machine config provides (machine.sysctls
+    # vm.nr_hugepages), and the add verifies the pool is there instead of
+    # creating it; see _hugepage_shortfall.
+    talos = _env_flag("TALOS_CLUSTER")
 
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
@@ -407,6 +445,7 @@ def spdk_process_start(body: SPDKParams):
             'NSOCKET': body.socket,
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
+            'TALOS_CLUSTER': talos,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
             'OPENSHIFT_MCP': openshift_mcp,
@@ -415,6 +454,12 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
         }
+
+        if talos:
+            shortfall = _hugepage_shortfall(node_utils.get_huge_memory(), values['MEM_MEGA'])
+            if shortfall:
+                logger.error(shortfall)
+                return utils.get_response(False, shortfall)
 
         if ubuntu_host:
             ubuntu_template = env.get_template('ubuntu_kernel_extra.yaml.j2')
@@ -462,7 +507,15 @@ def spdk_process_start(body: SPDKParams):
             if e.status != 404:
                 raise
             logger.info(f"Job '{job_resp.metadata.name}' already gone, skipping delete")
-        if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
+        wants_host_config = (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled)
+        if wants_host_config and talos:
+            # Both Jobs nsenter into the host (kubelet config, grubby). Talos
+            # has neither; its kubelet and kernel args come from the machine
+            # config, so this is a configuration mismatch to surface, not a
+            # Job to attempt and watch fail.
+            logger.warning("TALOS_CLUSTER is set: skipping the CPU-topology/core-isolation Job on '%s'; "
+                           "configure the kubelet and kernel args through the Talos machine config", node_name)
+        elif wants_host_config:
             if cpu_topology_enabled and not skip_kubelet_configuration:
                 if not openshift:
                     template_name = 'storage_cpu_topology.yaml.j2'
