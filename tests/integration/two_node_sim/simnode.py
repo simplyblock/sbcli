@@ -41,9 +41,13 @@ NORMAL, HOLDING, SOLO, FENCED = "normal", "holding", "solo", "fenced"
 #: * ``grant_stops_redirect`` -- F19, SPDK #81 + ultra #215: every solo grant
 #:   releases the LVS, and the release stops a non-leader's hublvol redirect to
 #:   the lost peer, so the next IO takes the LVS over at once.
+#: * ``reader_skips_dead_peer_jm`` -- F21, ultra (stacked on #215): on a solo LVS
+#:   the takeover's JC reader does not use the peer's JM that the HA layer knows
+#:   to be dead, instead of waiting for the 8 s NVMe IO timeout on a frozen peer.
 CAP_ANA_RESTORE_ALL = "ana_restore_all_groups"
 CAP_GRANT_STOPS_REDIRECT = "grant_stops_redirect"
-ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT})
+CAP_READER_SKIPS_DEAD_PEER_JM = "reader_skips_dead_peer_jm"
+ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM})
 DEPLOYED_CAPS: frozenset = frozenset()
 
 

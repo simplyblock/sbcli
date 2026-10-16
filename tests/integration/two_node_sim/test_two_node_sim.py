@@ -94,6 +94,18 @@ def test_pending_fix_passes(make_world, sc):
 
 
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+def test_f21_needs_its_own_fix(make_world):
+    """F21 is a separate defect: with only F19's capability (the redirect stops at
+    the grant) the takeover reader still waits on the frozen peer's JM (c8 02c)."""
+    from .simnode import CAP_GRANT_STOPS_REDIRECT, DEPLOYED_CAPS
+    sc = next(s for s in EXTRA if s.name == "F21-takeover-reader-frozen-peer-jm")
+    world = make_world(conditions=sc.conditions, caps=DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT})
+    out = run(world, sc)
+    assert not out.passed, out.report()
+    assert any("F21" in f for f in out.failures), out.report()
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
 @pytest.mark.parametrize("sc", BED, ids=lambda s: s.name)
 def test_bed_scenario_with_pending_caps(make_world, sc):
     """The pending capabilities must not break any bed scenario."""

@@ -28,7 +28,7 @@ import logging
 
 from simplyblock_core import constants
 
-from .simnode import FENCED, HOLDING, SOLO, SimNode
+from .simnode import CAP_READER_SKIPS_DEAD_PEER_JM, FENCED, HOLDING, SOLO, SimNode
 
 logger = logging.getLogger("two_node_sim")
 
@@ -43,6 +43,9 @@ DEPTH = 256
 CLIENT_KATO_S = float(constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO)
 #: keep-alive of the node-to-node NVMe controllers (hublvol, remote JM)
 HUBLVOL_KATO_S = float(constants.KATO) / 1000.0
+#: IO timeout of the node-to-node NVMe controllers (journal, hublvol): a request
+#: on a frozen peer completes with an error only after it (campaign c8, F21)
+NVME_TIMEOUT_S = float(constants.NVME_TIMEOUT_US) / 1e6
 
 
 class ControlPlane:
@@ -470,10 +473,20 @@ class Client:
             return "error"
         # IO-triggered takeover: lvstore update, 73 ms on new_md_journal
         # (4.05 s on master's md-journal, campaign c3 F7)
-        delay = 4.05 if "slow_takeover" in node.bugs else w.takeover_s
-        if delay > 1.0:
+        if "slow_takeover" in node.bugs:
+            delay = 4.05
             # campaign c3, F7: the takeover held client IO for 4 s
             w.violate("%s: lvstore takeover of %s takes %.2f s (> 1 s)" % (node.name, lvs_name, delay))
+        elif peer.proc == "frozen" and not (CAP_READER_SKIPS_DEAD_PEER_JM in node.caps and lv.state == SOLO):
+            # campaign c8, F21: the takeover's JC reader restart picks the frozen
+            # peer's JM (its connection is still up) and waits for the NVMe IO
+            # timeout of the SPDK-to-SPDK controllers (NVME_TIMEOUT_US, 8 s) before
+            # it moves on. ultra's F21 fix skips that JM once the LVS is solo.
+            delay = max(w.takeover_s, NVME_TIMEOUT_S)
+            w.violate("F21: %s's takeover reader of %s waits %.1f s on the frozen peer's JM"
+                      % (node.name, lvs_name, delay))
+        else:
+            delay = w.takeover_s
         lvs.takeover_until = w.vt.time() + delay
         w.log("%s: takes over %s on new IO (%.0f ms)" % (node.name, lvs_name, delay * 1000))
         return "wait"
