@@ -896,6 +896,13 @@ class TestClusterBase:
         Returns the actual pool name.
         """
         pool_name = pool_name or self.pool_name
+        # What existed before, so teardown can tell a pool this test made
+        # from one the operator handed back. Only the former is ours to
+        # delete -- see _delete_pool_dual.
+        try:
+            pools_before = set(self.sbcli_utils.list_storage_pools() or ())
+        except Exception:                                 # noqa: BLE001
+            pools_before = set()
         result = self.sbcli_utils.add_storage_pool(pool_name=pool_name, **kwargs)
         # K8s: the operator may reconcile to a pool whose name differs from the
         # requested one (add_storage_pool returns it). Docker: the REST client
@@ -905,6 +912,14 @@ class TestClusterBase:
             self.logger.info(
                 f"[dual] Pool name: '{self.pool_name}' -> '{actual}'"
             )
+        if not hasattr(self, "_pools_i_created"):
+            self._pools_i_created = set()
+        if actual not in pools_before:
+            self._pools_i_created.add(actual)
+        else:
+            self.logger.info(
+                "[pool] '%s' already existed; using it but NOT claiming "
+                "ownership, so teardown will leave it alone.", actual)
         self.pool_name = actual
         return actual
 
@@ -972,8 +987,26 @@ class TestClusterBase:
         Skipped entirely when pool_name doesn't match any existing pool
         (avoids errors from trying to delete a pool that was already
         cleaned up or renamed by the operator).
+
+        Also skipped for a pool this test did not create. On k8s
+        add_storage_pool often does not create anything: the operator
+        reconciles the request to a pool it already has and returns that
+        name, _create_pool_dual then stores it in self.pool_name, and
+        teardown would delete a pool that belongs to the cluster. That
+        is what emptied run 20261016: the first backup class asked for
+        'testpool', was handed 'simplyblock-cluster-default', and
+        deleted it at 10:15:45. The StorageClass resolves against that
+        pool, so every later class failed to provision --
+        "failed to resolve pool simplyblock-cluster-default" -- and 25
+        of the 26 classes never got a PVC bound.
         """
         pool_name = pool_name or self.pool_name
+        if pool_name and pool_name not in getattr(self, "_pools_i_created", ()):
+            self.logger.info(
+                "[pool] not deleting '%s': this test did not create it. The "
+                "operator handed it back from an existing pool, and it is "
+                "the cluster's, not ours.", pool_name)
+            return
         if self.k8s_test:
             pools = self.sbcli_utils.list_storage_pools()
             if pool_name not in pools:

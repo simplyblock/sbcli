@@ -4016,6 +4016,20 @@ class K8sUtils:
         the operator's own namespace, whatever the claim's, which dev
         called out explicitly -- so a test that looks for a policy's
         output in the application namespace will not find it.
+
+        source ONLY, never alongside clusterRef. The CRD rejects both:
+
+            set exactly one of source (to request a backup) or
+            clusterRef (to record one the store holds)
+
+        They are two different operations on one kind -- source asks the
+        cluster to take a backup, clusterRef adopts one the object store
+        already holds. Sending both failed validation on every create,
+        which is why all 26 backup classes failed on 20261016 without a
+        single backup being taken.
+
+        cluster_name is accepted and ignored so callers need not change;
+        the claim already determines the cluster.
         """
         ns = namespace or self.namespace
         yaml_content = (
@@ -4025,9 +4039,6 @@ class K8sUtils:
             f"  name: {name}\n"
             f"  namespace: {ns}\n"
             "spec:\n"
-            # A bare string. The Ops kind wants an object for the same
-            # word, which is the trap in this API.
-            f"  clusterRef: {cluster_name}\n"
             "  source:\n"
             f"    claimName: {pvc_name}\n"
         )
