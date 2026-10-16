@@ -411,8 +411,26 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                                 client,
                                 self.ssh_obj.exec_command(
                                     node=client,
-                                    command="sudo nvme list-subsys -o json "
-                                            "2>/dev/null || sudo nvme list",
+                                    # list-subsys shows PATHS, not namespaces,
+                                    # and that is the one fact needed here --
+                                    # run 20261015-225408 dumped it and still
+                                    # could not say which namespace belongs to
+                                    # which subsystem. `nvme list -o json`
+                                    # carries DevicePath + SubsystemNQN per
+                                    # device; the sysfs walk is the kernel's
+                                    # own view of the same mapping, so the two
+                                    # disagreeing is itself the answer.
+                                    command=(
+                                        "echo '--- nvme list ---'; "
+                                        "sudo nvme list -o json 2>/dev/null; "
+                                        "echo '--- sysfs ---'; "
+                                        "for d in /sys/class/nvme-subsystem/*; "
+                                        "do [ -r \"$d/subsysnqn\" ] || continue; "
+                                        "echo \"$(basename $d) $(cat $d/subsysnqn)\"; "
+                                        "for n in \"$d\"/nvme*n*; do "
+                                        "[ -e \"$n\" ] || continue; "
+                                        "echo \"    $(basename $n) nsid=$(cat $n/nsid 2>/dev/null)\"; "
+                                        "done; done"),
                                     supress_logs=True)[0])
                         except Exception as exc:          # noqa: BLE001
                             self.logger.warning(
