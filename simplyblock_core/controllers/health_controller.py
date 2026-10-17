@@ -251,23 +251,18 @@ def _log_port_check_failure(db_controller, snode, port, exc):
 
 
 def check_port_on_node(snode, port_id):
-    from simplyblock_core.utils import port_block
-    return not port_block.is_port_blocked(snode, port_id)
+    return int(port_id) not in snode.rpc_client(timeout=5, retry=5).nvmf_get_blocked_ports()
 
 
 def check_ports_on_node(snode, port_ids):
     """Batch variant of :func:`check_port_on_node`: ONE
     ``nvmf_get_blocked_ports`` fetch answers every port in ``port_ids``.
-    Returns ``{port: bool}`` (True = open). Falls back to per-port checks on
-    legacy nodes without the RPC. Raises on fetch failure — callers treat it
-    like the single-port failure path."""
-    from simplyblock_core.utils import port_block
+    Returns ``{port: bool}`` (True = open). Raises on fetch failure — callers
+    treat it like the single-port failure path."""
     port_ids = list(port_ids)
     if not port_ids:
         return {}
-    blocked = port_block.get_blocked_ports_set(snode)
-    if blocked is None:
-        return {p: check_port_on_node(snode, p) for p in port_ids}
+    blocked = snode.rpc_client(timeout=5, retry=5).nvmf_get_blocked_ports()
     return {p: int(p) not in blocked for p in port_ids}
 
 

@@ -32,7 +32,6 @@ def _render_storage_deploy(tls_provider: str) -> str:
         PCI_ALLOWED="",
         TOTAL_HP="",
         NSOCKET=0,
-        FW_PORT=50001,
         CPU_TOPOLOGY_ENABLED=False,
         MEM_MEGA=1536,
         MEM2_MEGA=1024,

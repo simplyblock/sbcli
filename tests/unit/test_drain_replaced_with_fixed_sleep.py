@@ -221,7 +221,7 @@ class PortAllowPath_MinimalFailback(unittest.TestCase):
 
     def test_failback_never_blocks_ports(self):
         self.assertNotIn(
-            "block=True", self.fn,
+            ".nvmf_port_block(", self.fn,
             "the failback must NOT port-block the acting leader or peers: "
             "the LVS ports carry hublvol/redirect and journal traffic; "
             "blocking them mid-IO produced DISTRIBD n_unavail_read errors "

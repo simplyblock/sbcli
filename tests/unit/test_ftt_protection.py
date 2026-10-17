@@ -986,10 +986,7 @@ def _fence(node, port):
     """Make ``node`` report ``port`` fenced in reject mode and serve every
     lvstore on that port."""
     node.get_lvol_subsys_port = MagicMock(return_value=port)
-    node.rpc_client().nvmf_get_blocked_ports = MagicMock(return_value={
-        "total_blocked_ports": 1,
-        "blocked_ports": [{"port": port, "is_reject": True}],
-    })
+    node.rpc_client().nvmf_get_blocked_ports = MagicMock(return_value={port})
 
 
 class TestFencedOwnSecondary(unittest.TestCase):
@@ -1038,8 +1035,7 @@ class TestFencedOwnSecondary(unittest.TestCase):
     def test_down_secondary_without_a_fence_stays_a_passing_refusal(self):
         nodes = self._nodes()
         nodes[1].get_lvol_subsys_port = MagicMock(return_value=4440)
-        nodes[1].rpc_client().nvmf_get_blocked_ports = MagicMock(
-            return_value={"total_blocked_ports": 0, "blocked_ports": []})
+        nodes[1].rpc_client().nvmf_get_blocked_ports = MagicMock(return_value=set())
         db = _db(_cluster(npcs=1, ft=1), nodes)
         with patch(EVENT) as event:
             allowed, reason = _check_ftt_allows_node_removal("n1", db)
@@ -1064,10 +1060,7 @@ class TestFencedOwnSecondary(unittest.TestCase):
         nodes = self._nodes()
         nodes[1].get_lvol_subsys_port = MagicMock(
             side_effect=lambda lvs: {"LVS_10": 4440, "LVS_3": 4434}[lvs])
-        nodes[1].rpc_client().nvmf_get_blocked_ports = MagicMock(return_value={
-            "total_blocked_ports": 1,
-            "blocked_ports": [{"port": 4434, "is_reject": True}],
-        })
+        nodes[1].rpc_client().nvmf_get_blocked_ports = MagicMock(return_value={4434})
         db = _db(_cluster(npcs=1, ft=1), nodes)
         allowed, reason = _check_ftt_allows_node_removal("n1", db)
         self.assertFalse(allowed)

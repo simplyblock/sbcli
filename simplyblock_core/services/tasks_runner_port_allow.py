@@ -20,7 +20,6 @@ from simplyblock_core.services.task_runner_base import (
     serve,
     set_result,
 )
-from simplyblock_core.utils import port_block
 
 logger = utils.get_logger(__name__)
 
@@ -971,7 +970,7 @@ def exec_port_allow_task(task):
         lvs_ports.append(port_number)
     logger.info(f"Allow LVS ports {lvs_ports} on node {node.get_id()}")
     for p in lvs_ports:
-        port_block.set_port(node, p, block=False, timeout=5, retry=2)
+        node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)
         tcp_ports_events.port_allowed(node, p)
 
     # Deferred ANA failover, AFTER the port release: a secondary recovering
