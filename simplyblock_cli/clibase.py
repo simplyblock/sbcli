@@ -27,7 +27,11 @@ from simplyblock_core.controllers import (
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup.chain import BackupChain
-from simplyblock_core.controllers.backup.manifest import ManifestError, parse_export
+from simplyblock_core.controllers.backup.manifest import (
+    ManifestError,
+    parse_export,
+    parse_group_export,
+)
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -1385,6 +1389,135 @@ class CLIWrapperBase:
         if err:
             return f"Clone failed: {err}"
         return utils.print_table([{"Volume": v} for v in created])
+
+    def consistency_group__backup_create(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        group = self._cg_resolve(args.group_id)
+        group_backup_id, err = group_backup.create_group_backup(
+            group.get_id(), group_seq=getattr(args, 'group_seq', None))
+        if err:
+            return f"Group backup failed: {err}"
+        return f"Group backup {group_backup_id} started"
+
+    def _group_backup_row(self, gb):
+        return {
+            "ID": gb.get_id(),
+            "Group": gb.consistency_group_name or "-",
+            "Gen": gb.group_seq,
+            "Status": gb.status,
+            "Members": len(gb.members),
+            "Encrypted": "yes" if gb.encrypted else "no",
+            "Size": utils.humanbytes(gb.size),
+        }
+
+    def group_backup__list(self, sub_command, args):
+        db = db_controller.DBController()
+        group_backups = sorted(db.get_group_backups(args.cluster_id),
+                               key=lambda g: (g.created_at, g.uuid), reverse=True)
+        return _format_result([self._group_backup_row(g) for g in group_backups],
+                              json=args.json)
+
+    def group_backup__get(self, sub_command, args):
+        db = db_controller.DBController()
+        try:
+            gb = db.get_group_backup_by_id(args.group_backup_id)
+        except KeyError:
+            return f"Group backup {args.group_backup_id} not found"
+        if args.json:
+            return _format_json(gb.get_clean_dict())
+        return utils.print_table([self._group_backup_row(gb)])
+
+    def group_backup__restore(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        group_id, lvol_ids, err = group_backup.restore_group_backup(
+            args.group_backup_id, args.into_group_name, args.pool,
+            target_node_id=getattr(args, 'node', None),
+            s3_credentials=_s3_credentials(args))
+        if err:
+            return f"Group restore failed: {err}"
+        return (f"Restoring group backup into consistency group {group_id} "
+                f"({len(lvol_ids)} volumes)")
+
+    def group_backup__delete(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        success, err = group_backup.delete_group_backup(args.group_backup_id)
+        if err:
+            return f"Delete failed: {err}"
+        return f"Group backup {args.group_backup_id} deleted"
+
+    def group_backup__export(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        try:
+            export = group_backup.export_group_backup(
+                args.group_backup_id, cluster_id=getattr(args, 'cluster_id', None))
+        except (PreconditionError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+
+        output = _format_json(export.model_dump(mode="json"))
+        output_file = getattr(args, 'output', None)
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(output)
+            print(f"Exported group backup {args.group_backup_id} to {output_file}")
+        else:
+            print(output)
+        return True
+
+    def group_backup__discover(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        config = _bucket_config(args)
+        try:
+            manifests = group_backup.discover_group_backups(config)
+        except (ManifestError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+        if not manifests:
+            print(f"No group backups found in {args.bucket}")
+            return False
+        # A group manifest records its own membership, so "complete" is answered
+        # from the document alone -- a torn generation is worth showing rather than
+        # hiding, as that IS the finding a discover is for.
+        # str, not UUID: this row goes through `utils.dump_json` for --json output,
+        # and json.dumps has no encoder for a UUID.
+        return [{
+            "ID": str(m.group_backup_id),
+            "Group": m.source.consistency_group_name,
+            "Gen": m.source.generation,
+            "Members": len(m.members),
+            "Complete": "yes" if m.is_complete() else "no",
+            "Size": m.size,
+            "Encrypted": "yes" if m.encrypted else "no",
+            "Created": _format_timestamp(m.created_at),
+        } for m in manifests]
+
+    def group_backup__import(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        from_file = getattr(args, 'from_file', None)
+        bucket = getattr(args, 'bucket', None)
+
+        # An export file records the location of everything in it, so naming a
+        # bucket alongside one could only contradict it. Reading a bucket needs
+        # the opposite: the name is how the manifests are found at all.
+        if bool(from_file) == bool(bucket):
+            print("Error: give exactly one of --from-file or --bucket")
+            return False
+
+        cluster_id = getattr(args, 'cluster_id', None)
+        try:
+            if bucket:
+                ids = group_backup.import_group_backup_from_bucket(
+                    _bucket_config(args), cluster_id=cluster_id)
+            else:
+                with open(str(from_file), 'rb') as f:
+                    export = parse_group_export(f.read(), str(from_file))
+                ids = [group_backup.import_group_backup(export, cluster_id=cluster_id)]
+        except (ManifestError, PreconditionError, ValueError, OSError) as e:
+            print(f"Error: {e}")
+            return False
+
+        print(f"Imported {len(ids)} group backup(s)")
+        return True
 
     def snapshot__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)

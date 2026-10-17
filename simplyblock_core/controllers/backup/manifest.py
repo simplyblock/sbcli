@@ -457,3 +457,253 @@ def parse_export(body: bytes, source: str) -> BackupExport:
         return BackupExport.model_validate(data)
     except ValueError as e:
         raise ManifestError(f"{source} is malformed: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Group backup manifest
+#
+# The self-describing part of a CONSISTENCY-GROUP backup: one JSON document per
+# group backup, under a "groups/" prefix, naming the N member backups of one
+# generation as a unit. It is written LAST, after every member manifest exists,
+# so its presence is the group backup's all-or-nothing commit barrier
+# (design-consistency-group-backup.md §3.3, §4.2). A reader resolves a group
+# backup from this document, then reads each member's manifests/<backup_id>.json
+# to assemble that member's chain. Like the per-backup manifest, it records
+# identity and encoding, never the bucket, region, endpoint, or credentials.
+# ---------------------------------------------------------------------------
+
+GROUP_MANIFEST_PREFIX = "groups/"
+GROUP_MANIFEST_SCHEMA_VERSION = 1
+
+
+def group_manifest_key(group_backup_id: UUID) -> str:
+    return f"{GROUP_MANIFEST_PREFIX}{group_backup_id}.json"
+
+
+class GroupManifestSource(BaseModel):
+    """Where a group backup's generation came from. Provenance for a reader."""
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: UUID
+    #: ``ConsistencyGroup.get_id()``: the composite "<cluster_id>/<uuid>".
+    consistency_group_id: str
+    consistency_group_name: str
+    #: The generation (``group_seq``) this backup was taken from.
+    generation: int
+    #: Absent when the cluster's own record of its name was unreadable.
+    cluster_name: str | None = None
+
+
+class GroupManifestMember(BaseModel):
+    """One member of a group backup: the volume and the backup that copied it."""
+    model_config = ConfigDict(extra="forbid")
+
+    lvol_id: UUID
+    lvol_name: str
+    #: The per-member backup uuid; its own manifest is ``manifests/<backup_id>.json``.
+    backup_id: UUID
+    s3_id: int
+
+
+class GroupManifestMembership(BaseModel):
+    """The generation's membership, so a reader can verify completeness.
+
+    A group backup is restorable only when every expected member is present
+    (design-consistency-group-backup.md §6). Recording the expected ids here is
+    the expected-versus-present check (design-consistency-groups.md §8.3) encoded
+    in the bucket, so a reader with only the bucket can tell a complete group
+    backup from a torn one.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lvol_ids: list[UUID]
+
+
+class GroupBackupManifest(BaseModel):
+    """The self-describing document for one consistency-group backup."""
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = GROUP_MANIFEST_SCHEMA_VERSION
+    group_backup_id: UUID
+    created_at: int
+    completed_at: int
+    size: int
+
+    source: GroupManifestSource
+    members: list[GroupManifestMember]
+    membership: GroupManifestMembership
+
+    #: Whether the members are encrypted. Homogeneous (design §3.4): every member
+    #: shares this disposition. The actual per-member keys are NOT here -- each
+    #: member has its own DEK, recorded in its own manifest
+    #: (``manifests/<backup_id>.json``) -- so this is only the group-level
+    #: statement that a reader must resolve per-member keys before a restore.
+    encrypted: bool = False
+
+    def is_complete(self) -> bool:
+        """Whether every expected member is present in this manifest."""
+        present = {member.lvol_id for member in self.members}
+        return set(self.membership.expected_lvol_ids) <= present
+
+
+def write_group(config: BackupConfig, manifest: GroupBackupManifest) -> None:
+    """Store a group manifest, next to the member backups it names.
+
+    Written LAST, after every member manifest exists: its presence is the group
+    backup's commit barrier (design §3.3).
+
+    Raises:
+        ManifestError: it could not be stored. A group backup with member
+            manifests but no group manifest is not a committed group backup.
+    """
+    try:
+        s3_client(config).put_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(manifest.group_backup_id),
+            Body=manifest.model_dump_json().encode(),
+            ContentType="application/json",
+        )
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            "Failed to write group manifest for group backup "
+            f"{manifest.group_backup_id}") from e
+
+    logger.info("Wrote group manifest for group backup %s to %s",
+                manifest.group_backup_id, config.bucket_name)
+
+
+def read_group(config: BackupConfig, group_backup_id: UUID) -> GroupBackupManifest:
+    """Load one group manifest by group backup id.
+
+    Raises:
+        ManifestError: it is absent, unreadable, or a schema version this build
+            does not understand.
+    """
+    try:
+        body = s3_client(config).get_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(group_backup_id))["Body"].read()
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            f"Failed to read group manifest for group backup {group_backup_id} "
+            f"from {config.bucket_name}") from e
+
+    return _parse_group(body, group_manifest_key(group_backup_id))
+
+
+def list_all_groups(config: BackupConfig) -> list[GroupBackupManifest]:
+    """Every group manifest in the bucket, newest first.
+
+    The disaster-recovery entry point for group backups, parallel to
+    :func:`list_all`.
+
+    Raises:
+        ManifestError: the bucket could not be listed, or one group manifest
+            could not be parsed. Not best-effort, for :func:`list_all`'s reason.
+    """
+    client = s3_client(config)
+    manifests = []
+
+    try:
+        pages = client.get_paginator("list_objects_v2").paginate(
+            Bucket=config.bucket_name, Prefix=GROUP_MANIFEST_PREFIX)
+        for page in pages:
+            for entry in page.get("Contents", []):
+                key = entry["Key"]
+                if not key.endswith(".json"):
+                    continue
+                body = client.get_object(Bucket=config.bucket_name, Key=key)["Body"].read()
+                manifests.append(_parse_group(body, key))
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            f"Failed to list group manifests in {config.bucket_name}") from e
+
+    manifests.sort(key=lambda m: (m.created_at, m.group_backup_id), reverse=True)
+    return manifests
+
+
+def delete_group(config: BackupConfig, group_backup_id: UUID) -> None:
+    """Remove a group manifest.
+
+    Deleting it un-commits the group backup as a unit; the member manifests and
+    objects follow retention per member (design §9).
+    """
+    try:
+        s3_client(config).delete_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(group_backup_id))
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            "Failed to delete group manifest for group backup "
+            f"{group_backup_id}") from e
+
+
+def _parse_group(body: bytes, key: str) -> GroupBackupManifest:
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise ManifestError(f"Group manifest {key} is not valid JSON") from e
+
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if version != GROUP_MANIFEST_SCHEMA_VERSION:
+        # Refuse rather than guess, for the reason `_parse` refuses a manifest.
+        raise ManifestError(
+            f"Group manifest {key} has schema version {version}, "
+            f"this build understands {GROUP_MANIFEST_SCHEMA_VERSION}")
+
+    try:
+        return GroupBackupManifest.model_validate(data)
+    except ValueError as e:
+        raise ManifestError(f"Group manifest {key} is malformed: {e}") from e
+
+
+GROUP_EXPORT_SCHEMA_VERSION = 1
+
+
+class GroupBackupExport(BaseModel):
+    """A group backup carried out of a cluster in a file: the group manifest plus
+    the member backup manifests it names, as one unit (design §6.5).
+
+    This is to the group manifest what ``BackupExport`` is to a single-volume
+    manifest -- the one document that does record a location, because it is not
+    stored in the bucket it describes. The group manifest names the generation's
+    members; ``members`` carries each member's whole restorable chain, grouped by
+    the location it lives in exactly as a single-volume export groups its
+    manifests. A group backup is homogeneous -- its members share one location
+    (§3.4) -- so there is one group in practice, but reusing ``BackupExport`` keeps
+    the member records on the single-volume import path and describes a member's
+    chain the same way everywhere.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = GROUP_EXPORT_SCHEMA_VERSION
+    group_manifest: GroupBackupManifest
+    members: BackupExport
+
+
+def parse_group_export(body: bytes, source: str) -> GroupBackupExport:
+    """Read a group export document, naming *source* in anything it rejects.
+
+    The group analog of :func:`parse_export`.
+
+    Raises:
+        ManifestError: It is not valid JSON, states a schema version this build
+            does not understand, or is not shaped like a group export.
+    """
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise ManifestError(f"{source} is not valid JSON") from e
+
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if version != GROUP_EXPORT_SCHEMA_VERSION:
+        # Refused rather than guessed at, for the reason `_parse` refuses a
+        # manifest: the field names may not mean the same thing.
+        raise ManifestError(
+            f"{source} has group export schema version {version}, "
+            f"this build understands {GROUP_EXPORT_SCHEMA_VERSION}")
+
+    try:
+        return GroupBackupExport.model_validate(data)
+    except ValueError as e:
+        raise ManifestError(f"{source} is malformed: {e}") from e

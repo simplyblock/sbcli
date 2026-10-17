@@ -13,10 +13,16 @@ import pytest
 
 from simplyblock_cli import clibase
 from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import group_backup as group_backup_controller
 from simplyblock_core.controllers.backup.manifest import (
     BackupExport,
     BackupManifest,
     FDBKeyDescriptor,
+    GroupBackupExport,
+    GroupBackupManifest,
+    GroupManifestMember,
+    GroupManifestMembership,
+    GroupManifestSource,
     LocatedManifests,
     ManifestDataPlane,
     ManifestSource,
@@ -300,4 +306,126 @@ class TestExportImportFile:
 
         assert not ok
         assert "schema version 99" in capsys.readouterr().out
-        imported.assert_not_called()
+
+
+def _group_manifest():
+    return GroupBackupManifest(
+        group_backup_id=_id("gb-1"),
+        created_at=100,
+        completed_at=200,
+        size=4096,
+        source=GroupManifestSource(
+            cluster_id=_id("cluster"),
+            consistency_group_id=f"{_id('cluster')}/{_id('cg')}",
+            consistency_group_name="gitea", generation=7),
+        members=[GroupManifestMember(lvol_id=_id("volume"), lvol_name="vol",
+                                     backup_id=_id("b-1"), s3_id=1)],
+        membership=GroupManifestMembership(expected_lvol_ids=[_id("volume")]),
+    )
+
+
+def _group_export():
+    return GroupBackupExport(
+        group_manifest=_group_manifest(),
+        members=BackupExport(groups=[LocatedManifests(
+            location=BackupLocation(bucket_name="backups", region="eu-central-1"),
+            manifests=[_manifest()])]))
+
+
+class TestGroupExportImportFile:
+    """What `group-backup export` writes and `group-backup import --from-file`
+    reads back -- the single-volume contract (TestExportImportFile) lifted to a
+    group backup carried as one unit (design §6.5)."""
+
+    def _export(self, tmp_path, **args):
+        out = tmp_path / "group.json"
+        with patch.object(group_backup_controller, "export_group_backup",
+                          return_value=_group_export()) as export:
+            written = clibase.CLIWrapperBase.group_backup__export(
+                clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
+                "export", _Args(group_backup_id="gb-1", cluster_id=None,
+                                output=str(out), **args))
+        return written, out, export
+
+    def _import(self, path, **args):
+        with patch.object(group_backup_controller, "import_group_backup",
+                          return_value="cl/gb-1") as imported:
+            ok = clibase.CLIWrapperBase.group_backup__import(
+                clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
+                "import", _Args(from_file=str(path), bucket=None,
+                                cluster_id=None, **args))
+        return ok, imported
+
+    def test_the_file_carries_the_group_manifest_and_its_members(self, tmp_path):
+        written, out, _ = self._export(tmp_path)
+
+        assert written
+        document = json.loads(out.read_text())
+        assert document["group_manifest"]["source"]["consistency_group_name"] == "gitea"
+        assert document["members"]["groups"][0]["location"]["bucket_name"] == "backups"
+
+    def test_a_file_imports_without_naming_a_bucket(self, tmp_path):
+        _, out, _ = self._export(tmp_path)
+
+        ok, imported = self._import(out)
+
+        assert ok
+        (export,), _ = imported.call_args
+        assert str(export.group_manifest.group_backup_id) == str(_id("gb-1"))
+
+    def test_naming_a_bucket_alongside_a_file_is_refused(self, tmp_path, capsys):
+        _, out, _ = self._export(tmp_path)
+
+        ok = clibase.CLIWrapperBase.group_backup__import(
+            clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
+            "import", _Args(from_file=str(out), bucket="elsewhere", cluster_id=None))
+
+        assert not ok
+        assert "exactly one" in capsys.readouterr().out
+
+    def test_no_credential_reaches_the_file(self, tmp_path):
+        _, out, _ = self._export(tmp_path)
+
+        body = out.read_text()
+        assert "access_key" not in body and "secret" not in body
+
+    def test_a_file_from_a_later_build_is_refused(self, tmp_path, capsys):
+        out = tmp_path / "future.json"
+        out.write_text(json.dumps({"schema_version": 99, "group_manifest": {},
+                                   "members": {"schema_version": 1, "groups": []}}))
+
+        ok, imported = self._import(out)
+
+        assert not ok
+        assert "group export schema version 99" in capsys.readouterr().out
+
+
+class TestGroupDiscoverRendering:
+    """`group-backup discover` reports the group backups a bucket holds, including
+    a torn generation (design §6.5)."""
+
+    def _run(self, manifests):
+        with patch.object(group_backup_controller, "discover_group_backups",
+                          return_value=manifests):
+            return clibase.CLIWrapperBase.group_backup__discover(
+                clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
+                "discover", _Args(bucket="backups", region="eu-central-1",
+                                  endpoint=None, access_key_id=None,
+                                  secret_access_key=None, no_verify_tls=False,
+                                  path_style=False))
+
+    def test_lists_a_complete_group_backup(self):
+        rows = self._run([_group_manifest()])
+        assert rows[0]["ID"] == str(_id("gb-1"))
+        assert rows[0]["Members"] == 1
+        assert rows[0]["Complete"] == "yes"
+
+    def test_shows_a_torn_generation_as_incomplete(self):
+        gm = _group_manifest()
+        gm.membership.expected_lvol_ids.append(_id("missing"))   # expected 2, present 1
+        rows = self._run([gm])
+        assert rows[0]["Complete"] == "no"
+
+    def test_an_empty_bucket_is_reported(self, capsys):
+        assert self._run([]) is False
+        assert "No group backups found" in capsys.readouterr().out

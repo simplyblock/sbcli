@@ -17,6 +17,7 @@ from simplyblock_core.models.backup import (
     BackupChainLock,
     BackupPolicy,
     BackupPolicyAttachment,
+    GroupBackup,
 )
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
@@ -1566,6 +1567,32 @@ class DBController(metaclass=Singleton):
     def get_backups_by_snapshot_id(self, snapshot_id: str) -> list[Backup]:
         return self.query(Backup, 'snapshot_id', snapshot_id)
 
+    def get_backups_by_group_backup_id(self, group_backup_id: str) -> list[Backup]:
+        """The member backups of a group backup. A standalone backup's blank
+        group_backup_id is dropped by the index, so only members are returned
+        (design-consistency-group-backup.md §4.1).
+
+        A blank id names no group backup, so it has no members: return empty
+        rather than querying the index, which rejects a blank component (a blank
+        is never indexed, so it could only ever match nothing)."""
+        if not group_backup_id:
+            return []
+        return self.query(Backup, 'group_backup_id', group_backup_id)
+
+    def get_group_backups(self, cluster_id: str | None = None) -> list[GroupBackup]:
+        prefix = cluster_id if cluster_id else " "
+        return GroupBackup().read_from_db(self.kv_store, id=prefix)
+
+    def get_group_backup_by_id(self, group_backup_id: str) -> GroupBackup:
+        gb = self.query_one(GroupBackup, 'uuid', group_backup_id.split('/')[-1])
+        if gb is None:
+            raise KeyError(f'GroupBackup {group_backup_id} not found')
+        return gb
+
+    def get_group_backups_by_consistency_group(
+            self, consistency_group_id: str) -> list[GroupBackup]:
+        return self.query(GroupBackup, 'consistency_group_id', consistency_group_id)
+
     def get_replication_targets(self, cluster_id: str | None = None) -> list[ReplicationTarget]:
         prefix = cluster_id if cluster_id else " "
         return ReplicationTarget().read_from_db(self.kv_store, id=prefix)
@@ -1672,6 +1699,25 @@ class DBController(metaclass=Singleton):
                 BackupPolicyAttachment, 'target_type+target_id', 'pool', lvol.pool_uuid)),
             None)
         policy_id = lvol_policy_id or pool_policy_id
+        if policy_id:
+            try:
+                return self.get_backup_policy_by_id(policy_id)
+            except KeyError:
+                return None
+        return None
+
+    def get_policy_for_group(self, group) -> BackupPolicy | None:
+        """The backup policy attached to a consistency group, or None.
+
+        A group is backed up as one unit, so its policy attaches to the group
+        directly rather than to a pool or an lvol (design-consistency-group-backup.md
+        §7.1).
+        """
+        policy_id = next(
+            (att.policy_id for att in self.query(
+                BackupPolicyAttachment, 'target_type+target_id',
+                'consistency_group', group.get_id())),
+            None)
         if policy_id:
             try:
                 return self.get_backup_policy_by_id(policy_id)

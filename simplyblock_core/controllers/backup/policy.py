@@ -13,7 +13,12 @@ from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
+from simplyblock_core.models.backup import (
+    Backup,
+    BackupPolicy,
+    BackupPolicyAttachment,
+    GroupBackup,
+)
 from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger()
@@ -129,13 +134,16 @@ def attach_policy(policy_id, target_type, target_id):
     except KeyError as e:
         return None, str(e)
 
-    if target_type not in ("pool", "lvol"):
-        return None, f"Invalid target_type: {target_type}. Use 'pool' or 'lvol'"
+    if target_type not in ("pool", "lvol", "consistency_group"):
+        return None, (f"Invalid target_type: {target_type}. "
+                      f"Use 'pool', 'lvol', or 'consistency_group'")
 
     # Validate target exists
     try:
         if target_type == "pool":
             db_controller.get_pool_by_id(target_id)
+        elif target_type == "consistency_group":
+            db_controller.get_consistency_group_by_id(target_id)
         else:
             db_controller.get_lvol_by_id(target_id)
     except KeyError as e:
@@ -290,6 +298,111 @@ def evaluate_schedule(lvol):
             second = tier_backups[1]
             _trigger_merge(second, oldest)
             return  # One merge per cycle to avoid conflicts
+
+
+def evaluate_group_policy(group):
+    """Enforce a consistency group's count/age retention (design §9).
+
+    Retention is per generation: a group backup is the unit, so the oldest group
+    backups beyond ``max_versions``, and those older than ``max_age``, are deleted
+    whole rather than merged. The member backups a deleted group backup alone
+    holds follow through ``delete_group_backup``; a member a later generation
+    still chains against is left by the per-volume chain retention.
+    """
+    from simplyblock_core.controllers.backup import group_backup
+
+    policy = db_controller.get_policy_for_group(group)
+    if not policy:
+        return
+
+    completed = _completed_group_backups(group)
+    if not completed:
+        return
+    now = int(time.time())
+
+    for gb in _group_backups_to_prune(completed, policy, now):
+        _, err = group_backup.delete_group_backup(gb.get_id())
+        if err:
+            logger.warning("Group retention could not delete group backup %s: %s", gb.uuid, err)
+
+
+def evaluate_group_schedule(group):
+    """Take a scheduled group backup when due and prune old generations (design §9).
+
+    The group analog of :func:`evaluate_schedule`: it takes one crash-consistent
+    generation and backs it up when the smallest tier's interval has elapsed since
+    the last group backup, then enforces each tier's ``keep_count`` by deleting the
+    excess oldest generations in that age band -- generations are pruned whole, not
+    merged, because a group backup is the retention unit.
+    """
+    from simplyblock_core.controllers.backup import group_backup
+
+    policy = db_controller.get_policy_for_group(group)
+    if not policy or not policy.backup_schedule:
+        return
+
+    try:
+        tiers = _parse_schedule(policy.backup_schedule)
+    except ValueError:
+        return
+    if not tiers:
+        return
+
+    now = int(time.time())
+    smallest_interval = tiers[0][0]
+    group_backups = db_controller.get_group_backups_by_consistency_group(group.get_id())
+    completed = [g for g in group_backups if g.status == GroupBackup.STATUS_COMPLETED]
+    in_flight = [g for g in group_backups
+                 if g.status in (GroupBackup.STATUS_PENDING, GroupBackup.STATUS_IN_PROGRESS)]
+
+    # One group backup at a time: do not start another while one is still
+    # committing, the same gate the single-volume schedule keeps.
+    if not in_flight:
+        needs_backup = True
+        if completed:
+            latest = max(completed, key=lambda g: g.created_at)
+            if now - latest.created_at < smallest_interval:
+                needs_backup = False
+        if needs_backup:
+            _, err = group_backup.create_group_backup(group.get_id())
+            if err:
+                logger.warning("Scheduled group backup skipped for group %s: %s",
+                               group.uuid, err)
+            return  # let it commit before pruning this cycle
+
+    # Tiered pruning: keep keep_count generations per age band, deleting the
+    # excess oldest. One delete per cycle to avoid racing the data plane.
+    completed.sort(key=lambda g: g.created_at)
+    for tier_idx, (interval, keep_count) in enumerate(tiers):
+        lower_age = 0 if tier_idx == 0 else tiers[tier_idx - 1][0]
+        upper_age = tiers[tier_idx + 1][0] if tier_idx + 1 < len(tiers) else float('inf')
+        tier_backups = [g for g in completed
+                        if lower_age <= (now - g.created_at) < upper_age]
+        if len(tier_backups) > keep_count:
+            oldest = tier_backups[0]
+            _, err = group_backup.delete_group_backup(oldest.get_id())
+            if err:
+                logger.warning("Group schedule could not prune group backup %s: %s",
+                               oldest.uuid, err)
+            return
+
+
+def _completed_group_backups(group):
+    return [g for g in db_controller.get_group_backups_by_consistency_group(group.get_id())
+            if g.status == GroupBackup.STATUS_COMPLETED]
+
+
+def _group_backups_to_prune(completed, policy, now):
+    """The completed group backups a count/age policy would delete, oldest first."""
+    completed = sorted(completed, key=lambda g: g.created_at)
+    doomed = []
+    if policy.max_versions > 0 and len(completed) > policy.max_versions:
+        doomed.extend(completed[:len(completed) - policy.max_versions])
+    if policy.max_age_seconds > 0:
+        for gb in completed:
+            if gb not in doomed and (now - gb.created_at) > policy.max_age_seconds:
+                doomed.append(gb)
+    return doomed
 
 
 def _auto_backup_lvol(lvol):
