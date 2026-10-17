@@ -172,6 +172,35 @@ _MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
 _MIGRATION_BDEV_SUFFIX_DONE = 'am'
 
 
+def _group_sibling_lvol_ids(migration):
+    """uuids of every OTHER lvol migrating in the same batch group as
+    `migration` (empty set if `migration` isn't a batch-group member).
+
+    Used by _apply_migration_to_db()'s owned-snapshot handling to tell a
+    clone sibling that's migrating to the SAME target as part of this same
+    group apart from one genuinely staying behind on a different node --
+    only the latter still needs the snapshot's pre-migration location
+    preserved; a sibling moving with us needs nothing left behind.
+    """
+    if not migration.migration_group_id:
+        return set()
+    try:
+        group = db.get_migration_group_by_id(migration.migration_group_id)
+    except KeyError:
+        return set()
+    uuids = set()
+    for member in group.members:
+        mig_id = member.get("migration_id")
+        if not mig_id:
+            continue
+        try:
+            sibling_mig = db.get_migration_by_id(mig_id)
+        except KeyError:
+            continue
+        uuids.add(sibling_mig.lvol_id)
+    return uuids
+
+
 def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
     """
     Update control-plane DB records after a successful lvol migration.
@@ -327,31 +356,64 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
                 })
                 original_snap.write_to_db(db.kv_store)
         else:
-            referenced = False
+            # A living clone sibling only means "this snapshot's PRE-migration
+            # copy is still needed, so preserve the primary record and record
+            # our own copy as an extra instance instead" when that sibling is
+            # staying at its current node. When the sibling is itself a
+            # member of the SAME batch group (migration.migration_group_id)
+            # it is migrating to the exact same target right now too -- the
+            # whole branch (this snapshot and everything cloned from it)
+            # moves together, nothing is left behind that still needs the
+            # pre-migration location, and the primary record should simply
+            # move like the unreferenced case.
+            #
+            # Previously this didn't distinguish the two: ANY clone sibling
+            # (group member or not) was treated as "still referenced", which
+            # — correctly for a genuinely-external sibling, but WRONGLY for a
+            # group-moving one — skipped persisting the snapshot's own
+            # corrected snap_bdev/snap_uuid/blobid/lvol.* fields onto its
+            # primary record entirely (the write only ran in the
+            # "not referenced" branch, using a separately-fetched, still-
+            # stale `original_snap` otherwise). For a batch group migrating a
+            # snapshot together with everything cloned from it, that left the
+            # primary record pointing at the pre-migration source bdev/
+            # lvstore forever, which then made the next migration attempt
+            # look for a bdev that no longer existed at that name
+            # (`No such device`).
+            group_sibling_ids = _group_sibling_lvol_ids(migration)
+            external_snap = None
             for mini in db.get_mini_lvols():
-                if mini.uuid == migration.lvol_id:
+                if mini.uuid == migration.lvol_id or mini.uuid in group_sibling_ids:
                     continue
                 if mini.cloned_from_snap and mini.cloned_from_snap == snap_uuid:
                     logger.debug(
                         f"_apply_migration_to_db: snapshot {snap_uuid} "
-                        f"is still referenced by lvol {mini.uuid}")
-                    original_snap = db.get_snapshot_by_id(snap_uuid)
-                    if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
-                               for s in original_snap.instances):
-                        original_snap.instances.append({
-                            "lvol": {
-                                "node_id": snap.lvol.node_id,
-                                "hostname": snap.lvol.hostname,
-                                "lvol_bdev": snap.lvol.lvol_bdev,
-                                "uuid": snap.lvol.uuid,
-                            },
-                            "snap_bdev": snap.snap_bdev,
-                            "uuid": snap.uuid,
-                        })
-                        original_snap.write_to_db(db.kv_store)
-                    referenced = True
+                        f"is still referenced by lvol {mini.uuid} (not moving with us)")
+                    external_snap = db.get_snapshot_by_id(snap_uuid)
                     break
-            if not referenced:
+
+            if external_snap is not None:
+                # Something outside this migration (and outside its batch
+                # group) still needs the pre-migration copy -- leave the
+                # primary record alone (do NOT persist `snap`'s in-memory
+                # target-side mutations above) and only record our own new
+                # copy as an extra instance on a fresh, unmutated fetch.
+                if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
+                           for s in external_snap.instances):
+                    external_snap.instances.append({
+                        "lvol": {
+                            "node_id": snap.lvol.node_id,
+                            "hostname": snap.lvol.hostname,
+                            "lvol_bdev": snap.lvol.lvol_bdev,
+                            "uuid": snap.lvol.uuid,
+                        },
+                        "snap_bdev": snap.snap_bdev,
+                        "uuid": snap.uuid,
+                    })
+                    external_snap.write_to_db(db.kv_store)
+            else:
+                # No one is left behind needing the pre-migration copy --
+                # safe to move the primary record itself.
                 snap.write_to_db(db.kv_store)
 
         logger.debug(
