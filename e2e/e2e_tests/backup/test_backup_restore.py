@@ -603,13 +603,38 @@ class BackupTestBase(TestClusterBase):
                 # is the normalised lvol name, so either satisfies a test
                 # looking for the lvol.
                 lvol = st_source.get("lvolName") or claim
+
+                # Two things are deliberately NOT reported raw.
+                #
+                # id: the object name, not status.backup.backupID. Every
+                # producer in this suite hands back the CRD name -- it is
+                # what wait_storage_backup_done and get_resource_json take
+                # -- and seventeen sites compare an id against this list.
+                # Reporting the control-plane uuid here made TC-BCK-005
+                # look for 'bck-snap2-...' among three uuids. The uuid is
+                # still carried, under uuid, for the cases that want the
+                # control plane's own identity.
+                #
+                # status: the phase mapped into the vocabulary the
+                # assertions use. v1alpha2 has exactly four phases --
+                # Pending, Creating, Available, Failed -- and nothing in
+                # this file compares against any of them; five sites test
+                # for "done"/"complete"/"completed", which Available would
+                # never match, so a finished backup read as unfinished and
+                # the filters silently selected nothing. The raw phase stays
+                # available under phase.
+                phase = status.get("phase", "")
+                canonical = {"Available": "done", "Failed": "failed",
+                             "Creating": "creating", "Pending": "pending"}
+                name = meta.get("name", "")
                 result.append({
-                    "id": backup_id or meta.get("name", ""),
-                    "ID": backup_id or meta.get("name", ""),
+                    "id": name,
+                    "ID": name,
                     "uuid": backup_id,
-                    "name": meta.get("name", ""),
-                    "status": status.get("phase", ""),
-                    "Status": status.get("phase", ""),
+                    "name": name,
+                    "status": canonical.get(phase, phase.lower()),
+                    "Status": canonical.get(phase, phase.lower()),
+                    "phase": phase,
                     "Snapshot": st_source.get("snapshotName", ""),
                     "snapshot": st_source.get("snapshotName", ""),
                     "LVol": lvol,

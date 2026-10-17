@@ -5214,6 +5214,10 @@ class K8sSbcliUtils:
         self.cluster_id = cluster_id
         self.sbcli_cmd = sbcli_cmd
         self.logger = setup_logger(__name__)
+        #: pools this object created, and so may delete. add_storage_pool
+        #: hands back an existing pool whenever there is one, so holding a
+        #: pool name is not the same as owning it.
+        self._pools_created: set[str] = set()
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -5982,6 +5986,7 @@ class K8sSbcliUtils:
                         f"[pool] Operator reconciled dedicated pool '{actual}' "
                         f"(attempt {attempt})"
                     )
+                    self._pools_created.add(actual)
                     return actual
             elif pools:
                 actual = next(iter(pools))
@@ -5989,6 +5994,7 @@ class K8sSbcliUtils:
                     f"[pool] Operator reconciled pool '{actual}' "
                     f"(attempt {attempt})"
                 )
+                self._pools_created.add(actual)
                 return actual
             if attempt % 5 == 4:
                 self.logger.info(
@@ -6206,35 +6212,73 @@ class K8sSbcliUtils:
         return out
 
     def delete_storage_pool(self, pool_name):
-        """Delete a storage pool by removing its K8s CRD resource."""
+        """Delete a storage pool, if this object is the one that made it.
+
+        add_storage_pool hands back an EXISTING pool whenever there is one,
+        so the name a test holds is usually not a pool the test owns.
+        Deleting it took the lab's shared simplyblock-pool out from under
+        every later class: the 2026-10-17 gate run reused simplyblock-pool
+        in one test, deleted it in that test's teardown, and the next test
+        sat 300s on a PVC the CSI driver could not place --
+        "failed to resolve pool".
+
+        Only pools this object actually created are deletable. The caller is
+        told rather than failed: tearing down a pool you share is not an
+        error, it is simply not yours to do.
+        """
+        if pool_name not in self._pools_created:
+            self.logger.info(
+                "[pool] not deleting '%s': this object did not create it. "
+                "Created here: %s", pool_name,
+                sorted(self._pools_created) or "nothing")
+            return
         self.logger.info(f"[pool] Deleting pool CRD '{pool_name}'")
         ns = self.k8s.namespace
         self.k8s._exec_kubectl(
             f"kubectl delete storagepools {pool_name} -n {ns} "
             f"--timeout=60s 2>/dev/null || true"
         )
-        # Wait for pool to disappear from sbcli
+        # Wait for THIS pool to go. The old test was "no pools at all left",
+        # which on a cluster that always carries simplyblock-cluster-default
+        # could never be true, so every delete ended on the warning below
+        # whether it had worked or not.
         for _ in range(12):
-            if not self.list_storage_pools():
+            if pool_name not in self.list_storage_pools():
+                self._pools_created.discard(pool_name)
                 self.logger.info(f"[pool] Pool '{pool_name}' deleted")
                 return
             sleep_n_sec(5)
         self.logger.warning(f"[pool] Pool '{pool_name}' may not be fully removed")
 
     def delete_all_storage_pools(self):
-        """Delete all storage pool CRD resources."""
+        """Delete the pools this object created. Not every pool there is.
+
+        This used to delete every StoragePool CRD in the namespace, which on
+        a shared lab means the cluster's own pools as well -- simplyblock-pool
+        and encryption-pool are created once by the workflow and every class
+        afterwards depends on them. One teardown removed them for the whole
+        run.
+        """
         ns = self.k8s.namespace
         out, _ = self.k8s._exec_kubectl(
             f"kubectl get storagepools -n {ns} --no-headers "
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         resources = [r.strip() for r in out.strip().splitlines() if r.strip()]
+        skipped = [r for r in resources if r not in self._pools_created]
+        if skipped:
+            self.logger.info(
+                "[pool] leaving %d pool(s) this object did not create: %s",
+                len(skipped), ", ".join(sorted(skipped)))
         for res in resources:
+            if res not in self._pools_created:
+                continue
             self.logger.info(f"[pool] Deleting pool CRD '{res}'")
             self.k8s._exec_kubectl(
                 f"kubectl delete storagepools {res} -n {ns} "
                 f"--timeout=60s 2>/dev/null || true"
             )
+            self._pools_created.discard(res)
 
     # ── cluster methods ──────────────────────────────────────────────────────
 
