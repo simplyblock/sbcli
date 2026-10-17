@@ -4,7 +4,7 @@ import logging
 import os
 import time
 import traceback
-from typing import Annotated, List, Optional, Union
+from typing import List, Optional, Union
 
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
@@ -13,7 +13,6 @@ import yaml
 from pydantic import BaseModel, Field
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
-from simplyblock_core.utils import port_block
 from simplyblock_core.settings import Settings
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
@@ -221,13 +220,8 @@ class SPDKParams(BaseModel):
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
-    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
     cluster_id: str
     mcp_max_unavailable: Optional[int] = Field(None)
-    # Ports the entrypoint may delete stale iptables DROP/REJECT fences for
-    # before SPDK starts (port_block.host_fence_ports). Rendered as the
-    # space-separated FENCE_PORTS env of the SPDK container.
-    fence_ports: Annotated[List[int], Field(default_factory=list)]
 
 
 @api.post('/spdk_process_start', responses={
@@ -339,8 +333,6 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
-            'FW_PORT': body.firewall_port,
-            'FENCE_PORTS': port_block.fence_ports_env(body.fence_ports),
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
@@ -680,30 +672,6 @@ def write_key_file(body: WriteKeyFileBody):
     finally:
         os.close(fd)
     return utils.get_response(key_path)
-
-
-class _FirewallParams(BaseModel):
-    port_id: int
-    port_type: str
-    action: str
-    rpc_port: int = Field(ge=1, le=65536)
-
-
-@api.post('/firewall_set_port', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def firewall_set_port(body: _FirewallParams):
-    return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
-
-@api.get('/get_firewall', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def get_firewall():
-    return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
 @api.post('/persist_node_config', responses={

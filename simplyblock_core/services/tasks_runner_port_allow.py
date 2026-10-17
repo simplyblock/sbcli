@@ -4,7 +4,6 @@ import time
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
 from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCRemoteError
-from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import (
     tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller,
 )
@@ -992,7 +991,7 @@ def exec_port_allow_task(task):
         lvs_ports.append(port_number)
     logger.info(f"Allow LVS ports {lvs_ports} on node {node.get_id()}")
     for p in lvs_ports:
-        port_block.set_port(node, p, block=False, timeout=5, retry=2)
+        node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)
         tcp_ports_events.port_allowed(node, p)
 
     # Deferred ANA failover, AFTER the port release: a secondary recovering

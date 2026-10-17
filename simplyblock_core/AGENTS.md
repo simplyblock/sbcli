@@ -42,7 +42,7 @@ When adding a new `SecretStr` field to an existing model, grep for `json.dumps`,
 
 ## Client Pattern (RPC, SNode, Firewall API)
 
-Clients in `rpc_client.py`, `snode_client.py`, and `fw_api_client.py` accept `SecretStr` parameters and follow the **log-then-unwrap** pattern:
+Clients in `rpc_client.py` and `snode_client.py` accept `SecretStr` parameters and follow the **log-then-unwrap** pattern:
 
 1. Log the payload dict containing `SecretStr` wrappers (masked by Pydantic's `__repr__`).
 2. Call `unwrap_secrets_for_send(payload)` from `utils/secrets.py` to produce a plaintext dict.

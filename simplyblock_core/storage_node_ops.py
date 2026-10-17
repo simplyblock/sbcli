@@ -26,7 +26,6 @@ from tenacity import RetryError, Retrying, before_sleep_log, retry_if_exception_
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core import jm_raid
-from simplyblock_core.utils import port_block
 from simplyblock_core.utils import rpc_budget
 from simplyblock_core.utils import hublvol_reconnect
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
@@ -3745,7 +3744,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
         snode.spdk_proxy_image = spdk_proxy_image
-        snode.spdk_version = spdk_proxy_image.split(":")[1]
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -8132,7 +8130,6 @@ def _restart_storage_node_impl(
 
     if spdk_proxy_image:
         snode.spdk_proxy_image = spdk_proxy_image
-        snode.spdk_version = spdk_proxy_image.split(":")[1]
 
     if not snode.spdk_proxy_image:
         snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
@@ -8157,19 +8154,13 @@ def _restart_storage_node_impl(
         # restarting onto a new host, so snode.client() targets the right one.
         ensure_spdk_stopped(
             snode.client, snode.rpc_port, snode.cluster_id)
-        # The entrypoint clears stale iptables fences for exactly these ports
-        # instead of flushing the host table (which took the CNI's chains
-        # with it). They are the ports a 25.10.x control plane fenced on
-        # this host before the upgrade restart; nothing else removes those
-        # once the node answers the SPDK port-block RPCs.
-        fence_ports = port_block.host_fence_ports(snode, db_controller)
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
-            spdk_proxy_image=snode.spdk_proxy_image, fence_ports=fence_ports)
+            spdk_proxy_image=snode.spdk_proxy_image)
 
     except Exception as e:
         logger.error(e)
@@ -12028,7 +12019,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                         caused_by="restart_cleanup")
         if leader_port_blocked:
             try:
-                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=0.5, retry=2)
+                leader_node.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(leader_lvs_port)
                 _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                 _mark_leader_unblocked()
             except Exception as ue:
@@ -12080,7 +12071,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             attempts = 3
             for attempt in range(1, attempts + 1):
                 try:
-                    port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
+                    leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_lvs_port)
                     _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                     leader_port_blocked = True
                     _mark_leader_blocked()
@@ -12386,7 +12377,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                         primary_node.lvstore, ATTACH_RETRY_GAP_SEC)
                     if leader_port_blocked:
                         try:
-                            port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                            leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_lvs_port)
                             _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                             leader_port_blocked = False
                             _mark_leader_unblocked()
@@ -12396,7 +12387,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                                 "failed: %s", leader_node.get_id(), ue)
                     time.sleep(ATTACH_RETRY_GAP_SEC)
                     try:
-                        port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_lvs_port)
                         _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                         leader_port_blocked = True
                         _mark_leader_blocked()
@@ -12421,7 +12412,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                 attempts = 3
                 for attempt in range(1, attempts + 1):
                     try:
-                        port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_lvs_port)
                         _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                         unblocked = True
                         _mark_leader_unblocked()
@@ -12555,7 +12546,7 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
             peer = db_controller.get_storage_node_by_id(pid)
             if not peer or peer.status != StorageNode.STATUS_ONLINE:
                 continue
-            port_block.set_port(peer, port, block=False, timeout=0.5, retry=2)
+            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(port)
             tcp_ports_events.port_allowed(peer, port)
             logger.info("Defensive unblock: allowed LVS port %s on peer %s after "
                         "failed recreate of %s", port, pid, lvs_node.lvstore)
@@ -13012,7 +13003,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         if peer in blocked_peers:
             _warn_if_unblocking_a_non_leader(peer)
         try:
-            port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
+            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(snode_lvs_port)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))
             _t0 = _block_started.pop(peer.get_id(), None)
             if _t0 is not None:
@@ -13370,7 +13361,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 if sec_node in blocked_peers:
                     continue
                 try:
-                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                    sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
                     _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                     blocked_peers.append(sec_node)
                     _block_started[sec_node.get_id()] = time.monotonic()
@@ -13448,7 +13439,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         db_controller.atomic_update(
                             current_leader,
                             lambda x: setattr(x, "lvstore_status", "in_creation"))
-                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                        current_leader.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
                         _block_started[current_leader.get_id()] = time.monotonic()

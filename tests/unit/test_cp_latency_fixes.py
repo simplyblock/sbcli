@@ -320,7 +320,7 @@ class TestBlockedPortsBatching:
 
         def get_blocked():
             calls["n"] += 1
-            return {"blocked_ports": [{"port": 4500}]}
+            return {4500}
         rpc = types.SimpleNamespace(nvmf_get_blocked_ports=get_blocked)
         res = health_controller.check_ports_on_node(
             self._node(rpc), [4500, 4502, 4504])

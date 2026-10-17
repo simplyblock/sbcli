@@ -131,8 +131,8 @@ class SNodeClient:
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection: Optional[SecretStr] = None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password: Optional[SecretStr] = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, firewall_port=0, cluster_id=None,
-                           spdk_proxy_image=None, mcp_max_unavailable=None, fence_ports=None):
+                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, cluster_id=None,
+                           spdk_proxy_image=None, mcp_max_unavailable=None):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -164,8 +164,6 @@ class SNodeClient:
             params["system_mem"] = system_mem
         if cluster_mode:
             params["cluster_mode"] = cluster_mode
-        if firewall_port:
-            params["firewall_port"] = firewall_port
         params["socket"] = socket
         if cluster_id:
             params["cluster_id"] = cluster_id
@@ -173,11 +171,6 @@ class SNodeClient:
             params["spdk_proxy_image"] = spdk_proxy_image
         if mcp_max_unavailable is not None:
             params["mcp_max_unavailable"] = mcp_max_unavailable
-        if fence_ports:
-            # Ports the SPDK entrypoint may clear stale iptables fences for
-            # (port_block.host_fence_ports). Omitted when empty so an older
-            # storage-node API sees the same request as before.
-            params["fence_ports"] = [int(p) for p in fence_ports]
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):

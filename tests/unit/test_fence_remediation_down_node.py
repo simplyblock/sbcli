@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import storage_node_monitor
-from simplyblock_core.utils import port_block
+from tests._mocks import route_fences
 
 
 OWN_PORT = 4442
@@ -52,10 +52,9 @@ class _Harness:
     def run(self):
         storage_node_monitor._blocked_port_since.clear()
         hc = storage_node_monitor.health_controller
+        route_fences([self.node], lambda n, p, **kw: self.unblocked.append(p))
         with patch.object(hc, "_restart_owns_lvs", return_value=self.restart_owns), \
              patch.object(hc, "_check_node_hublvol", return_value=self.hublvol_ok), \
-             patch.object(port_block, "set_port",
-                          side_effect=lambda n, p, **kw: self.unblocked.append(p)), \
              patch.object(storage_node_monitor.time, "monotonic",
                           side_effect=[0.0, 100.0]):
             # First reading stamps first_seen, second measures how long it has
@@ -107,10 +106,9 @@ class TestTheOtherGatesStillHold(unittest.TestCase):
         h = _Harness(StorageNode.STATUS_DOWN)
         storage_node_monitor._blocked_port_since.clear()
         hc = storage_node_monitor.health_controller
+        route_fences([h.node], lambda n, p, **kw: h.unblocked.append(p))
         with patch.object(hc, "_restart_owns_lvs", return_value=False), \
              patch.object(hc, "_check_node_hublvol", return_value=True), \
-             patch.object(port_block, "set_port",
-                          side_effect=lambda n, p, **kw: h.unblocked.append(p)), \
              patch.object(storage_node_monitor.time, "monotonic",
                           side_effect=[0.0, 1.0]):
             storage_node_monitor._remediate_stale_port_blocks(
