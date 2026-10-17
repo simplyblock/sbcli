@@ -8,9 +8,11 @@ py-cpuinfo
 pytest
 mock
 flask
+werkzeug>=3.1.9
 kubernetes==35.0.0
+oauthlib>=4.0.0
 PyYAML
-urllib3
+urllib3>=2.8.0
 graypy==2.1.0
 boto3
 jinja2
