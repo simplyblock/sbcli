@@ -1,0 +1,74 @@
+{# One step of reserving a Talos worker's huge pages through the Talos API.
+
+   Talos has no host shell and its root filesystem is immutable, so the
+   nr_hugepages write the init Job makes elsewhere is not available. The
+   machine config is, through apid on the node. TALOS_STEP selects the step:
+
+     patch    -- patch the per-NUMA counts into machine.sysfs (applied live,
+                 no reboot). Talos writes the kernel parameter asynchronously,
+                 so the caller waits for the pool to appear in /proc/meminfo
+                 before the next step.
+     kubelet  -- restart the kubelet so the node's hugepages-2Mi capacity
+                 reflects the pool. Run only once the pool is there: the
+                 kubelet reads huge-page capacity at start, and a restart
+                 that races the write boots it seeing zero (worker-1,
+                 2026-10-16).
+
+   One container per Job because talosctl's image is scratch + the binary:
+   no shell to sequence or wait in. Credentials come from the Secret Talos
+   issues for the talos.dev ServiceAccount in this namespace (Talos API
+   access from Kubernetes), mounted where talosctl looks for them by
+   default. #}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ TALOS_JOBNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      hostNetwork: true
+      serviceAccountName: simplyblock-storage-node-sa
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      volumes:
+        - name: talos-secrets
+          secret:
+            secretName: {{ TALOS_API_SECRET }}
+      containers:
+        - name: {{ "patch-machine-config" if TALOS_STEP == "patch" else "restart-kubelet" }}
+          image: {{ TALOSCTL_IMAGE }}
+          args:
+            - --nodes
+            - $(NODE_IP)
+            - --endpoints
+            - $(NODE_IP)
+            {% if TALOS_STEP == "patch" %}
+            - patch
+            - machineconfig
+            - --mode=no-reboot
+            - --patch
+            - {{ TALOS_PATCH | tojson }}
+            {% else %}
+            - service
+            - kubelet
+            - restart
+            {% endif %}
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: TALOSCONFIG
+              value: /var/run/secrets/talos.dev/config
+          volumeMounts:
+            - name: talos-secrets
+              mountPath: /var/run/secrets/talos.dev
+              readOnly: true

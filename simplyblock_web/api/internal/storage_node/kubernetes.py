@@ -273,6 +273,254 @@ def _create_job_replacing_stale(batch_v1, namespace: str, job_yaml: dict):
     return batch_v1.create_namespaced_job(namespace=namespace, body=job_yaml)
 
 
+def _env_flag(name):
+    """A boolean the operator sets on the node agent's DaemonSet as the string
+    'true'/'false' (OPENSHIFT_CLUSTER, TALOS_CLUSTER, ...). Unset is False."""
+    return os.environ.get(name, "").strip().lower() == "true"
+
+
+def _hugepage_shortfall(host_hugetlb_bytes, required_mib):
+    """The message to fail the add with when the host carries fewer huge
+    pages than the SPDK pod is about to request, or None when it carries
+    enough.
+
+    Used where the node cannot write the pages itself (Talos), both to decide
+    whether anything has to be applied and to judge the result. Without it
+    the pod would sit Pending on 'Insufficient hugepages-2Mi' with nothing
+    naming the number. ``host_hugetlb_bytes`` is Hugetlb from /proc/meminfo:
+    the pool across every page size and NUMA node, so this is a lower bound
+    -- it can only pass a pod that at least fits the host as a whole.
+    """
+    available_mib = int(host_hugetlb_bytes) // (1024 * 1024)
+    if available_mib >= required_mib:
+        return None
+    pages_2mi = -(-required_mib // 2)  # ceil
+    return (f"host provides {available_mib} MiB of huge pages but the SPDK pod requests "
+            f"{required_mib} MiB (hugepages-2Mi), i.e. at least {pages_2mi} 2 MiB pages")
+
+
+def _hugepages_per_numa(nodes):
+    """2 MiB pages to reserve on each NUMA node for this host's node configs:
+    the sizing the init Job's apply_config has always used, so a Talos host
+    (reserved through the Talos API) and any other (written to sysfs) end up
+    with the same pool. The constants are kept as they were: a flat 1 GB of
+    headroom per node config, and pages of 2,000,000 rather than 2 MiB
+    bytes, which over-reserves by about 5 %."""
+    per_numa_bytes: dict = {}
+    for node_config in nodes:
+        hg_memory = node_config["huge_page_memory"]
+        if int(node_config["max_size"]) > 0:
+            hg_memory = max(hg_memory, node_config["max_size"])
+        numa = node_config["socket"]
+        per_numa_bytes[numa] = per_numa_bytes.get(numa, 0) + hg_memory + 1000000000
+    return {numa: mem // 2000000 for numa, mem in per_numa_bytes.items()}
+
+
+def _talos_sysfs_patch(pages_per_numa):
+    """The strategic-merge machine-config patch that reserves the pages.
+
+    machine.sysfs keys are dotted paths under /sys (Talos swaps dots for
+    slashes), so this is the same per-NUMA nr_hugepages file sysfs mode
+    writes, only applied by Talos. A merge patch adds to the sysfs map
+    rather than replacing it, so whatever else the operator keeps there
+    (cpufreq governors, ...) survives -- and it is the format Talos accepts
+    on a multi-document machine config, where a JSON 6902 patch is refused
+    ("JSON6902 patches are not supported for multi-document machine
+    configuration", Talos v1.12.7). machine.sysfs is deprecated on
+    recent Talos in favour of a SysfsConfig document but still honoured,
+    and it is what every supported Talos minor understands."""
+    return {"machine": {"sysfs": {
+        f"devices.system.node.node{numa}.hugepages.hugepages-2048kB.nr_hugepages": str(pages)
+        for numa, pages in sorted(pages_per_numa.items())
+    }}}
+
+
+_K8S_QUANTITY_MIB = {'Ki': 1 / 1024, 'Mi': 1, 'Gi': 1024, 'Ti': 1024 * 1024}
+
+
+def _quantity_to_mib(quantity):
+    """A Kubernetes resource quantity ('13Gi', '12800Mi', '0', bytes) in MiB."""
+    q = str(quantity or '0').strip()
+    for suffix, factor in _K8S_QUANTITY_MIB.items():
+        if q.endswith(suffix):
+            return int(float(q[:-len(suffix)]) * factor)
+    return int(float(q)) // (1024 * 1024)
+
+
+def _job_name(prefix, node_name):
+    """A Job name under Kubernetes' 63-character limit that keeps the end of
+    the node name, where generated names differ."""
+    name = prefix + node_name
+    return name[len(name) - 63:] if len(name) > 63 else name
+
+
+_TALOS_JOB_TIMEOUT_S = 300
+_TALOS_HUGEPAGE_WAIT_S = 240
+_TALOS_HUGEPAGE_POLL_S = 5
+
+
+def _talos_api_secret_missing(k8s_core_v1, namespace, secret_name):
+    """None when the Talos API credentials Secret is there (or cannot be
+    checked), else the message to fail with. Checked up front because a
+    missing Secret otherwise leaves the Job's pod in ContainerCreating for
+    the whole Job timeout with a FailedMount event nobody reads."""
+    try:
+        k8s_core_v1.read_namespaced_secret(secret_name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return (f"Talos API credentials Secret '{secret_name}' not found in namespace '{namespace}': "
+                    f"enable Talos API access from Kubernetes for this namespace with the os:admin role and "
+                    f"create a talos.dev/v1alpha1 ServiceAccount named '{secret_name}' with roles [os:admin] "
+                    f"(see docs/talos.md)")
+        logger.warning("Cannot check for Secret '%s' (HTTP %s); letting the Job tell", secret_name, e.status)
+    return None
+
+
+def _kubelet_hugepages_mib(k8s_core_v1, node_name):
+    """What the kubelet on ``node_name`` advertises as hugepages-2Mi capacity,
+    in MiB. The kubelet reads it at start, so it lags the host until the
+    kubelet is restarted."""
+    node = k8s_core_v1.read_node(node_name)
+    return _quantity_to_mib((node.status.capacity or {}).get('hugepages-2Mi'))
+
+
+def _wait_for_host_hugepages(required_mib):
+    """Block until the host's pool covers the pod's request, or return the
+    message to fail with. Talos writes the kernel parameter asynchronously
+    after the machine config patch is accepted, so the pool appears some
+    seconds after the patch Job completes."""
+    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
+    while True:
+        shortfall = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib)
+        if shortfall is None:
+            return None
+        if time.monotonic() >= deadline:
+            return f"after applying the machine config patch, {shortfall}"
+        time.sleep(_TALOS_HUGEPAGE_POLL_S)
+
+
+def _wait_for_kubelet_hugepages(k8s_core_v1, node_name, required_mib):
+    """Block until the kubelet's capacity covers the pod's request, or return
+    the message to fail with."""
+    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
+    while True:
+        kubelet_mib = _kubelet_hugepages_mib(k8s_core_v1, node_name)
+        if kubelet_mib >= required_mib:
+            return None
+        if time.monotonic() >= deadline:
+            return (f"the kubelet on '{node_name}' still reports {kubelet_mib} MiB of hugepages-2Mi "
+                    f"capacity against the SPDK pod's {required_mib} MiB after its restart")
+        time.sleep(_TALOS_HUGEPAGE_POLL_S)
+
+
+def _job_pod_logs(k8s_core_v1, namespace, job_name):
+    """The log of the Job's pod(s), for the agent log: the Job is deleted once
+    it has run, and what talosctl said is the only record of what happened
+    on the Talos side."""
+    try:
+        pods = k8s_core_v1.list_namespaced_pod(namespace, label_selector=f"job-name={job_name}")
+        return " | ".join(
+            k8s_core_v1.read_namespaced_pod_log(pod.metadata.name, namespace).strip().replace("\n", " / ")
+            for pod in (pods.items or []))
+    except ApiException as e:
+        return f"<pod log unavailable: HTTP {e.status}>"
+
+
+def _run_talos_job(step, node_name, namespace, job_values):
+    """Run one step of the Talos huge-page flow as a Job on the node and wait
+    for it; return None, or the message to fail the add with. The Job is
+    deleted on success (its pod log is copied into the agent log first) and
+    left in place on failure, where its pod log says why talosctl failed
+    (role not allowed, apid unreachable, patch rejected)."""
+    prefix = {"patch": "snode-talos-hugepages-", "kubelet": "snode-talos-kubelet-"}[step]
+    values = dict(job_values, TALOS_STEP=step, TALOS_JOBNAME=_job_name(prefix, node_name))
+    env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
+    job_yaml = yaml.safe_load(env.get_template('storage_talos_hugepages_job.yaml.j2').render(values))
+    batch_v1 = core_utils.get_k8s_batch_client()
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    job_resp = _create_job_replacing_stale(batch_v1, namespace, job_yaml)
+    job_name = job_resp.metadata.name
+    logger.info("Job created: '%s' in namespace '%s'", job_name, namespace)
+    try:
+        node_utils_k8s.wait_for_job_completion(job_name, namespace, timeout=_TALOS_JOB_TIMEOUT_S)
+    except (RuntimeError, TimeoutError) as e:
+        return (f"Talos {step} Job on '{node_name}' did not succeed: {e}; "
+                f"see the pod log of Job '{job_name}'")
+    logger.info("Job '%s' completed; talosctl said: %s", job_name, _job_pod_logs(k8s_core_v1, namespace, job_name))
+    try:
+        batch_v1.delete_namespaced_job(
+            name=job_name, namespace=namespace,
+            body=V1DeleteOptions(propagation_policy='Foreground', grace_period_seconds=0))
+    except ApiException as e:
+        if e.status != 404:
+            raise
+    return None
+
+
+def _provision_talos_hugepages(required_mib, node_name, namespace, values):
+    """Make a Talos worker's huge-page pool cover the SPDK pod about to be
+    created, through the Talos API, and return None -- or the message to
+    fail the add with.
+
+    Talos has no host shell and no writable sysfs for us, so the init Job's
+    nr_hugepages write is replaced by talosctl run as Jobs against the
+    node's own apid, in two steps with a wait between them:
+
+    1. If the host's pool is short: patch the per-NUMA counts into
+       machine.sysfs (applied live, no reboot) and wait until the pool shows
+       in /proc/meminfo -- Talos writes the kernel parameter asynchronously.
+    2. If the kubelet's capacity is short: restart the kubelet and wait until
+       it advertises the pool. The kubelet reads huge-page capacity at start,
+       which is why the two steps are not one Job: a restart that races the
+       write boots the kubelet seeing zero (worker-1, 2026-10-16), and the
+       pod then never schedules.
+
+    Each step is skipped when its half already holds, so a plain node
+    restart with the pool in place touches nothing -- in particular, no
+    kubelet restart.
+    """
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    host_short = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib) is not None
+    kubelet_short = _kubelet_hugepages_mib(k8s_core_v1, node_name) < required_mib
+    if not host_short and not kubelet_short:
+        logger.info("Huge-page pool on '%s' already covers the SPDK pod's %s MiB; nothing to apply",
+                    node_name, required_mib)
+        return None
+
+    secret_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
+    missing = _talos_api_secret_missing(k8s_core_v1, namespace, secret_name)
+    if missing:
+        return missing
+    job_values = dict(values,
+                      TALOSCTL_IMAGE=os.environ.get("TALOSCTL_IMAGE") or constants.TALOSCTL_IMAGE,
+                      TALOS_API_SECRET=secret_name)
+
+    if host_short:
+        node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+        nodes = node_info.get("nodes") or []
+        if not nodes:
+            return "Please run sbcli sn configure before adding the storage node"
+        pages_per_numa = _hugepages_per_numa(nodes)
+        logger.info("Reserving huge pages on Talos node '%s' through the Talos API: %s 2 MiB pages per NUMA node",
+                    node_name, pages_per_numa)
+        job_values["TALOS_PATCH"] = json.dumps(_talos_sysfs_patch(pages_per_numa), separators=(',', ':'))
+        err = _run_talos_job("patch", node_name, namespace, job_values)
+        if err:
+            return err
+        err = _wait_for_host_hugepages(required_mib)
+        if err:
+            return err
+        kubelet_short = True  # the kubelet booted before this pool existed
+
+    if kubelet_short:
+        logger.info("Restarting the kubelet on Talos node '%s' so it advertises the huge-page pool", node_name)
+        err = _run_talos_job("kubelet", node_name, namespace, job_values)
+        if err:
+            return err
+        return _wait_for_kubelet_hugepages(k8s_core_v1, node_name, required_mib)
+    return None
+
+
 class SPDKParams(BaseModel):
     server_ip: str = Field(pattern=utils.IP_PATTERN)
     rpc_port: int = Field(ge=1, lt=65536)
@@ -332,6 +580,16 @@ def spdk_process_start(body: SPDKParams):
     openshift = os.environ.get("OPENSHIFT_CLUSTER", False)
     if isinstance(openshift, str):
        openshift = openshift.strip().lower() in ("true")
+
+    # Talos is stated the same way OpenShift is: a flag the operator sets on
+    # the node agent from the StorageCluster's environment, not something
+    # sniffed off the host at run time. On Talos the host is immutable and
+    # has no shell, so nothing here touches it directly -- no nr_hugepages
+    # write, no nsenter kubelet restart, no grubby/KubeletConfig Job. Huge
+    # pages are reserved through the Talos API instead (a talosctl Job
+    # patching machine.sysfs and restarting the kubelet), and the add waits
+    # for the pool before creating the pod; see _provision_talos_hugepages.
+    talos = _env_flag("TALOS_CLUSTER")
 
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
@@ -405,6 +663,7 @@ def spdk_process_start(body: SPDKParams):
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
+            'TALOS_CLUSTER': talos,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
             'OPENSHIFT_MCP': openshift_mcp,
@@ -413,6 +672,12 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
         }
+
+        if talos:
+            err = _provision_talos_hugepages(values['MEM_MEGA'], node_name, namespace, values)
+            if err:
+                logger.error(err)
+                return utils.get_response(False, err)
 
         if ubuntu_host:
             ubuntu_template = env.get_template('ubuntu_kernel_extra.yaml.j2')
@@ -460,7 +725,15 @@ def spdk_process_start(body: SPDKParams):
             if e.status != 404:
                 raise
             logger.info(f"Job '{job_resp.metadata.name}' already gone, skipping delete")
-        if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
+        wants_host_config = (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled)
+        if wants_host_config and talos:
+            # Both Jobs nsenter into the host (kubelet config, grubby). Talos
+            # has neither; its kubelet and kernel args come from the machine
+            # config, so this is a configuration mismatch to surface, not a
+            # Job to attempt and watch fail.
+            logger.warning("TALOS_CLUSTER is set: skipping the CPU-topology/core-isolation Job on '%s'; "
+                           "configure the kubelet and kernel args through the Talos machine config", node_name)
+        elif wants_host_config:
             if cpu_topology_enabled and not skip_kubelet_configuration:
                 if not openshift:
                     template_name = 'storage_cpu_topology.yaml.j2'
@@ -783,15 +1056,7 @@ def apply_config():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
-    huge_page_memory_dict: dict = {}
-    for node_config in nodes:
-        hg_memory = node_config["huge_page_memory"]
-        if int(node_config["max_size"]) > 0:
-            hg_memory = max(hg_memory , node_config["max_size"])
-        numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory + 1000000000
-    for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // 2000000
+    for numa, num_pages in _hugepages_per_numa(nodes).items():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
