@@ -465,7 +465,11 @@ class BackupTestBase(TestClusterBase):
             pvc_name = self._get_pvc_for_lvol(lvol_id)
             backups = k8s.list_storage_backups()
             for b in backups:
-                pvc_ref = b.get("spec", {}).get("pvcRef", {}).get("name", "")
+                # v1alpha2: spec.source.claimName, not spec.pvcRef.name.
+                # Reading the old path matched nothing, so this fell through
+                # to the `lvol_id in str(b)` substring test for every backup.
+                pvc_ref = (b.get("spec", {}).get("source", {})
+                           .get("claimName", ""))
                 if pvc_ref == pvc_name or lvol_id in str(b):
                     bname = b.get("metadata", {}).get("name", "")
                     if bname:
@@ -571,21 +575,46 @@ class BackupTestBase(TestClusterBase):
             k8s = self._ensure_k8s_utils()
             items = k8s.list_storage_backups()
             result = []
+            # v1alpha2 field paths. Every one of these moved, and reading
+            # the v1alpha1 places returned "" for all of them rather than
+            # failing: status.backupId was never a field at all (v1alpha1
+            # spelled it backupID), and spec.pvcRef and status.snapshot are
+            # v1alpha1 shapes the object no longer has. The entries came
+            # back with an id of the object name and every other column
+            # empty, which is what failed TestBackupBasicPositive,
+            # TestBackupCryptoLvol and TestBackupListFields on
+            # "Backup entry does not reference lvol_name".
+            #
+            #   status.backupID        -> status.backup.backupID
+            #   status.snapshotName    -> status.source.snapshotName
+            #   spec.pvcRef.name       -> spec.source.claimName
+            #                             (status.source.lvolName is the
+            #                              lvol itself, once resolved)
             for item in items:
                 meta = item.get("metadata", {})
                 spec = item.get("spec", {})
                 status = item.get("status", {})
+                st_backup = status.get("backup") or {}
+                st_source = status.get("source") or {}
+                backup_id = st_backup.get("backupID", "")
+                claim = (spec.get("source") or {}).get("claimName", "")
+                # The operator fills status.source once it has resolved the
+                # claim; until then the claim name is all there is, and it
+                # is the normalised lvol name, so either satisfies a test
+                # looking for the lvol.
+                lvol = st_source.get("lvolName") or claim
                 result.append({
-                    "id": status.get("backupId", meta.get("name", "")),
-                    "ID": status.get("backupId", meta.get("name", "")),
-                    "uuid": status.get("backupId", ""),
+                    "id": backup_id or meta.get("name", ""),
+                    "ID": backup_id or meta.get("name", ""),
+                    "uuid": backup_id,
                     "name": meta.get("name", ""),
                     "status": status.get("phase", ""),
                     "Status": status.get("phase", ""),
-                    "Snapshot": status.get("snapshot", ""),
-                    "snapshot": status.get("snapshot", ""),
-                    "LVol": spec.get("pvcRef", {}).get("name", ""),
-                    "lvol": spec.get("pvcRef", {}).get("name", ""),
+                    "Snapshot": st_source.get("snapshotName", ""),
+                    "snapshot": st_source.get("snapshotName", ""),
+                    "LVol": lvol,
+                    "lvol": lvol,
+                    "claim": claim,
                 })
             return result
 
@@ -684,13 +713,20 @@ class BackupTestBase(TestClusterBase):
             pvc_size = restore_size or self.lvol_size
             if "Gi" not in pvc_size:
                 pvc_size = pvc_size.replace("G", "Gi")
+            # StorageBackupOps.spec.restore.targetPool is required by the CRD
+            # and has no default, so an omitted pool_name is not "restore
+            # wherever the backup came from" -- it is a refusal. 44 of the 48
+            # call sites here omit it, which failed 16 classes of the
+            # 2026-10-17 lane on a ValueError before anything was restored.
+            # The pool the test is working in is the right answer for all of
+            # them; a caller restoring into a second pool passes it.
             k8s.create_backup_restore(
                 name=restore_name,
                 backup_ref_name=backup_id,
                 pvc_name=pvc_name,
                 pvc_size=pvc_size,
                 cluster_name=self._cluster_name,
-                target_pool=pool_name,
+                target_pool=pool_name or self.pool_name,
             )
             self.created_backup_restores.append(restore_name)
             self.created_pvcs.append(pvc_name)
@@ -1041,8 +1077,12 @@ class BackupTestBase(TestClusterBase):
         """
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
+            # storagebackuppolicies, not backuppolicy. _add_policy creates a
+            # v1alpha2 StorageBackupPolicy, so listing the v1alpha1 kind
+            # returned an empty list for policies that existed -- which is
+            # what failed TC-BCK-021 with "not found in policy-list: []".
             out, _ = k8s._exec_kubectl(
-                f"kubectl -n {k8s.namespace} get backuppolicy -o json")
+                f"kubectl -n {k8s.namespace} get {k8s.SBPOLICY_KIND} -o json")
             import json
             try:
                 data = json.loads(out)
@@ -1052,14 +1092,21 @@ class BackupTestBase(TestClusterBase):
             for item in data.get("items", []):
                 meta = item.get("metadata", {})
                 spec = item.get("spec", {})
+                status = item.get("status", {})
+                # The CRD has no spec.name: a policy is named by its object.
+                # status.policyID is the control plane's own id for it, and
+                # callers match on either.
+                name = meta.get("name", "")
                 result.append({
-                    "id": meta.get("name", ""),
-                    "ID": meta.get("name", ""),
-                    "name": spec.get("name", meta.get("name", "")),
-                    "Name": spec.get("name", meta.get("name", "")),
+                    "id": name,
+                    "ID": name,
+                    "uuid": status.get("policyID", ""),
+                    "name": name,
+                    "Name": name,
                     "max_versions": spec.get("maxVersions", 0),
                     "max_age": spec.get("maxAge", ""),
                     "schedule": spec.get("schedule", ""),
+                    "phase": status.get("phase", ""),
                 })
             return result
 
@@ -3810,6 +3857,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 pvc_size="5Gi",
                 cluster_name=c2_cluster_name,
                 storage_class=c2_sc,
+                # Cluster-2's own pool: the restore lands on C2, so C1's pool
+                # is not a place it can be written.
+                target_pool=self._cluster2_pool_name,
             )
 
             # Wait for BackupRestore to reach Done (PVC auto-created)
@@ -6666,6 +6716,10 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
                 pvc_name=fake_pvc,
                 pvc_size=pvc_size,
                 cluster_name=self._cluster_name,
+                # A real pool, so the request reaches the operator and is
+                # refused for the reason under test -- the missing backup --
+                # rather than by our own targetPool pre-check.
+                target_pool=self.pool_name,
             )
             self.created_backup_restores.append(restore_name)
             sleep_n_sec(30)
@@ -6734,6 +6788,8 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
                 pvc_name=bad_pvc,
                 pvc_size=pvc_size,
                 cluster_name="nonexistent-cluster",
+                # Valid pool: the cluster name is what this case makes wrong.
+                target_pool=self.pool_name,
             )
             sleep_n_sec(30)
             try:

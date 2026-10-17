@@ -622,6 +622,201 @@ def check_no_lossy_error_truncation():
     return True
 
 
+def check_params_the_helper_refuses_to_default():
+    """A parameter that looks optional but whose helper refuses it empty.
+
+    `check_helper_kwargs` catches keywords a helper does not have. This
+    catches the opposite: a keyword it DOES have, declared `= None` so every
+    call site compiles, whose body then raises when it is not supplied.
+
+        def create_backup_restore(self, ..., target_pool: str | None = None):
+            if not target_pool:
+                raise ValueError("target_pool is required by ...")
+
+    Nothing is wrong until the line runs, and then it is wrong everywhere at
+    once: 44 of 48 call sites omitted target_pool, which is 16 classes of the
+    2026-10-17 backup lane failing after ten hours on a ValueError raised
+    before a single restore was attempted.
+
+    The signature cannot be trusted here -- `= None` says optional and the
+    body says otherwise -- so the body is what is read.
+    """
+    import ast
+
+    print("=" * 68)
+    print("parameters a helper declares optional and then refuses")
+    print("=" * 68)
+
+    HELPER_DIR = os.path.join("e2e", "utils")
+    HELPERS = [os.path.join("e2e", "utils", "k8s_utils.py"),
+               os.path.join("e2e", "utils", "sbcli_utils.py"),
+               os.path.join("e2e", "utils", "ssh_utils.py")]
+
+    def refused_params(fn):
+        """Params this function raises on when falsy or None."""
+        out = set()
+        names = {a.arg for a in
+                 fn.args.args + fn.args.posonlyargs + fn.args.kwonlyargs}
+        # Only top-level guards. A nested one states an either/or --
+        # delete_snapshot's "if not snap_id: if not snap_name: raise" means
+        # supply one of the two, not both, and flagging each separately
+        # reports every correct call site.
+        for node in fn.body:
+            if not isinstance(node, ast.If):
+                continue
+            # The guard must do nothing but refuse. A body that also
+            # loops, branches or assigns is a branch SELECTOR, not a
+            # refusal: wait_for_health_status's "if not device_id:" picks
+            # the node path and raises only on timeout at the end of it.
+            if not any(isinstance(s, ast.Raise) for s in node.body):
+                continue
+            if not all(isinstance(s, (ast.Raise, ast.Expr, ast.Pass))
+                       for s in node.body):
+                continue
+            t = node.test
+            # if not x:
+            if isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not) \
+                    and isinstance(t.operand, ast.Name) \
+                    and t.operand.id in names:
+                out.add(t.operand.id)
+            # if x is None:
+            elif isinstance(t, ast.Compare) and isinstance(t.left, ast.Name) \
+                    and t.left.id in names \
+                    and len(t.ops) == 1 and isinstance(t.ops[0], ast.Is) \
+                    and isinstance(t.comparators[0], ast.Constant) \
+                    and t.comparators[0].value is None:
+                out.add(t.left.id)
+        # A parameter the function reassigns before guarding is not the
+        # caller's input by then. delete_snapshot resolves snap_id from
+        # snap_name and then raises "Snapshot not found" if the LOOKUP came
+        # back empty -- a runtime outcome, not a missing argument.
+        assigned = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        assigned.add(tgt.id)
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign))                     and isinstance(node.target, ast.Name):
+                assigned.add(node.target.id)
+        out -= assigned
+
+        # only those that are actually defaulted -- a plain required
+        # positional is already enforced by Python
+        defaulted = set()
+        args = fn.args.args[1:]                      # drop self
+        for a, d in zip(args[len(args) - len(fn.args.defaults):],
+                        fn.args.defaults):
+            if isinstance(d, ast.Constant) and d.value is None:
+                defaulted.add(a.arg)
+        for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults):
+            if isinstance(d, ast.Constant) and d.value is None:
+                defaulted.add(a.arg)
+        return out & defaulted
+
+    # method name -> {param: "Class.method"} it refuses
+    refuses, order = {}, {}
+    for path in HELPERS:
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            for fn in [n for n in cls.body
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+                bad = refused_params(fn)
+                if bad:
+                    refuses.setdefault(fn.name, {}).update(
+                        {p: f"{cls.name}.{fn.name}" for p in bad})
+                    order[fn.name] = [a.arg for a in fn.args.args[1:]]
+
+    if not refuses:
+        print("    no helper refuses a parameter it defaults -- nothing to check")
+        return True
+    for meth, params in sorted(refuses.items()):
+        print(f"    {meth}: {', '.join(sorted(params))}")
+
+    bad = []
+    for root, _dirs, files in os.walk("e2e"):
+        if any(p in root for p in ("__pycache__", ".agents")):
+            continue
+        # The helpers' own modules are excluded: a helper calling a sibling
+        # supplies what it means to internally, and a bare name like
+        # `connect` there is as likely to be paramiko's as ours.
+        if os.path.normpath(root).startswith(os.path.normpath(HELPER_DIR)):
+            continue
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(root, fname)
+            try:
+                tree = ast.parse(open(path, encoding="utf-8").read())
+            except SyntaxError:
+                continue
+            # Each call is judged inside its enclosing function, because
+            # the common way to break this is not omitting the argument --
+            # it is FORWARDING one that is itself defaulted to None:
+            #
+            #     def _restore_backup(self, ..., pool_name=None):
+            #         k8s.create_backup_restore(..., target_pool=pool_name)
+            #
+            # Every call site reads as supplying the parameter and 44 of 48
+            # supplied None. Presence alone proves nothing.
+            def scan(fn_node, nullable):
+                for node in ast.iter_child_nodes(fn_node):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        inner = set(nullable)
+                        a = node.args
+                        pos = a.args + a.posonlyargs
+                        for arg, dflt in zip(pos[len(pos) - len(a.defaults):],
+                                             a.defaults):
+                            if isinstance(dflt, ast.Constant)                                     and dflt.value is None:
+                                inner.add(arg.arg)
+                            else:
+                                inner.discard(arg.arg)
+                        for arg, dflt in zip(a.kwonlyargs, a.kw_defaults):
+                            if isinstance(dflt, ast.Constant)                                     and dflt.value is None:
+                                inner.add(arg.arg)
+                            else:
+                                inner.discard(arg.arg)
+                        scan(node, inner)
+                        continue
+                    if isinstance(node, ast.Call)                             and isinstance(node.func, ast.Attribute)                             and node.func.attr in refuses:
+                        check_call(node, nullable)
+                    scan(node, nullable)
+
+            def check_call(node, nullable, path=path):
+                if any(k.arg is None for k in node.keywords):
+                    return                   # **kwargs -- cannot tell
+                by_kw = {k.arg: k.value for k in node.keywords if k.arg}
+                names = order.get(node.func.attr, [])
+                positional = set(names[:len(node.args)])
+                for param, owner in refuses[node.func.attr].items():
+                    if param not in by_kw and param not in positional:
+                        bad.append(
+                            f"        {path}:{node.lineno}  "
+                            f"{node.func.attr}(...) omits '{param}', which "
+                            f"{owner} raises on")
+                        continue
+                    val = by_kw.get(param)
+                    if isinstance(val, ast.Name) and val.id in nullable:
+                        bad.append(
+                            f"        {path}:{node.lineno}  "
+                            f"{node.func.attr}(...) passes {param}="
+                            f"{val.id}, which defaults to None, and "
+                            f"{owner} raises on empty")
+
+            scan(tree, set())
+    if bad:
+        for row in sorted(set(bad)):
+            print(row)
+        print()
+        print("    Pass a real value, or give the helper a real default.")
+        print("    `= None` plus a raise is a required argument that every")
+        print("    call site compiles against and no call site satisfies.")
+        return False
+    print("    every call site supplies them")
+    return True
+
+
 def main():
     ok = True
     ok &= run("CLI invocations match simplyblock_cli/cli.py",
@@ -632,6 +827,7 @@ def main():
     ok &= check_no_naive_error_checks()
     ok &= check_seed_writes_to_a_real_mount()
     ok &= check_helper_kwargs()
+    ok &= check_params_the_helper_refuses_to_default()
     ok &= check_no_attribute_shadows_a_method()
     ok &= check_no_lossy_error_truncation()
     ok &= check_bringup_document_against_crd()
