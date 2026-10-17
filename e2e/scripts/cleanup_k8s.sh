@@ -32,8 +32,14 @@ retry_cmd() {
   return 1
 }
 
-echo "=== Phase 1: Helm uninstall ==="
-helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
+echo "=== Phase 1: Helm uninstall (R25 and R26 release names) ==="
+# spdk-csi is what the 26.x workflows install the operator chart as; sbcli and
+# simplyblock-operator are the names earlier releases used. A leftover release
+# under any of them keeps its objects alive through everything below, so all
+# three are uninstalled rather than only the one this branch happens to use.
+for RELEASE in spdk-csi sbcli simplyblock-operator simplyblock-csi; do
+  helm uninstall "$RELEASE" -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+done
 
 echo "=== Phase 2: Patch finalizers and delete CRs ==="
 RESOURCES=(
@@ -92,33 +98,31 @@ patch_and_delete_crs() {
 }
 patch_and_delete_crs
 
-# Dynamic catch-all: patch finalizers and delete ALL CRs of each type
-# (handles resources not in the hardcoded list, e.g. encryption-pool)
-echo "Cleaning up any remaining CRs..."
-for CR_TYPE in \
-  "simplyblockpool.storage.simplyblock.io" \
-  "simplyblocklvol.storage.simplyblock.io" \
-  "simplyblocktask.storage.simplyblock.io" \
-  "simplyblockdevices.storage.simplyblock.io" \
-  "simplyblockstoragenodes.storage.simplyblock.io" \
-  "simplyblockstoragenodesets.storage.simplyblock.io" \
-  "simplyblockstoragenodeops.storage.simplyblock.io" \
-  "simplyblockstorageclusters.storage.simplyblock.io" \
-  "simplyblocksnapshotreplications.storage.simplyblock.io" \
-  "pool.storage.simplyblock.io" \
-  "lvol.storage.simplyblock.io" \
-  "task.storage.simplyblock.io" \
-  "devices.storage.simplyblock.io" \
-  "storagenodes.storage.simplyblock.io" \
-  "storagenodesets.storage.simplyblock.io" \
-  "storagenodeops.storage.simplyblock.io" \
-  "storageclusters.storage.simplyblock.io" \
-  "snapshotreplications.storage.simplyblock.io" \
-  "storagebackups.storage.simplyblock.io" \
-  "backuprestores.storage.simplyblock.io" \
-  "backuppolicies.storage.simplyblock.io" \
-  "backupimports.storage.simplyblock.io"; do
-  for CR_NAME in $(kubectl -n $NAMESPACE $KUBECTL_TIMEOUT get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+# Dynamic catch-all: every CR of every simplyblock CRD on the cluster.
+#
+# This was a hand-written list, and by the 26.4 operator it had fallen twenty
+# kinds behind -- clusterdeploymentconfigs and operatorops, which a rerun must
+# not inherit, but also storagepools, which had simply never matched: the list
+# said pool.storage.simplyblock.io and the CRD's plural is storagepools, so
+# pools were left behind on every cleanup this script has ever run.
+#
+# Asking the cluster which CRDs exist cannot fall behind. It also covers the
+# legacy simplyblock* group for clusters upgraded from before the rename.
+echo "Cleaning up any remaining simplyblock CRs (discovered from the cluster)..."
+CR_TYPES=$(kubectl $KUBECTL_TIMEOUT get crd -o name 2>/dev/null \
+  | sed 's|customresourcedefinition.apiextensions.k8s.io/||' \
+  | grep -E '\.(storage\.simplyblock\.io|simplyblock\.io)$' || true)
+
+if [ -z "$CR_TYPES" ]; then
+  echo "No simplyblock CRDs found; nothing to clean."
+fi
+
+for CR_TYPE in $CR_TYPES; do
+  # Namespaced only. A cluster-scoped CRD returns nothing for -n and the loop
+  # simply does not run, which is what we want: this script owns a namespace.
+  for CR_NAME in $(kubectl -n $NAMESPACE $KUBECTL_TIMEOUT get "$CR_TYPE" \
+      --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+    echo "  deleting $CR_TYPE/$CR_NAME"
     kubectl -n $NAMESPACE $KUBECTL_TIMEOUT patch "$CR_TYPE" "$CR_NAME" \
       --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
     kubectl -n $NAMESPACE $KUBECTL_TIMEOUT delete "$CR_TYPE" "$CR_NAME" \
@@ -261,6 +265,27 @@ for RTYPE in deployment service sa configmap; do
     kubectl -n kube-system $KUBECTL_TIMEOUT delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
   done
 done
+
+# NOTE: no MachineConfig phase here, deliberately.
+#
+# An earlier version of this script deleted the KubeletConfigs,
+# MachineConfigPools and MachineConfigs the operator creates per cluster, to
+# stop them accumulating. That was a mistake. Nothing else in this suite
+# touches MCO objects and neither does the manual OpenShift deploy the
+# operator team runs -- they install the chart, wait for ControlPlaneReady,
+# and approve the draft. The MCO objects are the operator's to own.
+#
+# Deleting them is actively harmful: spdk_process_start blocks until the
+# worker has converged onto its cluster MCP
+# (simplyblock_web/api/internal/storage_node/kubernetes.py:508), and that
+# wait passes instantly when the node already runs a same-hash config.
+# Removing the pool puts the node back on the worker config, so the next
+# deploy has to migrate and reboot it -- minutes, against a client that gives
+# up at SPDK_PROXY_TIMEOUT=300s. Cleanup was manufacturing the timeout the
+# next run died on.
+#
+# If the accumulation needs addressing, it belongs in the operator, which
+# knows when a pool stops being referenced.
 
 echo "=== Phase 5: Verify nothing remains ==="
 echo "Namespaced resources:"

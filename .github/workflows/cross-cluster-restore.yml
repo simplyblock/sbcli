@@ -1,5 +1,5 @@
 name: Cross-Cluster Restore Test (Docker)
-run-name: "Cross-Cluster Restore | ${{ inputs.SBCLI_BRANCH || 'main' }} | ${{ inputs.MNODES || '192.168.10.210' }} | ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}+${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}"
+run-name: "Cross-Cluster | ${{ inputs.TEST_CLASS || 'TestBackupCrossClusterRestore' }} | ${{ inputs.SBCLI_BRANCH || 'main' }} | ${{ inputs.MNODES || '192.168.10.210' }} | ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}+${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}"
 
 on:
   workflow_dispatch:
@@ -12,6 +12,17 @@ on:
         required: true
         type: string
         default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+
+      TEST_CLASS:
+        # Both lanes need the same thing: two simplyblock clusters
+        # under one control plane, built by splitting the node list.
+        # Rather than a second workflow that would duplicate the
+        # split and validation, the class is an input. The default
+        # keeps this workflow doing exactly what it did before.
+        description: "Test class or group to run (e.g. TestBackupCrossClusterRestore, or the group keyword: replication)"
+        required: false
+        type: string
+        default: "TestBackupCrossClusterRestore"
 
       MNODES:
         description: "Management node IP (shared by both clusters)"
@@ -86,10 +97,10 @@ on:
         default: "root"
 
       KEY_PATH:
-        description: "SSH private key path on runner"
+        description: "Fallback SSH key path on the runner. Ignored when the LAB_SSH_PRIVATE_KEY secret is set, which is the normal case. Note simplyblock-us-east-2.pem no longer authenticates: infra strips it from the nodes."
         required: false
         type: string
-        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+        default: ''
 
       NFS_MOUNTPOINT:
         description: "NFS mount path"
@@ -218,7 +229,7 @@ jobs:
       API_INVOKE_URL: "http://${{ inputs.MNODES }}/"
       BASTION_IP: ${{ inputs.MNODES }}
       GRAFANA_ENDPOINT: "http://${{ inputs.MNODES }}/grafana"
-      TEST_CLASS: "TestBackupCrossClusterRestore"
+      TEST_CLASS: ${{ inputs.TEST_CLASS || 'TestBackupCrossClusterRestore' }}
       CLUSTER_SECURITY: "backup"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'main' }}
       CUSTOM_IMAGES: ${{ inputs.CUSTOM_IMAGES || 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"' }}

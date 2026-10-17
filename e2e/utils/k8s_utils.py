@@ -22,10 +22,66 @@ import re
 import shlex
 import subprocess
 import time
+import uuid
 from datetime import UTC, datetime
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+
+#: How a v1alpha1 StoragePool's storageClassParameters key spells itself under
+#: v1alpha2's typed volumeDefaults. storageClassParameters was a free-form map;
+#: volumeDefaults is a struct, so a key with no field here is an error rather
+#: than something to pass through and have the apiserver prune.
+#:
+#: "encryption" is deliberately absent. v1alpha2 has no encryption field on
+#: StoragePool at all -- spec is allowedNodes/clusterRef/limits/volumeDefaults,
+#: and volumeDefaults has no such key, so asking for one is rejected outright:
+#:   strict decoding error: unknown field
+#:   "spec.volumeDefaults.enableEncryption"
+#: Encryption is a StorageClass setting again, bound to a pool by the
+#: storage.simplyblock.io/{namespace,cluster,pool} labels. See
+#: create_storage_class.
+_SCP_TO_VOLUME_DEFAULTS = {
+    "compression": "enableCompression",
+    "filesystem": "filesystem",
+    "csi.storage.k8s.io/fstype": "filesystem",
+}
+
+#: The fields volumeDefaults actually has, for the error message.
+_VOLUME_DEFAULT_FIELDS = (
+    "iops, throughput, filesystem, enableCompression, enableClientCompression, "
+    "enableClientDeduplication, enableReplication, "
+    "enableDHCHAP, priorityClass, fabric, maxNamespacesPerSubsystem, "
+    "tune2fsReservedBlocks"
+)
+
+
+def pool_volume_defaults(dhchap=False, storage_class_parameters=None):
+    """The volumeDefaults a pool request maps to, as {field: value}.
+
+    Shared by the writer and by the reuse check that compares an existing
+    StoragePool against what a caller asked for. Those two drifting is how a
+    pool gets reused with the wrong StorageClass: the comparison read
+    spec.storageClassParameters and spec.dhchap, neither of which v1alpha2 has,
+    so it compared two empty dicts and matched any pool at all.
+    """
+    out = {}
+    if dhchap:
+        out["enableDHCHAP"] = True
+    for key, value in (storage_class_parameters or {}).items():
+        field = _SCP_TO_VOLUME_DEFAULTS.get(key)
+        if field is None:
+            raise ValueError(
+                f"storage_class_parameters key '{key}' has no v1alpha2 "
+                f"equivalent; volumeDefaults takes {_VOLUME_DEFAULT_FIELDS}")
+        out[field] = value
+    return out
+
+
+def _as_yaml_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 class K8sUtils:
@@ -184,6 +240,746 @@ class K8sUtils:
                 f"[K8sUtils] Cannot resolve K8s node name for IP {node_ip!r}"
             )
         return name
+
+    # ── host access ───────────────────────────────────────────────────
+    #: How long to let a node-level command run before giving up.
+    NODE_CMD_TIMEOUT = 180
+
+    def run_on_node(self, node_ip: str, host_cmd: str,
+                    timeout: int | None = None, check: bool = True):
+        """Run *host_cmd* in the host namespace of the node owning *node_ip*.
+
+        One entry point for the three platforms the suite runs on:
+
+        * **OpenShift** -- ``oc debug node/<n> -- chroot /host``
+        * **Talos** -- no host shell exists at all, so this raises. Talos is
+          API-managed; callers that need a host action must go through
+          ``talosctl`` (see :meth:`reboot_node`) or accept a substitute and say
+          so. Returning a silent no-op here would make every Talos run look
+          like it exercised something it did not.
+        * **everything else** -- ``kubectl debug node/<n>`` with a chroot
+
+        Returns ``(stdout, stderr)``. With ``check=False`` a failing command
+        returns its output instead of raising, which is what the reboot and
+        isolation paths want: the connection dies *because the command
+        worked*.
+        """
+        import shlex as _shlex
+
+        node_name = self._get_k8s_node_name(node_ip)
+        quoted = _shlex.quote(host_cmd)
+
+        if self.detect_talos():
+            raise RuntimeError(
+                f"[K8sUtils] Talos has no host shell, so run_on_node cannot "
+                f"execute {host_cmd!r} on {node_ip}. Use talosctl, or use a "
+                f"substitute and record that the host action did not happen.")
+
+        if self.detect_openshift():
+            cmd = (f"oc debug node/{node_name} --quiet=true -- "
+                   f"chroot /host bash -c {quoted}")
+        else:
+            cmd = (f"kubectl debug node/{node_name} -it --quiet=true "
+                   f"--image=busybox:latest -- chroot /host sh -c {quoted}")
+
+        try:
+            return self._exec_kubectl(
+                cmd, timeout=timeout or self.NODE_CMD_TIMEOUT)
+        except Exception as exc:                      # noqa: BLE001
+            if check:
+                raise
+            self.logger.info(
+                "[K8sUtils] node command on %s returned an error, continuing "
+                "as asked (check=False): %s", node_ip, str(exc)[:160])
+            return "", str(exc)
+
+    def cordon_node(self, node_ip: str, cordon: bool = True) -> bool:
+        """Mark the node unschedulable (or schedulable again)."""
+        node_name = self._get_k8s_node_name(node_ip)
+        verb = "cordon" if cordon else "uncordon"
+        cli = "oc adm" if self.detect_openshift() else "kubectl"
+        out, err = self._exec_kubectl(
+            f"{cli} {verb} {node_name} 2>&1 || true", timeout=120)
+        self.logger.info("[K8sUtils] %s %s: %s", verb, node_name,
+                         (out or err or "").strip()[:160])
+        return True
+
+    def drain_node(self, node_ip: str, timeout_min: int = 10) -> bool:
+        """Evacuate the node's pods before it goes down.
+
+        `--ignore-daemonsets` is not optional: the SPDK pod is a DaemonSet
+        pod, and drain refuses to run at all if it would have to evict one.
+        It is also the honest behaviour -- DaemonSet pods are not evacuated,
+        they go down with the node and come back with it, which is what we
+        want to observe.
+
+        The Job-backed FIO pods DO get evicted and rescheduled elsewhere, and
+        their RWO volumes have to follow them. That is the part worth
+        watching, and what the attach check afterwards is for.
+
+        Never fatal. A drain that times out because something will not
+        evict is a finding to record, not a reason to abandon the cycle --
+        the reboot still tells us what we came for.
+        """
+        node_name = self._get_k8s_node_name(node_ip)
+        cli = "oc adm" if self.detect_openshift() else "kubectl"
+        self.logger.info("[K8sUtils] draining %s (up to %dm)",
+                         node_name, timeout_min)
+        out, err = self._exec_kubectl(
+            f"{cli} drain {node_name} --ignore-daemonsets "
+            f"--delete-emptydir-data --force --timeout={timeout_min}m 2>&1 "
+            f"|| true",
+            timeout=timeout_min * 60 + 120)
+        text = (out or "") + (err or "")
+        if "error" in text.lower() or "timed out" in text.lower():
+            self.logger.warning(
+                "[K8sUtils] drain of %s did not complete cleanly: %s",
+                node_name, text.strip()[-400:])
+            return False
+        self.logger.info("[K8sUtils] drained %s", node_name)
+        return True
+
+    def reboot_node(self, node_ip: str, drain: bool = True) -> bool:
+        """Actually reboot the worker. Returns True if a real reboot was issued.
+
+        With *drain* (the default) this is the documented OpenShift node
+        maintenance sequence -- cordon, drain, reboot -- and the caller
+        uncordons once the node is Ready again. That is a PLANNED maintenance
+        reboot: pods are evacuated before the node goes, which is what an
+        operator does to patch a node, and it is a different thing from a node
+        vanishing. The unplanned case is already covered elsewhere, by
+        container_stop and node_network_isolation, so this does not duplicate
+        it.
+
+        Pass drain=False for an undrained reboot, where the node goes with its
+        pods still on it.
+
+        Synchronous, and the result is not trusted either way: the reboot
+        kills the connection carrying it, so succeeding looks like failing.
+        The caller decides the node went down by watching it go NotReady,
+        which is the only honest evidence.
+
+        Talos: `talosctl reboot` if the binary is on the runner, otherwise
+        False so the caller can fall back and SAY it fell back.
+        """
+        node_name = self._get_k8s_node_name(node_ip)
+
+        if self.detect_talos():
+            # Talos gets the SAME sequence -- cordon, drain, reboot -- because
+            # it is a property of Kubernetes, not of the host OS. Only the
+            # reboot verb differs, and only because Talos has no host shell to
+            # send one to: it is API-managed, so the reboot goes through
+            # talosctl instead of a debug pod. cordon_node and drain_node are
+            # already platform-aware and fall to plain kubectl here, since
+            # detect_openshift() is False.
+            #
+            # Cordon before checking for talosctl would leave the node
+            # unschedulable on a runner that cannot reboot it, so the
+            # capability check comes first.
+            probe, _ = self._exec_kubectl(
+                "command -v talosctl >/dev/null 2>&1 && echo HAVE_TALOSCTL "
+                "|| echo NO_TALOSCTL", supress_logs=True, timeout=60)
+            if "HAVE_TALOSCTL" not in (probe or ""):
+                self.logger.warning(
+                    "[K8sUtils] Talos node %s: talosctl not available on the "
+                    "runner, cannot issue a real reboot", node_ip)
+                return False
+
+            if drain:
+                self.cordon_node(node_ip, cordon=True)
+                self.drain_node(node_ip)
+
+            out, err = self._exec_kubectl(
+                f"talosctl -n {node_ip} reboot 2>&1 || true", timeout=180)
+            self.logger.info("[K8sUtils] talosctl reboot issued for %s: %s",
+                             node_ip, (out or err or "").strip()[:160])
+            return True
+
+        if drain:
+            # cordon -> drain -> reboot, the documented OpenShift node
+            # maintenance sequence. Cordon first so nothing is scheduled onto
+            # a node that is about to go; drain so the workload leaves under
+            # its own eviction rules rather than being cut off.
+            self.cordon_node(node_ip, cordon=True)
+            self.drain_node(node_ip)
+
+        self.logger.info("[K8sUtils] rebooting node %s (%s)",
+                         node_name, node_ip)
+        # Synchronously, and plain `reboot` -- the same thing SshUtils does on
+        # docker ("`sudo reboot` never returns an exit status: the host is
+        # gone before it can be sent").
+        #
+        # It was backgrounded before, and that was the bug: `oc debug` DELETES
+        # its debug pod the moment the command returns, so a backgrounded
+        # `sleep 3; reboot` is a child of a pod that is already gone and never
+        # runs. On 2026-09-23 the command was issued cleanly, took 48s, and
+        # worker-1 stayed Ready. Run in the foreground it works -- confirmed by
+        # hand on this cluster, where the node went NotReady immediately.
+        #
+        # check=False because succeeding looks like failing here: the reboot
+        # kills the connection carrying it. The caller decides whether it
+        # worked by watching for NotReady, which is the only honest evidence.
+        #
+        # `systemctl reboot`, not the `reboot` shim. On systemd they are the
+        # same thing, but the shim's FLAGS differ between distros and one of
+        # them is a trap: the hand-run that proved this route used `reboot -h`,
+        # and -h means --halt. worker-1 went down and did not come back.
+        # systemctl's verb cannot be read as anything but a reboot, which
+        # matters for a command whose failure mode is a node that never
+        # returns and a run that waits for it.
+        #
+        # Not `--force` either: that skips the clean shutdown, which is a
+        # harsher fault than this outage is meant to be. A storage node
+        # rebooting cleanly is the case under test; killing it outright is
+        # what container_stop already does.
+        self.run_on_node(node_ip, "systemctl reboot", timeout=60, check=False)
+        return True
+
+    def wait_node_condition(self, node_ip: str, ready: bool,
+                            timeout: int = 600, poll: int = 10) -> bool:
+        """Wait until the node's Ready condition is *ready*. True if it got there."""
+        import time as _time
+
+        node_name = self._get_k8s_node_name(node_ip)
+        deadline = _time.time() + timeout
+        want = "True" if ready else "False"
+        while _time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get node {node_name} "
+                f"-o jsonpath='{{.status.conditions[?(@.type==\"Ready\")].status}}'",
+                supress_logs=True, timeout=60)
+            got = (out or "").strip().strip("'")
+            # A node that has gone away entirely reads as neither.
+            if got == want or (not ready and got in ("Unknown", "")):
+                self.logger.info("[K8sUtils] node %s Ready=%s", node_name, got)
+                return True
+            _time.sleep(poll)
+        self.logger.warning(
+            "[K8sUtils] node %s did not reach Ready=%s within %ds",
+            node_name, want, timeout)
+        return False
+
+    # ── storage-network cut (shared by every k8s outage test) ─────────
+    #
+    # One implementation for lblk, continuous_k8s_native_failover,
+    # continuous_failover_ha_k8s and the security suite. They had four
+    # copies; three of them blanket-DROPped everything on the node, which
+    # takes out OVN, FoundationDB and the cluster's own health monitor along
+    # with the storage path, and then "restored" with `iptables -F`.
+
+    def peer_data_ips(self, storage_nodes, node_ip):
+        """Peers' DATA-network addresses, given the storage-node list.
+
+        *storage_nodes* is the list of dicts the control plane returns.
+
+        The data NIC is what a storage outage should cut. Management carries
+        spdk-proxy, the SNodeAPI, OVN geneve, FoundationDB, the kubelet and
+        simplyblock-monitoring; cutting it means that when the monitor is
+        scheduled on the node under test, our own rule starves it of its
+        peers and it demotes all of them. That produced a cluster collapse
+        twice, which was written up as a product defect before dev spotted
+        the co-location.
+
+        Falls back to mgmt_ip when a node has no data NIC recorded, with a
+        warning -- silently falling back would reintroduce exactly that bug.
+        """
+        peers = []
+        for n in storage_nodes or []:
+            if n.get("mgmt_ip") == node_ip:
+                continue
+            ip = ""
+            for nic in (n.get("data_nics") or []):
+                ip = nic.get("ip4_address") or ""
+                if ip:
+                    break
+            if not ip:
+                ip = n.get("mgmt_ip") or ""
+                if ip:
+                    self.logger.warning(
+                        "[K8sUtils] storage node %s has no data NIC address; "
+                        "falling back to its mgmt IP for the cut. That is the "
+                        "network simplyblock-monitoring uses, so this cut may "
+                        "demote peers that are perfectly healthy.", ip)
+            if ip:
+                peers.append(ip)
+        return peers
+
+    @staticmethod
+    def _peer_drop_add(peers):
+        return "; ".join(
+            f"iptables -A INPUT -s {p} -j DROP; "
+            f"iptables -A OUTPUT -d {p} -j DROP" for p in peers)
+
+    @staticmethod
+    def _peer_drop_undo(peers):
+        """Delete exactly what we added. Never `iptables -F`.
+
+        -D matches the whole rule, so this has to mirror the add. Three
+        passes because a retried cycle can add a rule more than once.
+        """
+        return "; ".join(
+            f"for i in 1 2 3; do "
+            f"iptables -D INPUT -s {p} -j DROP 2>/dev/null; "
+            f"iptables -D OUTPUT -d {p} -j DROP 2>/dev/null; done"
+            for p in peers) + "; true"
+
+    #: Where the host-armed undo records that it fired.
+    NET_UNDO_MARKER = "/tmp/sb_net_undo.stamp"
+
+    def arm_host_net_undo(self, node_ip, peers, delay):
+        """Schedule the undo on the HOST, to fire in *delay* seconds.
+
+        Returns True when it is armed somewhere that outlives the SPDK pod.
+
+        This is the part the old copies got wrong. They scheduled it with
+        `nsenter --target 1` from inside the SPDK pod, under a comment saying
+        it survives the container dying. The pod is hostNetwork but not
+        hostPID, so PID 1 there is the container's own and the timer dies
+        with it. run_on_node goes in through `oc debug node/` instead, which
+        chroots /host and gets real systemd.
+
+        The SELinux relabel is not optional: a script written to /tmp is
+        user_tmp_t, which init_t may not execute, and systemd reports that as
+        "Failed to locate executable", which reads like a missing file.
+        """
+        return self.arm_host_undo_script(
+            node_ip, self._peer_drop_undo(peers), delay, tag="netundo")
+
+    def arm_host_undo_script(self, node_ip, inner, delay, tag="undo"):
+        """Run *inner* on the host after *delay* seconds, outliving the pod.
+
+        The generic form of :meth:`arm_host_net_undo`, so the interface-
+        scoped NIC outage can use the same mechanism rather than keeping its
+        own `nsenter --target 1` version, which never reached the host.
+
+        Returns True when systemd (or at worst setsid) took it.
+        """
+        import random as _random
+        import time as _time
+        unit = f"sb-{tag}-{int(_time.time())}-{_random.getrandbits(16):04x}"
+        undo = inner
+        script = (
+            f"set -e; "
+            f"cat > /tmp/sb_{tag}_undo.sh <<'EOS'\n"
+            f"#!/bin/sh\n"
+            f"sleep {delay}\n"
+            f"{undo}\n"
+            f"date -u +'net-undo %Y-%m-%dT%H:%M:%SZ' >> {self.NET_UNDO_MARKER}\n"
+            f"EOS\n"
+            f"chmod +x /tmp/sb_{tag}_undo.sh; "
+            f"chcon -t bin_t /tmp/sb_{tag}_undo.sh 2>/dev/null || true; "
+            f"if command -v systemd-run >/dev/null 2>&1 && "
+            f"systemd-run --collect --unit={unit} /tmp/sb_{tag}_undo.sh; "
+            f"then echo armed-via-systemd; else "
+            f"echo armed-via-setsid; "
+            f"setsid nohup /tmp/sb_{tag}_undo.sh </dev/null >/dev/null 2>&1 & "
+            f"fi")
+        try:
+            out, _err = self.run_on_node(node_ip, script, timeout=120,
+                                         check=False)
+        except Exception as exc:                      # noqa: BLE001
+            # Talos raises by design: it has no host shell.
+            self.logger.warning(
+                "[K8sUtils] could not arm the undo on the host for %s: %s",
+                node_ip, str(exc)[:160])
+            return False
+        if "armed-via" not in (out or ""):
+            self.logger.warning(
+                "[K8sUtils] host undo for %s did not confirm it armed; said: "
+                "%s", node_ip, (out or "<nothing>").strip()[:200])
+            return False
+        return True
+
+    def cut_storage_network(self, node_ip, peers, duration):
+        """Cut *node_ip* off its peers' storage network for *duration*.
+
+        Verifies the rules landed -- a silent no-op here is indistinguishable
+        from a successful isolation and produces a test that proves nothing.
+        Raises RuntimeError if they did not, after undoing whatever did.
+        """
+        import shlex as _shlex
+        if not peers:
+            raise RuntimeError(
+                f"[K8sUtils] no peer storage nodes to isolate {node_ip} from")
+        add = self._peer_drop_add(peers)
+        self.exec_in_spdk_container(node_ip, f"sudo sh -c {_shlex.quote(add)}")
+        show = "iptables -S INPUT; iptables -S OUTPUT"
+        out, _err = self.exec_in_spdk_container(
+            node_ip, f"sudo sh -c {_shlex.quote(show)}")
+        applied = sum(1 for p in peers if f"-s {p}/32" in (out or "")
+                      or f"-d {p}/32" in (out or ""))
+        if applied < len(peers):
+            self.restore_storage_network(node_ip, peers)
+            raise RuntimeError(
+                f"[K8sUtils] iptables did not take on {node_ip}: wanted "
+                f"{len(peers)} peers blocked, saw {applied}. Rules undone. "
+                f"iptables -S said: {(out or '<nothing>')[:300]}")
+        mgmt_hit = [ln for ln in (out or "").splitlines()
+                    if "-j DROP" in ln and "192.168." in ln]
+        if mgmt_hit:
+            self.logger.warning(
+                "[K8sUtils] a DROP rule on %s is on the MANAGEMENT network: "
+                "%s. That is the network simplyblock-monitoring uses; if the "
+                "monitor is on this node it will report its peers as failed.",
+                node_ip, mgmt_hit[:2])
+        on_host = self.arm_host_net_undo(node_ip, peers, duration + 30)
+        if not on_host:
+            undo = self._peer_drop_undo(peers)
+            self.exec_in_spdk_container(node_ip, (
+                f"sudo sh -c {_shlex.quote(f'(sleep {duration + 30}; {undo}) >/dev/null 2>&1 &')}"))
+            self.logger.warning(
+                "[K8sUtils] backstop for %s is in the SPDK pod, not on the "
+                "host. If this cut takes the node offline the pod goes with "
+                "it and the cut will not be undone.", node_ip)
+        self.logger.info(
+            "[K8sUtils] %s cut off from %d peer(s) %s for %ds; undo armed %s",
+            node_ip, len(peers), ",".join(peers), duration,
+            "on the host" if on_host else "in the pod (fallback)")
+        return duration
+
+    def restore_storage_network(self, node_ip, peers):
+        """Remove the peer DROP rules. Safe to call twice. Never raises.
+
+        Pod first because it is cheap and is all Talos has; host second
+        because a cut long enough to take the node offline removes the pod,
+        and that is the case that matters -- it is what ended run
+        20261002-202420 with "No snode-spdk-pod found" as its verdict on a
+        cycle that was testing a network cut.
+        """
+        import shlex as _shlex
+        if not peers:
+            return True
+        undo = self._peer_drop_undo(peers)
+        show = "iptables -S INPUT; iptables -S OUTPUT"
+        out = None
+        try:
+            self.exec_in_spdk_container(node_ip, f"sudo sh -c {_shlex.quote(undo)}")
+            out, _err = self.exec_in_spdk_container(
+                node_ip, f"sudo sh -c {_shlex.quote(show)}")
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[K8sUtils] cannot restore %s through its SPDK pod (%s); "
+                "going in through the host instead", node_ip, str(exc)[:140])
+            try:
+                self.run_on_node(node_ip, undo, timeout=120, check=False)
+                out, _err = self.run_on_node(node_ip, show, timeout=120,
+                                             check=False)
+            except Exception as exc2:                 # noqa: BLE001
+                self.logger.error(
+                    "[K8sUtils] could not reach %s by either route, so its "
+                    "peer DROP rules are probably still in place: %s",
+                    node_ip, str(exc2)[:160])
+                return False
+        left = [ln for ln in (out or "").splitlines() if "-j DROP" in ln]
+        if left:
+            self.logger.warning(
+                "[K8sUtils] DROP rules still on %s after restore: %s",
+                node_ip, left[:4])
+            return False
+        self.logger.info("[K8sUtils] network restored on %s", node_ip)
+        return True
+
+    def relocate_monitor_off(self, node_ip, timeout=180):
+        """Move simplyblock-monitoring off *node_ip* before isolating it.
+
+        :meth:`isolate_node` cuts EVERYTHING (``! -i lo -j DROP``) and has to:
+        the point of that outage is to make the kubelet miss its heartbeats
+        so the scheduler evicts the node's pods, and the kubelet is on the
+        management network. So unlike the storage-network cut, this one
+        cannot be narrowed to spare the control plane.
+
+        Which leaves the other half of the problem. simplyblock-monitoring is
+        scheduled onto a storage node, and when the node it lands on is the
+        one being isolated, it loses its RPCs to all three peers, concludes
+        all three have failed, and demotes them -- the cluster goes degraded
+        and then suspended off a single-node outage. That is what run
+        20261003-080237 did, and it was written up as a product defect twice
+        before dev spotted the co-location.
+
+        Deleting the pod lets the deployment put it on another node, so the
+        monitor keeps a clear view of the cluster while one node goes dark.
+        That is the behaviour the test means to exercise; a blinded monitor
+        is not.
+
+        Returns True when the monitor is known to be elsewhere. Best effort:
+        if it cannot be found or moved, the caller is told and decides.
+        """
+        try:
+            out, _err = self._exec_kubectl(
+                f"kubectl get pods -n {self.namespace} -o wide --no-headers "
+                f"2>/dev/null | grep -i monitoring || true",
+                supress_logs=True, timeout=120)
+            node = self._get_k8s_node_name(node_ip)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[K8sUtils] could not locate simplyblock-monitoring before "
+                "isolating %s: %s", node_ip, str(exc)[:140])
+            return False
+
+        here = [c.split()[0] for c in (out or "").splitlines()
+                if len(c.split()) >= 7 and c.split()[6] == node]
+        if not here:
+            self.logger.info(
+                "[K8sUtils] simplyblock-monitoring is not on %s; isolating "
+                "without moving it", node)
+            return True
+
+        self.logger.warning(
+            "[K8sUtils] simplyblock-monitoring %s is on %s, the node about "
+            "to be fully isolated. Moving it first -- left there it would "
+            "lose every peer and demote all of them, which collapses the "
+            "cluster and tells us nothing about the outage.", here, node)
+        for pod in here:
+            self._exec_kubectl(
+                f"kubectl delete pod {pod} -n {self.namespace} "
+                f"--ignore-not-found --wait=false 2>&1 || true", timeout=120)
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sleep_n_sec(10)
+            try:
+                out, _err = self._exec_kubectl(
+                    f"kubectl get pods -n {self.namespace} -o wide "
+                    f"--no-headers 2>/dev/null | grep -i monitoring || true",
+                    supress_logs=True, timeout=120)
+            except Exception:                         # noqa: BLE001
+                continue
+            rows = [c.split() for c in (out or "").splitlines()
+                    if len(c.split()) >= 7]
+            running = [r for r in rows if r[2] == "Running" and r[6] != node]
+            if running and not [r for r in rows if r[6] == node]:
+                self.logger.info(
+                    "[K8sUtils] simplyblock-monitoring is now on %s",
+                    running[0][6])
+                return True
+        self.logger.warning(
+            "[K8sUtils] simplyblock-monitoring did not move off %s within "
+            "%ds. Isolating anyway, but if the peers go schedulable during "
+            "this outage, that is why.", node, timeout)
+        return False
+
+    def isolate_node(self, node_ip: str, duration: int) -> bool:
+        """Cut the node off completely for *duration*, restoring itself.
+
+        Total isolation, not just the storage ports: the point is to make the
+        kubelet miss its heartbeats so the node goes NotReady and the
+        scheduler evicts its pods, which is the behaviour worth testing and
+        which a storage-port cut deliberately avoids.
+
+        Self-restoring from the HOST, which is what makes this safe to run at
+        all. Nothing can reach the node while the cut holds -- that is the
+        point -- so the undo cannot be driven from outside; it is scheduled on
+        the node before the cut lands. Two independent restores are armed, a
+        timer and a boot-time flush, so a node that reboots mid-cut still
+        comes back reachable.
+
+        Handed to systemd rather than backgrounded, because the delivery
+        vehicle is ``oc debug node/<n>`` -- an ephemeral pod that is torn down
+        the moment the command returns, taking its cgroup and every child
+        process with it. A `nohup ... &` script that opens with `sleep 2` is
+        killed inside that sleep, before it ever reaches its first iptables
+        call: run 20260929-205137 armed this on worker-2, the command returned
+        clean, and nothing whatsoever happened for the next four minutes. A
+        transient systemd unit is owned by PID 1 instead, so it outlives the
+        pod that asked for it.
+
+        The marker file is how a caller tells the two failure shapes apart
+        afterwards. "Never armed" is a broken harness; "armed, but the node
+        stayed Ready" is a finding about the cluster. Without it they look
+        identical from outside, which is exactly how the bug above survived.
+        """
+        marker = "/tmp/sb_isolate.stamp"
+        # Named here, not with $$ in the script. The command crosses two
+        # shells before systemd sees it, and $$ did not survive the trip:
+        # run 20260930-032853 answered
+        #   Invalid unit name "sb-isolate-$" escaped as "sb-isolate-\x24"
+        # so every node and every cycle asked for the same unit. --collect
+        # cleans one up as it exits, which is the only reason consecutive
+        # cycles did not start colliding. A name built in Python cannot be
+        # eaten by a shell.
+        unit = f"sb-isolate-{uuid.uuid4().hex[:8]}"
+        script = (
+            # Loopback first, so the scheduling command itself can return and
+            # so the node can still talk to itself under the blanket DROP.
+            f"set -e; "
+            f"iptables -I INPUT 1 -i lo -j ACCEPT; "
+            f"iptables -I OUTPUT 1 -o lo -j ACCEPT; "
+            f"rm -f {marker}; "
+            f"cat > /tmp/sb_isolate.sh <<'EOS'\n"
+            f"#!/bin/sh\n"
+            f"sleep 2\n"
+            f"date -u +'armed %Y-%m-%dT%H:%M:%SZ' >> {marker}\n"
+            f"iptables -I INPUT 2 ! -i lo -j DROP\n"
+            f"iptables -I OUTPUT 2 ! -o lo -j DROP\n"
+            f"sleep {duration}\n"
+            f"iptables -D INPUT ! -i lo -j DROP 2>/dev/null || true\n"
+            f"iptables -D OUTPUT ! -o lo -j DROP 2>/dev/null || true\n"
+            f"date -u +'restored %Y-%m-%dT%H:%M:%SZ' >> {marker}\n"
+            f"EOS\n"
+            f"chmod +x /tmp/sb_isolate.sh; "
+            # SELinux is enforcing on these hosts, and a file written into
+            # /tmp is user_tmp_t, which init_t may not execute -- systemd
+            # reports that as "Failed to locate executable ...: Permission
+            # denied", which reads like the file is missing. Relabelling it
+            # bin_t is what makes systemd-run able to start it at all;
+            # verified on the lab, where without this the unit dies 203/EXEC.
+            f"chcon -t bin_t /tmp/sb_isolate.sh 2>/dev/null || true; "
+            # --collect so the unit does not linger in failed state and block
+            # the next cycle from reusing the name. The whole thing sits in
+            # the `if` CONDITION rather than its body, so that systemd-run
+            # being present but unable to reach the host manager falls through
+            # to the fallback instead of tripping `set -e` and leaving the
+            # node uncut -- which is the failure this whole change is about.
+            f"if command -v systemd-run >/dev/null 2>&1 && "
+            f"systemd-run --collect --unit={unit} /tmp/sb_isolate.sh; "
+            f"then echo armed-via-systemd; else "
+            # setsid is the best available on a host without systemd: it at
+            # least escapes the session, though not the pod's cgroup.
+            f"echo armed-via-setsid; "
+            f"setsid nohup /tmp/sb_isolate.sh </dev/null >/dev/null 2>&1 & "
+            f"fi"
+        )
+        self.logger.info(
+            "[K8sUtils] isolating %s completely for %ds (self-restoring on "
+            "the host)", node_ip, duration)
+        self.run_on_node(node_ip, script, timeout=120, check=False)
+        return True
+
+    #: Where :meth:`isolate_node` records that its cut actually ran.
+    ISOLATION_MARKER = "/tmp/sb_isolate.stamp"
+
+    def isolation_marker(self, node_ip: str) -> str:
+        """What the last :meth:`isolate_node` on this node left behind.
+
+        Empty string when the cut never armed.
+
+        Read from the HOST. isolate_node writes this marker through
+        run_on_node, which chroots /host, so the file is on the host
+        filesystem. This used to read it with `nsenter --target 1 --mount`
+        from inside the SPDK pod, which lands in the CONTAINER's mount
+        namespace -- the pod is hostNetwork but not hostPID, so PID 1 there
+        is its own. It would have returned "" whether or not the cut armed,
+        which is the exact failure the marker exists to distinguish.
+
+        Currently unreferenced; fixed rather than deleted because the
+        distinction it draws -- "never armed" is a broken harness, "armed
+        but nothing happened" is a finding about the cluster -- is worth
+        having, and a method that silently reads the wrong filesystem is a
+        trap for whoever picks it up next.
+        """
+        try:
+            out, _err = self.run_on_node(
+                node_ip, f"cat {self.ISOLATION_MARKER} 2>/dev/null || true",
+                timeout=120, check=False)
+            return (out or "").strip()
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[K8sUtils] could not read the isolation "
+                                "marker on %s: %s", node_ip, str(exc)[:120])
+            return ""
+
+    #: Substrings that mean a pod could not get its volume. Matched
+    #: case-insensitively against event messages.
+    VOLUME_ATTACH_MARKERS = (
+        "multi-attach",
+        "failedattachvolume",
+        "volume is already exclusively attached",
+        "failedmount",
+    )
+
+    def pods_stuck_on_volumes(self, namespace: str | None = None,
+                              within_sec: int = 900) -> list[str]:
+        """Pods that are NOT running AND are complaining about a volume.
+
+        This, not the raw event list, is the question worth asking. A
+        Multi-Attach event on its own is routine: delete a pod using an RWO
+        volume and create another one immediately, and the second is told the
+        volume is still exclusively attached until the first attachment is
+        released. The attach controller retries and it clears. Our own
+        seed/md5 utility pods do exactly that back to back, so an event-only
+        check fails on the test's own setup -- which is what happened on the
+        k8s run of 2026-09-23, where a Multi-Attach raised at 09:59:13 during
+        volume seeding failed a cycle that ran at 10:05.
+
+        What actually matters is whether anything is STILL waiting. A pod that
+        is Running got its volume, whatever was logged on the way. So: take
+        the pods that are not Running or Succeeded, and report only those with
+        a recent volume complaint against them.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pods -n {ns} "
+            f"-o custom-columns=':metadata.name,:status.phase' --no-headers "
+            f"2>/dev/null || true", supress_logs=True, timeout=120)
+        pending = set()
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] not in ("Running", "Succeeded"):
+                pending.add(parts[0])
+        if not pending:
+            return []
+
+        stuck = []
+        for entry in self.multi_attach_errors(namespace=ns,
+                                              within_sec=within_sec):
+            # entries read "[<age>] <pod>: <message>"
+            name = entry.split("] ", 1)[-1].split(":", 1)[0].strip()
+            if name in pending:
+                stuck.append(entry)
+        return stuck
+
+    def multi_attach_errors(self, namespace: str | None = None,
+                            within_sec: int = 900) -> list[str]:
+        """Volume attach errors from the last *within_sec* seconds.
+
+        A pod rescheduled after an eviction has to take its PV with it, and
+        RWO volumes are where that goes wrong: if the old attachment is not
+        released the new pod sits in ContainerCreating with
+        ``Multi-Attach error for volume``. Silent until someone looks, which
+        is why this is checked rather than assumed.
+
+        The time bound is the point. Events live about an hour and these
+        suites loop every few minutes, so an unbounded query makes iteration 5
+        fail on iteration 2's events -- and once a real failure lands, every
+        later iteration echoes it and a new failure is indistinguishable from
+        the old one. Bounded, each iteration is judged on its own outage.
+
+        An event with no usable timestamp is INCLUDED: a check that hunts a
+        rare failure should not drop evidence because a field was missing.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get events -n {ns} --field-selector type=Warning "
+            f"-o json 2>/dev/null || true",
+            supress_logs=True, timeout=120)
+        try:
+            items = (json.loads(out or "{}") or {}).get("items", []) or []
+        except ValueError:
+            self.logger.warning(
+                "[K8sUtils] could not parse events as JSON; "
+                "reporting no attach errors rather than guessing")
+            return []
+
+        now = datetime.now(UTC)
+        bad = []
+        for ev in items:
+            msg = (ev.get("message") or "").strip()
+            if not any(m in msg.lower() for m in self.VOLUME_ATTACH_MARKERS):
+                continue
+            stamp = (ev.get("lastTimestamp") or ev.get("eventTime")
+                     or (ev.get("series") or {}).get("lastObservedTime"))
+            age = None
+            if stamp:
+                try:
+                    age = (now - datetime.fromisoformat(
+                        stamp)).total_seconds()
+                except ValueError:
+                    age = None
+            if age is not None and age > within_sec:
+                continue
+            where = (ev.get("involvedObject") or {}).get("name", "?")
+            when = f"{age:.0f}s ago" if age is not None else "age unknown"
+            bad.append(f"[{when}] {where}: {msg[:180]}")
+        return bad
 
     def get_all_k8s_node_names(self) -> list[str]:
         """Return a list of ALL K8s node hostnames."""
@@ -1082,16 +1878,52 @@ class K8sUtils:
 
     # ── StorageClass & VolumeSnapshotClass (cluster-scoped) ──────────────────
 
+    def _storage_cluster_cr_name(self, namespace: str | None = None):
+        """The StorageCluster CR's metadata.name, or "" if none is found.
+
+        This is the name the storage.simplyblock.io/cluster label wants, which
+        is NOT the cluster uuid that goes in StorageClass parameters. Returns
+        "" rather than guessing a default: a label pointing at a cluster that
+        does not exist binds the class to nothing, and a caller that knows the
+        name should pass it rather than rely on this.
+        """
+        ns = namespace or self.namespace
+        try:
+            out, _err = self._exec_kubectl(
+                f"kubectl get storageclusters -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true",
+                supress_logs=True)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[K8sUtils] could not resolve the "
+                                "StorageCluster CR name: %s", str(exc)[:120])
+            return ""
+        names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
+        return names[0] if names else ""
+
     def create_storage_class(self, name: str, cluster_id: str, pool_name: str,
                              ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
                              compression: bool = False, encryption: bool = False,
                              fabric: str = "tcp",
-                             max_namespace_per_subsys: int = 1,
-                             dhchap_node_label: str | None = None):
+                             max_namespace_per_subsys: int = 30,
+                             dhchap_node_selector: str | None = None,
+                             cluster_name: str | None = None, namespace: str | None = None):
         """Create a simplyblock CSI StorageClass.
 
-        dhchap_node_label: the pool's node label key
-            (``simplyblock.io/pool.<ns>.<cluster>.<pool>``). Required for a
+        cluster_name/namespace: used for the three labels that attach this
+            class to its StoragePool --
+            ``storage.simplyblock.io/{namespace,cluster,pool}``. Encryption is
+            a StorageClass setting again in v1alpha2 (there is no encryption
+            field on StoragePool), and the labels are what tie the setting to
+            a pool; a class carrying ``encryption`` with no labels is not
+            associated with any pool. cluster_name is the StorageCluster CR
+            NAME, deliberately separate from cluster_id, which is its uuid and
+            goes in parameters. Resolved from the cluster when not given.
+
+        dhchap_node_selector: the pool's node label key, shaped
+            ``storage.simplyblock.io/storage-pool.<pool uuid>``. Renamed and
+            reshaped from the old ``dhchap_node_label`` /
+            ``simplyblock.io/pool.<ns>.<cluster>.<pool>``, which dev confirmed
+            does not work any more. Required for a
             DHCHAP pool: without it the CSI driver provisions the volume with
             no ``nodeAffinity``, so any node mounts it and allowedNodes is not
             enforced at all. With it, the driver writes a matching
@@ -1102,23 +1934,43 @@ class K8sUtils:
             driver has re-registered and picked the label up as a topology key.
         """
         dhchap_param = (
-            f"  dhchap_node_label: {dhchap_node_label}\n"
-            if dhchap_node_label else ""
+            f"  dhchap_node_selector: {dhchap_node_selector}\n"
+            if dhchap_node_selector else ""
         )
+        ns = namespace or self.namespace
+        cl_name = cluster_name or self._storage_cluster_cr_name()
+        # Lowercase, matching the documented example. These are CSI parameter
+        # STRINGS, not YAML booleans, so the driver compares them as text and
+        # str(True) == "True" is not obviously equal to "true".
+        _b = lambda v: "true" if v else "false"       # noqa: E731
+        labels = ""
+        if cl_name:
+            labels = (
+                f"  labels:\n"
+                f"    storage.simplyblock.io/namespace: {ns}\n"
+                f"    storage.simplyblock.io/cluster: {cl_name}\n"
+                f"    storage.simplyblock.io/pool: {pool_name}\n"
+            )
+        else:
+            self.logger.warning(
+                "[K8sUtils] StorageClass '%s': no StorageCluster CR name "
+                "resolved, so it carries no pool labels. encryption=%s will "
+                "not be associated with pool '%s'.", name, encryption, pool_name)
         yaml_content = (
             f"allowVolumeExpansion: true\n"
             f"apiVersion: storage.k8s.io/v1\n"
             f"kind: StorageClass\n"
             f"metadata:\n"
             f"  name: {name}\n"
+            f"{labels}"
             f"parameters:\n"
             f"  cluster_id: \"{cluster_id}\"\n"
-            f"  compression: \"{compression!s}\"\n"
+            f"  compression: \"{_b(compression)}\"\n"
             f"  csi.storage.k8s.io/fstype: {fs_type}\n"
             f"{dhchap_param}"
             f"  distr_ndcs: \"{ndcs}\"\n"
             f"  distr_npcs: \"{npcs}\"\n"
-            f"  encryption: \"{encryption!s}\"\n"
+            f"  encryption: \"{_b(encryption)}\"\n"
             f"  fabric: {fabric}\n"
             f"  lvol_priority_class: \"0\"\n"
             f"  max_namespace_per_subsys: \"{max_namespace_per_subsys}\"\n"
@@ -1127,7 +1979,7 @@ class K8sUtils:
             f"  qos_rw_iops: \"0\"\n"
             f"  qos_rw_mbytes: \"0\"\n"
             f"  qos_w_mbytes: \"0\"\n"
-            f"  replicate: \"False\"\n"
+            f"  replicate: \"false\"\n"
             f"  tune2fs_reserved_blocks: \"0\"\n"
             f"provisioner: csi.simplyblock.io\n"
             f"reclaimPolicy: Delete\n"
@@ -1177,12 +2029,18 @@ class K8sUtils:
     # ── PVC operations ───────────────────────────────────────────────────────
 
     def create_pvc(self, name: str, size: str, storage_class: str,
-                   namespace: str | None = None, node_id: str | None = None):
+                   namespace: str | None = None, node_id: str | None = None,
+                   volume_mode: str | None = None):
         """Create a PersistentVolumeClaim (provisions an lvol via CSI).
 
         Args:
             node_id: If provided, adds ``simplybk/host-id`` annotation to pin
                      the PVC to a specific storage node.
+            volume_mode: ``"Block"`` for a raw device with no filesystem,
+                     consumed through ``volumeDevices``. Omitted means the
+                     cluster default, which is Filesystem. spdkcsi supports
+                     both -- see GetBlock() in
+                     csi-driver/internal/csi/node/publish.go.
         """
         ns = namespace or self.namespace
         annotations = ""
@@ -1191,6 +2049,7 @@ class K8sUtils:
                 f"  annotations:\n"
                 f"    simplybk/host-id: {node_id}\n"
             )
+        mode = f"  volumeMode: {volume_mode}\n" if volume_mode else ""
         yaml_content = (
             f"apiVersion: v1\n"
             f"kind: PersistentVolumeClaim\n"
@@ -1201,13 +2060,104 @@ class K8sUtils:
             f"spec:\n"
             f"  accessModes:\n"
             f"  - ReadWriteOnce\n"
+            f"{mode}"
             f"  resources:\n"
             f"    requests:\n"
             f"      storage: {size}\n"
             f"  storageClassName: {storage_class}\n"
         )
-        self.logger.info(f"[K8sUtils] Creating PVC '{name}' size={size} node={node_id or 'auto'}")
+        self.logger.info(
+            f"[K8sUtils] Creating PVC '{name}' size={size} "
+            f"mode={volume_mode or 'Filesystem'} node={node_id or 'auto'}")
         self.apply_yaml(yaml_content, namespace=ns)
+
+    #: Every spelling of the pin, because the operator normalises between
+    #: them: a claim created with the legacy simplybk/host-id comes back
+    #: carrying storage.simplyblock.io/selected-storage-node, and removing
+    #: only the one that was written leaves the claim pinned.
+    PIN_ANNOTATIONS = (
+        "storage.simplyblock.io/selected-storage-node",
+        "simplyblock.io/selected-storage-node",
+        "simplybk/host-id",
+    )
+
+    def unpin_pvc(self, pvc_name: str, namespace: str | None = None):
+        """Remove the storage-node pin from a claim.
+
+        A pinned volume CANNOT BE MIGRATED. The operator refuses the
+        operation outright -- "volume pvc-... is pinned to storage node
+        ..., and a pinned volume cannot be moved; change or remove the pin
+        on its claim instead" -- so anything that pins a claim in order to
+        place it has to unpin before it can move it.
+
+        That is not hypothetical: pinning is the only way to get several
+        claims onto ONE node, which is the only way to get them into one
+        NVMe-oF subsystem, which is what a batch case needs. Build the
+        group pinned, then unpin, then migrate.
+        """
+        ns = namespace or self.namespace
+        keys = " ".join(f"{a}-" for a in self.PIN_ANNOTATIONS)
+        out, err = self._exec_kubectl(
+            f"kubectl annotate pvc {pvc_name} -n {ns} {keys} "
+            f"--overwrite 2>&1 || true", supress_logs=True)
+        self.logger.info("[K8sUtils] unpinned PVC %s", pvc_name)
+        return (out or "") + (err or "")
+
+    def pvc_pin(self, pvc_name: str, namespace: str | None = None) -> str:
+        """The node a claim is pinned to, or "" when it is not pinned."""
+        ns = namespace or self.namespace
+        res = self.get_resource_json("pvc", pvc_name, namespace=ns)
+        ann = ((res.get("metadata") or {}).get("annotations") or {})
+        for a in self.PIN_ANNOTATIONS:
+            if ann.get(a):
+                return str(ann[a])
+        return ""
+
+    def create_raw_device_pod(self, pod_name: str, pvc_name: str,
+                              device_path: str = "/dev/rawlblk",
+                              namespace: str | None = None,
+                              image: str = "dockerpinata/fio:2.1",
+                              timeout: int = 300):
+        """Long-lived pod exposing a Block PVC as a raw device, with fio.
+
+        volumeDevices, not volumeMounts: the latter is filesystem-only and a
+        Block PVC cannot be mounted. The device appears at *device_path* with
+        no filesystem on it at all, which is the point -- a filesystem journal
+        can absorb or reshape a torn write, and these tests exist to catch one.
+
+        Long-lived rather than a Job because the verifier runs stamp, churn and
+        verify as separate commands against the same device, and a Job would
+        exit between them.
+        """
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: Pod\n"
+            f"metadata:\n"
+            f"  name: {pod_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  restartPolicy: Never\n"
+            f"  containers:\n"
+            f"  - name: raw\n"
+            f"    image: {image}\n"
+            f"    command: [\"sleep\", \"infinity\"]\n"
+            f"    securityContext:\n"
+            f"      privileged: true\n"
+            f"    volumeDevices:\n"
+            f"    - name: raw-volume\n"
+            f"      devicePath: {device_path}\n"
+            f"  volumes:\n"
+            f"  - name: raw-volume\n"
+            f"    persistentVolumeClaim:\n"
+            f"      claimName: {pvc_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating raw-device pod '{pod_name}' for PVC "
+            f"'{pvc_name}' at {device_path}")
+        self.apply_yaml(yaml_content, namespace=ns)
+        self.wait_pod_running(pod_name, namespace=ns, timeout=timeout)
+        return device_path
 
     def create_clone_pvc(self, name: str, size: str, storage_class: str,
                          snapshot_name: str, namespace: str | None = None):
@@ -1434,7 +2384,7 @@ class K8sUtils:
 
     def log_fio_pvc_mapping(self, pvc_details: dict, clone_details: dict | None = None,
                             extra_details: dict | None = None,
-                            snapshot_details: dict | None = None) -> None:
+                            snapshot_details: dict | None = None):
         """Log a table mapping FIO Job → PVC → lvol ID for debugging.
 
         Parameters
@@ -1650,10 +2600,26 @@ class K8sUtils:
                        avoid_node: str | None = None,
                        warmup_config: str | None = None,
                        node_name: str | None = None,
-                       node_selector: str | None = None):
+                       node_selector: str | None = None,
+                       prefer_node: str | None = None,
+                       backoff_limit: int = 0):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
+            backoff_limit: how many times Kubernetes may replace a failed pod.
+                Defaults to 0, which is what every caller had before this was a
+                parameter: one pod, no retries, a failure is final.
+
+                That default is wrong for any job an outage is aimed at. A pod
+                evicted with its node counts as a failed pod, so at 0 the Job is
+                marked Failed and no replacement is ever placed -- which is how
+                run 20261005-081722 spent 900s waiting for a reschedule that
+                could not happen. Jobs that are expected to be moved need a real
+                budget, or the move cannot be observed at all.
+
+                Raising it does not hide FIO failures: get_job_pod_names selects
+                on job-name and so lists terminated pods, and
+                _collect_fio_findings reads every one of them.
             cleanup_before_fio: If True, add an init container that removes old
                 FIO data files from the volume before FIO starts. Useful for
                 clone PVCs that inherit files from the source.
@@ -1714,9 +2680,30 @@ class K8sUtils:
         node_affinity_block = ""
         tolerations_block = ""
         node_name_line = f"      nodeName: {node_name}\n" if node_name else ""
-        if node_selector and node_name:
+        if sum(bool(x) for x in (node_name, node_selector, prefer_node)) > 1:
             raise ValueError(
-                "create_fio_job: pass node_name OR node_selector, not both")
+                "create_fio_job: pass at most one of node_name, "
+                "node_selector, prefer_node")
+        if prefer_node:
+            # Where to START, not where to stay. node_selector is a hard
+            # nodeSelector: a pod carrying one cannot be rescheduled anywhere
+            # else, so when its node goes away the Job's replacement sits
+            # Pending forever and the outage suites can never exercise the
+            # thing that matters most -- a client being moved off a dead node
+            # and getting its volume back. A preference schedules it on the
+            # same node in the normal case and lets the scheduler place it
+            # elsewhere when that node is gone.
+            node_affinity_block = (
+                "        nodeAffinity:\n"
+                "          preferredDuringSchedulingIgnoredDuringExecution:\n"
+                "          - weight: 100\n"
+                "            preference:\n"
+                "              matchExpressions:\n"
+                "              - key: kubernetes.io/hostname\n"
+                "                operator: In\n"
+                "                values:\n"
+                f"                - {prefer_node}\n"
+            )
         if node_selector:
             # nodeSelector keeps the scheduler in the loop, which a
             # WaitForFirstConsumer StorageClass requires in order to bind.
@@ -1724,7 +2711,8 @@ class K8sUtils:
                 "      nodeSelector:\n"
                 f"        kubernetes.io/hostname: {node_selector}\n")
         client_nodes_exist = (
-            not node_name and not node_selector and self.has_client_nodes())
+            not node_name and not node_selector and not prefer_node
+            and self.has_client_nodes())
         if client_nodes_exist:
             # Hard-pin FIO pods to client-role nodes
             node_affinity_block = (
@@ -1747,7 +2735,8 @@ class K8sUtils:
                 f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
                 f"pinned to client nodes (with toleration)"
             )
-        elif not node_name and not node_selector and avoid_node:
+        elif (not node_name and not node_selector and not prefer_node
+              and avoid_node):
             # No client nodes — at least avoid the primary storage node
             node_affinity_block = (
                 f"        nodeAffinity:\n"
@@ -1783,7 +2772,7 @@ class K8sUtils:
             f"  name: {job_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  backoffLimit: 0\n"
+            f"  backoffLimit: {backoff_limit}\n"
             f"  template:\n"
             f"    metadata:\n"
             f"      labels:\n"
@@ -1854,6 +2843,37 @@ class K8sUtils:
         self.logger.warning(f"[K8sUtils] Job '{job_name}' timed out after {timeout}s")
         return "timeout"
 
+    def job_active(self, job_name: str, namespace: str | None = None) -> bool:
+        """True while a Job still has a pod running.
+
+        Deliberately reads .status.active rather than asking whether the Job
+        has pods: a Job that has completed keeps its pod around in Completed
+        state, so pod existence stays true forever and anything using it as a
+        liveness signal never notices the work stopped.
+
+        An unreadable status returns True. Callers use this to decide whether
+        to relaunch, and relaunching on top of a job that is still writing is
+        worse than waiting one more cycle to find out.
+        """
+        ns = namespace or self.namespace
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl get job {job_name} -n {ns} "
+                f"-o jsonpath='{{.status.active}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+        except Exception:                                 # noqa: BLE001
+            return True
+        raw = (out or "").strip().strip("'")
+        if not raw:
+            # No active count at all: either the Job is gone or it has
+            # finished. Both mean nothing is running.
+            return False
+        try:
+            return int(raw) >= 1
+        except ValueError:
+            return True
+
     def get_job_pod_names(self, job_name: str, namespace: str | None = None) -> list:
         """Get all pod names created by a Job."""
         ns = namespace or self.namespace
@@ -1868,6 +2888,89 @@ class K8sUtils:
         """Get the first pod name created by a Job."""
         pods = self.get_job_pod_names(job_name, namespace=namespace)
         return pods[0] if pods else ""
+
+    def job_pod_node(self, job_name: str, namespace: str | None = None) -> str | None:
+        """Node hosting the Running pod of *job_name*, or None.
+
+        Deliberately only Running pods: a Job whose pod is Pending has no
+        node worth recording, and a Terminating one is already leaving.
+        """
+        ns = namespace or self.namespace
+        out, _err = self._exec_kubectl(
+            f"kubectl get pods -n {ns} --selector=job-name={job_name} "
+            f"--field-selector=status.phase=Running "
+            f"-o jsonpath='{{.items[0].spec.nodeName}}' 2>/dev/null || true",
+            supress_logs=True, timeout=120)
+        return (out or "").strip().strip("'") or None
+
+    def assert_clean_reschedule(self, job_name: str, from_node: str,
+                                timeout: int = 900,
+                                namespace: str | None = None) -> str:
+        """A Job whose node died must come back somewhere else, cleanly.
+
+        This is the assertion no k8s outage suite was making. The suites
+        either pinned FIO so hard it could not move, or kept its node out of
+        the outage list, so the single most important client-side behaviour --
+        a pod losing its node and getting its RWO volume back somewhere else
+        -- was never once exercised.
+
+        Three things have to hold, and they fail in different ways:
+
+        * a replacement is placed at all (the Job controller did its job);
+        * it is on a DIFFERENT node -- landing back on the original means the
+          node recovered before the scheduler moved anything, which is not the
+          case under test and must not be reported as though it were;
+        * nothing complained about the volume. An RWO volume whose old
+          attachment is not released leaves the new pod in ContainerCreating
+          behind "Multi-Attach error", and that is the failure this is hunting.
+
+        Slow on purpose. When a node goes NotReady rather than being drained,
+        kubernetes will not detach its RWO volumes until taint-based eviction
+        and then the force-detach timer have both elapsed -- minutes, not
+        seconds. A short timeout here would report a product failure every
+        time kubernetes was merely being patient.
+
+        Returns the new node name.
+        """
+        deadline = time.time() + timeout
+        seen = None
+        while time.time() < deadline:
+            seen = self.job_pod_node(job_name, namespace=namespace)
+            if seen and seen != from_node:
+                break
+            sleep_n_sec(10)
+        else:
+            seen = self.job_pod_node(job_name, namespace=namespace)
+
+        if not seen:
+            stuck = self.pods_stuck_on_volumes(namespace=namespace)
+            raise RuntimeError(
+                f"[reschedule] {job_name} was on {from_node}, that node went "
+                f"away, and {timeout}s later no replacement pod is Running "
+                f"anywhere. The Job controller should have placed one."
+                + (f" Pods are stuck on volumes: {stuck[:6]}" if stuck else
+                   " Nothing is stuck on a volume, so the pod is not being "
+                   "blocked by an attachment -- look at scheduling."))
+        if seen == from_node:
+            raise RuntimeError(
+                f"[reschedule] {job_name} is Running on {seen}, the same node "
+                f"the outage hit. Nothing was actually rescheduled, so this "
+                f"cycle proves nothing about moving a client off a dead node "
+                f"-- most likely the node came back before the scheduler "
+                f"acted, or the pod carries a hard nodeSelector.")
+
+        stuck = self.pods_stuck_on_volumes(namespace=namespace)
+        if stuck:
+            raise RuntimeError(
+                f"[reschedule] {job_name} moved {from_node} -> {seen}, but "
+                f"pod(s) cannot get their volume:\n    "
+                + "\n    ".join(stuck[:6])
+                + "\nAn RWO volume that does not detach from the old node in "
+                  "time leaves the replacement wedged in ContainerCreating.")
+        self.logger.info(
+            "[reschedule] %s moved %s -> %s and no pod is stuck on a volume",
+            job_name, from_node, seen)
+        return seen
 
     def get_pod_node_name(self, pod_name: str, namespace: str | None = None) -> str:
         """Return the K8s node hostname where a pod is/was scheduled."""
@@ -2083,21 +3186,34 @@ class K8sUtils:
         """
         ns = namespace or self.namespace
 
+        # v1alpha2. The older version is still served but needs the
+        # conversion webhook, and this install does not deploy one --
+        # "service simplyblock-operator-conversion-webhook-service not found"
+        # is what every v1alpha1 read and write returns. The shape differs:
+        # storageNodeRef is nodeRef, the action enum is capitalised, and
+        # targetWorkerNode/newSsdPcie moved under a migrate block.
+        action_v2 = {
+            "shutdown": "Shutdown", "restart": "Restart", "suspend": "Suspend",
+            "resume": "Resume", "remove": "Remove", "migrate": "Migrate",
+        }.get(str(action).lower(), str(action))
+
         spec_lines = (
-            f"  storageNodeRef: {storage_node_ref}\n"
-            f"  action: {action}\n"
+            f"  nodeRef: {storage_node_ref}\n"
+            f"  action: {action_v2}\n"
         )
-        if target_worker_node:
-            spec_lines += f"  targetWorkerNode: {target_worker_node}\n"
         if reattach_volume:
             spec_lines += "  reattachVolume: true\n"
-        if new_ssd_pcie:
-            spec_lines += "  newSsdPcie:\n"
-            for pcie in new_ssd_pcie:
-                spec_lines += f'    - "{pcie}"\n'
+        if target_worker_node or new_ssd_pcie:
+            spec_lines += "  migrate:\n"
+            if target_worker_node:
+                spec_lines += f"    targetWorkerNode: {target_worker_node}\n"
+            if new_ssd_pcie:
+                spec_lines += "    newSsdPcie:\n"
+                for pcie in new_ssd_pcie:
+                    spec_lines += f'      - "{pcie}"\n'
 
         yaml_content = (
-            "apiVersion: storage.simplyblock.io/v1alpha1\n"
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
             "kind: StorageNodeOps\n"
             "metadata:\n"
             f"  name: {name}\n"
@@ -2147,17 +3263,23 @@ class K8sUtils:
             )
             status = res.get("status", {})
             phase = (status.get("phase") or "").strip()
-            sub_phase = (status.get("subPhase") or "").strip()
+            # subPhase was removed in v1alpha2 and replaced by step.state;
+            # read both so the log says something on either version.
+            sub_phase = ((status.get("subPhase") or "")
+                         or (status.get("step") or {}).get("state", "")).strip()
 
             if phase == "Succeeded":
                 self.logger.info(
                     f"[K8sUtils] StorageNodeOps '{name}' Succeeded"
                 )
                 return res
-            if phase == "Failed":
+            # Aborted is a v1alpha2 addition. Left out, an aborted operation
+            # was indistinguishable from a slow one and the wait spun to its
+            # full timeout instead of failing where the cause was still legible.
+            if phase in ("Failed", "Aborted"):
                 self._dump_storage_node_ops_diagnostics(name, ns)
                 raise AssertionError(
-                    f"StorageNodeOps '{name}' failed: "
+                    f"StorageNodeOps '{name}' {phase.lower()}: "
                     f"{status.get('message', 'no message')}"
                 )
             self.logger.info(
@@ -2169,6 +3291,127 @@ class K8sUtils:
         raise TimeoutError(
             f"StorageNodeOps '{name}' did not reach Succeeded within "
             f"{timeout}s (last phase={phase})"
+        )
+
+    # ── PersistentVolumeOps: a volume move, the way k8s raises one ───────
+    #
+    # On Kubernetes nothing calls ``sbctl volume migrate``. A move is a
+    # cluster-scoped PersistentVolumeOps, and the operator performs the
+    # whole two-phase handshake itself: ``Validating`` POSTs the migration
+    # and starts one Job per CONSUMING NODE to connect and verify the
+    # target paths, ``Migrating`` continues it (which is what starts the
+    # copy), and ``Verifying`` deletes those Jobs and clears the
+    # controllers they left behind.  The spec is
+    # operator/docs/designs/crd-redesign/design-persistentvolumeops.md §5.
+    #
+    # Which is why a test must NOT connect the target paths here.  On
+    # docker the harness does it because nothing else will; doing it on
+    # k8s races the operator's own Jobs for the same paths, and
+    # ``Verifying`` exists precisely because paths a checker left behind
+    # once "outlived the Jobs, poisoned the data path, and blocked every
+    # later migration on that volume".
+    #
+    # VolumeMigration is a DIFFERENT kind and is not this one.  It is the
+    # registered/legacy spelling, kept one release for drain-on-upgrade,
+    # and operator cmd/main.go defaults --legacy-volume-migration to
+    # false -- so on a default install a VolumeMigration CR is reconciled
+    # by nobody and the move silently never happens.
+    PVO_KIND = "persistentvolumeops.storage.simplyblock.io"
+
+    def create_persistent_volume_ops(self, name: str, pv_name: str,
+                                     target_node_ref: str,
+                                     target_namespace: str | None = None):
+        """Raise a volume move as a PersistentVolumeOps.  Returns (out, err).
+
+        Cluster-scoped, unlike its StorageNodeOps sibling -- the PV it
+        names is cluster-scoped too, so there is no namespace for the
+        operation to live in.  ``targetNodeRef`` needs BOTH name and
+        namespace (the CRD marks them required): it locates a StorageNode,
+        which is namespaced.
+        """
+        ns = target_namespace or self.namespace
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: PersistentVolumeOps\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            "spec:\n"
+            "  action: Migrate\n"
+            f"  persistentVolumeName: {pv_name}\n"
+            "  migrate:\n"
+            "    targetNodeRef:\n"
+            f"      name: {target_node_ref}\n"
+            f"      namespace: {ns}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating PersistentVolumeOps '{name}': migrate "
+            f"{pv_name} -> StorageNode {ns}/{target_node_ref}"
+        )
+        return self.apply_yaml_cluster_scoped(yaml_content)
+
+    def get_persistent_volume_ops(self, name: str) -> dict:
+        """The operation as JSON, or ``{}`` when it does not exist."""
+        out, err = self._exec_kubectl(
+            f"kubectl get {self.PVO_KIND} {name} -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        text = (out or "").strip()
+        if not text or "NotFound" in (err or ""):
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:                             # noqa: BLE001
+            return {}
+
+    def list_persistent_volume_ops(self) -> list:
+        """Every operation on the cluster.  Cheap enough to poll."""
+        out, _ = self._exec_kubectl(
+            f"kubectl get {self.PVO_KIND} -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        try:
+            return json.loads((out or "").strip() or "{}").get("items", [])
+        except Exception:                             # noqa: BLE001
+            return []
+
+    def abort_persistent_volume_ops(self, name: str):
+        """Ask a running operation to stop at its next step and unwind.
+
+        Expressible from ``Validating`` and ``Migrating`` only.  Once the
+        copy has finished the volume has already moved and there is
+        nothing to undo, so the step graph rejects the edge and the
+        controller reports an IllegalTransitionError rather than leaving a
+        half-undone move.  An abort that arrives that late is therefore
+        not an error in the test -- it is the documented answer.
+        """
+        patch = '{"spec":{"abort":true}}'
+        return self._exec_kubectl(
+            f"kubectl patch {self.PVO_KIND} {name} --type merge "
+            f"-p '{patch}'"
+        )
+
+    def delete_persistent_volume_ops(self, name: str):
+        """Delete one operation.
+
+        Safe at every step that admits it, and not a way to drop paths on
+        the floor: a non-terminal object carries a finalizer that clears
+        only once "the backend migration is canceled, the Jobs are
+        deleted, no path is left connected, and the volume's lock is
+        released" (§5.1).  A finalizer that cannot finish BLOCKS the
+        delete and leaves the object with the reason in
+        ``status.message``, which is the intended outcome rather than a
+        hang to work around.
+
+        Two consequences for a test.  A delete during ``Verifying`` is
+        REFUSED by admission -- that step declares no abort edge and is
+        itself the cleanup, so there is nothing to unwind.  And a delete
+        leaves no record, so "stop it and keep the evidence" is
+        :meth:`abort_persistent_volume_ops` alone; this is only for
+        discarding it afterwards.
+        """
+        return self._exec_kubectl(
+            f"kubectl delete {self.PVO_KIND} {name} "
+            f"--ignore-not-found --wait=false"
         )
 
     def _dump_storage_node_ops_diagnostics(self, ops_name: str,
@@ -2227,73 +3470,150 @@ class K8sUtils:
 
     def patch_storage_node_add_workers(self, new_workers: list,
                                         storage_node_set_ref: str = "simplyblock-node",
-                                        namespace: str | None = None):
-        """Add worker nodes by creating StorageNode CRs directly.
+                                        namespace: str | None = None,
+                                        cluster_ref: str = "simplyblock-cluster",
+                                        timeout: int = 3600):
+        """Add worker nodes by growing the cluster through a discovery run.
 
-        For each worker, a ``StorageNode`` CR is created with
-        ``spec.overrides.expand: true``.  The operator detects the
-        new CR and handles provisioning automatically — no separate
-        ``StorageCluster`` expand patch is needed.
+        This used to create a StorageNode CR per worker with
+        ``spec.overrides.expand: true``, reading driveSizeRange and pcieModel
+        off the parent StorageNodeSet. Neither half of that still works:
 
-        Device configuration (``driveSizeRange``, ``pcieModel``) is
-        read from the parent StorageNodeSet and included in the
-        ``overrides`` block so the init container can find the correct
-        SSD devices on the new worker.
+        * The StorageNodeSet is gone. Nothing reconciles one any more, so the
+          bring-up no longer creates it and the read came back empty -- the new
+          nodes would have been created with no device selection at all.
+        * A hand-written StorageNode has no cluster. v1alpha1 has no clusterRef
+          field, and the conversion webhook derives it from a controller owner
+          reference of kind StorageCluster (controllingClusterName in
+          storagenode_conversion.go). A bare CR has no owner, so it converted
+          to a node with an empty ClusterRef, belonging to nothing.
+
+        Growing a cluster is now a second discovery naming the existing one:
+        the draft it writes carries the same clusterRef, and approving it
+        creates the nodes already marked as an expansion, which the control
+        plane reads as a request to rebalance onto them.
 
         Parameters
         ----------
         new_workers : list[str]
             Kubernetes node names to add (e.g. ``["worker-4", "worker-5"]``).
         storage_node_set_ref : str
-            Name of the parent StorageNodeSet
-            (default ``simplyblock-node``).
+            Retained for call compatibility; used only to name the objects.
         namespace : str | None
             Override namespace (default ``self.namespace``).
+        cluster_ref : str
+            The StorageCluster to grow.
+        timeout : int
+            Seconds to wait for the expansion to finish.
         """
         ns = namespace or self.namespace
+        if not new_workers:
+            self.logger.info("[K8sUtils] no workers to add")
+            return None
 
-        # Read device config from parent StorageNodeSet
-        sns_json = self.get_resource_json(
-            "storagenodeset.storage.simplyblock.io",
-            storage_node_set_ref,
-            namespace=ns,
+        suffix = "-".join(w.split(".")[0] for w in new_workers)[:30]
+        config_name = f"grow-{suffix}"
+        ops_name = f"discover-{config_name}"[:63]
+
+        worker_yaml = "".join(f"      - {w}\n" for w in new_workers)
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: OperatorOps\n"
+            "metadata:\n"
+            f"  name: {ops_name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            "  action: Discover\n"
+            "  discover:\n"
+            f"    configName: {config_name}\n"
+            f"    clusterRef: {cluster_ref}\n"
+            "    enableControlPlaneNodes: false\n"
+            "    workers:\n"
+            f"{worker_yaml}"
         )
-        sns_spec = sns_json.get("spec", {})
-        drive_size_range = sns_spec.get("driveSizeRange", "")
-        pcie_model = sns_spec.get("pcieModel", "")
-        if drive_size_range or pcie_model:
-            self.logger.info(
-                f"[K8sUtils] Read device config from StorageNodeSet "
-                f"'{storage_node_set_ref}': driveSizeRange={drive_size_range!r}, "
-                f"pcieModel={pcie_model!r}"
-            )
+        self.logger.info(
+            f"[K8sUtils] growing {cluster_ref} with {new_workers} "
+            f"via discovery '{ops_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
 
-        for worker in new_workers:
-            cr_name = f"{storage_node_set_ref}-expand-{worker}"
-            overrides = "    expand: true\n"
-            if drive_size_range:
-                overrides += f'    driveSizeRange: "{drive_size_range}"\n'
-            if pcie_model:
-                overrides += f'    pcieModel: "{pcie_model}"\n'
+        config = self._await_discovery_config(ops_name, ns, timeout=900)
+        self.approve_deployment_config(config, namespace=ns, timeout=timeout)
+        return config
 
-            yaml_content = (
-                "apiVersion: storage.simplyblock.io/v1alpha1\n"
-                "kind: StorageNode\n"
-                "metadata:\n"
-                f"  name: {cr_name}\n"
-                f"  namespace: {ns}\n"
-                "spec:\n"
-                f"  storageNodeSetRef: {storage_node_set_ref}\n"
-                f"  workerNode: {worker}\n"
-                "  socketIndex: 0\n"
-                "  overrides:\n"
-                f"{overrides}"
+    def _await_discovery_config(self, ops_name: str, namespace: str,
+                                timeout: int = 900) -> str:
+        """Wait for a Discover run to write its draft, and name it."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            res = self.get_resource_json(
+                "operatorops.storage.simplyblock.io", ops_name,
+                namespace=namespace,
             )
+            status = res.get("status", {}) if res else {}
+            ref = status.get("configRef")
+            if ref:
+                self.logger.info(
+                    f"[K8sUtils] discovery '{ops_name}' wrote "
+                    f"ClusterDeploymentConfig '{ref}'"
+                )
+                return ref
+            if status.get("phase") == "Failed":
+                raise AssertionError(
+                    f"discovery '{ops_name}' failed: "
+                    f"{status.get('message', 'no message')}"
+                )
             self.logger.info(
-                f"[K8sUtils] Creating StorageNode CR '{cr_name}' "
-                f"for worker '{worker}' (expand=true)"
+                f"[K8sUtils] waiting for discovery '{ops_name}' "
+                f"(phase={status.get('phase', '-')})"
             )
-            self.apply_yaml(yaml_content, namespace=ns)
+            time.sleep(10)
+        raise TimeoutError(
+            f"discovery '{ops_name}' wrote no config within {timeout}s")
+
+    def approve_deployment_config(self, name: str, namespace: str | None = None,
+                                  timeout: int = 3600) -> dict:
+        """Approve a draft and wait for the expansion to finish.
+
+        Approval is one way -- "approval cannot be withdrawn", and an approved
+        document is immutable -- so anything that needs editing must already
+        have been written.
+        """
+        ns = namespace or self.namespace
+        self._exec_kubectl(
+            f"kubectl patch clusterdeploymentconfigs.storage.simplyblock.io "
+            f"{name} -n {ns} --type=merge "
+            f"-p '{{\"spec\":{{\"approved\":true}}}}'"
+        )
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            res = self.get_resource_json(
+                "clusterdeploymentconfigs.storage.simplyblock.io", name,
+                namespace=ns,
+            )
+            status = res.get("status", {}) if res else {}
+            phase = status.get("phase", "")
+            step = (status.get("step") or {}).get("state", "")
+            cur = f"{phase}/{step}: {status.get('message', '')}"
+            if cur != last:
+                self.logger.info(f"[K8sUtils] {name}: {cur}")
+                last = cur
+            if phase == "Expanded":
+                self.logger.info(
+                    f"[K8sUtils] {name} expanded; "
+                    f"{len(status.get('nodeRefs') or [])} storage node(s)"
+                )
+                return res
+            if phase == "Failed":
+                raise AssertionError(
+                    f"deployment config '{name}' failed: "
+                    f"{status.get('message', 'no message')}"
+                )
+            time.sleep(15)
+        raise TimeoutError(
+            f"deployment config '{name}' did not finish within {timeout}s "
+            f"(last {last})")
 
     def patch_storage_cluster_expand(self, name: str = "simplyblock-cluster",
                                       namespace: str | None = None):
@@ -2323,6 +3643,62 @@ class K8sUtils:
         )
         out, err = self._exec_kubectl(cmd)
         return out, err
+
+    def wait_cluster_settled(self, name: str = "simplyblock-cluster",
+                             timeout: int = 1800,
+                             namespace: str | None = None) -> str:
+        """Wait for the StorageCluster to leave Rebalancing and reach Online.
+
+        Node operations are held while the cluster rebalances --
+        storagenodeops_controller.go:794, "cluster %s is rebalancing; the
+        operation resumes when it settles" -- so firing the next outage before
+        the previous one has settled does not overlap the two, it parks the new
+        operation in the gate and spends its step deadline waiting.
+
+        Waiting on the sbcli status does not catch it. A rebalancing cluster
+        reports status ``active`` and only the CR's phase says Rebalancing, so
+        the check that reads status alone sees a settled cluster and proceeds.
+        Since 2026-09-28 the phase is published, which is what makes this
+        possible at all.
+
+        Degraded is not waited out. A node that is genuinely down keeps the
+        cluster degraded indefinitely, and blocking here would turn the
+        caller's own timeout into this one; the caller has already established
+        the node it broke is back before getting here. Rebalancing is the
+        transient this exists for.
+
+        Returns the last phase seen, so a caller can log what it settled into.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl -n {ns} get storagecluster {name} "
+                f"-o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            phase = (out or "").strip()
+            if phase and phase != last:
+                self.logger.info(f"[cluster] phase: {phase}")
+                last = phase
+            if phase in ("Online", "Degraded"):
+                return phase
+            if not phase:
+                # No phase at all is an older operator that never publishes
+                # one. Returning beats blocking for the full timeout on a
+                # field that is never going to appear.
+                self.logger.info(
+                    "[cluster] no status.phase on this build; not waiting for "
+                    "the cluster to settle")
+                return ""
+            time.sleep(10)
+
+        self.logger.warning(
+            f"[cluster] still {last or 'unknown'} after {timeout}s; continuing. "
+            f"The next node operation will sit in the operator's cluster gate "
+            f"until it settles.")
+        return last
 
     def wait_spdk_pods_ready(self, expected_count: int, timeout: int = 600,
                               namespace: str | None = None) -> int:
@@ -2599,52 +3975,320 @@ class K8sUtils:
 
     # ── StorageBackup CRD operations ─────────────────────────────────────────
 
+    # ── backup, the v1alpha2 way ─────────────────────────────────────────
+    #
+    # On-demand backup is a Kubernetes operation again. It was not, for a
+    # while: v1alpha2's StorageBackup arrived as {clusterRef, backupID} --
+    # a record of a backup that already existed -- and the only kind that
+    # acted was StorageBackupOps, whose action enum held nothing but
+    # Restore. create_storage_backup raised NotImplementedError through
+    # that period rather than write a document that could not work.
+    #
+    # Manohar Reddy, 2026-10-13: "the changes related to on demand backups
+    # is merged now". StorageBackup.spec.source is the request --
+    # "Source asks for a new backup of a claim, the way a VolumeSnapshot
+    # asks" -- and storagebackup_controller.go now exists to serve it.
+    #
+    # THREE SHAPES THAT DO NOT MATCH EACH OTHER, and getting one wrong is
+    # a strict-decoding rejection rather than a warning:
+    #
+    #   StorageBackup.spec.clusterRef        STRING  (just the name)
+    #   StorageBackupPolicy.spec.clusterRef  STRING  (just the name)
+    #   StorageBackupOps.spec.clusterRef     OBJECT  {name, namespace}
+    #   StorageBackupOps.spec.backupRef      OBJECT  {name, namespace}
+    #
+    # The old BackupRestore / BackupPolicy / BackupImport kinds still
+    # exist and are still reconciled, but their controllers are named
+    # legacy_* in the operator now. New work uses the three above.
+
+    SB_KIND = "storagebackups.storage.simplyblock.io"
+    SBOPS_KIND = "storagebackupops.storage.simplyblock.io"
+    SBPOLICY_KIND = "storagebackuppolicies.storage.simplyblock.io"
+
     def create_storage_backup(self, name: str, pvc_name: str,
                               cluster_name: str = "simplyblock-cluster",
                               namespace: str | None = None):
-        """Create a StorageBackup CRD that triggers an S3 backup from a PVC."""
+        """Ask for a backup of a claim. Namespaced, and any namespace does.
+
+        ``spec.source.claimName`` names a PVC in THIS object's namespace,
+        so the backup is raised beside the claim it backs up. Only
+        policy-created backups behave differently: those always land in
+        the operator's own namespace, whatever the claim's, which dev
+        called out explicitly -- so a test that looks for a policy's
+        output in the application namespace will not find it.
+
+        source ONLY, never alongside clusterRef. The CRD rejects both:
+
+            set exactly one of source (to request a backup) or
+            clusterRef (to record one the store holds)
+
+        They are two different operations on one kind -- source asks the
+        cluster to take a backup, clusterRef adopts one the object store
+        already holds. Sending both failed validation on every create,
+        which is why all 26 backup classes failed on 20261016 without a
+        single backup being taken.
+
+        cluster_name is accepted and ignored so callers need not change;
+        the claim already determines the cluster.
+        """
         ns = namespace or self.namespace
         yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: StorageBackup\n"
-            f"metadata:\n"
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: StorageBackup\n"
+            "metadata:\n"
             f"  name: {name}\n"
             f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
-            f"  pvcRef:\n"
-            f"    name: {pvc_name}\n"
+            "spec:\n"
+            "  source:\n"
+            f"    claimName: {pvc_name}\n"
         )
         self.logger.info(
-            f"[K8sUtils] Creating StorageBackup '{name}' for PVC '{pvc_name}'"
-        )
-        self.apply_yaml(yaml_content, namespace=ns)
+            f"[K8sUtils] StorageBackup '{name}' in {ns}: backing up claim "
+            f"'{pvc_name}' on cluster '{cluster_name}'")
+        return self.apply_yaml(yaml_content, namespace=ns)
+
+    #: What a finished backup looks like. Not "Done" -- the enum is
+    #: Pending/Creating/Available/Failed, and waiting for a phase the CRD
+    #: cannot produce times out after the full budget while the backup sat
+    #: Available the whole time.
+    SB_READY = "Available"
 
     def wait_storage_backup_done(self, name: str, timeout: int = 300,
-                                  namespace: str | None = None) -> dict:
-        """Poll until StorageBackup phase is ``Done``.  Returns resource JSON."""
+                                 namespace: str | None = None) -> dict:
+        """Poll until the StorageBackup reports Available."""
         ns = namespace or self.namespace
         deadline = time.time() + timeout
+        phase = ""
         while time.time() < deadline:
-            res = self.get_resource_json("storagebackup", name, namespace=ns)
-            status = res.get("status", {})
-            phase = (status.get("phase") or "").lower()
-            if phase == "done":
-                self.logger.info(f"[K8sUtils] StorageBackup '{name}' is Done")
+            res = self.get_resource_json(self.SB_KIND, name, namespace=ns)
+            status = res.get("status") or {}
+            phase = str(status.get("phase") or "")
+            if phase == self.SB_READY:
+                bid = ((status.get("backup") or {}).get("backupID") or "?")
+                self.logger.info(
+                    f"[K8sUtils] StorageBackup '{name}' is {phase} "
+                    f"(backupID={bid})")
                 return res
-            if phase == "failed":
+            if phase == "Failed":
                 self._dump_backup_diagnostics(name, ns)
                 raise AssertionError(
-                    f"StorageBackup '{name}' failed: {status}")
+                    f"StorageBackup '{name}' failed: "
+                    f"{status.get('message') or status}")
             self.logger.info(
                 f"[K8sUtils] Waiting for StorageBackup '{name}' "
-                f"(phase={status.get('phase', 'unknown')})"
-            )
+                f"(phase={phase or 'none yet'})")
             time.sleep(10)
         self._dump_backup_diagnostics(name, ns)
         raise TimeoutError(
-            f"StorageBackup '{name}' not Done within {timeout}s"
+            f"StorageBackup '{name}' did not reach {self.SB_READY} within "
+            f"{timeout}s (last phase={phase or 'none'})")
+
+    def get_storage_backup_id(self, name: str,
+                              namespace: str | None = None) -> str:
+        """The control plane's id for a completed backup, or ""."""
+        res = self.get_resource_json(self.SB_KIND, name,
+                                     namespace=namespace or self.namespace)
+        return str(((res.get("status") or {}).get("backup")
+                    or {}).get("backupID") or "")
+
+    def list_storage_backups(self, namespace: str | None = None) -> list:
+        """Every StorageBackup in a namespace, or in all of them.
+
+        ``namespace="--all-namespaces"`` is worth having here: a policy
+        writes its backups into the operator's namespace rather than the
+        claim's, so a caller looking only where it put the claim finds
+        nothing.
+        """
+        ns = namespace or self.namespace
+        scope = ("--all-namespaces" if ns == "--all-namespaces"
+                 else f"-n {ns}")
+        out, _ = self._exec_kubectl(
+            f"kubectl get {self.SB_KIND} {scope} -o json 2>/dev/null || true",
+            supress_logs=True)
+        try:
+            return json.loads((out or "").strip() or "{}").get("items", [])
+        except Exception:                             # noqa: BLE001
+            return []
+
+    def delete_storage_backup(self, name: str, namespace: str | None = None):
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {self.SB_KIND} {name} -n {ns} "
+            f"--ignore-not-found --wait=false")
+
+    def create_storage_backup_ops_restore(
+            self, name: str, backup_name: str, claim_name: str,
+            target_pool: str, backup_namespace: str | None = None,
+            cluster_name: str = "simplyblock-cluster",
+            cluster_namespace: str | None = None,
+            namespace: str | None = None,
+            claim_labels: dict | None = None,
+            claim_annotations: dict | None = None):
+        """Restore a backup into a NEW claim, in this object's namespace.
+
+        The restore lands where the StorageBackupOps lives, which is what
+        makes cross-namespace restore expressible: the backup is named
+        with its own namespace in ``backupRef``, and the claim is created
+        in the operation's.
+
+        ``clusterRef`` and ``backupRef`` are OBJECTS here even though
+        StorageBackup spells the same word as a plain string. Passing a
+        string is worse than an error: the operator's own startup check
+        treats a string ref as "the old format", refuses to start the
+        StorageBackupOps controller at all, and logs
+        "StorageBackupOps controller not started: these operations use the
+        old string..." -- so one stale object disables every restore in
+        the cluster, not just its own.
+        """
+        ns = namespace or self.namespace
+        b_ns = backup_namespace or ns
+        c_ns = cluster_namespace or self.namespace
+
+        def _block(label, d):
+            if not d:
+                return ""
+            out = f"    {label}:\n"
+            for k, v in d.items():
+                out += f"      {k}: \"{v}\"\n"
+            return out
+
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: StorageBackupOps\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            "  action: Restore\n"
+            "  clusterRef:\n"
+            f"    name: {cluster_name}\n"
+            f"    namespace: {c_ns}\n"
+            "  backupRef:\n"
+            f"    name: {backup_name}\n"
+            f"    namespace: {b_ns}\n"
+            "  restore:\n"
+            f"    claimName: {claim_name}\n"
+            f"    targetPool: {target_pool}\n"
+            + _block("claimLabels", claim_labels)
+            + _block("claimAnnotations", claim_annotations)
         )
+        self.logger.info(
+            f"[K8sUtils] StorageBackupOps '{name}' in {ns}: restore "
+            f"{b_ns}/{backup_name} -> claim '{claim_name}' in pool "
+            f"'{target_pool}'")
+        return self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_storage_backup_ops_done(self, name: str, timeout: int = 600,
+                                     namespace: str | None = None) -> dict:
+        """Poll until a StorageBackupOps reports Succeeded."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        phase = ""
+        while time.time() < deadline:
+            res = self.get_resource_json(self.SBOPS_KIND, name, namespace=ns)
+            status = res.get("status") or {}
+            phase = str(status.get("phase") or "")
+            step = str((status.get("step") or {}).get("state") or "")
+            if phase == "Succeeded":
+                self.logger.info(
+                    f"[K8sUtils] StorageBackupOps '{name}' Succeeded "
+                    f"(claim={status.get('claimName')}, "
+                    f"pv={status.get('persistentVolumeName')})")
+                return res
+            if phase in ("Failed", "Aborted"):
+                self._dump_backup_diagnostics(name, ns)
+                raise AssertionError(
+                    f"StorageBackupOps '{name}' {phase}: "
+                    f"{status.get('message') or status}")
+            self.logger.info(
+                f"[K8sUtils] Waiting for StorageBackupOps '{name}' "
+                f"(phase={phase or 'none yet'}, step={step or '-'})")
+            time.sleep(10)
+        self._dump_backup_diagnostics(name, ns)
+        raise TimeoutError(
+            f"StorageBackupOps '{name}' did not succeed within {timeout}s "
+            f"(last phase={phase or 'none'})")
+
+    def delete_storage_backup_ops(self, name: str,
+                                  namespace: str | None = None):
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {self.SBOPS_KIND} {name} -n {ns} "
+            f"--ignore-not-found --wait=false")
+
+    def legacy_storage_backup_ops(self) -> list:
+        """Ops written in the OLD string-ref format, which disable restore.
+
+        The operator refuses to start its StorageBackupOps controller when
+        any of these exist, cluster-wide. One left behind by an older run
+        means every restore in the next run hangs in Pending with nothing
+        obviously wrong, so a lane should check for them and say so rather
+        than wait out its timeout.
+        """
+        out, _ = self._exec_kubectl(
+            f"kubectl get {self.SBOPS_KIND} --all-namespaces -o json "
+            f"2>/dev/null || true", supress_logs=True)
+        try:
+            items = json.loads((out or "").strip() or "{}").get("items", [])
+        except Exception:                             # noqa: BLE001
+            return []
+        bad = []
+        for it in items:
+            spec = it.get("spec") or {}
+            if isinstance(spec.get("backupRef"), str) or \
+                    isinstance(spec.get("clusterRef"), str):
+                m = it.get("metadata") or {}
+                bad.append(f"{m.get('namespace')}/{m.get('name')}")
+        return bad
+
+    def create_storage_backup_policy(
+            self, name: str, cluster_name: str = "simplyblock-cluster",
+            schedule: str | None = None, max_versions: int | None = None,
+            max_age: str | None = None,
+            match_labels: dict | None = None,
+            namespace: str | None = None):
+        """A scheduled policy over a claim SELECTOR, not a named claim.
+
+        Two differences from the legacy BackupPolicy that a test has to
+        know. The policy picks its claims with ``claimSelector`` rather
+        than being annotated onto one; and whatever namespace the claims
+        live in, the StorageBackups it produces are created in the
+        OPERATOR's namespace. Dev, 2026-10-13: "the StorageBackup created
+        by backup policies behaviour is unchanged, they are always getting
+        created in operator namespace which is: simplyblock".
+        """
+        ns = namespace or self.namespace
+        body = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: StorageBackupPolicy\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            f"  clusterRef: {cluster_name}\n"
+        )
+        if schedule:
+            body += f"  schedule: \"{schedule}\"\n"
+        if max_versions is not None:
+            body += f"  maxVersions: {max_versions}\n"
+        if max_age:
+            body += f"  maxAge: \"{max_age}\"\n"
+        if match_labels:
+            body += "  claimSelector:\n    matchLabels:\n"
+            for k, v in match_labels.items():
+                body += f"      {k}: \"{v}\"\n"
+        self.logger.info(
+            f"[K8sUtils] StorageBackupPolicy '{name}': schedule={schedule} "
+            f"maxVersions={max_versions} maxAge={max_age} "
+            f"selector={match_labels}")
+        return self.apply_yaml(body, namespace=ns)
+
+    def delete_storage_backup_policy(self, name: str,
+                                     namespace: str | None = None):
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {self.SBPOLICY_KIND} {name} -n {ns} "
+            f"--ignore-not-found --wait=false")
 
     def _dump_backup_diagnostics(self, backup_name: str,
                                   namespace: str) -> None:
@@ -2706,110 +4350,91 @@ class K8sUtils:
         except Exception as e:
             self.logger.warning(f"[backup-diag] tasks pod logs failed: {e}")
 
-    def get_storage_backup_id(self, name: str,
-                               namespace: str | None = None) -> str:
-        """Return the backupId from a StorageBackup's status field."""
-        ns = namespace or self.namespace
-        res = self.get_resource_json("storagebackup", name, namespace=ns)
-        return res.get("status", {}).get("backupId", "")
+    def find_storage_backup_by_id(self, backup_id: str) -> tuple:
+        """(name, namespace) of the StorageBackup holding *backup_id*.
 
-    def list_storage_backups(self, namespace: str | None = None) -> list:
-        """List all StorageBackup resources.  Returns list of resource dicts."""
-        ns = namespace or self.namespace
-        out, _ = self._exec_kubectl(
-            f"kubectl get storagebackup -n {ns} -o json 2>/dev/null || true",
-            supress_logs=True,
-        )
-        try:
-            data = json.loads(out.strip()) if out.strip() else {}
-            return data.get("items", [])
-        except Exception:
-            return []
+        Searched across ALL namespaces on purpose. A backup taken on
+        demand lives beside its claim, but one a policy took lives in the
+        operator's namespace whatever the claim's -- so looking only where
+        the claim is finds half of them.
 
-    def delete_storage_backup(self, name: str, namespace: str | None = None):
-        """Delete a StorageBackup CRD."""
-        ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting StorageBackup '{name}'")
-        self.delete_resource("storagebackup", name, namespace=ns)
-
-    # ── BackupRestore CRD operations ─────────────────────────────────────────
+        Returns (None, None) when nothing matches, which is the caller's
+        cue that the id is a control-plane id with no Kubernetes object
+        behind it: backups taken through sbcli, or through a policy on a
+        cluster this operator did not import, have none.
+        """
+        for item in self.list_storage_backups(namespace="--all-namespaces"):
+            st = item.get("status") or {}
+            if str((st.get("backup") or {}).get("backupID") or "") == str(backup_id):
+                m = item.get("metadata") or {}
+                return m.get("name"), m.get("namespace")
+        return None, None
 
     def create_backup_restore(self, name: str, backup_ref_name: str,
-                              pvc_name: str, pvc_size: str,
+                              pvc_name: str, pvc_size: str = "",
                               cluster_name: str = "simplyblock-cluster",
                               storage_class: str | None = None,
                               target_pool: str | None = None,
                               namespace: str | None = None):
-        """Create a BackupRestore CRD to restore a backup into a new PVC."""
-        ns = namespace or self.namespace
-        sc_line = ""
-        if storage_class:
-            sc_line = f"      storageClassName: {storage_class}\n"
-        pool_line = ""
-        if target_pool:
-            pool_line = f"  targetPool: {target_pool}\n"
-        yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: BackupRestore\n"
-            f"metadata:\n"
-            f"  name: {name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
-            f"{pool_line}"
-            f"  backupRef:\n"
-            f"    name: {backup_ref_name}\n"
-            f"  pvcTemplate:\n"
-            f"    metadata:\n"
-            f"      name: {pvc_name}\n"
-            f"    spec:\n"
-            f"      accessModes:\n"
-            f"      - ReadWriteOnce\n"
-            f"      resources:\n"
-            f"        requests:\n"
-            f"          storage: {pvc_size}\n"
-            f"{sc_line}"
-        )
-        self.logger.info(
-            f"[K8sUtils] Creating BackupRestore '{name}' from backup "
-            f"'{backup_ref_name}' -> PVC '{pvc_name}'"
-        )
-        self.apply_yaml(yaml_content, namespace=ns)
+        """Restore a backup into a new claim. Now a StorageBackupOps.
 
-    def wait_backup_restore_done(self, name: str, timeout: int = 300,
-                                  namespace: str | None = None) -> dict:
-        """Poll until BackupRestore phase is ``Done``.
+        The signature is the old BackupRestore one and the call sites are
+        unchanged, but the object written is the v1alpha2 kind. Three
+        things do not map one-to-one and are handled here rather than at
+        fourteen call sites:
 
-        Phases: InProgress -> PVCBinding -> Done
-        Returns resource JSON.
+        * ``backup_ref_name`` is passed a control-plane backup ID by every
+          caller in this suite, while StorageBackupOps.backupRef names a
+          StorageBackup OBJECT. An id is looked up; a name is used as
+          given.
+        * ``pvc_size`` and ``storage_class`` have no counterpart. The
+          operator creates the claim itself, sized from the backup. They
+          are accepted and ignored so the call sites keep compiling, and
+          logged once so nobody thinks they took effect.
+        * ``target_pool`` is now REQUIRED by the CRD. A restore without
+          one is refused at admission rather than failing later.
         """
         ns = namespace or self.namespace
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            res = self.get_resource_json("backuprestore", name, namespace=ns)
-            phase = (res.get("status", {}).get("phase") or "").lower()
-            if phase == "done":
-                self.logger.info(f"[K8sUtils] BackupRestore '{name}' is Done")
-                return res
-            if phase == "failed":
-                raise AssertionError(
-                    f"BackupRestore '{name}' failed: {res.get('status')}")
+        if not target_pool:
+            raise ValueError(
+                f"restore '{name}': target_pool is required by "
+                f"StorageBackupOps.spec.restore and has no default -- the "
+                f"operator will not guess which pool to restore into")
+        if pvc_size or storage_class:
             self.logger.info(
-                f"[K8sUtils] Waiting for BackupRestore '{name}' "
-                f"(phase={res.get('status', {}).get('phase', 'unknown')})"
-            )
-            time.sleep(10)
-        raise TimeoutError(
-            f"BackupRestore '{name}' not Done within {timeout}s"
-        )
+                "[K8sUtils] restore '%s': pvc_size=%r and storage_class=%r "
+                "are ignored; the operator sizes the claim from the backup "
+                "and places it with targetPool", name, pvc_size,
+                storage_class)
+
+        backup_name, backup_ns = backup_ref_name, ns
+        found, found_ns = self.find_storage_backup_by_id(backup_ref_name)
+        if found:
+            backup_name, backup_ns = found, found_ns
+            self.logger.info(
+                "[K8sUtils] restore '%s': backup id %s is StorageBackup "
+                "%s/%s", name, backup_ref_name, found_ns, found)
+        else:
+            self.logger.info(
+                "[K8sUtils] restore '%s': no StorageBackup carries id %r, "
+                "treating it as an object name in %s. If this is a "
+                "control-plane id with no Kubernetes object behind it -- an "
+                "sbcli backup, say -- the operation will not resolve it.",
+                name, backup_ref_name, ns)
+
+        return self.create_storage_backup_ops_restore(
+            name=name, backup_name=backup_name, claim_name=pvc_name,
+            target_pool=target_pool, backup_namespace=backup_ns,
+            cluster_name=cluster_name, namespace=ns)
+
+    def wait_backup_restore_done(self, name: str, timeout: int = 300,
+                                 namespace: str | None = None) -> dict:
+        """Wait for a restore. Now a StorageBackupOps, same signature."""
+        return self.wait_storage_backup_ops_done(
+            name, timeout=timeout, namespace=namespace)
 
     def delete_backup_restore(self, name: str, namespace: str | None = None):
-        """Delete a BackupRestore CRD."""
-        ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting BackupRestore '{name}'")
-        self.delete_resource("backuprestore", name, namespace=ns)
-
-    # ── BackupImport CRD operations ──────────────────────────────────────────
+        return self.delete_storage_backup_ops(name, namespace=namespace)
 
     def create_backup_import(self, name: str,
                               source_cluster_name: str,
@@ -2882,65 +4507,84 @@ class K8sUtils:
 
     # ── BackupPolicy CRD operations ──────────────────────────────────────────
 
+    #: The label a policy selects its claims by. The API has no opinion --
+    #: claimSelector is a plain label selector and the published example
+    #: uses "backup: nightly" -- so the suite fixes one key and puts the
+    #: policy's own name in the value. That keeps attach/detach a one-line
+    #: label edit and keeps two policies in one namespace from selecting
+    #: each other's claims.
+    BACKUP_POLICY_LABEL = "backup"
+
     def create_backup_policy(self, name: str,
                              cluster_name: str = "simplyblock-cluster",
                              max_versions: int = 0, max_age: str = "",
                              schedule: str = "", namespace: str | None = None):
-        """Create a BackupPolicy CRD."""
-        ns = namespace or self.namespace
-        spec_lines = f"  clusterName: {cluster_name}\n"
-        if max_versions:
-            spec_lines += f"  maxVersions: {max_versions}\n"
-        if max_age:
-            spec_lines += f'  maxAge: "{max_age}"\n'
-        if schedule:
-            spec_lines += f'  schedule: "{schedule}"\n'
-        yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: BackupPolicy\n"
-            f"metadata:\n"
-            f"  name: {name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"{spec_lines}"
-        )
-        self.logger.info(f"[K8sUtils] Creating BackupPolicy '{name}'")
-        self.apply_yaml(yaml_content, namespace=ns)
+        """Create a backup policy. Now a v1alpha2 StorageBackupPolicy.
 
-    def delete_backup_policy(self, name: str, namespace: str | None = None):
-        """Delete a BackupPolicy CRD."""
-        ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting BackupPolicy '{name}'")
-        self.delete_resource("backuppolicy", name, namespace=ns)
+        Same signature as the legacy BackupPolicy helper, so the call
+        sites are unchanged, but three things about the new kind change
+        what a test can do with it:
 
-    # ── PVC annotation helpers ───────────────────────────────────────────────
+        * claims attach by LABEL, not by an annotation naming the policy.
+          annotate_pvc_backup_policy() does that instead now.
+        * ``schedule``, ``maxVersions`` and ``maxAge`` are IMMUTABLE. A
+          different schedule needs a new policy; editing one is refused.
+        * a policy selects claims in its own namespace only, which is the
+          StorageCluster's namespace -- and the StorageBackups it produces
+          are created in the operator's namespace whatever the claim's.
+
+        An absent claimSelector selects NOTHING and is reported with a
+        SelectorEmpty event, while ``{}`` selects every claim. The
+        selector is therefore always written, so a policy created here is
+        never accidentally the second of those.
+        """
+        ns = namespace or self.namespace
+        return self.create_storage_backup_policy(
+            name=name, cluster_name=cluster_name, schedule=schedule or None,
+            max_versions=max_versions or None, max_age=max_age or None,
+            match_labels={self.BACKUP_POLICY_LABEL: name}, namespace=ns)
 
     def annotate_pvc_backup_policy(self, pvc_name: str, policy_name: str,
-                                    namespace: str | None = None):
-        """Attach a BackupPolicy to a PVC via annotation."""
+                                   namespace: str | None = None):
+        """Attach a claim to a policy. A LABEL now, despite the name.
+
+        The name is kept so the call sites do not move. The legacy kind
+        read an annotation naming the policy; StorageBackupPolicy selects
+        on labels, so attaching is "kubectl label pvc <claim>
+        backup=<policy>" and detaching is removing it. Existing backups
+        survive both.
+        """
         ns = namespace or self.namespace
         self.logger.info(
-            f"[K8sUtils] Annotating PVC '{pvc_name}' with "
-            f"backup-policy='{policy_name}'"
-        )
-        self._exec_kubectl(
-            f"kubectl annotate pvc {pvc_name} -n {ns} "
-            f"simplybk/backup-policy={policy_name} --overwrite"
-        )
+            f"[K8sUtils] attaching PVC '{pvc_name}' to policy "
+            f"'{policy_name}' via label "
+            f"{self.BACKUP_POLICY_LABEL}={policy_name}")
+        return self._exec_kubectl(
+            f"kubectl label pvc {pvc_name} -n {ns} "
+            f"{self.BACKUP_POLICY_LABEL}={policy_name} --overwrite")
 
     def remove_pvc_backup_policy_annotation(self, pvc_name: str,
-                                             namespace: str | None = None):
-        """Remove BackupPolicy annotation from a PVC."""
+                                            namespace: str | None = None):
+        """Detach a claim from its policy by removing the label."""
         ns = namespace or self.namespace
-        self.logger.info(
-            f"[K8sUtils] Removing backup-policy annotation from PVC "
-            f"'{pvc_name}'"
-        )
-        self._exec_kubectl(
-            f"kubectl annotate pvc {pvc_name} -n {ns} simplybk/backup-policy-"
-        )
+        return self._exec_kubectl(
+            f"kubectl label pvc {pvc_name} -n {ns} "
+            f"{self.BACKUP_POLICY_LABEL}- 2>/dev/null || true")
 
-    # ── Utility pod operations (checksums) ───────────────────────────────────
+    def delete_backup_policy(self, name: str, namespace: str | None = None):
+        return self.delete_storage_backup_policy(name, namespace=namespace)
+
+    def storage_backup_policy_status(self, name: str,
+                                     namespace: str | None = None) -> dict:
+        """attachedClaims and lastBackupAt, which is how a test knows the
+        policy actually picked a claim up rather than silently selecting
+        nothing."""
+        res = self.get_resource_json(self.SBPOLICY_KIND, name,
+                                     namespace=namespace or self.namespace)
+        st = res.get("status") or {}
+        return {"phase": st.get("phase"),
+                "attachedClaims": st.get("attachedClaims") or [],
+                "lastBackupAt": st.get("lastBackupAt")}
 
     def create_utility_pod(self, pod_name: str, pvc_name: str,
                            mount_path: str = "/spdkvol",
@@ -3054,13 +4698,91 @@ class K8sUtils:
             f"Pod '{pod_name}' not Running within {timeout}s"
         )
 
+    def csi_node_pod(self, node_name: str) -> tuple:
+        """The CSI node-plugin pod on *node_name*, as (pod, container).
+
+        It is the window onto a worker's own NVMe fabric.  The node plugin
+        already mounts the host's ``/sys`` -- that is how it finds the
+        devices it attaches -- so reading a subsystem's ANA state through
+        it needs no privileged pod of our own, and nothing is created or
+        scheduled to take a reading.
+
+        Returns ``(None, None)`` rather than raising: a missing plugin pod
+        makes a diagnostic unavailable, and a diagnostic must never be the
+        thing that fails a run.
+        """
+        ns = self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pods -n {ns} --no-headers -o custom-columns="
+            f"NAME:.metadata.name,NODE:.spec.nodeName,"
+            f"PHASE:.status.phase 2>/dev/null || true",
+            supress_logs=True,
+        )
+        pod = None
+        for line in (out or "").splitlines():
+            cols = line.split()
+            if len(cols) < 3:
+                continue
+            name, node, phase = cols[0], cols[1], cols[2]
+            low = name.lower()
+            if node != node_name or phase != "Running":
+                continue
+            if "csi" in low and "node" in low:
+                pod = name
+                break
+        if not pod:
+            self.logger.warning(
+                "[K8sUtils] no running CSI node pod on %s; the host's NVMe "
+                "fabric cannot be read from here", node_name)
+            return None, None
+        # Pick the container that actually has the host mounts rather than
+        # a registrar or liveness sidecar, which do not.
+        out, _ = self._exec_kubectl(
+            f"kubectl get pod {pod} -n {ns} -o jsonpath="
+            f"'{{range .spec.containers[*]}}{{.name}}{{\"\\n\"}}{{end}}' "
+            f"2>/dev/null || true",
+            supress_logs=True,
+        )
+        names = [c.strip() for c in (out or "").splitlines() if c.strip()]
+        container = next((c for c in names
+                          if "csi" in c.lower() and "node" in c.lower()),
+                         None) or next(
+            (c for c in names if "registrar" not in c.lower()
+             and "liveness" not in c.lower()), None)
+        return pod, container
+
+    def exec_in_pod_container(self, pod_name: str, container: str,
+                              command: str, namespace: str | None = None,
+                              timeout: int = 15) -> str:
+        """Run *command* in one container of a pod. Returns stdout only.
+
+        The default timeout is short because the caller for this is a
+        periodic sampler: one that blocks stops sampling during whatever
+        it was watching, and a gap in the samples reads as "nothing
+        happened" rather than as a gap.
+        """
+        ns = namespace or self.namespace
+        c = f"-c {container} " if container else ""
+        out, _ = self._exec_kubectl(
+            f"kubectl exec -n {ns} {pod_name} {c}-- sh -c "
+            f"{shlex.quote(command)} 2>/dev/null || true",
+            supress_logs=True, timeout=timeout,
+        )
+        return out or ""
+
     def exec_in_pod(self, pod_name: str, command: str,
-                    namespace: str | None = None) -> tuple:
-        """Execute a command inside a running pod.  Returns (stdout, stderr)."""
+                    namespace: str | None = None, timeout: int = 300) -> tuple:
+        """Execute a command inside a running pod.  Returns (stdout, stderr).
+
+        timeout is exposed because a raw-device FIO verify runs for minutes and
+        the 300s default would cut it off mid-run, which reads as a failure of
+        the storage rather than of the harness.
+        """
         ns = namespace or self.namespace
         return self._exec_kubectl(
             f"kubectl exec {pod_name} -n {ns} -- "
-            f"sh -c {shlex.quote(command)}"
+            f"sh -c {shlex.quote(command)}",
+            timeout=timeout
         )
 
     def find_files_in_pvc(self, pod_name: str,
@@ -3116,13 +4838,35 @@ class K8sUtils:
     def operator_storage_class_name(self, pool_crd_name: str,
                                     cluster_cr_name: str | None = None,
                                     namespace: str | None = None) -> str:
-        """Return the StorageClass name the operator generates for a pool.
+        """Return the StorageClass the operator generated for a pool.
 
-        Documented format: ``simplyblock-{namespace}-{clusterName}-{poolName}``
-        where poolName is the StoragePool CRD's metadata.name. Verified on
-        OpenShift 2026-09-04.
+        Read from the pool, not derived. This built
+        ``simplyblock-{namespace}-{clusterName}-{poolName}``, which is one
+        segment longer than what the operator now writes -- DefaultStorageClassName
+        (pool/assignment.go:87) returns ``"simplyblock-" + namespace + "-" +
+        clusterName`` with no pool segment -- so every caller was handed a class
+        that does not exist, and the PVCs, snapshots and clones that referenced
+        it never bound.
+
+        Deriving it at all was the mistake, and the operator says so: the name is
+        derived "only because the operator has to choose one, and nothing reads
+        it back: the pool records what was written in
+        status.defaultStorageClassName". So that is what this reads. An authored
+        class can be called anything, which no derivation could ever have found.
+
+        Falls back to the current derivation only if the pool has no status yet,
+        and says so, rather than returning a name nothing will match.
         """
         ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl -n {ns} get storagepool {pool_crd_name} "
+            f"-o jsonpath='{{.status.defaultStorageClassName}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        sc = (out or "").strip()
+        if sc:
+            return sc
+
         if not cluster_cr_name:
             out, _ = self._exec_kubectl(
                 f"kubectl get storageclusters -n {ns} --no-headers "
@@ -3131,7 +4875,14 @@ class K8sUtils:
             )
             names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
             cluster_cr_name = names[0] if names else "simplyblock-cluster"
-        return f"simplyblock-{ns}-{cluster_cr_name}-{pool_crd_name}"
+        fallback = f"simplyblock-{ns}-{cluster_cr_name}"
+        self.logger.warning(
+            f"[pool] StoragePool '{pool_crd_name}' has no "
+            f"status.defaultStorageClassName yet; guessing '{fallback}'. If the "
+            f"PVC does not bind, the pool had not been reconciled when this was "
+            f"read."
+        )
+        return fallback
 
     def wait_storage_class_exists(self, sc_name: str, timeout: int = 300) -> bool:
         """Wait for the operator to generate *sc_name*."""
@@ -3524,7 +5275,9 @@ class K8sSbcliUtils:
     def get_lvol_details(self, lvol_id):
         """Return ``[{uuid, lvol_name, node_id, nqn, status, ...}]``."""
         raw = self._run(f"{self.sbcli_cmd} lvol get {lvol_id} --json")
-        data = json.loads(raw)
+        data = self._json_or_empty(raw, f"lvol get {lvol_id}")
+        if not data:
+            return []
         return data if isinstance(data, list) else [data]
 
     def get_lvol_connect_str(self, lvol_name):
@@ -3631,7 +5384,16 @@ class K8sSbcliUtils:
         lvols = self.list_lvols()
         for name, lvol_id in lvols.items():
             details = self.get_lvol_details(lvol_id)
-            if details and details[0].get("cloned_from_snap"):
+            # isinstance, not truthiness. get_lvol_details does not always
+            # hand back a list of dicts -- a failed or empty read can come
+            # back with a bool in the first slot, and `details[0].get(...)`
+            # then raises "'bool' object has no attribute 'get'" out of
+            # teardown, which is where it was seen: run 38248680886 lost
+            # its clone cleanup twice that way. Teardown is the one place
+            # that must not throw, because it runs after a failure and its
+            # exception replaces the one worth reading.
+            row = details[0] if isinstance(details, (list, tuple)) and details else None
+            if isinstance(row, dict) and row.get("cloned_from_snap"):
                 self.logger.info(f"Deleting clone lvol: {name}")
                 try:
                     self.delete_lvol(lvol_name=name, skip_error=True)
@@ -3659,14 +5421,42 @@ class K8sSbcliUtils:
         for item in items:
             uuid = item["UUID"]
             detail_raw = self._run(f"{self.sbcli_cmd} sn get {uuid}")
-            detail = json.loads(detail_raw)
-            results.append(detail)
+            detail = self._json_or_empty(detail_raw, f"sn get {uuid}")
+            if detail:
+                results.append(detail)
         return {"results": results}
+
+    def _json_or_empty(self, raw, what):
+        """Parse sbctl output that is normally JSON, tolerating that it is not.
+
+        _run_json already does this for --json commands; these callers
+        did not, and a control plane that answers with an empty string
+        or a traceback is not an exceptional condition -- run
+        20261014-184128 lost two whole classes to it. Node 0f28a2bb was
+        stuck in_restart, `sbctl sn get` returned nothing, and the bare
+        json.loads raised JSONDecodeError out of a status poll, which
+        reads as a harness crash rather than as the node still being
+        down. An empty list says "could not read it", which is what the
+        callers already handle.
+        """
+        text = (raw or "").strip()
+        if not text:
+            self.logger.warning("[%s] empty output; treating as no result",
+                                what)
+            return []
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            self.logger.warning("[%s] not JSON (%s); raw=%r", what, exc,
+                                text[:200])
+            return []
 
     def get_storage_node_details(self, storage_node_id):
         """Return ``[{uuid, mgmt_ip, status, ...}]``."""
         raw = self._run(f"{self.sbcli_cmd} sn get {storage_node_id}")
-        data = json.loads(raw)
+        data = self._json_or_empty(raw, f"sn get {storage_node_id}")
+        if not data:
+            return []
         return data if isinstance(data, list) else [data]
 
     def get_management_nodes(self):
@@ -3704,6 +5494,20 @@ class K8sSbcliUtils:
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn restart {node_uuid}{force_flag}")
 
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
+        """Wait for *node_id* to reach *status*.
+
+        Careful with *timeout*: it counts POLLS, not seconds. Each pass costs
+        an ``sbctl`` exec into the admin pod -- about 4.5s against this lab --
+        plus the 1s sleep below, so ``timeout=600`` waits something closer to
+        54 minutes than to 10. The message on the way out reports the real
+        elapsed time so the two numbers cannot be confused again.
+
+        Left as polls rather than quietly redefined: 161 call sites pass this,
+        95 of them taking the default, and every one of those values was tuned
+        against the behaviour as it is. Changing the unit here would shorten
+        every wait in the suite roughly fivefold in one go.
+        """
+        started = time.time()
         actual_status = None
         status_list = status if isinstance(status, list) else [status]
         while timeout > 0:
@@ -3725,7 +5529,8 @@ class K8sSbcliUtils:
             timeout -= 1
         raise TimeoutError(
             f"Timed out waiting for node status, {node_id}, "
-            f"Expected: {status_list}, Actual: {actual_status}"
+            f"Expected: {status_list}, Actual: {actual_status} "
+            f"(waited {time.time() - started:.0f}s)"
         )
 
     def is_secondary_node(self, node_id):
@@ -3773,6 +5578,51 @@ class K8sSbcliUtils:
     def get_storage_pool_id(self, pool_name):
         return self.list_storage_pools().get(pool_name)
 
+    def _storage_pool_crds(self, ns):
+        """The StoragePool CRs in *ns*, or [] if they cannot be read.
+
+        Unreadable is treated as none deliberately: the callers use this to
+        decide whether a backend pool is reachable from k8s, and guessing yes
+        on a failed kubectl is how a pool with no CR gets handed out again.
+        """
+        raw, _ = self.k8s._exec_kubectl(
+            f"kubectl get storagepools -n {ns} -o json 2>/dev/null || true")
+        if not (raw or "").strip():
+            return []
+        try:
+            return json.loads(raw).get("items", []) or []
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            return []
+
+    def _pool_of_crd(self, crd, existing):
+        """The backend pool a StoragePool CR reconciled into, or None.
+
+        The operator sets the backend name, which "may differ from the CRD
+        metadata.name" -- so the CR's own status is asked first and the name
+        is only a fallback. A CR that has not reconciled into any pool
+        ``sbcli pool list`` reports is not a pool anything can be provisioned
+        from, and None says so rather than inventing one.
+        """
+        meta = crd.get("metadata") or {}
+        status = crd.get("status") or {}
+        for candidate in (status.get("poolName"), status.get("name"),
+                          meta.get("name")):
+            if candidate and candidate in existing:
+                return candidate
+        return None
+
+    def _pools_with_crd(self, ns, existing):
+        """*existing* narrowed to the pools a StoragePool CR backs, in order.
+
+        Order is preserved because callers pick positionally and a stable pick
+        keeps a shared pool shared across the classes in a run.
+        """
+        crds = self._storage_pool_crds(ns)
+        backed = {name for name in
+                  (self._pool_of_crd(crd, existing) for crd in crds)
+                  if name}
+        return {name: uuid for name, uuid in existing.items() if name in backed}
+
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
                          max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None,
                          storage_class_parameters=None):
@@ -3798,8 +5648,38 @@ class K8sSbcliUtils:
         # arbitrary existing pool silently gives it the wrong one. That is how
         # a "non-DHCHAP pool" request came back as the DHCHAP pool, whose
         # StorageClass carries dhchap_node_label.
-        if existing and not dhchap and not allowed_nodes and not storage_class_parameters:
-            actual = next(iter(existing))
+        # ...and only a pool the CSI driver can actually resolve. "Exists in
+        # the control plane" is not the same as "usable from k8s": the driver
+        # resolves a pool through its StoragePool CR, so a backend pool with
+        # no CR in this namespace provisions nothing --
+        #
+        #   failed to resolve pool "encryption-pool":
+        #   pool "encryption-pool" not found
+        #
+        # -- and every PVC the test makes stays Pending. Two pools on this lab
+        # are exactly that. encryption-pool is created by the workflow only
+        # when tls_enabled is true, but survives in the control plane after a
+        # TLS run, so a later non-TLS run finds it listed with no CR behind
+        # it; and simplyblock-cluster-default is the cluster's own pool, which
+        # never had a CR at all. Both sort before simplyblock-pool, and the
+        # pick below is positional, so the backup lane took encryption-pool on
+        # every class.
+        usable = self._pools_with_crd(ns, existing)
+        if existing and not usable:
+            self.logger.warning(
+                "[pool] %d backend pool(s) exist but none has a StoragePool "
+                "CR in '%s': %s. Creating one rather than handing back a pool "
+                "the CSI driver cannot resolve.",
+                len(existing), ns, list(existing))
+        if usable and not dhchap and not allowed_nodes and not storage_class_parameters:
+            # The general-purpose pool by name, not whichever one the control
+            # plane listed first. A caller on this path asked for nothing in
+            # particular, and on a TLS run the first pool alphabetically is
+            # encryption-pool -- a pool that exists to be bound to encrypted
+            # StorageClasses. Handing it to every caller would make the pool a
+            # test runs against depend on whether TLS happened to be on.
+            actual = ("simplyblock-pool" if "simplyblock-pool" in usable
+                      else next(iter(usable)))
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
@@ -3823,18 +5703,32 @@ class K8sSbcliUtils:
             matched = False
             for crd in crds:
                 spec = crd.get("spec", {})
-                wanted_scp = {
-                    k: ("true" if v is True else "false" if v is False else str(v))
-                    for k, v in (storage_class_parameters or {}).items()
+                # Against volumeDefaults, which is where both dhchap and
+                # storageClassParameters went. Comparing the old names made
+                # this match anything: spec.get("dhchap") and
+                # spec.get("storageClassParameters") are absent on every
+                # v1alpha2 pool, so the test reduced to {} == {} and True ==
+                # True, and a caller asking for an encrypted DHCHAP pool was
+                # handed whichever pool happened to exist.
+                wanted_vd = {
+                    k: _as_yaml_scalar(v) for k, v in
+                    pool_volume_defaults(dhchap, storage_class_parameters).items()
                 }
-                have_scp = {
-                    k: ("true" if v is True else "false" if v is False else str(v))
-                    for k, v in (spec.get("storageClassParameters") or {}).items()
+                have_vd = {
+                    k: _as_yaml_scalar(v)
+                    for k, v in (spec.get("volumeDefaults") or {}).items()
                 }
-                if (bool(spec.get("dhchap")) == bool(dhchap)
-                        and sorted(spec.get("allowedNodes", []) or []) == wanted_nodes
-                        and have_scp == wanted_scp):
-                    actual = next(iter(existing))
+                if (sorted(spec.get("allowedNodes", []) or []) == wanted_nodes
+                        and have_vd == wanted_vd):
+                    # The pool this CRD reconciled into, not whichever pool
+                    # happens to sort first. Returning an arbitrary one threw
+                    # away the match that was just made and handed a caller
+                    # asking for a specific dhchap/allowedNodes shape a pool
+                    # with some other shape -- the exact failure the matching
+                    # above exists to prevent.
+                    actual = self._pool_of_crd(crd, existing)
+                    if actual is None:
+                        continue
                     self.logger.info(
                         f"[pool] Existing CRD '{crd['metadata']['name']}' "
                         f"already matches requested dhchap={dhchap} "
@@ -4007,32 +5901,41 @@ class K8sSbcliUtils:
                     f"falling back to cluster_name='{cluster_name}' from sbcli"
                 )
 
+            # v1alpha2. The older version needs the conversion webhook, which
+            # these installs do not deploy, so a v1alpha1 apply fails outright
+            # -- and the failure was invisible here, because existing_crds was
+            # set to the name we had just tried rather than to what the cluster
+            # holds. The run then waited the full 300s for a pool that had
+            # never been created and reported "Operator may not have reconciled
+            # the pool", which pointed at the operator instead of at the apply.
+            #
+            # Three fields moved. clusterName is clusterRef. dhchap and
+            # storageClassParameters are both gone: what they carried is typed
+            # fields under volumeDefaults, which the operator turns into the
+            # pool's StorageClass. allowedNodes stays where it was.
             yaml_content = (
-                f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+                f"apiVersion: storage.simplyblock.io/v1alpha2\n"
                 f"kind: StoragePool\n"
                 f"metadata:\n"
                 f"  name: {k8s_resource_name}\n"
                 f"  namespace: {ns}\n"
                 f"spec:\n"
-                f"  clusterName: {cluster_name}\n"
+                f"  clusterRef: {cluster_name}\n"
             )
-            if dhchap:
-                yaml_content += "  dhchap: true\n"
             if allowed_nodes:
                 yaml_content += "  allowedNodes:\n"
                 for node_name in allowed_nodes:
                     yaml_content += f"    - {node_name}\n"
-            if storage_class_parameters:
-                # The operator builds the pool's StorageClass from these,
-                # including encryption and csi.storage.k8s.io/fstype. They
-                # are IMMUTABLE once the SC exists (the CRD says to create
-                # a new StoragePool to change them), so a caller wanting
-                # both plain and encrypted volumes needs two pools.
-                yaml_content += "  storageClassParameters:\n"
-                for _k, _v in storage_class_parameters.items():
-                    if isinstance(_v, bool):
-                        _v = "true" if _v else "false"
-                    yaml_content += f"    {_k}: {_v}\n"
+
+            # volumeDefaults is immutable once set, because the StorageClass
+            # parameters it produces are immutable in the Kubernetes API. A
+            # caller wanting both plain and encrypted volumes still needs two
+            # pools.
+            defaults = pool_volume_defaults(dhchap, storage_class_parameters)
+            if defaults:
+                yaml_content += "  volumeDefaults:\n"
+                for _k, _v in defaults.items():
+                    yaml_content += f"    {_k}: {_as_yaml_scalar(_v)}\n"
 
             self.logger.info(
                 f"[pool] Creating '{pool_name}' "
@@ -4040,6 +5943,20 @@ class K8sSbcliUtils:
             )
             yaml_escaped = yaml_content.replace("'", "'\\''")
             self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+
+            # Read back what the cluster holds rather than asserting what we
+            # sent. Setting this to the name we had just tried made a rejected
+            # apply indistinguishable from a slow operator: the wait below
+            # then blamed reconciliation for a CR that did not exist.
+            readback = self.k8s._exec_kubectl(
+                f"kubectl -n {ns} get storagepool {k8s_resource_name} "
+                f"-o jsonpath='{{.metadata.name}}' 2>/dev/null") or ""
+            if k8s_resource_name not in readback:
+                raise RuntimeError(
+                    f"[pool] StoragePool '{k8s_resource_name}' does not exist "
+                    f"after apply, so the apply was rejected. The document "
+                    f"sent was:\n{yaml_content}"
+                    f"    kubectl -n {ns} get storagepool")
             existing_crds = [k8s_resource_name]
         else:
             self.logger.info(
@@ -4202,21 +6119,34 @@ class K8sSbcliUtils:
                 f"[pool] No StorageCluster CRDs found in namespace {ns}; "
                 f"falling back to cluster_name='{cluster_name}' from sbcli"
             )
+        # v1alpha2, for the reason the other pool writer in this file states:
+        # v1alpha1 needs a conversion webhook these installs do not deploy.
+        #
+        # The pool carries NO encryption setting. v1alpha2's spec is
+        # allowedNodes/clusterRef/limits/volumeDefaults and volumeDefaults has
+        # no encryption key, so the volumeDefaults.enableEncryption this used
+        # to emit was rejected outright and failed every bring-up at
+        # "Applying pools". Encryption is a StorageClass setting again,
+        # attached to a pool by the
+        # storage.simplyblock.io/{namespace,cluster,pool} labels -- see
+        # create_storage_class. The encryption argument is kept so callers do
+        # not have to change, and is logged rather than silently dropped.
         sc_params = ""
         if encryption:
-            sc_params = (
-                "  storageClassParameters:\n"
-                "    encryption: true\n"
-            )
+            self.logger.info(
+                "[pool] Pool %r requested with encryption=True. v1alpha2 "
+                "StoragePool has no encryption field, so the pool is created "
+                "plain; encryption comes from a StorageClass labelled to it. "
+                "Use create_storage_class(encryption=True).", pool_name)
 
         yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"apiVersion: storage.simplyblock.io/v1alpha2\n"
             f"kind: StoragePool\n"
             f"metadata:\n"
             f"  name: {pool_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
+            f"  clusterRef: {cluster_name}\n"
             f"{sc_params}"
         )
 
@@ -4391,12 +6321,34 @@ class K8sSbcliUtils:
     # ── device / node capacity methods ────────────────────────────────────────
 
     def get_device_details(self, storage_node_id):
-        """Return list of device dicts for a storage node."""
+        """Return list of storage-device dicts for a storage node.
+
+        `sbctl sn list-devices --json` does not return a list. It returns
+        {"Storage Devices": [...], "JM Devices": [...]}, so returning it raw
+        made every caller iterate the DICT KEYS -- two strings -- and anything
+        doing dev.get(...) died with "'str' object has no attribute 'get'".
+
+        Unwrapped to the storage devices so this matches the docker side, where
+        /device/list/<id> returns the data devices only. The JM devices are
+        available separately rather than silently mixed in, since a caller
+        counting devices means data devices.
+        """
         data = self._run_json(
             f"{self.sbcli_cmd} sn list-devices {storage_node_id} --json"
         )
         self.logger.info(f"Device Details: {data}")
-        return data
+        if isinstance(data, dict):
+            return data.get("Storage Devices") or []
+        return data or []
+
+    def get_jm_device_details(self, storage_node_id):
+        """Return the JM (journal) devices for a storage node."""
+        data = self._run_json(
+            f"{self.sbcli_cmd} sn list-devices {storage_node_id} --json"
+        )
+        if isinstance(data, dict):
+            return data.get("JM Devices") or []
+        return []
 
     def get_device_capacity(self, device_id):
         """Return capacity records for a device.

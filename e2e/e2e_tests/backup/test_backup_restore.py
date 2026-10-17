@@ -3656,10 +3656,13 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self.logger.info(f"Tearing down self-bootstrapped Cluster-2 ({self._cluster2_id})")
         mgmt_ip = self.mgmt_nodes[0]
         try:
-            # Deactivate + delete Cluster-2
+            # Quiesce + delete Cluster-2. `cluster deactivate` does not exist
+            # -- the verb is `suspend` -- so this was a silent no-op behind the
+            # `|| true` for as long as it has been here. Found by
+            # scripts/check_cli_usage.py.
             self.ssh_obj.exec_command(
                 node=mgmt_ip,
-                command=f"{self.base_cmd} cluster deactivate {self._cluster2_id} || true"
+                command=f"{self.base_cmd} cluster suspend {self._cluster2_id} || true"
             )
             sleep_n_sec(5)
             self.ssh_obj.exec_command(

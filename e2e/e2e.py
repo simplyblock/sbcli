@@ -26,7 +26,14 @@ from __init__ import (
     get_backup_tests,
     get_backup_topology_tests,
     get_e2e_all_tests,
+    get_lblk_tests,
+    get_migration_load_tests,
+    get_migration_stress_tests,
+    get_migration_tests,
     get_parity_tests,
+    get_replication_load_tests,
+    get_replication_stress_tests,
+    get_replication_tests,
     get_security_tests,
 )
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -135,12 +142,19 @@ def main():
                         help="Path to simplyblock helm chart directory "
                              "(auto-detected from GITHUB_WORKSPACE if not set).",
                         default="")
+    # Pass these as --opt=value. The value is itself a string of flags, and
+    # argparse treats any token starting with a dash as an option, so the
+    # separated form fails with "expected one argument" on a value like
+    # '--lblk'. It happens to work for multi-word values only because argparse
+    # exempts anything containing a space. EXTRA_CLUSTER_ARGS/EXTRA_SN_ARGS in
+    # the environment sidestep the question entirely.
     parser.add_argument('--extra_cluster_args', type=str,
-                        help="Extra args appended to 'sbcli cluster create' "
-                             "(e.g. '--enable-node-affinity true').",
+                        help="Extra args appended to 'sbcli cluster create'. "
+                             "Use the = form: --extra_cluster_args='--device-mode lblk'.",
                         default=os.environ.get("EXTRA_CLUSTER_ARGS", ""))
     parser.add_argument('--extra_sn_args', type=str,
-                        help="Extra args for storage node add-node.",
+                        help="Extra args for storage node add-node. "
+                             "Use the = form: --extra_sn_args='--lblk'.",
                         default=os.environ.get("EXTRA_SN_ARGS", ""))
 
     args = parser.parse_args()
@@ -155,19 +169,68 @@ def main():
     new_worker_nodes = [n.strip() for n in args.new_worker_nodes.split(",") if n.strip()] if args.new_worker_nodes else []
     skipped_cases = 0
 
+    def _for_this_platform(classes, run_k8s):
+        """Drop the group's classes that belong to the other platform.
+
+        The empty-testname path below filters by platform as it walks the
+        list; the group keywords never did, so `--testname lblk` on a k8s
+        cluster queued the four *Docker classes as well and they ran against
+        a cluster they cannot reach. Same for security, backup and e2e-all
+        wherever a group carries both halves.
+
+        Only names that actually end in Docker or K8s are touched, so a group
+        with no platform variants -- parity, most of backup -- comes back
+        unchanged rather than being emptied by a rule that does not apply to
+        it.
+        """
+        wanted, other = ("K8s", "Docker") if run_k8s else ("Docker", "K8s")
+        paired = [c for c in classes
+                  if c.__name__.endswith(("Docker", "K8s"))]
+        if not paired:
+            return classes
+        kept = [c for c in classes if not c.__name__.endswith(other)]
+        dropped = [c.__name__ for c in classes if c.__name__.endswith(other)]
+        if dropped:
+            logger.info(
+                "Platform is %s: skipping %d %s-only test(s) from this group: %s",
+                wanted, len(dropped), other, ", ".join(dropped))
+        return kept
+
     # group keywords — run a named category of tests
-    if args.testname and args.testname.strip().lower() == "security":
-        test_class_run = get_security_tests()
-    elif args.testname and args.testname.strip().lower() == "backup":
-        test_class_run = get_backup_tests()
-    elif args.testname and args.testname.strip().lower() == "backup-topology":
-        test_class_run = get_backup_topology_tests()
-    elif args.testname and args.testname.strip().lower() == "backup-stress":
-        test_class_run = get_backup_stress_tests()
-    elif args.testname and args.testname.strip().lower() == "parity":
-        test_class_run = get_parity_tests()
-    elif args.testname and args.testname.strip().lower() == "e2e-all":
-        test_class_run = get_e2e_all_tests()
+    # A lookup rather than eight near-identical elif arms, so the platform
+    # filter below can be applied in exactly one place. Written as a chain it
+    # had to be bolted on after the last arm, where it read as another link
+    # and quietly changed which branch the empty-testname case fell into.
+    _GROUPS = {
+        "security": get_security_tests,
+        "backup": get_backup_tests,
+        "backup-topology": get_backup_topology_tests,
+        "backup-stress": get_backup_stress_tests,
+        "lblk": get_lblk_tests,
+        "replication": get_replication_tests,
+        # Separate lane on purpose: AR-P/AR-U include a soak measured in
+        # hours, and it must never stand between a correctness run and
+        # its answer.
+        "replication-stress": get_replication_stress_tests,
+        # lvol migration: the two-phase volume migrate handshake. Had no
+        # e2e coverage at all before this lane.
+        "migration": get_migration_tests,
+        "migration-stress": get_migration_stress_tests,
+        # LOAD lanes. Different output contract from e2e and stress: a
+        # number per swept step, appended to CSV, resumable, plotted.
+        # "Did it pass" is not the question these answer.
+        "migration-load": get_migration_load_tests,
+        "replication-load": get_replication_load_tests,
+        "parity": get_parity_tests,
+        "e2e-all": get_e2e_all_tests,
+    }
+    _group = (args.testname or "").strip().lower()
+    if _group in _GROUPS:
+        # Filtered here and nowhere else. Explicitly named classes further
+        # down are NOT filtered: naming LblkFunctionalDocker by hand is a
+        # deliberate act, and silently dropping it would report the test as
+        # missing rather than as skipped.
+        test_class_run = _for_this_platform(_GROUPS[_group](), args.run_k8s)
     elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
@@ -282,8 +345,21 @@ def main():
                     seen.add(cls)
 
     if not test_class_run:
-        available_tests = ', '.join(cls.__name__ for cls in tests)
-        print(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
+        # Report what was actually SEARCHED. This used to print `tests`, the
+        # short default-suite list from get_all_tests(), while the lookup above
+        # searches ALL_TESTS -- so a class missing from ALL_TESTS produced a
+        # list of five unrelated names and sent you looking in the wrong place.
+        available_tests = ', '.join(sorted(cls.__name__ for cls in ALL_TESTS))
+        print(f"Test '{args.testname}' not found.")
+        print()
+        print("A --testname is either a GROUP key or an exact class name.")
+        print(f"Groups: {', '.join(sorted(_GROUPS))}")
+        print()
+        print("If you named a class and it exists in the tree, it is probably "
+              "missing from ALL_TESTS in e2e/__init__.py -- being in a group "
+              "function alone is not enough to name it directly.")
+        print()
+        print(f"Known classes ({len(ALL_TESTS)}): {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
     
     test_run_api = TestRunsAPI(PROFILE_KEY)
@@ -366,6 +442,21 @@ def main():
                 test_obj.configure_sysctl_settings()
             test_obj.run()
             passed_cases.append(f"{test.__name__}")
+        except SkippedTestsException as exp:
+            # A scenario that cannot run here is not a defect. Some cases have
+            # no equivalent on a platform (device hot-remove needs the storage
+            # host's sysfs, which kubectl does not reach) and some are
+            # prevented by the environment rather than by the product. Counting
+            # those as failures buries real ones, and leaving them to raise
+            # meant a test could only pass or fail with no way to say
+            # "not applicable".
+            #
+            # Deliberately NOT added to errors: the summary reports anything
+            # that is neither passed nor failed as SKIPPED.
+            logger.warning(f"{test.__name__} SKIPPED: {exp}")
+            # Deliberately NOT incremented here. The final tally counts every
+            # case that is neither passed nor failed, which already includes
+            # this one -- incrementing as well reported one skip as two.
         except Exception as exp:
             tb = traceback.format_exc()
             logger.error(tb)
@@ -451,26 +542,54 @@ def main():
                         )
                     except Exception:
                         pass
-            if not args.run_k8s and check_for_dumps():
-                # If a full reset is about to happen, core dumps from the
-                # current test won't affect the fresh cluster.
-                _next_idx = i + 1
-                _reset_coming = (
-                    _next_idx < len(test_class_run)
-                    and test.__name__ in TOPOLOGY_MODIFYING_TESTS
-                    and test_class_run[_next_idx].__name__ in TOPOLOGY_MODIFYING_TESTS
-                )
-                if _reset_coming:
-                    logger.info(
-                        "Core dump found, but inter-test cluster reset will "
-                        "re-bootstrap a fresh cluster. Continuing."
+            if not args.run_k8s:
+                _since = 0.0
+                _started = getattr(test_obj, "test_start_time_utc", None)
+                if _started is not None:
+                    try:
+                        _since = _started.timestamp()
+                    except Exception:            # noqa: BLE001
+                        _since = 0.0
+                # Guarded, because this now reaches every storage node over
+                # ssh and gathers per-core detail. It is a diagnostic: it must
+                # never be the reason a run ends. If it cannot answer, the run
+                # carries on and says so -- the same stance as
+                # start_alert_collection above.
+                try:
+                    _fatal, _summary = inspect_core_dumps(
+                        since_epoch=_since,
+                        expected_nodes=getattr(test_obj, "expected_core_nodes",
+                                               set()),
+                        log_dir=getattr(test_obj, "docker_logs_path", "") or "",
                     )
-                else:
-                    logger.info(
-                        "Found a core dump during test execution. "
-                        "Cannot execute more tests as cluster is not stable. Exiting"
+                except Exception:                    # noqa: BLE001
+                    logger.error("Core-dump inspection failed; continuing. "
+                                 "Cores on the nodes have NOT been judged for "
+                                 "this test.")
+                    logger.error(traceback.format_exc())
+                    _fatal, _summary = False, ""
+                for _line in _summary.splitlines():
+                    logger.info(_line)
+                if _fatal:
+                    # If a full reset is about to happen, core dumps from the
+                    # current test won't affect the fresh cluster.
+                    _next_idx = i + 1
+                    _reset_coming = (
+                        _next_idx < len(test_class_run)
+                        and test.__name__ in TOPOLOGY_MODIFYING_TESTS
+                        and test_class_run[_next_idx].__name__ in TOPOLOGY_MODIFYING_TESTS
                     )
-                    break
+                    if _reset_coming:
+                        logger.info(
+                            "Core dump found, but inter-test cluster reset will "
+                            "re-bootstrap a fresh cluster. Continuing."
+                        )
+                    else:
+                        logger.info(
+                            "Cannot execute more tests as cluster is not stable. "
+                            "Exiting"
+                        )
+                        break
 
             # ── Inter-test cluster reset ──────────────────────────────
             # When two consecutive topology-modifying tests are queued,
@@ -514,7 +633,13 @@ def main():
                     break
 
     failed_cases = list(errors.keys())
-    skipped_cases += len(test_class_run) - (len(passed_cases) + len(failed_cases))
+    # skipped_cases so far counts only cases dropped BEFORE the run, which
+    # never entered test_class_run (missing --new-nodes and friends). Cases
+    # that ran and skipped themselves are covered by the subtraction, so the
+    # two are added, not double-counted. max() because a mid-run abort can
+    # leave more results than planned cases.
+    skipped_cases += max(
+        0, len(test_class_run) - (len(passed_cases) + len(failed_cases)))
 
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
     logger.info(f"Number of Passed Cases: {len(passed_cases)}")
@@ -1285,6 +1410,107 @@ def _k8s_cluster_reset(args, new_worker_nodes, logger):
 
     logger.info("[reset] K8s cluster reset complete.")
     return cluster_id, cluster_secret
+
+
+def inspect_core_dumps(since_epoch=0.0, expected_nodes=None, log_dir=""):
+    """Find cores written DURING this test and say whether they are a failure.
+
+    Returns ``(fatal, summary)``.
+
+    Two rules decide it, and neither needs a backtrace to work:
+
+    * a core on a node the test deliberately broke is EVIDENCE THE FAULT
+      LANDED, not a failure. Cutting a node's NICs makes its journal client
+      lose quorum and call ``spdk_abort_node`` by design -- ultra
+      ``alg_journal.cpp:2267``, which logs "JC aborts the node due to network
+      outage" immediately before aborting. Confirmed on 2026-10-08: both
+      cores from MigrationSourceAndTargetFaults were SIGABRT through
+      ``spdk_abort_node`` <- ``alg_journal_client::t_jc_inst::periodic``, 4
+      and 5 seconds after a nic_down, while the two deliberate spdk_crash
+      kills produced no core at all.
+    * a core on ANY OTHER node is a failure. Nothing asked that node to die.
+
+    Judging by attribution rather than by stack means it still works when the
+    core cannot be symbolised -- which is the normal case here, since there is
+    no gdb in the SPDK image and the container that wrote the core is usually
+    recreated before anyone can read its log.
+
+    ``since_epoch`` matters as much as the rules. ``cleanup_logs()`` runs only
+    before the FIRST test of a run (gated on ``i == 0`` above), so a core left
+    by test 3 is still on disk when test 7 looks. While any core ended the run
+    that was harmless; now that a core can be expected, an old one would be
+    charged to whichever test happened to look next.
+    """
+    expected_nodes = set(expected_nodes or ())
+    logger.info("Checking for core dumps written during this test!!")
+    cluster_base = TestClusterBase()
+    ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
+    sbcli_utils = SbcliUtils(
+        cluster_api_url=cluster_base.api_base_url,
+        cluster_id=cluster_base.cluster_id,
+        cluster_secret=cluster_base.cluster_secret
+    )
+    _, storage_nodes = sbcli_utils.get_all_nodes_ip()
+    for node in storage_nodes:
+        ssh_obj.connect(
+            address=node,
+            bastion_server_address=cluster_base.bastion_server,
+        )
+
+    expected_hits, unexpected_hits, lines = [], [], []
+    try:
+        for node in storage_nodes:
+            try:
+                cores = ssh_obj.find_core_dumps(node, since_epoch=since_epoch)
+            except Exception as exc:                  # noqa: BLE001
+                lines.append(f"[core] {node}: could not be listed ({str(exc)[:120]})")
+                continue
+            for core in cores:
+                where = "EXPECTED" if node in expected_nodes else "UNEXPECTED"
+                lines.append(
+                    f"[core] {where} on {node}: {core['name']} "
+                    f"({core['size']} bytes)")
+                try:
+                    detail = ssh_obj.describe_core_dump(node, core["name"])
+                except Exception as exc:              # noqa: BLE001
+                    detail = f"(no detail: {str(exc)[:160]})"
+                if log_dir:
+                    try:
+                        os.makedirs(log_dir, exist_ok=True)
+                        out = os.path.join(
+                            log_dir, f"core_analysis_{node}_{core['name']}.txt")
+                        with open(out, "w", encoding="utf-8") as fh:
+                            fh.write(f"node: {node}\ncore: {core['name']}\n"
+                                     f"size: {core['size']}\n"
+                                     f"mtime: {core['mtime']}\n"
+                                     f"verdict: {where}\n"
+                                     f"faulted by this test: "
+                                     f"{sorted(expected_nodes)}\n\n{detail}\n")
+                        lines.append(f"[core]   detail -> {out}")
+                    except Exception as exc:          # noqa: BLE001
+                        lines.append(f"[core]   detail could not be written: "
+                                     f"{str(exc)[:120]}")
+                (expected_hits if node in expected_nodes
+                 else unexpected_hits).append((node, core["name"]))
+    finally:
+        for node, ssh in ssh_obj.ssh_connections.items():
+            logger.info(f"Closing node ssh connection for {node}")
+            ssh.close()
+
+    if not expected_hits and not unexpected_hits:
+        lines.append("[core] none written during this test")
+    elif unexpected_hits:
+        lines.append(
+            f"[core] FAILING THE RUN: {len(unexpected_hits)} core(s) on node(s) "
+            f"this test did not break "
+            f"({', '.join(n for n, _ in unexpected_hits)}). Nodes it did break: "
+            f"{sorted(expected_nodes) or 'none'}.")
+    else:
+        lines.append(
+            f"[core] {len(expected_hits)} core(s), all on node(s) this test "
+            f"deliberately broke ({sorted(expected_nodes)}). A NIC drop aborts "
+            f"the node by design, so this is the fault landing. Continuing.")
+    return bool(unexpected_hits), "\n".join(lines)
 
 
 def check_for_dumps():
