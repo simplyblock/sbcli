@@ -891,19 +891,24 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         self.max_fault_tolerance = 1       # overwritten in run()
         self._last_outage_node = None      # for non-related node selection
         self.k8s_utils = None              # initialised in run() when k8s_test=True
-        # storage_node_reboot is deliberately NOT added here, though the
-        # base has a branch for it and LblkRapidOutageStressDocker opts in.
-        # It was added on 2026-10-15 to match the lblk lane and reverted the
-        # same day: the run reached 52 FIO I/O errors in 1h03m, on its second
-        # reboot. That is SFAM-2827 -- one reboot leaves every peer unhealthy
-        # for ~50s because UNREACHABLE counts as a state where peer
-        # connections must still work, so two reboots a few minutes apart
-        # overlap into a window with no healthy node and no usable path.
+        # Same four outages as LblkRapidOutageStressDocker, so a failure
+        # here and a failure there are comparable. The base keeps
+        # storage_node_reboot out of its default list and documents the
+        # branch at _perform_outage as opt-in; lblk_stress.py opts in the
+        # same way.
         #
-        # Restore this once SFAM-2827 is fixed. The coverage is not lost
-        # meanwhile: the lblk soak still injects reboots, and that is where
-        # the defect was first reached (lblk_rapid_outage_docker-20261002-195205,
-        # 42 I/O errors after storage_node_reboot).
+        # Added 2026-10-15, reverted the same day when the run hit 52 FIO
+        # I/O errors in 1h03m on its second reboot, and restored on
+        # 2026-10-17 at Raunak's request. Expect that failure to come
+        # back until SFAM-2827 is fixed: one reboot leaves every peer
+        # unhealthy for ~50s, because UNREACHABLE counts as a state where
+        # peer connections must still work, so two reboots a few minutes
+        # apart overlap into a window with no healthy node and no usable
+        # path. Reboot is also the only one of the four that reloads a
+        # node's lvstore from disk, which on lblk goes back through the
+        # kernel block layer, so the coverage is worth the noise.
+        if "storage_node_reboot" not in self.outage_types:
+            self.outage_types.append("storage_node_reboot")
         # Gap pacing (MIN/MAX_OUTAGE_GAP_SEC, _node_online_ts,
         # _outaged_since_checkpoint) comes from TestClusterBase.
         # Bootstrap objects are pinned: mounted, running FIO, never deleted, so
