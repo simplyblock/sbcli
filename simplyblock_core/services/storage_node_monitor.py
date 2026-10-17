@@ -1834,8 +1834,7 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
             "nothing released it. Unblocking.",
             port, snode.get_id(), held, snode.status, owner.lvstore)
         try:
-            from simplyblock_core.utils import port_block
-            port_block.set_port(snode, port, block=False, timeout=5, retry=1)
+            snode.rpc_client(timeout=5, retry=1).nvmf_port_unblock(port)
             _blocked_port_since.pop(key, None)
         except Exception as e:
             logger.error("Failed to unblock stale port %s on %s: %s",

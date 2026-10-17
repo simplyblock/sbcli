@@ -1005,14 +1005,13 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._reapply_allowed_hosts")
     @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_recreate_lvstore_on_non_leader_passes_allow_any_false(
             self, MockDB, MockRPC, mock_tasks, mock_bdev_stack,
-            MockFW, mock_tcp_events, mock_add_thread, mock_reapply, _mock_disc, _mock_phase, _mock_handle):
+            mock_tcp_events, mock_add_thread, mock_reapply, _mock_disc, _mock_phase, _mock_handle):
         """recreate_lvstore_on_non_leader sets allow_any_host=False for lvols with allowed_hosts."""
         dhchap_host = {"nqn": "nqn:secured", "dhchap_key": "DHHC-1:01:x:"}
 
@@ -1083,8 +1082,6 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         with patch.object(sec_node, 'connect_to_hublvol'):
             with patch.object(primary_node, 'write_to_db'), patch.object(sec_node, 'write_to_db'):
                 mock_bdev_stack.return_value = (True, None)
-                mock_fw_inst = MagicMock()
-                MockFW.return_value = mock_fw_inst
 
                 snode_ops.recreate_lvstore_on_non_leader(sec_node, leader_node=primary_node, primary_node=primary_node)
 

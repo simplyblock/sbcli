@@ -805,8 +805,9 @@ def _patch_externals():
               return_value=(True, None)),
         patch('simplyblock_core.controllers.health_controller._check_node_api', return_value=True),
         # Firewall always succeeds
-        patch('simplyblock_core.utils.port_block.set_port', return_value=True),
-        patch('simplyblock_core.utils.port_block.get_blocked_ports_set',
+        patch('simplyblock_core.rpc_client.RPCClient.nvmf_port_block', return_value=True),
+        patch('simplyblock_core.rpc_client.RPCClient.nvmf_port_unblock', return_value=True),
+        patch('simplyblock_core.rpc_client.RPCClient.nvmf_get_blocked_ports',
               return_value=set()),
         # Port check always passes
         patch('simplyblock_core.controllers.health_controller.check_port_on_node',

@@ -51,3 +51,42 @@ def assert_hublvol_wired(mock_connect, primary, *, role, lvs_node,
     assert call.args[0] is primary
     assert call.kwargs.get("lvs_node") is lvs_node
     assert call.kwargs.get("failover_node") is failover_node
+
+
+class _FenceRoutingClient:
+    """An RPC client that sends fences to a test callback and everything else
+    to the wrapped client."""
+
+    def __init__(self, client, node, fence):
+        self._client = client
+        self._node = node
+        self._fence = fence
+
+    def nvmf_port_block(self, port, is_reject=False):
+        return self._fence(self._node, port, block=True, is_reject=is_reject)
+
+    def nvmf_port_unblock(self, port):
+        return self._fence(self._node, port, block=False)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def route_fences(nodes, fence):
+    """Send every fence issued through ``node.rpc_client(...)`` for ``nodes``
+    to ``fence(node, port, block=..., is_reject=...)``.
+
+    Production fences a peer with ``node.rpc_client(timeout=..,
+    retry=..).nvmf_port_block(port)`` / ``.nvmf_port_unblock(port)``. Tests
+    usually hand every node the same mocked RPC client, which loses which
+    node a fence was meant for; this keeps it. Each node's ``rpc_client`` is
+    wrapped, so call it after the test has installed its own ``rpc_client``
+    on the nodes. Every other RPC goes to the client the node returned.
+    """
+    for node in nodes:
+        original = node.rpc_client
+
+        def _client(*args, _original=original, _node=node, **kwargs):
+            return _FenceRoutingClient(_original(*args, **kwargs), _node, fence)
+
+        node.rpc_client = _client

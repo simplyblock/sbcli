@@ -25,7 +25,6 @@ from docker.errors import DockerException
 from pydantic import SecretStr
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_upgrades, storage_node_ops
-from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
@@ -1507,7 +1506,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
                     try:
                         leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                        port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
+                        primary_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_port)
                         tcp_ports_events.port_deny(primary_node, leader_port)
                         leader_blocked = True
                         time.sleep(0.5)
@@ -1530,7 +1529,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 finally:
                     if leader_blocked:
                         try:
-                            port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
+                            primary_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_port)
                             tcp_ports_events.port_allowed(primary_node, leader_port)
                         except Exception as ue:
                             logger.error(
