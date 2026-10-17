@@ -298,21 +298,36 @@ class _RestartParams(BaseModel):
     new_ssd_pcie: builtins.list[str] = []
 
 
-@instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
-@instance_api.post('/restart', name='clusters:storage-nodes:restart', status_code=202, responses={202: {"content": None}})
-def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams) -> Response:
-    Thread(
-        target=storage_node_ops.restart_storage_node,
-        kwargs={
-            "node_id": storage_node.get_id(),
+@instance_api.post('/start', name='clusters:storage-nodes:start', status_code=201, responses={201: {"content": None}})  # Same as restart for now
+@instance_api.post('/restart', name='clusters:storage-nodes:restart', status_code=201, responses={201: {"content": None}})
+def restart(request: Request, cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams,
+           response_format: util.CreationResponseFormatParameter = "identifier") -> Response:
+    task_id_or_false = tasks_controller.ensure_node_restart_task(
+        storage_node,
+        function_params={
             "force": parameters.force,
             "node_address": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
             "new_ssd_pcie": parameters.new_ssd_pcie,
-        }
-    ).start()
+        },
+    )
+    if not task_id_or_false:
+        # ensure_node_restart_task's dedup declines to create a second task for
+        # a node that already has one in flight -- the existing task is the
+        # answer to "restart this node", same as add_node_add_task's duplicate
+        # handling above.
+        task_id_or_false = tasks_controller.get_active_node_restart_task(
+            cluster.get_id(), storage_node.get_id())
+        if not task_id_or_false:
+            raise ValueError('Failed to create restart task')
 
-    return Response(status_code=202)  # FIXME: Provide URL for checking task status
+    return util.creation_response(
+        request, response_format,
+        entity_id=UUID(task_id_or_false),
+        route_name='clusters:tasks:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'task_id': UUID(task_id_or_false)},
+        get_full=lambda id: TaskDTO.from_model(db.get_task_by_id(str(id))),
+    )
 
 
 @instance_api.post('/promote', name='clusters:storage-nodes:start', status_code=204, responses={204: {"content": None}})

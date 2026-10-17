@@ -279,35 +279,67 @@ class TestStorageNodeLifecycle:
         assert response.status_code == 202
         storage_node_ops.shutdown_storage_node.assert_called_once_with(STORAGE_NODE_ID, True)
 
-    def test_restart(self, client, storage_node, storage_node_ops):
+    def test_restart_creates_a_restart_task(self, client, storage_node, tasks_controller):
+        tasks_controller.ensure_node_restart_task.return_value = TASK_ID
+
         response = client.post(
             f'{BASE}/{STORAGE_NODE_ID}/restart',
             json={'force': True, 'node_address': '10.0.0.11:5000'},
         )
 
-        assert response.status_code == 202
-        storage_node_ops.restart_storage_node.assert_called_once_with(
-            node_id=STORAGE_NODE_ID,
-            force=True,
-            node_address='10.0.0.11:5000',
-            reattach_volume=False,
-            new_ssd_pcie=[],
-        )
+        assert response.status_code == 201
+        (submitted_node,), kwargs = tasks_controller.ensure_node_restart_task.call_args
+        assert submitted_node.get_id() == STORAGE_NODE_ID
+        assert kwargs['function_params'] == {
+            'force': True,
+            'node_address': '10.0.0.11:5000',
+            'reattach_volume': False,
+            'new_ssd_pcie': [],
+        }
+        # Default response format is 'identifier': body is the task id
+        assert response.json() == TASK_ID
+        assert response.headers['Location'].endswith(f'/tasks/{TASK_ID}/')
 
-    def test_restart_passes_new_ssd_pcie(self, client, storage_node, storage_node_ops):
+    def test_restart_passes_new_ssd_pcie(self, client, storage_node, tasks_controller):
+        tasks_controller.ensure_node_restart_task.return_value = TASK_ID
+
         response = client.post(
             f'{BASE}/{STORAGE_NODE_ID}/restart',
             json={'new_ssd_pcie': ['0000:00:1e.0', '0000:00:1f.0']},
         )
 
-        assert response.status_code == 202
-        storage_node_ops.restart_storage_node.assert_called_once_with(
-            node_id=STORAGE_NODE_ID,
-            force=False,
-            node_address=None,
-            reattach_volume=False,
-            new_ssd_pcie=['0000:00:1e.0', '0000:00:1f.0'],
-        )
+        assert response.status_code == 201
+        _, kwargs = tasks_controller.ensure_node_restart_task.call_args
+        assert kwargs['function_params'] == {
+            'force': False,
+            'node_address': None,
+            'reattach_volume': False,
+            'new_ssd_pcie': ['0000:00:1e.0', '0000:00:1f.0'],
+        }
+
+    def test_restart_returns_the_existing_task_when_one_is_already_in_flight(
+            self, client, storage_node, tasks_controller):
+        # ensure_node_restart_task's dedup returns False (via _add_task) when a
+        # restart task for this node is already unfinished -- the existing
+        # task is the answer to "restart this node", same as the add-node
+        # endpoint's duplicate handling.
+        tasks_controller.ensure_node_restart_task.return_value = False
+        tasks_controller.get_active_node_restart_task.return_value = TASK_ID
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/restart', json={})
+
+        assert response.status_code == 201
+        tasks_controller.get_active_node_restart_task.assert_called_once_with(
+            CLUSTER_ID, STORAGE_NODE_ID)
+        assert response.json() == TASK_ID
+
+    def test_restart_raises_when_no_task_was_created_and_none_is_already_in_flight(
+            self, client, storage_node, tasks_controller):
+        tasks_controller.ensure_node_restart_task.return_value = False
+        tasks_controller.get_active_node_restart_task.return_value = False
+
+        with pytest.raises(ValueError):
+            client.post(f'{BASE}/{STORAGE_NODE_ID}/restart', json={})
 
 
 class TestStorageNodeStats:
