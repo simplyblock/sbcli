@@ -1661,13 +1661,31 @@ jobs:
       - name: Patch service accounts with imagePullSecrets (post-CRD)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
+          # Service accounts only. This step used to patch every deployment's
+          # spec.template as well, and that is a rollout: changing the pod
+          # template changes its hash, so every control-plane deployment is
+          # replaced. The deployments this loop reaches are the ones the
+          # operator has just created, which do not carry regcred yet, so the
+          # patch was always a real change and always rolled them.
+          #
+          # By this point the operator has also started activating the
+          # cluster, and activation runs in a webappapi thread. On run
+          # 39013041668 the rollout killed that thread mid-flight: the six S3
+          # bdevs had been created at 07:36:44, the pod went Terminating at
+          # 07:36:48, and the cluster never left unready. Every retry then
+          # failed "Bdev already exists" -- 108 of them over the next hour --
+          # because bdev_s3_create is not idempotent, so the orphaned bdevs
+          # wedged activation permanently.
+          #
+          # The deployment patch was redundant anyway: a pod inherits
+          # imagePullSecrets from its ServiceAccount at admission, which is
+          # what the loop below sets. A pod that was admitted before that and
+          # genuinely cannot pull shows up as ImagePullBackOff and is deleted
+          # by the next step, which recreates it with the secret -- one pod at
+          # a time, and only the ones actually broken.
           for sa in $(kubectl get serviceaccounts -n simplyblock --no-headers | awk '{print $1}'); do
             kubectl patch serviceaccount "$sa" -n simplyblock \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
-          done
-          for deploy in $(kubectl get deployments -n simplyblock --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl patch deployment "$deploy" -n simplyblock \
-              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
           done
 
       - name: Delete ImagePullBackOff pods and wait for Running (post-CRD)
@@ -1704,14 +1722,13 @@ jobs:
             sleep 10
           done
 
-          echo "Patching service accounts and deployments with imagePullSecrets..."
+          # Service accounts only -- see the post-CRD patch step for why. This
+          # step runs even later, while the cluster is activating, so a
+          # deployment rollout here lands squarely on the activation thread.
+          echo "Patching service accounts with imagePullSecrets..."
           for sa in $(kubectl get serviceaccounts -n $NAMESPACE --no-headers | awk '{print $1}'); do
             kubectl patch serviceaccount "$sa" -n $NAMESPACE \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
-          done
-          for deploy in $(kubectl get deployments -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl patch deployment "$deploy" -n $NAMESPACE \
-              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
           done
 
           if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
