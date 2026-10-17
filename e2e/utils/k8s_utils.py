@@ -5578,6 +5578,51 @@ class K8sSbcliUtils:
     def get_storage_pool_id(self, pool_name):
         return self.list_storage_pools().get(pool_name)
 
+    def _storage_pool_crds(self, ns):
+        """The StoragePool CRs in *ns*, or [] if they cannot be read.
+
+        Unreadable is treated as none deliberately: the callers use this to
+        decide whether a backend pool is reachable from k8s, and guessing yes
+        on a failed kubectl is how a pool with no CR gets handed out again.
+        """
+        raw, _ = self.k8s._exec_kubectl(
+            f"kubectl get storagepools -n {ns} -o json 2>/dev/null || true")
+        if not (raw or "").strip():
+            return []
+        try:
+            return json.loads(raw).get("items", []) or []
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            return []
+
+    def _pool_of_crd(self, crd, existing):
+        """The backend pool a StoragePool CR reconciled into, or None.
+
+        The operator sets the backend name, which "may differ from the CRD
+        metadata.name" -- so the CR's own status is asked first and the name
+        is only a fallback. A CR that has not reconciled into any pool
+        ``sbcli pool list`` reports is not a pool anything can be provisioned
+        from, and None says so rather than inventing one.
+        """
+        meta = crd.get("metadata") or {}
+        status = crd.get("status") or {}
+        for candidate in (status.get("poolName"), status.get("name"),
+                          meta.get("name")):
+            if candidate and candidate in existing:
+                return candidate
+        return None
+
+    def _pools_with_crd(self, ns, existing):
+        """*existing* narrowed to the pools a StoragePool CR backs, in order.
+
+        Order is preserved because callers pick positionally and a stable pick
+        keeps a shared pool shared across the classes in a run.
+        """
+        crds = self._storage_pool_crds(ns)
+        backed = {name for name in
+                  (self._pool_of_crd(crd, existing) for crd in crds)
+                  if name}
+        return {name: uuid for name, uuid in existing.items() if name in backed}
+
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
                          max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None,
                          storage_class_parameters=None):
@@ -5603,8 +5648,31 @@ class K8sSbcliUtils:
         # arbitrary existing pool silently gives it the wrong one. That is how
         # a "non-DHCHAP pool" request came back as the DHCHAP pool, whose
         # StorageClass carries dhchap_node_label.
-        if existing and not dhchap and not allowed_nodes and not storage_class_parameters:
-            actual = next(iter(existing))
+        # ...and only a pool the CSI driver can actually resolve. "Exists in
+        # the control plane" is not the same as "usable from k8s": the driver
+        # resolves a pool through its StoragePool CR, so a backend pool with
+        # no CR in this namespace provisions nothing --
+        #
+        #   failed to resolve pool "encryption-pool":
+        #   pool "encryption-pool" not found
+        #
+        # -- and every PVC the test makes stays Pending. Two pools on this lab
+        # are exactly that. encryption-pool is created by the workflow only
+        # when tls_enabled is true, but survives in the control plane after a
+        # TLS run, so a later non-TLS run finds it listed with no CR behind
+        # it; and simplyblock-cluster-default is the cluster's own pool, which
+        # never had a CR at all. Both sort before simplyblock-pool, and the
+        # pick below is positional, so the backup lane took encryption-pool on
+        # every class.
+        usable = self._pools_with_crd(ns, existing)
+        if existing and not usable:
+            self.logger.warning(
+                "[pool] %d backend pool(s) exist but none has a StoragePool "
+                "CR in '%s': %s. Creating one rather than handing back a pool "
+                "the CSI driver cannot resolve.",
+                len(existing), ns, list(existing))
+        if usable and not dhchap and not allowed_nodes and not storage_class_parameters:
+            actual = next(iter(usable))
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
@@ -5645,7 +5713,15 @@ class K8sSbcliUtils:
                 }
                 if (sorted(spec.get("allowedNodes", []) or []) == wanted_nodes
                         and have_vd == wanted_vd):
-                    actual = next(iter(existing))
+                    # The pool this CRD reconciled into, not whichever pool
+                    # happens to sort first. Returning an arbitrary one threw
+                    # away the match that was just made and handed a caller
+                    # asking for a specific dhchap/allowedNodes shape a pool
+                    # with some other shape -- the exact failure the matching
+                    # above exists to prevent.
+                    actual = self._pool_of_crd(crd, existing)
+                    if actual is None:
+                        continue
                     self.logger.info(
                         f"[pool] Existing CRD '{crd['metadata']['name']}' "
                         f"already matches requested dhchap={dhchap} "
