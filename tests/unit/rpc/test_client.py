@@ -9,6 +9,7 @@ from pydantic import SecretStr
 
 from simplyblock_core.rpc_client import (
     RPCClient,
+    RPCErrorCode,
     RPCException,
     RPCRemoteError,
     _session_pool,
@@ -167,6 +168,86 @@ class TestNbdGetDisk(unittest.TestCase):
         client = _make_client()
         with self.assertRaises(RPCException):
             client.nbd_get_disk("/dev/nbd0")
+
+
+class TestLvolCryptoDelete(unittest.TestCase):
+    """SFAM-2826: a retried lvol delete can reach this call after the crypto
+    bdev was already removed on a prior pass. ``idempotent=True`` is what
+    ``_remove_bdev_stack`` passes on that retried path."""
+
+    @patch.object(RPCClient, "_request")
+    def test_delegates_to_rpc(self, mock_req):
+        mock_req.return_value = True
+        client = _make_client()
+
+        self.assertTrue(client.lvol_crypto_delete("crypto_LVOL_1"))
+        mock_req.assert_called_once_with("bdev_crypto_delete", name="crypto_LVOL_1")
+
+    @patch.object(RPCClient, "_request")
+    def test_no_such_device_propagates_by_default(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("No such device", code=-errno.ENODEV)
+        client = _make_client()
+        with self.assertRaises(RPCRemoteError):
+            client.lvol_crypto_delete("crypto_LVOL_1")
+
+    @patch.object(RPCClient, "_request")
+    def test_idempotent_no_such_device_returns_none(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("No such device", code=-errno.ENODEV)
+        client = _make_client()
+        self.assertIsNone(client.lvol_crypto_delete("crypto_LVOL_1", idempotent=True))
+
+    @patch.object(RPCClient, "_request")
+    def test_idempotent_other_rpc_error_propagates(self, mock_req):
+        # Idempotency must not swallow a real failure (e.g. device busy).
+        mock_req.side_effect = RPCRemoteError("device busy", code=-errno.EBUSY)
+        client = _make_client()
+        with self.assertRaises(RPCRemoteError):
+            client.lvol_crypto_delete("crypto_LVOL_1", idempotent=True)
+
+
+class TestLvolCryptoKeyDelete(unittest.TestCase):
+    """Unlike bdev_crypto_delete, accel_crypto_key_destroy does not answer
+    -ENODEV for a missing key -- SPDK rejects it as invalid_params with
+    message "No key object found" (checked live against SPDK; see the
+    RPCClient.lvol_crypto_key_delete docstring)."""
+
+    @patch.object(RPCClient, "_request")
+    def test_delegates_to_rpc(self, mock_req):
+        mock_req.return_value = True
+        client = _make_client()
+
+        self.assertTrue(client.lvol_crypto_key_delete("key_crypto_LVOL_1"))
+        mock_req.assert_called_once_with("accel_crypto_key_destroy", key_name="key_crypto_LVOL_1")
+
+    @patch.object(RPCClient, "_request")
+    def test_missing_key_propagates_by_default(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("No key object found", code=RPCErrorCode.invalid_params)
+        client = _make_client()
+        with self.assertRaises(RPCRemoteError):
+            client.lvol_crypto_key_delete("key_crypto_LVOL_1")
+
+    @patch.object(RPCClient, "_request")
+    def test_idempotent_missing_key_returns_none(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("No key object found", code=RPCErrorCode.invalid_params)
+        client = _make_client()
+        self.assertIsNone(client.lvol_crypto_key_delete("key_crypto_LVOL_1", idempotent=True))
+
+    @patch.object(RPCClient, "_request")
+    def test_idempotent_other_invalid_params_message_propagates(self, mock_req):
+        # Same error code, different cause -- the message is what narrows
+        # this to "already gone", so a different invalid_params must not be
+        # swallowed just because the code matches.
+        mock_req.side_effect = RPCRemoteError("Invalid key size", code=RPCErrorCode.invalid_params)
+        client = _make_client()
+        with self.assertRaises(RPCRemoteError):
+            client.lvol_crypto_key_delete("key_crypto_LVOL_1", idempotent=True)
+
+    @patch.object(RPCClient, "_request")
+    def test_idempotent_other_rpc_error_propagates(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
+        client = _make_client()
+        with self.assertRaises(RPCRemoteError):
+            client.lvol_crypto_key_delete("key_crypto_LVOL_1", idempotent=True)
 
 
 class TestBdevDistribCreate(unittest.TestCase):

@@ -2174,9 +2174,28 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "crypto" and not sync:
-            ret = rpc_client.lvol_crypto_delete(name)
-            if ret:
-                ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
+            # A retried teardown pass can reach this branch after the crypto
+            # bdev (and its key) were already removed on a prior pass. The
+            # already-absent case is handled inside the RPC calls themselves
+            # (idempotent=True) rather than here, so a genuine failure is the
+            # only thing left to turn into "not removed" below (SFAM-2826).
+            try:
+                present = rpc_client.bdev_get(name) is not None
+            except RPCException as e:
+                logger.warning(
+                    f"Could not determine whether BDev {name} still exists "
+                    f"({e}); attempting the delete and judging by its result")
+                present = True
+            if not present:
+                logger.info(f"BDev {name} already deleted, skipping")
+                bdev['status'] = 'deleted'
+                continue
+            try:
+                rpc_client.lvol_crypto_delete(name, idempotent=True)
+                rpc_client.lvol_crypto_key_delete(f'key_{name}', idempotent=True)
+                ret = True
+            except RPCRemoteError:
+                ret = None
 
         elif type == "bdev_lvstore":
             try:

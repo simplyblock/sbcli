@@ -17,6 +17,8 @@ collapsing them into one boolean: teardown completed (returns normally),
 deferred (raises ``PreconditionError``), or failed (raises ``RuntimeError``).
 """
 
+import errno
+
 import pytest
 
 from simplyblock_core.controllers import lvol_controller as lc
@@ -138,6 +140,121 @@ class TestRemoveBdevStack:
         assert stack[0]["status"] == "deleted"
         assert stack[1].get("status") != "deleted"
         assert len(rpc.deletes) == 2, "a failure must not abort the remaining entries"
+
+
+class _CryptoRPC:
+    """Minimal SPDK stub for the crypto branch. ``probe`` is what
+    ``bdev_get`` answers with (a bdev dict, ``None``, or an exception
+    instance); ``crypto_delete``/``key_delete`` are ``(result, error)``
+    pairs, where ``error`` -- a dict with ``code``/``message`` -- makes the
+    call raise ``RPCRemoteError`` unless called with ``idempotent=True`` and
+    the error is ``-ENODEV``, mirroring the real idempotent-absorption
+    contract on ``RPCClient.lvol_crypto_delete``/``lvol_crypto_key_delete``
+    (tested directly in ``tests/unit/rpc/test_client.py``)."""
+
+    def __init__(self, probe=({"name": "x"},), crypto_delete=(True, None),
+                 key_delete=(True, None)):
+        self._probe = probe
+        self._crypto_delete = crypto_delete
+        self._key_delete = key_delete
+        self.crypto_deletes = []
+        self.key_deletes = []
+
+    def bdev_get(self, name):
+        if isinstance(self._probe, Exception):
+            raise self._probe
+        return self._probe
+
+    def lvol_crypto_delete(self, name, *, idempotent=False):
+        self.crypto_deletes.append(name)
+        result, error = self._crypto_delete
+        if error:
+            if idempotent and error.get("code") == -errno.ENODEV:
+                return None
+            raise RPCRemoteError(error.get("message", ""), error.get("code", 0))
+        return result
+
+    def lvol_crypto_key_delete(self, name, *, idempotent=False):
+        self.key_deletes.append(name)
+        result, error = self._key_delete
+        if error:
+            if idempotent and error.get("code") == -errno.ENODEV:
+                return None
+            raise RPCRemoteError(error.get("message", ""), error.get("code", 0))
+        return result
+
+
+def _crypto_stack(**over):
+    bdev = {"type": "crypto", "name": "crypto_LVOL_1"}
+    bdev.update(over)
+    return [bdev]
+
+
+class TestRemoveBdevStackCrypto:
+    """SFAM-2826: a retried teardown pass reaches the crypto branch after the
+    crypto bdev (and/or its key) were already removed on a prior pass.
+    ``lvol_crypto_delete``/``lvol_crypto_key_delete`` answer that with
+    ``RPCRemoteError(-ENODEV)`` rather than a falsy result -- unhandled, that
+    exception used to escape ``_remove_bdev_stack`` entirely, skipping the
+    ``all_removed=False`` path, so the delete never converged."""
+
+    def test_a_failed_crypto_delete_is_reported_and_not_marked_deleted(self):
+        stack = _crypto_stack()
+        rpc = _CryptoRPC(crypto_delete=(None, {"code": -16, "message": "device busy"}))
+
+        assert lc._remove_bdev_stack(stack, rpc, sync=False) is False
+        assert stack[0].get("status") != "deleted"
+
+    def test_a_successful_crypto_delete_is_confirmed(self):
+        stack = _crypto_stack()
+        rpc = _CryptoRPC()
+
+        assert lc._remove_bdev_stack(stack, rpc, sync=False) is True
+        assert stack[0]["status"] == "deleted"
+        assert rpc.crypto_deletes == ["crypto_LVOL_1"]
+        assert rpc.key_deletes == ["key_crypto_LVOL_1"]
+
+    def test_an_absent_crypto_bdev_is_confirmed_without_a_delete(self):
+        stack = _crypto_stack()
+        rpc = _CryptoRPC(probe=None)
+
+        assert lc._remove_bdev_stack(stack, rpc, sync=False) is True
+        assert stack[0]["status"] == "deleted"
+        assert rpc.crypto_deletes == [], "an absent bdev must not be re-deleted"
+
+    def test_enodev_from_the_crypto_delete_counts_as_confirmation(self):
+        """The RCA scenario: the probe cannot tell (or races the real state),
+        and the bdev delete answers -ENODEV. ``_remove_bdev_stack`` must pass
+        ``idempotent=True`` for that to be absorbed instead of raising
+        uncaught -- the key delete still runs afterward, since the two
+        resources have independent absent-signatures (one call does not
+        short-circuit the other)."""
+        stack = _crypto_stack()
+        rpc = _CryptoRPC(probe=RPCException("proxy returned non-200"),
+                          crypto_delete=(None, {"code": -19, "message": "No such device"}))
+
+        assert lc._remove_bdev_stack(stack, rpc, sync=False) is True
+        assert stack[0]["status"] == "deleted"
+        assert rpc.key_deletes == ["key_crypto_LVOL_1"], "the key delete still runs independently"
+
+    def test_enodev_from_the_key_delete_counts_as_confirmation(self):
+        """The bdev delete succeeds but the key was already removed on a
+        prior pass -- the same idempotent absorption applies one call later."""
+        stack = _crypto_stack()
+        rpc = _CryptoRPC(key_delete=(None, {"code": -19, "message": "No such device"}))
+
+        assert lc._remove_bdev_stack(stack, rpc, sync=False) is True
+        assert stack[0]["status"] == "deleted"
+
+    def test_sync_deletes_skip_the_crypto_branch_entirely(self):
+        """A sync (non-leader) teardown never touches crypto state -- the
+        branch's own ``and not sync`` guard must still hold."""
+        stack = _crypto_stack()
+        rpc = _CryptoRPC()
+
+        assert lc._remove_bdev_stack(stack, rpc, sync=True) is True
+        assert rpc.crypto_deletes == []
+        assert stack[0].get("status") != "deleted"
 
 
 class TestLvolBdevAbsentOnNode:
