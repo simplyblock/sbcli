@@ -13530,7 +13530,10 @@ def _fence_rpc_bounds(fence_held: bool, fence_elapsed: float,
     cycles, each one draining the cluster back to all-offline. With no fence
     held there is nothing the budget protects, so an unfenced call during a
     removal gets the ordinary client (``None``, ``None``), the same bounds
-    every other restart step outside the window runs with.
+    every other restart step outside the window runs with. The fenced case
+    of that same call is covered separately: the leader set carries its own
+    ``FENCE_SET_LEADER_TIMEOUT_SEC`` budget, since the journal replay it
+    performs is slow for the same reason whether or not a port is fenced.
     """
     budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
     if fence_held:
@@ -14587,7 +14590,11 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             hublvol_port=lvs_node.get_hublvol_port(lvs_name),
             role=snode_lvs_role,
         )
-        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True)
+        # Journal replay and blobstore re-level happen inside this call, so it
+        # gets its own budget (see FENCE_SET_LEADER_TIMEOUT_SEC) -- the 0.5s
+        # norm is sized for calls that only schedule work.
+        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True,
+                      budget=constants.FENCE_SET_LEADER_TIMEOUT_SEC)
         leader_restored = False
         for _ in range(10):
             # 10 x 0.2s of sleep plus 10 RPCs is a large slice of the fence
