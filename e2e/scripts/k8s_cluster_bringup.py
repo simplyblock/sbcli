@@ -550,6 +550,46 @@ def shape_draft(cfg: dict) -> dict:
     if fmt is not None:
         cluster["enableDriveFormat"] = fmt
 
+    # Where backups go. Stated on the document, not patched onto the cluster
+    # after approval, because a store that arrives late never reaches the
+    # control plane at all: the operator sends backup_config only from
+    # creationParams, on the cluster-add call, and the control-plane API
+    # exposes no setter for it -- /clusters/{id}/backup_config is GET only.
+    # The CR then looks entirely correct while every backup fails with
+    # "Cluster <uuid> has no backup configuration", which is how the
+    # 2026-10-16 backup lane lost all 26 of its classes.
+    #
+    # The CRD says the same in its own words: the field is here so that "a
+    # store stated on the document is present when the cluster is created
+    # rather than patched in afterward by whoever remembers".
+    #
+    # The Secret is deliberately not resolved here. It is a core object a
+    # deployment legitimately creates alongside the document or after it, and
+    # the cluster's own creation is where its absence is reported.
+    bucket = (os.environ.get("BACKUP_BUCKET", "") or "").strip()
+    endpoint = (os.environ.get("BACKUP_ENDPOINT", "") or "").strip()
+    secret = (os.environ.get("BACKUP_CREDENTIALS_SECRET", "") or "").strip()
+    if bucket or endpoint or secret:
+        missing = [name for name, val in (("BACKUP_BUCKET", bucket),
+                                          ("BACKUP_ENDPOINT", endpoint),
+                                          ("BACKUP_CREDENTIALS_SECRET", secret))
+                   if not val]
+        if missing:
+            # The CRD requires all three. Refusing here beats a draft rejected
+            # at admission, and beats a cluster that comes up perfectly and
+            # cannot back anything up.
+            raise SystemExit("backup store is half-stated: "
+                             + ", ".join(missing)
+                             + " unset. Set all three, or none.")
+        cluster["backup"] = {
+            "bucket": bucket,
+            "endpoint": endpoint,
+            "credentialsSecretRef": {"name": secret},
+        }
+        region = (os.environ.get("BACKUP_REGION", "") or "").strip()
+        if region:
+            cluster["backup"]["region"] = region
+
     env_name = (os.environ.get("ENVIRONMENT", "") or "").strip()
     if env_name:
         # Discovery concludes this itself; overriding is for the case where it
@@ -680,6 +720,12 @@ def describe(cfg: dict) -> None:
     log(f"  device class   {'LogicalBlock' if block else 'NVMe'} "
         f"({block or nvme} device(s) across {len(workers)} worker slot(s))")
     log(f"  workers        {', '.join(sorted(set(workers)))}")
+    # Printed even when there is none: a backup lane that reaches approval
+    # with "<none>" here is the failure, and this is the last point before
+    # the document becomes immutable.
+    backup = cluster.get("backup") or {}
+    log(f"  backup store   {backup.get('bucket') or '<none>'}"
+        f"{' @ ' + backup['endpoint'] if backup.get('endpoint') else ''}")
 
 
 # ── step 3: approve and wait ─────────────────────────────────────────────

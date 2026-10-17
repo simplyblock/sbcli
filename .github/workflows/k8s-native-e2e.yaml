@@ -1385,35 +1385,48 @@ jobs:
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
 
-          # Conditionally build backup spec block
-          BACKUP_SPEC=""
+          # Where this run's backups go.
+          #
+          # This used to be a StorageCluster patch applied after the deployment
+          # config was approved, and it never once worked. The operator sends
+          # backup_config to the control plane from creationParams only -- the
+          # cluster-add call -- and the control plane exposes no setter for it
+          # (/clusters/{id}/backup_config is GET). A store patched on after the
+          # cluster exists therefore sits on the CR looking perfectly correct
+          # while the control plane has never heard of it, and every backup
+          # fails with:
+          #
+          #   control-plane returned 400: {"error":"Preconditions are not met",
+          #   "detail":"Cluster <uuid> has no backup configuration"}
+          #
+          # which is how the 2026-10-16 lane lost all 26 of its classes with a
+          # healthy MinIO and valid StorageBackup objects.
+          #
+          # So it is stated on the ClusterDeploymentConfig instead, which
+          # expands it into StorageCluster.spec.backup before the cluster is
+          # created. The CRD carries the field for exactly this reason.
+          #
+          # v1alpha2 replaced the backup block outright: bucket, endpoint and
+          # credentialsSecretRef are REQUIRED; localEndpoint became endpoint;
+          # and localTesting, secondaryTarget, snapshotBackups and
+          # withCompression are gone -- not renamed, gone -- so they are
+          # dropped rather than guessed at.
           CLUSTER_SEC="${{ github.event.inputs.cluster_security || 'none' }}"
           TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
           if [ "$CLUSTER_SEC" = "backup" ] || [ "$TESTNAME_INPUT" = "backup" ] || [ "$TESTNAME_INPUT" = "backup-stress" ]; then
-            # v1alpha2 replaced the backup block outright. bucket, endpoint
-            # and credentialsSecretRef are REQUIRED; localEndpoint became
-            # endpoint; and localTesting, secondaryTarget, snapshotBackups
-            # and withCompression are gone -- not renamed, gone -- so they
-            # are dropped rather than guessed at. Sending the old shape got
-            # "unknown field" warnings for five keys and then a hard
-            # "spec.backup.bucket: Required value", which failed the run.
-            #
-            # The bucket is named for the cluster uuid because that is what
-            # the MinIO cleanup step deletes (simplyblock-backup-$CLUSTER_ID).
-            # CLUSTER_ID is not parsed until much later in this job, but the
-            # StorageCluster exists by now and carries the same value in
-            # .status.uuid, so read it from there.
-            SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
-            if [ -z "${SB_UUID}" ]; then
-              echo "::warning::could not read StorageCluster .status.uuid; naming the backup bucket after the run id, which the MinIO cleanup step will not match"
-              SB_UUID="${GITHUB_RUN_ID}"
+            # Named for the run, not the cluster uuid. The uuid is not knowable
+            # here any more: the store has to be on the document BEFORE
+            # approval, and approval is what creates the cluster that would
+            # carry the uuid. The MinIO cleanup step matches this same name.
+            export BACKUP_BUCKET="simplyblock-backup-${GITHUB_RUN_ID}"
+            export BACKUP_ENDPOINT="${MINIO_ENDPOINT}"
+            export BACKUP_CREDENTIALS_SECRET="backup-credentials"
+            echo "BACKUP_BUCKET=${BACKUP_BUCKET}" >> "$GITHUB_ENV"
+            echo "backup bucket: ${BACKUP_BUCKET}"
+            if [ -z "${MINIO_ENDPOINT:-}" ]; then
+              echo "::error::backup run with no MINIO_ENDPOINT. The MinIO setup step did not run or did not export it, and a cluster created without a store cannot be given one afterwards."
+              exit 1
             fi
-            echo "backup bucket: simplyblock-backup-${SB_UUID}"
-            BACKUP_SPEC="  backup:
-              bucket: simplyblock-backup-${SB_UUID}
-              endpoint: ${MINIO_ENDPOINT}
-              credentialsSecretRef:
-                name: backup-credentials"
           fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
@@ -1456,7 +1469,6 @@ jobs:
           fi
 
           JM_COUNT="${JM_COUNT:-3}"
-          BACKUP_SPEC="${BACKUP_SPEC:-}"
           MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"
 
           echo "=== Bringing the cluster up through the deployment config ==="
@@ -1549,9 +1561,14 @@ jobs:
 
           echo "=== Settings the deployment config does not carry ==="
           # A deployment config describes a deployment, not every knob of a
-          # cluster: thresholds, node affinity, backup and vault have no field
-          # on it. They are mutable on the StorageCluster, so they are patched
-          # onto the cluster the expansion just created.
+          # cluster: thresholds, node affinity and vault have no field on it.
+          # They are mutable on the StorageCluster, so they are patched onto
+          # the cluster the expansion just created.
+          #
+          # Backup used to be patched here too, and that was the bug: the
+          # config DOES carry spec.cluster.backup, and it is the only place a
+          # store can be stated, because the control plane is only ever told
+          # about one at cluster-add. It is set above, before approval.
           #
           # v1alpha2, not v1alpha1. Patching the older version looked safer --
           # it carries these fields in the shapes this workflow already builds
@@ -1574,7 +1591,6 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
-          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
           EOF
           echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
@@ -2739,12 +2755,15 @@ jobs:
         run: |
           set +e
           export PATH="/tmp:$PATH"
-          CLUSTER_ID="${CLUSTER_ID:-}"
-          if [ -z "$CLUSTER_ID" ]; then
-            echo "No CLUSTER_ID set, skipping MinIO bucket cleanup"
+          # Named for the run, matching what the deployment config was given.
+          # It used to be simplyblock-backup-$CLUSTER_ID, which stopped being
+          # knowable once the store moved onto the pre-approval document: the
+          # cluster that owns the uuid does not exist until approval.
+          BUCKET="${BACKUP_BUCKET:-}"
+          if [ -z "$BUCKET" ]; then
+            echo "No BACKUP_BUCKET set, skipping MinIO bucket cleanup"
             exit 0
           fi
-          BUCKET="simplyblock-backup-${CLUSTER_ID}"
           if [ "${MINIO_SOURCE:-external}" = "in-cluster" ]; then
             MC_ENDPOINT="http://localhost:9000"
           else

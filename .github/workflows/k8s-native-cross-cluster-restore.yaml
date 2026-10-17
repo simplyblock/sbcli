@@ -1045,11 +1045,26 @@ jobs:
           # region. localEndpoint is endpoint; localTesting, secondaryTarget,
           # snapshotBackups and withCompression have no field here any more --
           # not renamed, gone -- so they are dropped rather than guessed at.
-          # Built at the patch site below, not here: v1alpha2 requires
-          # spec.backup.bucket, the bucket is named for the cluster uuid so the
-          # MinIO cleanup step can find it, and that uuid does not exist until
-          # the cluster has been brought up a few lines further down.
-          BACKUP_SPEC=""
+          # Stated on the deployment config, before approval. It used to be
+          # patched onto the StorageCluster afterwards, named for the cluster
+          # uuid, and that never reached the control plane: the operator sends
+          # backup_config from creationParams only -- the cluster-add call --
+          # and the control plane has no setter for it. The CR looked right
+          # while every backup failed "Cluster <uuid> has no backup
+          # configuration".
+          #
+          # So the bucket is named for the run and the namespace instead. The
+          # uuid is not knowable here by construction: approval is what creates
+          # the cluster that would carry it.
+          if [ -z "${MINIO_ENDPOINT:-}" ]; then
+            echo "::error::no MINIO_ENDPOINT. A cluster created without a backup store cannot be given one afterwards."
+            exit 1
+          fi
+          export BACKUP_BUCKET="simplyblock-backup-${GITHUB_RUN_ID}-${NS_C1}"
+          echo "BACKUP_BUCKET_C1=${BACKUP_BUCKET}" >> "$GITHUB_ENV"
+          export BACKUP_ENDPOINT="${MINIO_ENDPOINT}"
+          export BACKUP_CREDENTIALS_SECRET="backup-credentials"
+          echo "backup bucket: ${BACKUP_BUCKET}"
 
           echo "=== Bringing C1 up in ${NS_C1} through the deployment config ==="
           NAMESPACE="${NS_C1}"
@@ -1141,17 +1156,6 @@ jobs:
           # so the whole step aborted here and the pool below was never
           # applied. enableNodeAffinity and the two thresholds carry the same
           # names in v1alpha2; only backup and vault are reshaped.
-          SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
-          if [ -n "${SB_UUID}" ]; then
-            BACKUP_SPEC="  backup:
-              bucket: simplyblock-backup-${SB_UUID}
-              endpoint: ${MINIO_ENDPOINT}
-              credentialsSecretRef:
-                name: backup-credentials"
-            echo "backup bucket: simplyblock-backup-${SB_UUID}"
-          else
-            echo "::warning::no StorageCluster .status.uuid yet; leaving spec.backup unset rather than sending an invalid one"
-          fi
           cat > /tmp/cluster-extra.yaml <<EOF
           spec:
             enableNodeAffinity: true
@@ -1161,7 +1165,6 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
-          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
           EOF
           echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
@@ -1250,11 +1253,26 @@ jobs:
           # region. localEndpoint is endpoint; localTesting, secondaryTarget,
           # snapshotBackups and withCompression have no field here any more --
           # not renamed, gone -- so they are dropped rather than guessed at.
-          # Built at the patch site below, not here: v1alpha2 requires
-          # spec.backup.bucket, the bucket is named for the cluster uuid so the
-          # MinIO cleanup step can find it, and that uuid does not exist until
-          # the cluster has been brought up a few lines further down.
-          BACKUP_SPEC=""
+          # Stated on the deployment config, before approval. It used to be
+          # patched onto the StorageCluster afterwards, named for the cluster
+          # uuid, and that never reached the control plane: the operator sends
+          # backup_config from creationParams only -- the cluster-add call --
+          # and the control plane has no setter for it. The CR looked right
+          # while every backup failed "Cluster <uuid> has no backup
+          # configuration".
+          #
+          # So the bucket is named for the run and the namespace instead. The
+          # uuid is not knowable here by construction: approval is what creates
+          # the cluster that would carry it.
+          if [ -z "${MINIO_ENDPOINT:-}" ]; then
+            echo "::error::no MINIO_ENDPOINT. A cluster created without a backup store cannot be given one afterwards."
+            exit 1
+          fi
+          export BACKUP_BUCKET="simplyblock-backup-${GITHUB_RUN_ID}-${NS_C2}"
+          echo "BACKUP_BUCKET_C2=${BACKUP_BUCKET}" >> "$GITHUB_ENV"
+          export BACKUP_ENDPOINT="${MINIO_ENDPOINT}"
+          export BACKUP_CREDENTIALS_SECRET="backup-credentials"
+          echo "backup bucket: ${BACKUP_BUCKET}"
 
           echo "=== Bringing C2 up in ${NS_C2} through the deployment config ==="
           NAMESPACE="${NS_C2}"
@@ -1346,17 +1364,6 @@ jobs:
           # so the whole step aborted here and the pool below was never
           # applied. enableNodeAffinity and the two thresholds carry the same
           # names in v1alpha2; only backup and vault are reshaped.
-          SB_UUID="$(kubectl -n "${NAMESPACE}" get storagecluster simplyblock-cluster -o jsonpath="{.status.uuid}" 2>/dev/null || true)"
-          if [ -n "${SB_UUID}" ]; then
-            BACKUP_SPEC="  backup:
-              bucket: simplyblock-backup-${SB_UUID}
-              endpoint: ${MINIO_ENDPOINT}
-              credentialsSecretRef:
-                name: backup-credentials"
-            echo "backup bucket: simplyblock-backup-${SB_UUID}"
-          else
-            echo "::warning::no StorageCluster .status.uuid yet; leaving spec.backup unset rather than sending an invalid one"
-          fi
           cat > /tmp/cluster-extra.yaml <<EOF
           spec:
             enableNodeAffinity: true
@@ -1366,7 +1373,6 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
-          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
           EOF
           echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
@@ -1818,10 +1824,12 @@ jobs:
           fi
           mc alias set myminio "${MC_ENDPOINT}" minioadmin minioadmin 2>/dev/null || true
 
-          # Cleanup C1 bucket
-          C1_ID="${C1_CLUSTER_ID:-}"
-          if [ -n "$C1_ID" ]; then
-            BUCKET="simplyblock-backup-${C1_ID}"
+          # Cleanup C1 bucket. Named for the run, matching what the
+          # deployment config was given -- the cluster uuid is not a name
+          # the store can carry any more, because the store has to exist
+          # on the document before the cluster that owns the uuid does.
+          BUCKET="${BACKUP_BUCKET_C1:-}"
+          if [ -n "$BUCKET" ]; then
             if mc ls "myminio/${BUCKET}" >/dev/null 2>&1; then
               echo "=== Cleaning up MinIO backup bucket (C1): ${BUCKET} ==="
               mc rb --force "myminio/${BUCKET}" 2>/dev/null || true
@@ -1830,13 +1838,15 @@ jobs:
               echo "C1 bucket ${BUCKET} does not exist, nothing to clean"
             fi
           else
-            echo "No C1_CLUSTER_ID set, skipping C1 MinIO bucket cleanup"
+            echo "No BACKUP_BUCKET_C1 set, skipping C1 MinIO bucket cleanup"
           fi
 
-          # Cleanup C2 bucket
-          C2_ID="${C2_CLUSTER_ID:-}"
-          if [ -n "$C2_ID" ]; then
-            BUCKET="simplyblock-backup-${C2_ID}"
+          # Cleanup C2 bucket. Named for the run, matching what the
+          # deployment config was given -- the cluster uuid is not a name
+          # the store can carry any more, because the store has to exist
+          # on the document before the cluster that owns the uuid does.
+          BUCKET="${BACKUP_BUCKET_C2:-}"
+          if [ -n "$BUCKET" ]; then
             if mc ls "myminio/${BUCKET}" >/dev/null 2>&1; then
               echo "=== Cleaning up MinIO backup bucket (C2): ${BUCKET} ==="
               mc rb --force "myminio/${BUCKET}" 2>/dev/null || true
@@ -1845,7 +1855,7 @@ jobs:
               echo "C2 bucket ${BUCKET} does not exist, nothing to clean"
             fi
           else
-            echo "No C2_CLUSTER_ID set, skipping C2 MinIO bucket cleanup"
+            echo "No BACKUP_BUCKET_C2 set, skipping C2 MinIO bucket cleanup"
           fi
 
       - name: Cleanup MinIO namespace (if deployed)
