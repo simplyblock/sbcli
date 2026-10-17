@@ -269,6 +269,10 @@ def test_reconstitute_is_a_noop_for_a_non_group_volume(db):
 def test_failback_group_configures_every_member(db, monkeypatch):
     from simplyblock_core.controllers import lvol_controller as lc
     group = _seed_group(db, ["v1", "v2"])
+    # The members must exist as live volumes: failback_group refuses a group
+    # with no live members as the retired end of a move (#33).
+    for lvol_id in ("v1", "v2"):
+        _seed_lvol(db, lvol_id, NODE, LVS, group_id=group.get_id())
     calls = []
 
     def _failback(lvol_id, source_cluster_id=None):
@@ -281,3 +285,19 @@ def test_failback_group_configures_every_member(db, monkeypatch):
     assert result["configured"] is True
     assert sorted(c[0] for c in calls) == ["v1", "v2"]
     assert all(c[1] == "grp-attach-peer-1" for c in calls)
+
+
+def test_failback_group_refuses_a_group_with_no_live_members(db, monkeypatch):
+    # #33: a resync addressed to the retired end of a move (its members already
+    # deleted) must refuse rather than report a healthy re-protect that
+    # configured nothing.
+    from simplyblock_core.controllers import lvol_controller as lc
+    group = _seed_group(db, ["v1", "v2"])   # member records never written
+    monkeypatch.setattr(lc, "replication_failback",
+                        lambda *a, **k: pytest.fail("must not configure fail-back"))
+
+    result = cgc.failback_group(group, source_cluster_id="grp-attach-peer-1")
+
+    assert result["configured"] is False
+    assert result["members"] == []
+    assert "no live members" in result["error"]
