@@ -102,7 +102,7 @@ on:
           - 'false'
           - 'true'
       tls_enabled:
-        description: 'Enable TLS'
+        description: 'Enable TLS. Ignored: this lane is a backup lane and always runs with TLS.'
         required: false
         default: true
         type: boolean
@@ -815,10 +815,34 @@ jobs:
 
           echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
 
+      # ── Resolve TLS once, for every step that depends on it ────────────
+
+      - name: Resolve TLS
+        run: |
+          set -euo pipefail
+          TLS="${{ github.event.inputs.tls_enabled }}"
+
+          # The input declares default: true, but a default only applies to a
+          # workflow_dispatch that rendered the form. On a schedule or a
+          # workflow_call github.event.inputs is empty, so the expression read
+          # "" and cert-manager and both TLS_FLAGS blocks silently did not run
+          # -- with the declared default still saying true.
+          #
+          # This whole lane is a backup lane, so it is a TLS lane: it is not
+          # worth running cross-cluster restore against a weaker transport
+          # than the one the backup classes themselves run on.
+          if [ "${TLS}" != "true" ]; then
+            echo "::notice::cross-cluster restore is a backup lane: enabling TLS"
+          fi
+          TLS="true"
+
+          echo "TLS_ENABLED=${TLS}" >> "$GITHUB_ENV"
+          echo "TLS: ${TLS}"
+
       # ── Install cert-manager (TLS) ─────────────────────────────────────
 
       - name: Install cert-manager
-        if: ${{ github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ env.TLS_ENABLED == 'true' }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
@@ -835,7 +859,7 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+          if [ "${TLS_ENABLED}" = "true" ]; then
             TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
           fi
 
@@ -918,7 +942,7 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+          if [ "${TLS_ENABLED}" = "true" ]; then
             TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
           fi
 

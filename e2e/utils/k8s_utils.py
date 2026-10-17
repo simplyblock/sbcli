@@ -5672,7 +5672,14 @@ class K8sSbcliUtils:
                 "the CSI driver cannot resolve.",
                 len(existing), ns, list(existing))
         if usable and not dhchap and not allowed_nodes and not storage_class_parameters:
-            actual = next(iter(usable))
+            # The general-purpose pool by name, not whichever one the control
+            # plane listed first. A caller on this path asked for nothing in
+            # particular, and on a TLS run the first pool alphabetically is
+            # encryption-pool -- a pool that exists to be bound to encrypted
+            # StorageClasses. Handing it to every caller would make the pool a
+            # test runs against depend on whether TLS happened to be on.
+            actual = ("simplyblock-pool" if "simplyblock-pool" in usable
+                      else next(iter(usable)))
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 

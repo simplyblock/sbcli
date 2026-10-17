@@ -114,7 +114,7 @@ on:
           - 'false'
           - 'true'
       tls_enabled:
-        description: 'Enable TLS (installs cert-manager, sets tls.enabled + tls.mutual_enabled)'
+        description: 'Enable TLS (installs cert-manager, sets tls.enabled + tls.mutual_enabled). Forced on for backup runs, which need the key store and encryption-pool.'
         required: false
         default: true
         type: boolean
@@ -782,6 +782,40 @@ jobs:
             pod-security.kubernetes.io/warn=privileged \
             --overwrite
 
+      # ── Resolve TLS once, for every step that depends on it ────────────────
+
+      - name: Resolve TLS
+        run: |
+          set -euo pipefail
+          TLS="${{ github.event.inputs.tls_enabled }}"
+
+          # The input declares default: true, but a default only applies to a
+          # workflow_dispatch that rendered the form. On a schedule or a
+          # workflow_call, github.event.inputs is empty, so the expression
+          # read "" and every TLS step silently did not run -- with the
+          # declared default still saying true.
+          if [ -z "${TLS}" ]; then
+            TLS="true"
+          fi
+
+          # A backup run is a TLS run, whatever the form said. The encryption
+          # backup classes provision against encryption-pool, and that pool
+          # exists only on a TLS run: it is created in the same branch as the
+          # vault settings, because encryption needs a key store. Without TLS
+          # those classes do not fail -- they quietly fall through to the
+          # plain pool and test nothing, which is worse.
+          CLUSTER_SEC="${{ github.event.inputs.cluster_security || 'none' }}"
+          TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
+          if [ "$CLUSTER_SEC" = "backup" ] || [ "$TESTNAME_INPUT" = "backup" ] || [ "$TESTNAME_INPUT" = "backup-stress" ]; then
+            if [ "${TLS}" != "true" ]; then
+              echo "::notice::backup lane: enabling TLS, which the encryption classes need for encryption-pool and the key store"
+            fi
+            TLS="true"
+          fi
+
+          echo "TLS_ENABLED=${TLS}" >> "$GITHUB_ENV"
+          echo "TLS: ${TLS}"
+
       # ── Deploy MinIO for backup tests (conditional) ────────────────────────
 
       - name: Setup MinIO for backup tests
@@ -972,7 +1006,7 @@ jobs:
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
       - name: Install cert-manager (TLS prerequisite)
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && env.TLS_ENABLED == 'true' }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
@@ -991,7 +1025,7 @@ jobs:
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+          if [ "${TLS_ENABLED}" = "true" ]; then
             TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
           fi
 
@@ -1156,7 +1190,7 @@ jobs:
           done
 
       - name: Setup KMS (vault) for encryption
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && env.TLS_ENABLED == 'true' }}
         run: |
           # Ensure vault namespace from previous run is fully terminated before installing.
           # The earlier cleanup step uses --wait=false, so the namespace may still be terminating.
@@ -1432,7 +1466,7 @@ jobs:
           # Build vault settings and encryption pool blocks (conditional on TLS)
           VAULT_SETTINGS=""
           ENCRYPTION_POOL_YAML=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+          if [ "${TLS_ENABLED}" = "true" ]; then
             VAULT_SETTINGS="  kms:
                 vault:
                   endpoint: \"https://openbao.vault:8200\""
