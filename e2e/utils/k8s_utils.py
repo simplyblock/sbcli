@@ -5641,7 +5641,7 @@ class K8sSbcliUtils:
 
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
                          max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None,
-                         storage_class_parameters=None):
+                         storage_class_parameters=None, dedicated=False):
         """Use an existing pool if any exist; only create via kubectl if none exist.
 
         Returns the actual pool name to use (may differ from *pool_name* if an
@@ -5687,7 +5687,8 @@ class K8sSbcliUtils:
                 "CR in '%s': %s. Creating one rather than handing back a pool "
                 "the CSI driver cannot resolve.",
                 len(existing), ns, list(existing))
-        if usable and not dhchap and not allowed_nodes and not storage_class_parameters:
+        if (usable and not dedicated and not dhchap and not allowed_nodes
+                and not storage_class_parameters):
             # The general-purpose pool by name, not whichever one the control
             # plane listed first. A caller on this path asked for nothing in
             # particular, and on a TLS run the first pool alphabetically is
@@ -5699,7 +5700,13 @@ class K8sSbcliUtils:
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        dedicated = bool(dhchap or allowed_nodes or storage_class_parameters)
+        # dedicated=True asks for a pool of this test's own outright. A test
+        # that DELETES its pool needs one: reuse hands back the lab's shared
+        # pool, and delete_storage_pool rightly declines to remove a pool the
+        # caller did not create -- so the delete, and any recreate after it,
+        # quietly do nothing and the case proves nothing.
+        dedicated = bool(dedicated or dhchap or allowed_nodes
+                         or storage_class_parameters)
         if existing and dedicated:
             # A caller with a specific dhchap/allowedNodes requirement must
             # NOT get an arbitrary existing pool handed back — reuse is only
