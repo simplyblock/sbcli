@@ -2838,10 +2838,62 @@ class K8sUtils:
                 return "succeeded"
             if failed and int(failed) >= 1:
                 self.logger.warning(f"[K8sUtils] Job '{job_name}' failed")
+                self._dump_job_diagnostics(job_name, ns, "failed")
                 return "failed"
             time.sleep(10)
         self.logger.warning(f"[K8sUtils] Job '{job_name}' timed out after {timeout}s")
+        self._dump_job_diagnostics(job_name, ns, "timed out")
         return "timeout"
+
+    def _dump_job_diagnostics(self, job_name: str, namespace: str,
+                              what: str) -> None:
+        """Say why a Job did not finish, while its pods still exist.
+
+        A timed-out fio job used to be reported as
+        "did not succeed (status=timeout)" and nothing else, and the test
+        then asserted -- so the pod, its events and its fio output were all
+        torn down with the namespace before anyone could look. That is one
+        whole run spent to learn a job did not finish. Everything here is
+        read-only and bounded, and runs BEFORE the caller asserts.
+
+        The three questions a stuck fio job actually raises: did the pod ever
+        start (phase/waiting reason), did the volume mount (events), and did
+        fio run and say something (logs).
+        """
+        self.logger.error(
+            f"[fio-diag] Job '{job_name}' {what}. Dumping diagnostics...")
+
+        def _show(label, cmd):
+            try:
+                out, _ = self._exec_kubectl(cmd, supress_logs=True)
+                out = (out or "").strip()
+                if out:
+                    self.logger.error("[fio-diag] %s:\n%s", label, out)
+                else:
+                    self.logger.error("[fio-diag] %s: <empty>", label)
+            except Exception as exc:                          # noqa: BLE001
+                self.logger.warning(f"[fio-diag] {label} failed: {exc}")
+
+        ns = namespace
+        _show("job", f"kubectl describe job {job_name} -n {ns} 2>&1 | tail -40")
+        # Pod phase and, when it never started, the reason it is waiting --
+        # ImagePullBackOff and a volume that will not attach look identical
+        # from the job's side.
+        _show("pods", f"kubectl get pods -n {ns} -l job-name={job_name} "
+                      f"-o wide 2>&1")
+        # describe rather than a jsonpath: it carries the container's waiting
+        # reason, the volume it is mounting and the pod's own events in one
+        # read, and those are the three ways an fio job hangs without ever
+        # producing output.
+        _show("pod detail",
+              f"kubectl describe pods -n {ns} -l job-name={job_name} "
+              f"2>&1 | tail -60")
+        _show("events", f"kubectl get events -n {ns} --sort-by=.lastTimestamp "
+                        f"2>&1 | grep -i {job_name} | tail -25")
+        # fio's own output. --tail bounds it; a job that never started
+        # returns nothing and that is itself the answer.
+        _show("fio log", f"kubectl logs -n {ns} -l job-name={job_name} "
+                         f"--tail=60 --all-containers 2>&1")
 
     def job_active(self, job_name: str, namespace: str | None = None) -> bool:
         """True while a Job still has a pod running.
