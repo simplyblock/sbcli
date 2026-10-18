@@ -4407,20 +4407,32 @@ class K8sUtils:
                 "and places it with targetPool", name, pvc_size,
                 storage_class)
 
+        # An object of that name is the ordinary case and is checked first.
+        # Every producer in this suite returns the StorageBackup's name, so
+        # looking the control-plane uuid up first meant the miss branch ran
+        # on every restore and logged that nothing carried the id and the
+        # operation might not resolve -- on restores that then worked. Only
+        # a reference that is NOT an object here is worth a word.
         backup_name, backup_ns = backup_ref_name, ns
-        found, found_ns = self.find_storage_backup_by_id(backup_ref_name)
-        if found:
-            backup_name, backup_ns = found, found_ns
+        if self.get_resource_json(self.SB_KIND, backup_ref_name,
+                                  namespace=ns):
             self.logger.info(
-                "[K8sUtils] restore '%s': backup id %s is StorageBackup "
-                "%s/%s", name, backup_ref_name, found_ns, found)
+                "[K8sUtils] restore '%s': StorageBackup %s/%s",
+                name, ns, backup_ref_name)
         else:
-            self.logger.info(
-                "[K8sUtils] restore '%s': no StorageBackup carries id %r, "
-                "treating it as an object name in %s. If this is a "
-                "control-plane id with no Kubernetes object behind it -- an "
-                "sbcli backup, say -- the operation will not resolve it.",
-                name, backup_ref_name, ns)
+            found, found_ns = self.find_storage_backup_by_id(backup_ref_name)
+            if found:
+                backup_name, backup_ns = found, found_ns
+                self.logger.info(
+                    "[K8sUtils] restore '%s': backup id %s is StorageBackup "
+                    "%s/%s", name, backup_ref_name, found_ns, found)
+            else:
+                self.logger.warning(
+                    "[K8sUtils] restore '%s': %r is neither a StorageBackup "
+                    "in %s nor the id of one. If it is a control-plane id "
+                    "with no Kubernetes object behind it -- an sbcli backup, "
+                    "say -- the operation will not resolve it.",
+                    name, backup_ref_name, ns)
 
         return self.create_storage_backup_ops_restore(
             name=name, backup_name=backup_name, claim_name=pvc_name,

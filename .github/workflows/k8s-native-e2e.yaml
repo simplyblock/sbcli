@@ -2246,11 +2246,17 @@ jobs:
                 echo "| \`${tc_name}\` | ${status_icon} | \`${log_dir}\` |"
               done <<< "${test_wise}"
             fi
-            echo ""
-            echo "### Failure Reason"
-            echo '```'
-            printf '%s\n' "${failure_summary}"
-            echo '```'
+            # Only when something actually failed. A passing run has no
+            # failure reason, and printing one invites reading whatever
+            # the scrape happened to land on as the cause of a problem
+            # that does not exist.
+            if [[ "${failed_cnt}" -gt 0 ]]; then
+              echo ""
+              echo "### Failure Reason"
+              echo '```'
+              printf '%s\n' "${failure_summary}"
+              echo '```'
+            fi
             if [[ -n "${log_tail}" ]]; then
               echo ""
               echo "<details><summary>Last 50 lines of output.log</summary>"
