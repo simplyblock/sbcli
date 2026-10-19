@@ -18,13 +18,7 @@ from simplyblock_core.models.backup import (
     BackupPolicyAttachment,
 )
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.cluster import (
-    Cluster,
-    ClusterAddNodeLock,
-    ClusterCreateLock,
-    DeployConfig,
-    PortReservation,
-)
+from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -1142,6 +1136,30 @@ class DBController(metaclass=Singleton):
             ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
         return sorted(ret, key=lambda x: x.date)
 
+    def get_job_tasks_by_function(self, cluster_id: str, function_name: str) -> list[JobSchedule]:
+        """One cluster's tasks of a single function, all statuses, date-ordered,
+        through the (cluster_id, function_name, status) index -- a scoped range
+        read rather than get_job_tasks' scan of the whole never-pruned task
+        table. The replication-status reads only ever need snapshot_replication
+        and replication_final tasks, so scanning every other function's history
+        to find them was pure overhead (2026-10-03).
+        """
+        return sorted(
+            self.query(JobSchedule, 'cluster_id+function_name+status',
+                       cluster_id, function_name),
+            key=lambda x: x.date)
+
+    def get_replication_tasks_for_snapshot(self, snapshot_id: str) -> list[JobSchedule]:
+        """The snapshot_replication task(s) that ship one snapshot, through the
+        repl_snapshot_id index -- a point/range read instead of walking the
+        cluster's never-pruned task table to find the one task per snapshot. The
+        relationship is 1:1 in steady state; a list tolerates a re-queued retry
+        reusing the snapshot_id.
+        """
+        return sorted(
+            self.query(JobSchedule, 'repl_snapshot_id', snapshot_id),
+            key=lambda x: x.date)
+
 
     def get_active_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Return all non-done FN_LVOL_MIG tasks for the given cluster."""
@@ -1298,135 +1316,6 @@ class DBController(metaclass=Singleton):
         ordered_snapshot_ids = sorted(set(snapshot_ids))
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
-
-    # ---- Cluster node-add mesh lock (Single FDB Transaction) ----
-
-    def get_cluster_add_lock(self, cluster_id: str) -> ClusterAddNodeLock | None:
-        return single_or_none(ClusterAddNodeLock().read_from_db(self.kv_store, id=cluster_id))
-
-    def _try_acquire_cluster_add_lock_tx(self, tr, cluster_id, owner, now):
-        lock = ClusterAddNodeLock()
-        lock.cluster_id = cluster_id
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if raw.present():
-            existing = ClusterAddNodeLock().from_dict(json.loads(raw))
-            fresh = (now - existing.heartbeat_at) <= constants.CLUSTER_ADD_LOCK_TTL_SEC
-            if existing.owner and existing.owner != owner and fresh:
-                return False, existing.owner
-            # Stale (holder presumed dead) or already ours: (re)take it.
-            lock.acquired_at = existing.acquired_at if existing.owner == owner else now
-        else:
-            lock.acquired_at = now
-        lock.owner = owner
-        lock.heartbeat_at = now
-        tr[key] = json.dumps(lock.to_dict()).encode()
-        return True, None
-
-    def acquire_cluster_add_lock(self, cluster_id, owner):
-        """Atomically acquire the per-cluster node-add mesh lock.
-
-        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
-        reclaimed from a dead holder whose heartbeat went stale, or already
-        held by this owner), or (False, current_owner) if a live holder owns it.
-        """
-        if not self.kv_store:
-            return False, "No DB connection"
-        now = int(time.time())
-        transactional = fdb.transactional(DBController._try_acquire_cluster_add_lock_tx)
-        return transactional(self, self.kv_store, cluster_id, owner, now)
-
-    def _refresh_cluster_add_lock_tx(self, tr, cluster_id, owner, now):
-        lock = ClusterAddNodeLock()
-        lock.cluster_id = cluster_id
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if not raw.present():
-            return False
-        existing = ClusterAddNodeLock().from_dict(json.loads(raw))
-        if existing.owner != owner:
-            return False  # lost the lock (reclaimed by someone else)
-        existing.heartbeat_at = now
-        tr[key] = json.dumps(existing.to_dict()).encode()
-        return True
-
-    def refresh_cluster_add_lock(self, cluster_id, owner):
-        """Heartbeat the lock so a long mesh section isn't reclaimed. Returns
-        True if still held by ``owner``, False if it was lost/reclaimed."""
-        if not self.kv_store:
-            return False
-        now = int(time.time())
-        transactional = fdb.transactional(DBController._refresh_cluster_add_lock_tx)
-        return transactional(self, self.kv_store, cluster_id, owner, now)
-
-    def _release_cluster_add_lock_tx(self, tr, cluster_id, owner):
-        lock = ClusterAddNodeLock()
-        lock.cluster_id = cluster_id
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if not raw.present():
-            return
-        existing = ClusterAddNodeLock().from_dict(json.loads(raw))
-        if existing.owner == owner:
-            del tr[key]
-
-    def release_cluster_add_lock(self, cluster_id, owner):
-        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
-        late release never deletes a lock another host has since reclaimed)."""
-        if not self.kv_store:
-            return
-        transactional = fdb.transactional(DBController._release_cluster_add_lock_tx)
-        transactional(self, self.kv_store, cluster_id, owner)
-
-    # ---- Cluster create-by-name lock (Single FDB Transaction) ----
-
-    def _try_acquire_cluster_create_lock_tx(self, tr, name, owner, now):
-        lock = ClusterCreateLock()
-        lock.lock_name = name
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if raw.present():
-            existing = ClusterCreateLock().from_dict(json.loads(raw))
-            fresh = (now - existing.acquired_at) <= constants.CLUSTER_CREATE_LOCK_TTL_SEC
-            if existing.owner and existing.owner != owner and fresh:
-                return False, existing.owner
-            # Stale (holder presumed dead/finished) or already ours: (re)take it.
-        lock.owner = owner
-        lock.acquired_at = now
-        tr[key] = json.dumps(lock.to_dict()).encode()
-        return True, None
-
-    def acquire_cluster_create_lock(self, name, owner):
-        """Atomically acquire the create-by-name lock for ``name``.
-
-        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
-        reclaimed from a stale holder, or already held by this owner), or
-        (False, current_owner) if a live holder owns it.
-        """
-        if not self.kv_store:
-            return False, "No DB connection"
-        now = int(time.time())
-        transactional = fdb.transactional(DBController._try_acquire_cluster_create_lock_tx)
-        return transactional(self, self.kv_store, name, owner, now)
-
-    def _release_cluster_create_lock_tx(self, tr, name, owner):
-        lock = ClusterCreateLock()
-        lock.lock_name = name
-        key = lock.get_db_id().encode()
-        raw = tr.get(key).wait()
-        if not raw.present():
-            return
-        existing = ClusterCreateLock().from_dict(json.loads(raw))
-        if existing.owner == owner:
-            del tr[key]
-
-    def release_cluster_create_lock(self, name, owner):
-        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
-        late release never deletes a lock another caller has since reclaimed)."""
-        if not self.kv_store:
-            return
-        transactional = fdb.transactional(DBController._release_cluster_create_lock_tx)
-        transactional(self, self.kv_store, name, owner)
 
     # ---- Per-lvstore snapshot-mutation lock (Single FDB Transaction) ----
 
@@ -1587,7 +1476,7 @@ class DBController(metaclass=Singleton):
     def _claim_lvol_ns_slot_tx(self, tr, lvol, host_node, namespaced,
                                standalone_nqn, standalone_namespace,
                                standalone_max_ns, standalone_allowed_hosts,
-                               exclude_nqns, internal=False):
+                               exclude_nqns, internal=False, prefer_nqn=""):
         from simplyblock_core.controllers import lvol_controller
 
         # Read-then-write of the per-node allocator key gives every claim on
@@ -1612,7 +1501,7 @@ class DBController(metaclass=Singleton):
             # fills one subsystem completely before a new one is opened.
             target = lvol_controller.get_next_available_subsystem_on_node(
                 host_node.get_id(), minis, exclude_nqns=exclude_nqns,
-                pool_id=lvol.pool_uuid)
+                pool_id=lvol.pool_uuid, prefer_nqn=prefer_nqn)
         if target is not None:
             lvol.nqn = target.nqn
             lvol.namespace = target.uuid
@@ -1671,7 +1560,7 @@ class DBController(metaclass=Singleton):
 
     def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
                            standalone_namespace="", standalone_allowed_hosts=None,
-                           exclude_nqns=None, internal=False):
+                           exclude_nqns=None, internal=False, prefer_nqn=""):
         """Pick the namespace slot for ``lvol`` AND persist its record
         (STATUS_IN_CREATION) in ONE FDB transaction.
 
@@ -1695,6 +1584,10 @@ class DBController(metaclass=Singleton):
         ``internal`` is set, which exempts system-created volumes such as the
         REP_* replication receiving copies from the admission cap.
 
+        ``prefer_nqn`` is the subsystem a consistency group's member should
+        join (its group's, cg_colocation): taken when it has a free slot,
+        otherwise the ordinary pick applies.
+
         ``exclude_nqns`` skips subsystems the DB believes have room but SPDK
         has rejected (-32602 re-claim in ``add_lvol_on_node``). The per-pool
         name index is maintained outside the transaction (as on every other
@@ -1707,13 +1600,13 @@ class DBController(metaclass=Singleton):
             return transactional(self, kv, lvol, host_node, namespaced,
                                  standalone_nqn, standalone_namespace,
                                  standalone_max_ns, standalone_allowed_hosts,
-                                 exclude_nqns, internal)
+                                 exclude_nqns, internal, prefer_nqn)
         # Transactionless store (unit-tier fdb stub / fake stores in tests):
         # same logic, not atomic.
         return self._claim_lvol_ns_slot_tx(
             _NoTxnStore(kv), lvol, host_node, namespaced, standalone_nqn,
             standalone_namespace, standalone_max_ns, standalone_allowed_hosts,
-            exclude_nqns, internal)
+            exclude_nqns, internal, prefer_nqn)
 
     def _release_lvol_ns_slot_tx(self, tr, lvol):
         lvol.remove(tr)

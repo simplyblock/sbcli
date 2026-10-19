@@ -651,6 +651,7 @@ class TestGroup:
         assert (body['role'], body['state'], body['resyncing'], body['member_count'],
                 body['outstanding_bytes'], body['lag_seconds']) == ('source', 'degraded', True, 3, 3 * 4096, 90)
         lvol_controller.get_replication_info.assert_not_called()
+        lvol_controller.get_replication_info_bulk.assert_not_called()
 
     def test_sync_status(self, client, sync_controller):
         sync_controller.group_sync_status.return_value = GroupSyncStatus(
@@ -771,10 +772,15 @@ class TestAsyncClusterUnchanged:
         assert client.post(REPLICATION_URL + 'start').status_code == 204
         lvol_controller.replication_start.assert_called_once()
 
-    def test_group_failover_needs_a_policy(self, client, sync_controller, resources):
+    def test_group_failover_without_a_policy_promoting_nothing_is_409(
+            self, client, sync_controller, policy_controller, resources):
+        # A group without a policy is not refused up front (a relocate may have
+        # emptied it); only a fail-over that promotes nothing is a 409.
         resources.group.policy_id = ''
+        policy_controller.failover_group.return_value = []
 
-        assert client.post(GROUP_URL + f'replication/failover?site={SITE}').status_code == 412
+        assert client.post(GROUP_URL + f'replication/failover?site={SITE}').status_code == 409
+        policy_controller.failover_group.assert_called_once()
         assert sync_controller.method_calls == []
 
     def test_group_status(self, client, sync_controller, group_controller):

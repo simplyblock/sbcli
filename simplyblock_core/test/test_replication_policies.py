@@ -384,6 +384,28 @@ def test_detach_refused_while_a_cutover_is_in_flight(monkeypatch):
     assert db.get_lvol_by_id("LV1").replication_policy_id == "CL_SRC/P1", "must not be cleared"
 
 
+def test_detach_of_a_demoted_volume_keeps_its_chain(monkeypatch):
+    """Relocate, 2026-10-01: Ramen deletes the demoted side's
+    VolumeReplication -> DisableVolumeReplication -> detach. The purge then
+    deleted the fail-over point's 13 ancestors 13 s before the promote on the
+    other side cloned from it. A demoted volume keeps every internal
+    snapshot; they go with the volume when the promote deletes it."""
+    for state in (LVol.REPLICATION_DEMOTE_PENDING, LVol.REPLICATION_DEMOTE_DONE):
+        lv = _lvol("LV1", policy_id="CL_SRC/P1", demote_snapshot_id="DEMOTE_SNAP")
+        lv.replication_demote_state = state
+        db = _FakeDB(lvols=[lv])
+        _install(monkeypatch, db)
+        monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+        stopped: list[str] = []
+        purged: list[str] = []
+        monkeypatch.setattr(rpc.lvol_controller, "replication_stop", _recording(stopped))
+        monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots", _recording(purged))
+        assert rpc.detach_policy("LV1") is True
+        assert stopped == ["LV1"]
+        assert purged == [], f"a {state} volume's chain must survive the detach"
+        assert db.get_lvol_by_id("LV1").replication_policy_id == ""
+
+
 def test_detach_stops_and_purges_both_sides(monkeypatch):
     lv = _lvol("LV1", policy_id="CL_SRC/P1")
     db = _FakeDB(lvols=[lv])
@@ -899,6 +921,58 @@ def test_failover_group_promote_proceeds_when_members_are_demoted(monkeypatch):
         "a demoted (relocating) member is a hand-off, not the live primary"
 
 
+def test_latest_generation_resolves_by_membership_not_the_policy_flag(monkeypatch):
+    """Regression (2026-09-30): the test-failover drill's group recovery point
+    read refused a group-first policy outright. A group attached with
+    attach_group_policy sets group.policy_id, NOT the legacy policy.consistency_group
+    flag, so the flag gate raised "has no consistency group" for every live group
+    and the group drill failed at ResolvingPoint. The generation must resolve by
+    MEMBERSHIP, the same signal the fail-over path keys on."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "group-first", target_id)  # no consistency_group flag
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=1)
+    db._groups.append(group)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    lv1.group_id = group.get_id()
+    lv2.group_id = group.get_id()
+    db._lvols.extend([lv1, lv2])
+    remote = _lvol("REP")
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), _snap("T1_LV1", remote),
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"), _snap("T1_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task("S1_LV1"), _done_replication_task("S1_LV2")])
+
+    seq, members = rpc.latest_replicated_generation(policy_id)
+    assert seq == 1
+    assert {lvol_id: snap.get_id() for lvol_id, snap in members.items()} == \
+        {"LV1": "T1_LV1", "LV2": "T1_LV2"}, \
+        "every member's cloneable point is its target copy at the common generation"
+
+
+def test_latest_generation_ignores_a_standalone_sharing_the_policy(monkeypatch):
+    """Regression (2026-09-30): the group recovery point read resolved the
+    generation over ALL of the policy's volumes. A policy shared by the group and
+    a single-PVC workload (STD, no group_id, not replicated at the group's
+    generation) then poisoned the read -- "generation 1 lacks STD" -- so the group
+    drill could never find a recovery point in the live shared-policy shape. The
+    generation is a property of the group's MEMBERS; a volume that merely shares
+    the policy must not enter the cut."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _shared_policy_group_and_standalone(monkeypatch, db)
+
+    seq, members = rpc.latest_replicated_generation(policy_id)
+    assert seq == 1
+    assert {lvol_id: snap.get_id() for lvol_id, snap in members.items()} == \
+        {"LV1": "T1_LV1", "LV2": "T1_LV2"}, \
+        "the standalone must not be demanded in the group's generation"
+    assert "STD" not in members, "a volume that only shares the policy is not a member"
+
+
 def _failback_scenario(monkeypatch, db, unshipped=()):
     """A failed-over consistency group ready to fail BACK: an EMPTY local group on
     CL_SRC whose members now live in the peer group on CL_TGT, with a demote cut
@@ -1106,10 +1180,70 @@ def test_group_promote_is_idempotent_once_members_failed_home(monkeypatch):
     touched: list = []
     monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
                         lambda lvol_id, **kw: touched.append(lvol_id))
+    # Home is up: the members answer, so this is the Ramen re-drive after a
+    # fail-back (the no-op case). The failed-home exit only applies when the
+    # members are reachable (finding #29); its unreachable counterpart is
+    # test_group_promote_fails_over_when_failed_home_members_are_unreachable.
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: True)
     results = rpc.failover_group(group)
     assert {r["status"] for r in results} == {"failed_over"}, results
     assert {r["lvol_id"] for r in results} == {"HC1", "HC2"}, results
     assert touched == [], "an already-home group must clone nothing on re-promote"
+
+
+def test_group_promote_fails_over_when_failed_home_members_are_unreachable(monkeypatch):
+    """Regression: 2026-10-10-failed-home-noop-ignores-reachability (finding #29).
+
+    The "failed home" mark a fail-back leaves on a member is permanent. A later
+    UNPLANNED fail-over away from home -- home partitioned, the members' nodes
+    down -- used to hit the failed-home early exit and return success WITHOUT
+    promoting, so the target site attached the disk from the dead home site
+    (WordPress's DB VM hung 77 min). The failed-home no-op is correct only when
+    the members are REACHABLE (a re-drive after fail-back, home up); when they
+    are down it is a real fail-over and must reach _failover_group_members."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = "CG_HOME", "CL_SRC", "cg"
+    group.policy_id = policy_id
+    group.members = {"HC1": {"joined_seq": 1, "removed_seq": 0},
+                     "HC2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(group)
+    for hc in ("HC1", "HC2"):
+        lv = _lvol(hc, policy_id=policy_id)
+        lv.group_id = group.get_id()
+        lv.cluster_id = "CL_SRC"
+        db._lvols.append(lv)
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"PEER_{hc}")       # the peer clone on CL_TGT
+        rep.target_lvol = db.get_lvol_by_id(hc)     # the home clone == this member
+        rep.source_cluster_id = "CL_TGT"
+        rep.target_cluster_id = "CL_SRC"
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+
+    # Home is partitioned: the members' nodes do not answer.
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: False)
+    # A real fail-over is routed to _failover_group_members; capture that it is
+    # reached (the bug returned the failed-home no-op before ever getting here).
+    sentinel = [{"lvol_id": "HC1", "status": "failed_over"}]
+    reached = {}
+
+    def _fake_failover_members(policy_arg, members_arg, label):
+        reached["members"] = sorted(m.get_id() for m in members_arg)
+        return sentinel
+
+    monkeypatch.setattr(rpc, "_failover_group_members", _fake_failover_members)
+
+    results = rpc.failover_group(group)
+    assert results is sentinel, (
+        "a failed-home group whose home is DOWN must perform a real fail-over, "
+        "not return the failed-home no-op")
+    assert reached.get("members") == ["HC1", "HC2"], reached
 
 
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):

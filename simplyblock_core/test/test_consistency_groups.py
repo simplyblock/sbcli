@@ -175,7 +175,11 @@ def test_late_joiner_epoch_starts_at_next_generation(monkeypatch):
 
 
 def test_detach_closes_the_epoch_at_current_generation(monkeypatch):
-    g = _group({"v1": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
+    # A second live member keeps the group non-empty, so this exercises the
+    # epoch-close path rather than the last-member reset (which clears members
+    # and returns the group to generation 0 — see the dynamic-membership suite).
+    g = _group({"v1": {"joined_seq": 1, "removed_seq": 0},
+                "v2": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
     g.write_to_db = lambda kv=None: None
     monkeypatch.setattr(cgc, "db", _FakeDB(g))
     cgc.remove_member("CL/p1", "v1")

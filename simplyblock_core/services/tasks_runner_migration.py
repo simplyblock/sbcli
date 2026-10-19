@@ -198,9 +198,9 @@ def resume_jc_compression(task):
         if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             logger.warning("Not all nodes are online, can not resume JC compression")
     try:
-        _, err = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
+        ret = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
             jm_vuid=node.jm_vuid, suspend=False)
-        if err:
+        if not ret:
             logger.info("Failed to resume JC compression adding task...")
             tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
     except Exception as e:

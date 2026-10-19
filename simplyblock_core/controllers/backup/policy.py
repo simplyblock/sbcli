@@ -10,14 +10,11 @@ import time
 import uuid
 
 from simplyblock_core.controllers import tasks_controller
-from simplyblock_core.controllers.backup.chain import BackupChain
-from simplyblock_core.controllers.backup.controller import (
-    create_single_backup,
-    get_latest_backup_for_lvol,
-)
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
+from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger()
 
@@ -59,6 +56,14 @@ def _parse_schedule(schedule_str):
         if tiers[i][0] <= tiers[i - 1][0]:
             raise ValueError("Schedule tier intervals must be strictly increasing")
     return tiers
+
+
+async def watch_policies(cluster_id):
+    """Stream backup policy changes for one cluster (same scope as the list endpoint)."""
+    async for batch in db_controller.watch(
+            BackupPolicy, scope=(cluster_id,),
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
 
 
 def add_policy(cluster_id, name, max_versions=0, max_age="", schedule=""):
@@ -288,62 +293,20 @@ def evaluate_schedule(lvol):
 
 
 def _auto_backup_lvol(lvol):
-    """Create an automatic snapshot + backup for scheduled backups.
+    """Create an automatic snapshot, then back up its whole unbacked ancestry.
 
-    Unlike manual backup_snapshot() which walks the full ancestor chain,
-    auto-backups create a single snapshot and a single backup for it.
-    The prev_backup_id is set to the latest existing backup so the
-    incremental chain is maintained without re-backing all ancestors.
+    A scheduled backup names its own snapshot (`auto_*`) instead of taking
+    one the user already made, so it shares `backup_controller`'s private
+    `_create_snapshot_and_back_up` -- the same core `backup_lvol` (a direct
+    user-requested backup) uses -- rather than that function's own public
+    entry point, which pins a different, non-overridable name of its own.
+    See its docstring for the restorability pre-check and chain walk.
     """
-    from simplyblock_core.controllers import snapshot_controller
-
-    # Resolve everything the backup needs BEFORE taking the snapshot. This used
-    # to create the snapshot first and discover afterwards that the node or
-    # cluster was unusable, leaving an orphaned auto_* snapshot behind on every
-    # scheduler tick.
-    node_id = lvol.node_id
-    prev_backup = get_latest_backup_for_lvol(lvol.get_id())
+    snap_name = f"{backup_controller.SCHEDULED_BACKUP_SNAPSHOT_PREFIX}{lvol.lvol_name}_{int(time.time())}"
     try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        cluster_id = snode.cluster_id
-        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
-
-        # The chain this backup would join has to stay restorable, exactly as it
-        # does for a backup taken by hand. A schedule is the one thing that adds
-        # to a chain indefinitely, so it is where a chain would otherwise grow
-        # past what the data plane accepts, or quietly split across two buckets
-        # after the cluster's backup configuration was repointed.
-        #
-        # The location and encryption declared here are the ones this backup
-        # WOULD be written with; holding the existing chain to them is what
-        # catches the disagreement, rather than inheriting whatever the chain
-        # already said.
-        existing = (
-            BackupChain.of_backups(
-                uuid.UUID(prev_backup.uuid), db_controller.get_backups(cluster_id)).records()
-            if prev_backup is not None else [])
-        BackupChain.assemble(
-            location, bool(lvol.crypto_bdev), existing,
-        ).require_restorable(
-            length=len(existing) + 1,
-            what=f"The backup chain of volume {lvol.lvol_name}")
-    except (KeyError, ValueError, PreconditionError) as e:
+        backup_controller._create_snapshot_and_back_up(lvol, snap_name)
+    except (PreconditionError, RuntimeError) as e:
         logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
-        return
-
-    snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
-    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
-    if error:
-        logger.warning(f"Auto-backup snapshot failed for lvol {lvol.get_id()}: {error}")
-        return
-
-    try:
-        snapshot = db_controller.get_snapshot_by_id(snap_id)
-    except KeyError:
-        logger.warning(f"Auto-backup: snapshot {snap_id} not found after creation")
-        return
-
-    create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location)
 
 
 def _trigger_merge(keep_backup, old_backup):

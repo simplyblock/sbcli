@@ -322,3 +322,29 @@ def test_demote_surfaces_a_snapshot_creation_failure(patched, monkeypatch):
 
     assert result == (False, "no space")
     assert lvol.replication_demote_state == "", "must not record pending on a failed trigger"
+
+
+def test_a_promotes_clone_does_not_inherit_the_sources_demote_state(patched, monkeypatch):
+    """The promote's clone is a deep copy of the demoted source. A copied
+    `done` makes the clone's own demote (the fail-back) a no-op -- no fence,
+    no final snapshot -- and the peer promotes from the last INTERVAL copy:
+    one interval of acknowledged writes lost on a PLANNED move (live
+    2026-10-02, WordPress B->A, the demote answered in 63 ms)."""
+    import copy
+
+    src = _lvol()
+    src.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    src.replication_demote_snapshot_id = "DEMOTE_OF_SRC"
+    clone = copy.deepcopy(src)
+    assert clone.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE  # the hazard
+
+    lvol_controller._reset_demote_state(clone)
+
+    assert clone.replication_demote_state == ""
+    assert clone.replication_demote_snapshot_id == ""
+    # ... so the clone's first demote fences and snapshots instead of
+    # answering "already demoted".
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: _FakeDB(clone, _node("N_src")))
+    assert lvol_controller.demote_lvol("LV1") == {"demoted": False}
+    assert len(patched["fenced"]) == 1 and len(patched["snap_add_calls"]) == 1
+    assert clone.replication_demote_snapshot_id == "SNAP1"

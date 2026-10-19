@@ -15,7 +15,7 @@ from uvicorn.config import Config
 
 from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import NodeTransitionInProgress, PreconditionError
 from simplyblock_core.settings import Settings
 from simplyblock_web.api import v1, v2
 from simplyblock_web.settings import Settings as WebSettings
@@ -83,6 +83,15 @@ async def precondition_handler(request: Request, exc: PreconditionError):
     logger.exception("Preciondition checks failed", exc_info=exc)
     return JSONResponse(status_code=400, content={
         "error": "Preconditions are not met",
+        "detail": str(exc),
+    })
+
+
+@app.exception_handler(NodeTransitionInProgress)
+async def node_transition_handler(request: Request, exc: NodeTransitionInProgress):
+    logger.info("Node transition in progress: %s", exc)
+    return JSONResponse(status_code=503, content={
+        "error": "Node transition in progress; retry",
         "detail": str(exc),
     })
 

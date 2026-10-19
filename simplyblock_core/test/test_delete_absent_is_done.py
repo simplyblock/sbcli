@@ -13,6 +13,7 @@ never finalized, the monitor retries it next cycle, and it never converges.
 had not, so the two halves of one delete disagreed about what had happened.
 """
 from simplyblock_core.controllers import snapshot_controller
+from simplyblock_core.rpc_client import RPCRemoteError
 
 
 class _RPC:
@@ -24,7 +25,12 @@ class _RPC:
         self.calls.append((bdev_name, sync, special_delete))
         if isinstance(self._result, Exception):
             raise self._result
-        return self._result
+        ret, err = self._result
+        if err:
+            if isinstance(err, dict):
+                raise RPCRemoteError(err.get("message", ""), err.get("code", 0))
+            raise RPCRemoteError(str(err), 0)
+        return ret
 
 
 class _Node:

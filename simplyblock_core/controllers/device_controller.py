@@ -11,6 +11,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
@@ -19,6 +20,10 @@ from simplyblock_core.utils.helpers import single_or_none
 # longer than the typical SPDK timeout/reset cycle is sufficient — 10 s
 # comfortably exceeds the 4 s timeout_us + reset round-trip.
 DEVICE_FLAP_DEBOUNCE_SEC = 10.0
+
+# Appended to a failed device's serial number once it has been replaced by a
+# fresh device record, marking the original as spent.
+FAILED_SERIAL_SUFFIX = "_failed"
 
 logger = logging.getLogger()
 
@@ -401,8 +406,8 @@ def probe_device_stack(device_obj, snode, rpc_client=None):
     _safe("nvme_controller",
           lambda: rpc_client.bdev_nvme_controller_list(device_obj.nvme_controller))
     if device_obj.alceml_bdev:
-        _safe("alceml", lambda: rpc_client.get_bdevs(device_obj.alceml_bdev))
-        _safe("pt", lambda: rpc_client.get_bdevs(f"{device_obj.alceml_bdev}_PT"))
+        _safe("alceml", lambda: rpc_client.bdev_get(device_obj.alceml_bdev))
+        _safe("pt", lambda: rpc_client.bdev_get(f"{device_obj.alceml_bdev}_PT"))
     if device_obj.nvmf_nqn:
         subsys: list = []
 
@@ -583,11 +588,12 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     nvme_bdev = device_obj.nvme_bdev
     if snode.enable_test_device:
         test_name = f"{device_obj.nvme_bdev}_test"
-        if not rpc_client.get_bdevs(test_name):
+        if not rpc_client.bdev_get(test_name):
             # create testing bdev
-            ret = rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
-            if not ret:
-                logger.error(f"Failed to create bdev: {test_name}")
+            try:
+                rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
+            except RPCException as e:
+                logger.error("Failed to create bdev %s: %s", test_name, e)
                 if not force:
                     return False
         else:
@@ -602,10 +608,11 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         # device can be made to "hang" on demand (chaos testing). Created with zero
         # latency; arm via device_controller.set_device_hang / bdev_delay_update_latency.
         hang_name = f"{device_obj.nvme_bdev}_hang"
-        if not rpc_client.get_bdevs(hang_name):
-            ret = rpc_client.bdev_delay_create(hang_name, nvme_bdev)
-            if not ret:
-                logger.error(f"Failed to create hang bdev: {hang_name}")
+        if not rpc_client.bdev_get(hang_name):
+            try:
+                rpc_client.bdev_delay_create(hang_name, nvme_bdev)
+            except RPCException as e:
+                logger.error("Failed to create hang bdev %s: %s", hang_name, e)
                 if not force:
                     return False
         else:
@@ -615,26 +622,26 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
-    if not rpc_client.get_bdevs(alceml_name):
+    if not rpc_client.bdev_get(alceml_name):
         checksum_method, cache_size, cache_eviction_threshold = utils.alceml_checksum_params(cluster, device_obj)
         if cluster.inline_checksum and not device_obj.md_supported:
             logger.warning(
                 f"Inline checksum: device {device_obj.get_id()} ({device_obj.pcie_address}) has no NVMe metadata; "
                 f"alceml will run in fallback mode (extra md page, ~1.17%% capacity overhead)."
             )
-        ret = snode.create_alceml(
-            alceml_name, nvme_bdev, alceml_id,
-            pba_init_mode=3 if clear_data else 2,
-            write_protection=cluster.distr_ndcs > 1,
-            pba_page_size=cluster.page_size_in_blocks,
-            full_page_unmap=cluster.full_page_unmap,
-            checksum_method=checksum_method,
-            cache_size=cache_size,
-            cache_eviction_threshold=cache_eviction_threshold,
-        )
-
-        if not ret:
-            logger.error(f"Failed to create alceml bdev: {alceml_name}")
+        try:
+            snode.create_alceml(
+                alceml_name, nvme_bdev, alceml_id,
+                pba_init_mode=3 if clear_data else 2,
+                write_protection=cluster.distr_ndcs > 1,
+                pba_page_size=cluster.page_size_in_blocks,
+                full_page_unmap=cluster.full_page_unmap,
+                checksum_method=checksum_method,
+                cache_size=cache_size,
+                cache_eviction_threshold=cache_eviction_threshold,
+            )
+        except RPCException as e:
+            logger.error("Failed to create alceml bdev %s: %s", alceml_name, e)
             if not force:
                 return False
     else:
@@ -642,10 +649,11 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
-    if not rpc_client.get_bdevs(pt_name):
-        ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
-        if not ret:
-            logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+    if not rpc_client.bdev_get(pt_name):
+        try:
+            rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
+        except RPCException as e:
+            logger.error("Failed to create pt noexcl bdev %s: %s", pt_name, e)
             if not force:
                 return False
     else:
@@ -774,7 +782,7 @@ def restart_device(device_id, force=False):
     if device_obj.bdev_type == "aio":
         # lblk mode: the base bdev is an AIO bdev over a kernel block device.
         # Re-resolve serial-first (kernel names shift), recreate if gone.
-        if not snode.rpc_client().get_bdevs(device_obj.nvme_bdev):
+        if not snode.rpc_client().bdev_get(device_obj.nvme_bdev):
             try:
                 filename = device_obj.by_id_path or device_obj.device_path
                 try:
@@ -830,11 +838,11 @@ def restart_device(device_id, force=False):
             # looking for jm partition
             rpc_client = snode.rpc_client()
             jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
-            ret = rpc_client.get_bdevs(jm_dev_part)
+            ret = rpc_client.bdev_get(jm_dev_part)
             if ret:
                 logger.info(f"JM part found: {jm_dev_part}")
                 if snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]:
-                    if snode.rpc_client().get_bdevs(snode.jm_device.raid_bdev):
+                    if snode.rpc_client().bdev_get(snode.jm_device.raid_bdev):
                         logger.info("Raid found, setting jm device online")
                         ret = snode.rpc_client().bdev_raid_get_bdevs()
                         has_bdev = any(
@@ -896,9 +904,10 @@ def set_device_hang(device_id, seconds):
     rpc_client = snode.rpc_client()
     ok = True
     for latency_type in ("avg_read", "p99_read", "avg_write", "p99_write"):
-        ret = rpc_client.bdev_delay_update_latency(device.hang_bdev, latency_type, latency_us)
-        if not ret:
-            logger.error(f"Failed to set {latency_type} latency on {device.hang_bdev}")
+        try:
+            rpc_client.bdev_delay_update_latency(device.hang_bdev, latency_type, latency_us)
+        except RPCException as e:
+            logger.error("Failed to set %s latency on %s: %s", latency_type, device.hang_bdev, e)
             ok = False
     return ok
 
@@ -1009,38 +1018,43 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
 
     if rpc_client.subsystem_get(device.nvmf_nqn):
         logger.info("Removing device subsystem")
-        ret = rpc_client.subsystem_delete(device.nvmf_nqn)
-        if not ret:
-            logger.error(f"Failed to remove subsystem: {device.nvmf_nqn}")
+        try:
+            rpc_client.subsystem_delete(device.nvmf_nqn)
+        except RPCException as e:
+            logger.error("Failed to remove subsystem %s: %s", device.nvmf_nqn, e)
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(f"{device.alceml_bdev}_PT") or force:
+    if  rpc_client.bdev_get(f"{device.alceml_bdev}_PT") or force:
         logger.info("Removing device PT")
-        ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
-        if not ret:
-            logger.error(f"Failed to remove bdev: {device.alceml_bdev}_PT")
+        try:
+            rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
+        except RPCException as e:
+            logger.error("Failed to remove bdev %s_PT: %s", device.alceml_bdev, e)
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(device.alceml_bdev ) or force:
-        ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
-        if not ret:
+    if  rpc_client.bdev_get(device.alceml_bdev ) or force:
+        try:
+            rpc_client.bdev_alceml_delete(device.alceml_bdev)
+        except RPCRemoteError:
             logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
             if not force:
                 return False
 
-    if  rpc_client.get_bdevs(device.qos_bdev) or force:
-        ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
-        if not ret:
+    if  rpc_client.bdev_get(device.qos_bdev) or force:
+        try:
+            rpc_client.qos_vbdev_delete(device.qos_bdev)
+        except RPCRemoteError:
             logger.error(f"Failed to remove bdev: {device.qos_bdev}")
             if not force:
                 return False
 
-    if snode.enable_test_device and (rpc_client.get_bdevs(device.testing_bdev) or force):
-        ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
-        if not ret:
-            logger.error(f"Failed to remove bdev: {device.testing_bdev}")
+    if snode.enable_test_device and (rpc_client.bdev_get(device.testing_bdev) or force):
+        try:
+            rpc_client.bdev_passtest_delete(device.testing_bdev)
+        except RPCException as e:
+            logger.error("Failed to remove bdev %s: %s", device.testing_bdev, e)
             if not force:
                 return False
 
@@ -1246,7 +1260,7 @@ def reset_storage_device(dev_id):
         # error state below (device_set_online also forgives flaps);
         # bdev gone => fail so the tasks framework escalates to
         # restart_device, whose full stack rebuild is the real recovery.
-        if not rpc_client.get_bdevs(device.nvme_bdev):
+        if not rpc_client.bdev_get(device.nvme_bdev):
             logger.error(f"AIO bdev {device.nvme_bdev} is gone; reset cannot "
                          f"recover it — restart the device instead")
             return False
@@ -1452,25 +1466,26 @@ def remove_jm_device(device_id, force=False):
         rpc_client = snode.rpc_client()
         # delete jm stack
         if snode.enable_ha_jm:
-            ret = rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
-            if not ret:
-                logger.error("device not found")
+            try:
+                rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
+            except RPCException as e:
+                logger.error("Failed to remove JM subsystem %s: %s", snode.jm_device.nvmf_nqn, e)
 
         if snode.jm_device.pt_bdev:
-            ret = rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
+            rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
 
-        if snode.enable_ha_jm:
-            ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=True)
-        else:
-            ret = rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=False)
+        rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=snode.enable_ha_jm)
 
-        ret = rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
+        try:
+            rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
+        except RPCRemoteError as e:
+            logger.warning(f"Failed to remove bdev {snode.jm_device.alceml_bdev}: {e}")
 
         # if snode.jm_device.testing_bdev:
-        #     ret = rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
+        #     rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
 
         # if len(snode.jm_device.jm_nvme_bdev_list) == 2:
-        ret = rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
+        rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
 
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_REMOVED)
     return True
@@ -1501,7 +1516,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
                     continue
                 dev_part = f"{dev.nvme_bdev[:-2]}p1"
-                if rpc_client.get_bdevs(dev_part):
+                if rpc_client.bdev_get(dev_part):
                     if dev_part not in jm_nvme_bdevs:
                         jm_nvme_bdevs.append(dev_part)
 
@@ -1520,47 +1535,52 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
         else:
             nvme_bdev = jm_device.nvme_bdev
             cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            ret = snode.create_alceml(
-                jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-                pba_init_mode=1,
-                pba_page_size=cluster.page_size_in_blocks,
-                full_page_unmap=cluster.full_page_unmap
-            )
-
-            if not ret:
-                logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
+            try:
+                snode.create_alceml(
+                    jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
+                    pba_init_mode=1,
+                    pba_page_size=cluster.page_size_in_blocks,
+                    full_page_unmap=cluster.full_page_unmap
+                )
+            except RPCException as e:
+                logger.error("Failed to create alceml bdev %s: %s", jm_device.alceml_bdev, e)
                 if not force:
                     return False
 
             jm_bdev = f"jm_{snode.get_id()}"
-            ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask,
-                                            compression_thread=False,
-                                            compression_cpu_mask=snode.compression_cpu_mask)
-            if not ret:
-                logger.error(f"Failed to create {jm_bdev}")
+            try:
+                rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask,
+                                          compression_thread=False,
+                                          compression_cpu_mask=snode.compression_cpu_mask)
+            except RPCException as e:
+                logger.error("Failed to create %s: %s", jm_bdev, e)
                 if not force:
                     return False
 
             if snode.enable_ha_jm:
                 # add pass through
                 pt_name = f"{jm_bdev}_PT"
-                ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
-                if not ret:
-                    logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+                try:
+                    rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
+                except RPCException as e:
+                    logger.error("Failed to create pt noexcl bdev %s: %s", pt_name, e)
                     if not force:
                         return False
 
                 subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
                 logger.info("creating subsystem %s", subsystem_nqn)
-                ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-                if not ret:
-                    logger.warning(f"Failed to create subsystem: {subsystem_nqn}")
+                try:
+                    rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
+                except RPCException as e:
+                    logger.warning("Failed to create subsystem %s: %s", subsystem_nqn, e)
                 for iface in snode.data_nics:
                     if iface.ip4_address:
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                        ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
-                        if not ret:
-                            logger.warning(f"Failed to create listener for {subsystem_nqn} on IP {iface.ip4_address}")
+                        try:
+                            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                        except RPCException as e:
+                            logger.warning("Failed to create listener for %s on IP %s: %s",
+                                           subsystem_nqn, iface.ip4_address, e)
                         break
                 logger.info(f"add {pt_name} to subsystem")
                 ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
@@ -1592,14 +1612,14 @@ def new_device_from_failed(device_id):
         logger.error(f"Device status: {device.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
         return False
 
-    if device.serial_number.endswith("_failed"):
+    if device.serial_number.endswith(FAILED_SERIAL_SUFFIX):
         logger.error("Device is already added back from failed")
         return False
 
     if device.bdev_type == "aio":
         # lblk mode: ensure the AIO bdev exists again (serial-first
         # re-resolution against the live host; stored path as fallback).
-        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+        if not device_node.rpc_client().bdev_get(device.nvme_bdev):
             try:
                 filename = device.by_id_path or device.device_path
                 try:
@@ -1621,7 +1641,7 @@ def new_device_from_failed(device_id):
             except Exception as e:
                 logger.error(e)
                 return False
-        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+        if not device_node.rpc_client().bdev_get(device.nvme_bdev):
             logger.error(f"Failed to find AIO bdev {device.nvme_bdev}")
             return False
     else:
@@ -1651,7 +1671,7 @@ def new_device_from_failed(device_id):
     def _mut(n, nd=new_device, old_id=device_id):
         for d in n.nvme_devices:
             if d.get_id() == old_id:
-                d.serial_number = f"{d.serial_number}_failed"
+                d.serial_number = f"{d.serial_number}{FAILED_SERIAL_SUFFIX}"
                 break
         n.nvme_devices.append(nd)
         return True

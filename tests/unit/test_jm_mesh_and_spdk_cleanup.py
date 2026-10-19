@@ -56,8 +56,8 @@ class TestJmMeshCoverage(unittest.TestCase):
         def _rpc_for(node_self, **kw):
             rpc = MagicMock()
             present = bdevs_by_node.get(node_self.get_id(), set())
-            rpc.get_bdevs.side_effect = lambda name: (
-                [{"name": name}] if name in present else None)
+            rpc.bdev_get.side_effect = lambda name: (
+                {"name": name} if name in present else None)
             return rpc
 
         patches = [

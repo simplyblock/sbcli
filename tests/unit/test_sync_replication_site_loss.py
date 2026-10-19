@@ -358,3 +358,71 @@ class TestSyncClusterStatus:
         verdict = storage_node_monitor._sync_cluster_status(_sync_cluster(), nodes, {}, majority, {}, [])
         assert _proposed(verdict) == (SUSPENDED, "", "")
         assert verdict.gone == {}
+
+
+MIGRATING_DEVICES = StorageNode.STATUS_MIGRATING_DEVICES
+MIGRATING_LVOLS = StorageNode.STATUS_MIGRATING_LVOLS
+
+
+def _removal(node, migrated=False):
+    """``node`` mid-removal (SPDK stopped), its device rebuilt or not yet."""
+    for dev in node.nvme_devices:
+        dev.status = NVMeDevice.STATUS_FAILED_AND_MIGRATED if migrated else NVMeDevice.STATUS_UNAVAILABLE
+    return node
+
+
+def _halves(verdict):
+    return verdict.status, verdict.status_without_removal
+
+
+class TestSyncClusterStatusDuringARemoval:
+    """Each site's verdict has two halves (_count_status): ``status`` counts a
+    node mid-removal while its devices are not rebuilt yet,
+    ``status_without_removal`` leaves it out. The site rule judges both."""
+
+    def test_a_removal_on_one_site_degrades_by_the_removal_only(self):
+        nodes = _layout(a=(MIGRATING_DEVICES, ONLINE, ONLINE))
+        _removal(nodes[0])
+        verdict = _verdict(_sync_cluster(), nodes)
+        assert _halves(verdict) == (DEGRADED, ACTIVE)
+        assert (verdict.site, verdict.state) == ("", "")
+
+    def test_a_removal_with_rebuilt_devices_does_not_count(self):
+        nodes = _layout(a=(MIGRATING_LVOLS, ONLINE, ONLINE))
+        _removal(nodes[0], migrated=True)
+        verdict = _verdict(_sync_cluster(), nodes)
+        assert _halves(verdict) == (ACTIVE, ACTIVE)
+
+    def test_a_removal_and_a_failure_on_one_site_take_it_out_by_the_removal(self):
+        nodes = _layout(a=(MIGRATING_DEVICES, OFFLINE, ONLINE))
+        _removal(nodes[0])
+        verdict = _verdict(_sync_cluster(), nodes)
+        # with the removal the site is beyond its FTT and proposed draining;
+        # without it, one failure: the site degrades
+        assert _proposed(verdict) == (DEGRADED, SITE_A, DRAINING)
+        assert verdict.status_without_removal == DEGRADED
+
+    def test_a_recorded_site_and_a_removal_on_the_other(self):
+        nodes = _layout(a=(OFFLINE,) * 3, b=(MIGRATING_DEVICES, ONLINE, ONLINE))
+        _removal(nodes[3])
+        verdict = _verdict(_sync_cluster((SITE_A, DOWN)), nodes)
+        assert _halves(verdict) == (DEGRADED, DEGRADED)
+        assert (verdict.site, verdict.state) == ("", "")
+
+    def test_the_majority_fallback_judges_both_halves(self):
+        # Every node unwitnessed (gone by the veto only) and b0 mid-removal:
+        # no healthy site by the veto rule, the majority dict decides.
+        nodes = _layout(a=(UNREACHABLE,) * 3, b=(MIGRATING_DEVICES, UNREACHABLE, UNREACHABLE))
+        _removal(nodes[3])
+        verdict = _verdict(_sync_cluster(), nodes,
+                           veto=[n.get_id() for n in nodes if n.status == UNREACHABLE])
+        assert _halves(verdict) == (DEGRADED, ACTIVE)
+        assert (verdict.site, verdict.state, verdict.gone) == ("", "", {})
+
+    def test_a_removal_shut_down_node_is_gone_for_a_site_loss(self):
+        # a0's SPDK is stopped by its removal, a1 and a2 are OFFLINE: the site
+        # is lost as a whole (down), not draining.
+        nodes = _layout(a=(MIGRATING_DEVICES, OFFLINE, OFFLINE))
+        _removal(nodes[0])
+        assert storage_node_monitor._site_lost(nodes[:3], {})
+        assert _proposed(_verdict(_sync_cluster(), nodes)) == (DEGRADED, SITE_A, DOWN)

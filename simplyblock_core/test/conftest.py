@@ -26,8 +26,11 @@ if 'fdb' not in sys.modules:
     # tests/unit/conftest.py: whichever of the two stubs installs first serves
     # the whole session, so they must stay equivalent or a combined run breaks
     # on watched-model writes.
+    # ``api_version`` is a no-op here: the real one selects the C API and is
+    # called at import by modules that decorate with ``fdb.transactional``
+    # (simplyblock_core/models/lock/store.py).
     _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError,
-          transactional=lambda f: f)
+          transactional=lambda f: f, api_version=lambda _ver: None)
     _stub('fdb.tuple')
 
 

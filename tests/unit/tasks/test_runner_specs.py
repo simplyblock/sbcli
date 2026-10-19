@@ -16,6 +16,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.rpc_client import RPCException
 
 
 def _task(**params):
@@ -131,7 +132,7 @@ def jc_comp(monkeypatch):
 def test_jc_comp_resumes_compression(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (True, None)
+    node.rpc_client.return_value.jc_suspend_compression.return_value = True
     task = _task()
 
     assert jc_comp.SPEC.handler(task) is None
@@ -143,7 +144,7 @@ def test_jc_comp_resumes_compression(jc_comp):
 def test_jc_comp_prefers_the_task_jm_vuid(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (True, None)
+    node.rpc_client.return_value.jc_suspend_compression.return_value = True
 
     jc_comp.SPEC.handler(_task(jm_vuid=42))
     node.rpc_client.return_value.jc_suspend_compression.assert_called_once_with(
@@ -196,7 +197,7 @@ def test_jc_comp_defers_unless_every_cluster_node_is_online(jc_comp):
 def test_jc_comp_aborts_when_compression_is_not_needed(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (False, "not needed")
+    node.rpc_client.return_value.jc_suspend_compression.return_value = False
 
     with pytest.raises(trb.TaskAbort):
         jc_comp.SPEC.handler(_task())
@@ -205,7 +206,7 @@ def test_jc_comp_aborts_when_compression_is_not_needed(jc_comp):
 def test_jc_comp_retries_when_resume_fails(jc_comp):
     node = _node()
     jc_comp.db.get_storage_node_by_id.return_value = node
-    node.rpc_client.return_value.jc_suspend_compression.return_value = (False, None)
+    node.rpc_client.return_value.jc_suspend_compression.side_effect = RPCException("connection error")
 
     with pytest.raises(trb.TaskRetry):
         jc_comp.SPEC.handler(_task())
@@ -256,6 +257,31 @@ def test_backup_no_process_poll_is_a_retry(backup_runner):
     snode = _node()
     rpc = snode.rpc_client.return_value
     rpc.bdev_lvol_transfer_stat.return_value = {"transfer_state": "No process"}
+    backup_runner.db.get_storage_node_by_id.return_value = snode
+
+    with pytest.raises(trb.TaskRetry):
+        backup_runner.SPEC.handler(_backup_task(backup_id="bk-1"))
+
+    assert backup.status == Backup.STATUS_PENDING
+    rpc.bdev_lvol_s3_backup.assert_not_called()  # this poll only resets state
+
+
+def test_backup_failed_poll_is_a_retry_not_an_abort(backup_runner):
+    """A "Failed" transfer must retry exactly like "No process", not abort the
+    backup outright.
+
+    Regression for backup-retry-empty-issue.md: MinIO was OOM-killed mid-upload
+    and back within ~2 seconds -- a plain upload is additive, so re-issuing it
+    onto the same s3_id is safe, and the data plane giving up after an I/O
+    error is not known to be any more permanent than it dying outright (the
+    "No process" case already retries). The task's own max_retry
+    (BACKUP_TASK_MAX_RETRIES) is what bounds this, not a counter kept here."""
+    backup = _backup()
+    backup_runner.db.get_backup_by_id.return_value = backup
+
+    snode = _node()
+    rpc = snode.rpc_client.return_value
+    rpc.bdev_lvol_transfer_stat.return_value = {"transfer_state": "Failed"}
     backup_runner.db.get_storage_node_by_id.return_value = snode
 
     with pytest.raises(trb.TaskRetry):

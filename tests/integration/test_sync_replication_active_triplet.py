@@ -33,7 +33,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import RemoteJMDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.services import snapshot_monitor, storage_node_monitor
 from simplyblock_core.services import tasks_runner_sync_promote as promote_runner
 from simplyblock_core.utils import ttl_cache
@@ -93,7 +93,7 @@ def _grants(rpcs, nodes):
 
 
 #: What an RPC grant sends to the taker: the reload, the grant and its confirmation poll.
-_GRANT_RPCS = {"bdev_lvol_update_lvstore", "bdev_lvol_set_leader", "bdev_lvol_get_lvstores"}
+_GRANT_RPCS = {"bdev_lvol_update_lvstore", "bdev_lvol_set_leader", "get_lvstore"}
 
 
 def _rpc_names(rpcs, node):
@@ -116,7 +116,7 @@ def _demote_takes(rpcs, node):
 
     def _set_leader(lvs_name, leader=False, **kwargs):
         if not leader:
-            rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+            rpc.get_lvstore.return_value = {"lvs leadership": False}
         return True
     rpc.bdev_lvol_set_leader.side_effect = _set_leader
 
@@ -173,7 +173,7 @@ class TestRemoteLedLookups:
         # the caller's own members come back as the non-leaders
         assert [n.get_id() for n in non_leaders] == [n.get_id() for n in home]
         for node in a:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_not_called()
+            rpcs[node.get_id()].get_lvstore.assert_not_called()
 
     def test_create_on_leader_runs_on_the_remote_leader(self, db, rpcs, env):
         _, a, b, _ = _layout(db, active_site=SITE_B)
@@ -202,6 +202,29 @@ class TestRemoteLedLookups:
             snapshot_monitor.process_snap_delete(snap, _fresh(db, a[0]), all_mini_lvols=[])
         assert delete.call_args.args[0].get_id() == b[0].get_id()
 
+    def test_snapshot_delete_skips_a_raising_member_and_caches_by_site(self, db, rpcs, env):
+        _, a, b, owner = _layout(db, active_site=SITE_B)
+        b0, b1 = b[0].get_id(), b[1].get_id()
+        rpcs[b0].get_lvstore.side_effect = RPCRemoteError(message="busy", code=-16)
+        rpcs.lead(b[1])
+        snap = types.SimpleNamespace(
+            get_id=lambda: "snap-1", snap_bdev="LVS_1/SNAP_1", deletion_status="",
+            instances=[], lvol=types.SimpleNamespace(lvs_name="LVS_1"))
+        cycle_cache: dict = {}
+        with patch.object(snapshot_monitor.snapshot_controller, "delete_bdev_absent_ok",
+                          return_value=False) as delete:
+            snapshot_monitor.process_snap_delete(snap, _fresh(db, owner), all_mini_lvols=[],
+                                                 leader_cache=cycle_cache)
+            probes = {n.get_id(): rpcs[n.get_id()].get_lvstore.call_count for n in (*a, *b)}
+            snapshot_monitor.process_snap_delete(snap, _fresh(db, owner), all_mini_lvols=[],
+                                                 leader_cache=cycle_cache)
+        # the raising b0 was asked and skipped, b1 leads and is reused from the cache
+        rpcs[b0].get_lvstore.assert_called_once_with("LVS_1")
+        assert [c.args[0].get_id() for c in delete.call_args_list] == [b1, b1]
+        assert list(cycle_cache) == [(owner.get_id(), SITE_B)]
+        assert cycle_cache[(owner.get_id(), SITE_B)].get_id() == b1
+        assert {n.get_id(): rpcs[n.get_id()].get_lvstore.call_count for n in (*a, *b)} == probes
+
     def test_snapshot_monitor_cache_follows_a_site_switch(self, db, rpcs, env):
         _, a, b, owner = _layout(db)
         rpcs.lead(a[0])
@@ -214,7 +237,7 @@ class TestRemoteLedLookups:
             snapshot_monitor.process_snap_delete(snap, _fresh(db, owner), all_mini_lvols=[],
                                                  leader_cache=cycle_cache)
             # a promote moves LVS_1 to site B within the same monitor cycle
-            rpcs[a[0].get_id()].bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+            rpcs[a[0].get_id()].get_lvstore.return_value = {"lvs leadership": False}
             rpcs.lead(b[0])
             _update(db, owner, lvs_active_site=SITE_B)
             snapshot_monitor.process_snap_delete(snap, _fresh(db, owner), all_mini_lvols=[],
@@ -227,7 +250,7 @@ class TestRemoteLedLookups:
         leader, _ = ops.find_leader_with_failover(_home(db, a), "LVS_1")
         assert leader.get_id() == a[0].get_id()
         for node in b:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_not_called()
+            rpcs[node.get_id()].get_lvstore.assert_not_called()
 
     def test_resize_without_a_leader_resizes_nowhere(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
@@ -340,7 +363,7 @@ class TestLookupWithoutRecovery:
         ttl_cache.no_leader_cache.put((cluster.get_id(), "LVS_1"), True)
         assert ops.find_leader_with_failover(_home(db, a), "LVS_1", recover=False) == (None, [])
         for node in (*a, *b):
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_not_called()
+            rpcs[node.get_id()].get_lvstore.assert_not_called()
 
     def test_an_unreachable_member_forces_no_leadership_change(self, db, rpcs, hub, env, no_sleep):
         _, a, b, _ = _layout(db, active_site=SITE_B)
@@ -1123,7 +1146,7 @@ class TestLeaderRebuild:
                               active_site=SITE_B, demoted=[SITE_A])
         b0, b1, b2 = (n.get_id() for n in b)
         _update(db, owner, remote_instances_pending=[b0, b2])
-        rpcs[b1].bdev_lvol_get_lvstores.side_effect = RPCException("no answer")
+        rpcs[b1].get_lvstore.side_effect = RPCException("no answer")
 
         with pytest.raises(Exception, match=f"leader detection RPC to peer {b1} failed"):
             ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=_fresh(db, owner))
@@ -1914,14 +1937,14 @@ class TestReconcile:
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         members = [*a, *b]
         rpcs.lead(members[leader_index])
-        rpcs[members[unknown_index].get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("timeout")
+        rpcs[members[unknown_index].get_id()].get_lvstore.side_effect = RPCException("timeout")
         leader, _ = ops.find_leader_with_failover(_home(db, a), "LVS_1")
         assert leader.get_id() == members[leader_index].get_id()
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
     def test_a_failed_probe_is_never_read_as_no_leader(self, db, rpcs, hub, env, no_sleep):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
-        rpcs[b[2].get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("timeout")
+        rpcs[b[2].get_id()].get_lvstore.side_effect = RPCException("timeout")
         for node in (*a, *b):
             _journal_ready(rpcs, node)
         assert ops.reconcile_lvs_move(owner.get_id()) is None
@@ -2017,7 +2040,7 @@ class TestReconcile:
                                  lost_site_state="done")
         env.down.update(n.get_id() for n in b)
         for node in b:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("site lost")
+            rpcs[node.get_id()].get_lvstore.side_effect = RPCException("site lost")
         for node in a:
             _journal_ready(rpcs, node)
         assert ops.reconcile_lvs_move(owner.get_id()) == SITE_A
@@ -2038,7 +2061,7 @@ class TestReconcile:
 
     def test_a_silent_member_on_the_old_site_blocks_the_move(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
-        rpcs[a[2].get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("timeout")
+        rpcs[a[2].get_id()].get_lvstore.side_effect = RPCException("timeout")
         with pytest.raises(ops.LVSMoveChangedError, match="does not answer"):
             ops.move_lvs_leadership(owner.get_id(), "moving:" + SITE_B, SITE_B, taker_id=b[0].get_id())
         assert _grants(rpcs, [*a, *b]) == []
@@ -2050,8 +2073,8 @@ class TestReconcile:
         for node in (*a, *b):
             _journal_ready(rpcs, node)
         # a1 answers "not leading" to the reconciler's scan, then self-promotes
-        rpcs[a[1].get_id()].bdev_lvol_get_lvstores.side_effect = [
-            [{"lvs leadership": False}], [{"lvs leadership": True}]]
+        rpcs[a[1].get_id()].get_lvstore.side_effect = [
+            {"lvs leadership": False}, {"lvs leadership": True}]
         assert ops.reconcile_lvs_move(owner.get_id()) is None
         assert _grants(rpcs, [*a, *b]) == []
         assert env.blocked() == []
@@ -2087,7 +2110,7 @@ class TestReconcile:
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B, lost_site=SITE_A,
                                  lost_site_state="done")
         for node in a:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("site lost")
+            rpcs[node.get_id()].get_lvstore.side_effect = RPCException("site lost")
         rpcs.lead(b[0])
         assert ops.reconcile_lvs_move(owner.get_id()) == SITE_B
 
@@ -2095,7 +2118,7 @@ class TestReconcile:
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B, lost_site=SITE_A,
                                  lost_site_state="fencing")
         for node in a:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("site lost")
+            rpcs[node.get_id()].get_lvstore.side_effect = RPCException("site lost")
         rpcs.lead(b[0])
         assert ops.reconcile_lvs_move(owner.get_id()) is None
 
@@ -2111,7 +2134,7 @@ class TestReconcile:
             ops.move_lvs_leadership(owner.get_id(), "moving:" + SITE_B, SITE_B,
                                     current_leader_id=a[0].get_id(), taker_id=b[0].get_id())
         # probed only: nothing reloaded, stamped or granted on the taker, nothing fenced
-        assert {c[0] for c in rpcs[b[0].get_id()].method_calls} == {"bdev_lvol_get_lvstores"}
+        assert {c[0] for c in rpcs[b[0].get_id()].method_calls} == {"get_lvstore"}
         assert env.blocked() == []
         rpcs[a[0].get_id()].bdev_lvol_set_leader.assert_not_called()
 
@@ -2207,7 +2230,7 @@ class TestReconcile:
         # The way out: a1 is restarted - a non-leader rebuild while the LVS is
         # moving - and no longer leads. The reconciler then finishes the move
         # on a0 by the hand-off, and only now does the open reach a0.
-        rpcs[a1].bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        rpcs[a1].get_lvstore.return_value = {"lvs leadership": False}
         stamp = rpcs[a0].bdev_lvol_set_lvs_opts
         stamp.side_effect, stamp.return_value = None, True
         assert ops.reconcile_lvs_move(owner.get_id()) == SITE_A
@@ -2218,7 +2241,8 @@ class TestReconcile:
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_A
         _nothing_granted(rpcs, [*a, *b])
 
-    @pytest.mark.parametrize("answer", [RPCException("timeout"), None, []])
+    @pytest.mark.parametrize("answer", [RPCException("timeout"), None,
+                                        RPCRemoteError(message="busy", code=-16)])
     def test_a_silent_member_on_the_other_site_fails_the_move(
             self, db, rpcs, hub, env, adopt, answer):
         # it answered "not leading" before the hand-off; no answer after it is
@@ -2232,7 +2256,8 @@ class TestReconcile:
         _nothing_granted(rpcs, [*a, *b])
         assert env.blocked() and sorted(env.unblocked()) == sorted(env.blocked())
 
-    @pytest.mark.parametrize("answer", [RPCException("timeout"), None, []])
+    @pytest.mark.parametrize("answer", [RPCException("timeout"), None,
+                                        RPCRemoteError(message="busy", code=-16)])
     def test_a_silent_member_beside_the_taker_is_ignored(
             self, db, rpcs, hub, env, adopt, answer):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_A)
@@ -2249,5 +2274,5 @@ class TestReconcile:
         self._move(owner, SITE_A, a[0])
         assert _fresh(db, owner).lvs_active_site == SITE_A
         # asked once, before the hand-off: no probe after it, no confirmation poll
-        assert rpcs[a[0].get_id()].bdev_lvol_get_lvstores.call_count == 1
+        assert rpcs[a[0].get_id()].get_lvstore.call_count == 1
         _nothing_granted(rpcs, [*a, *b])

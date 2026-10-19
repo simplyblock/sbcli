@@ -4,13 +4,21 @@ hublvol site rule, the pending marks kept with the refs, and the probes that
 tell a torn-down or not-yet-built distrib from a failure. The flows against
 the real database are in tests/integration/test_sync_replication_lvs_stack.py.
 """
+import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
+
+import pytest
 
 from simplyblock_core import distr_controller
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import (
+    RPCClient,
+    RPCConnectionError,
+    RPCException,
+    RPCRemoteError,
+)
 
 
 def _owner(**fields):
@@ -180,3 +188,159 @@ class TestDistribNotBuilt:
         rpc = MagicMock()
         rpc.bdev_get.side_effect = RPCException("connection error")
         assert distr_controller._distrib_not_built(rpc, self._node(), "d1") is False
+
+
+class TestLvsLeadershipVerdict:
+    """_lvs_leadership_verdict reads each member's get_lvstore: a dict that
+    reports the leadership leads, no lvstore or a failed probe is silent."""
+
+    @staticmethod
+    def _member(node_id, site="A", answer=None, error=None):
+        rpc = create_autospec(RPCClient, instance=True)
+        if error is not None:
+            rpc.get_lvstore.side_effect = error
+        else:
+            rpc.get_lvstore.return_value = answer
+        node = StorageNode()
+        node.uuid, node.site = node_id, site
+        node.rpc_client = MagicMock(return_value=rpc)
+        return node, rpc
+
+    def test_each_answer_is_classified(self):
+        members, rpcs = {}, {}
+        for node_id, kwargs in (
+                ("leads", {"answer": {"name": "LVS_1", "lvs leadership": True}}),
+                ("follows", {"answer": {"name": "LVS_1", "lvs leadership": False}}),
+                ("no_lvs", {"answer": None}),
+                ("remote_err", {"error": RPCRemoteError(message="busy", code=-16)}),
+                ("down", {"error": RPCConnectionError("down")})):
+            members[node_id], rpcs[node_id] = self._member(node_id, **kwargs)
+        verdict = ops._lvs_leadership_verdict("LVS_1", members)
+        assert verdict.leading == ["leads"]
+        assert verdict.silent == ["no_lvs", "remote_err", "down"]
+        assert verdict.skipped == set()
+        for rpc in rpcs.values():
+            rpc.get_lvstore.assert_called_once_with("LVS_1")
+
+    def test_a_skipped_site_is_not_probed(self):
+        lost, lost_rpc = self._member("b0", site="B", answer={"lvs leadership": True})
+        here, _rpc = self._member("a0", answer={"lvs leadership": True})
+        verdict = ops._lvs_leadership_verdict("LVS_1", {"b0": lost, "a0": here}, skip_site="B")
+        assert (verdict.leading, verdict.silent, verdict.skipped) == (["a0"], [], {"b0"})
+        lost_rpc.get_lvstore.assert_not_called()
+
+
+def _member(node_id):
+    node = StorageNode()
+    node.uuid = node_id
+    return node
+
+
+class TestNonLeaderRole:
+    """The role a non-leader instance is built in: the caller's, else its
+    position in its own triplet (lvs_triplet_of)."""
+
+    @pytest.mark.parametrize("node_id, role", [
+        ("s", "secondary"), ("t", "tertiary"),               # home triplet
+        ("rp", "secondary"), ("rs", "secondary"), ("rt", "tertiary"),   # remote triplet
+        ("p", "secondary"),                                   # the owner rebuilt as a non-leader
+    ])
+    def test_by_position(self, node_id, role):
+        assert ops._non_leader_role(_member(node_id), _owner()) == role
+
+    @pytest.mark.parametrize("role", ["secondary", "tertiary"])
+    def test_the_named_role_wins(self, role):
+        assert ops._non_leader_role(_member("rt"), _owner(), role) == role
+
+    def test_a_leader_role_is_refused(self):
+        with pytest.raises(ValueError):
+            ops._non_leader_role(_member("s"), _owner(), "primary")
+
+
+class TestLvolBdevRegistered:
+    """By uuid, else by <lvs>/<bdev>; a probe that raises counts as absent."""
+
+    @staticmethod
+    def _lvol():
+        lvol = SimpleNamespace(lvol_uuid="u-1", lvs_name="LVS_1", lvol_bdev="LVOL_1")
+        return lvol
+
+    def test_a_uuid_hit(self):
+        rpc = create_autospec(RPCClient, instance=True)
+        rpc.bdev_get.return_value = {"name": "u-1"}
+        assert ops._lvol_bdev_registered(rpc, self._lvol()) is True
+        rpc.bdev_get.assert_called_once_with("u-1")
+
+    def test_absent_by_uuid_then_found_by_alias(self):
+        rpc = create_autospec(RPCClient, instance=True)
+        rpc.bdev_get.side_effect = [None, {"name": "LVS_1/LVOL_1"}]
+        assert ops._lvol_bdev_registered(rpc, self._lvol()) is True
+        assert [c.args[0] for c in rpc.bdev_get.call_args_list] == ["u-1", "LVS_1/LVOL_1"]
+
+    def test_both_probes_raising_is_absent(self):
+        rpc = create_autospec(RPCClient, instance=True)
+        rpc.bdev_get.side_effect = [RPCRemoteError(message="busy", code=-16), RPCConnectionError("down")]
+        assert ops._lvol_bdev_registered(rpc, self._lvol()) is False
+
+
+class TestSendLvolAna:
+    """A failed per-NIC flip is logged; the other NICs are still flipped."""
+
+    def test_a_failed_nic_does_not_stop_the_next(self):
+        rpc = create_autospec(RPCClient, instance=True)
+        rpc.nvmf_subsystem_listener_set_ana_state.side_effect = [
+            RPCRemoteError(message="boom", code=-1), True]
+        node = MagicMock()
+        node.site = "site-a"
+        node.active_tcp = True
+        node.rpc_client.return_value = rpc
+        node.get_lvol_subsys_port.return_value = 4402
+        node.data_nics = [SimpleNamespace(ip4_address="10.0.0.1", trtype="TCP"),
+                          SimpleNamespace(ip4_address="10.0.0.2", trtype="TCP")]
+        lvol = SimpleNamespace(nqn="nqn.v1", fabric="tcp", ns_id=3, lvs_name="LVS_1")
+        ops._send_lvol_ana(lvol, node, "inaccessible")
+        assert [(c.args[1], c.kwargs["ana"], c.kwargs["anagrpid"])
+                for c in rpc.nvmf_subsystem_listener_set_ana_state.call_args_list] == [
+            ("10.0.0.1", "inaccessible", 3), ("10.0.0.2", "inaccessible", 3)]
+
+
+class TestFenceUnblockWarning:
+    """_LvsFence.warn_if_unblocking_a_non_leader reads get_lvstore: only a
+    peer whose lvstore answers "not leading" is warned about."""
+
+    @staticmethod
+    def _fence():
+        lvs_node = MagicMock()
+        lvs_node.lvstore = "LVS_1"
+        lvs_node.get_lvol_subsys_port.return_value = 4402
+        return ops._LvsFence(lvs_node, MagicMock(), None)
+
+    @staticmethod
+    def _peer(answer=None, error=None):
+        rpc = create_autospec(RPCClient, instance=True)
+        if error is not None:
+            rpc.get_lvstore.side_effect = error
+        else:
+            rpc.get_lvstore.return_value = answer
+        peer = MagicMock()
+        peer.get_id.return_value = "peer-1234"
+        peer.rpc_client.return_value = rpc
+        return peer, rpc
+
+    @pytest.mark.parametrize("answer, warned", [
+        ({"name": "LVS_1", "lvs leadership": False}, True),
+        ({"name": "LVS_1", "lvs leadership": True}, False),
+        (None, False),
+    ])
+    def test_the_answer_decides(self, caplog, answer, warned):
+        peer, rpc = self._peer(answer)
+        with caplog.at_level(logging.ERROR):
+            self._fence().warn_if_unblocking_a_non_leader(peer)
+        rpc.get_lvstore.assert_called_once_with("LVS_1")
+        assert ("NO LONGER leader" in caplog.text) is warned
+
+    def test_a_failed_probe_is_silent(self, caplog):
+        peer, _rpc = self._peer(error=RPCConnectionError("down"))
+        with caplog.at_level(logging.ERROR):
+            self._fence().warn_if_unblocking_a_non_leader(peer)
+        assert "NO LONGER leader" not in caplog.text

@@ -79,6 +79,20 @@ def _patch(monkeypatch, lvol, snaps, tasks):
                     return s
             raise KeyError(uuid)
 
+        # Scoped reads get_replication_info now uses instead of a whole-table
+        # task scan (2026-10-03).
+        def get_snapshots_by_lvol_id(self, lvol_id):
+            return [s for s in snaps
+                    if getattr(s, "lvol", None) is not None and s.lvol.get_id() == lvol_id]
+
+        def get_replication_tasks_for_snapshot(self, snapshot_id):
+            return [t for t in tasks
+                    if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                    and t.function_params.get("snapshot_id") == snapshot_id]
+
+        def get_job_tasks_by_function(self, cluster_id, function_name):
+            return [t for t in tasks if t.function_name == function_name]
+
         def get_lvol_replication_objects(self):
             return []
 

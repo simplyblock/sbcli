@@ -34,7 +34,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCHTTPError
 from simplyblock_core.services import storage_node_monitor as monitor
 from simplyblock_core.services import tasks_runner_sync_lvol_del
 from simplyblock_core.services import tasks_runner_sync_promote as runner
@@ -109,10 +109,15 @@ def evidence():
         yield e
 
 
+def _dead_spdk():
+    """What the live RPC proxy of a dead SPDK answers: HTTP 500."""
+    return RPCHTTPError("HTTP 500 from remote", status_code=500, response_text="")
+
+
 def _answers(rpc, answer):
     """``rpc`` (one RPC of a node's fake) answers ``answer`` from now on - an
-    exception is raised. ``None`` is what a live RPC proxy in front of a dead
-    SPDK gives: no result and no error."""
+    exception is raised. A live RPC proxy in front of a dead SPDK answers
+    HTTP 500 (_DEAD_SPDK)."""
     if isinstance(answer, Exception):
         rpc.side_effect = answer
     else:
@@ -147,7 +152,7 @@ class _Lost:
         for node in a:
             _update(db, node, status=t_status)
             # a lost node answers nothing
-            for rpc in (spdk[node.get_id()].bdev_lvol_get_lvstores, spdk[node.get_id()].get_version):
+            for rpc in (spdk[node.get_id()].get_lvstore, spdk[node.get_id()].get_version):
                 _answers(rpc, RPCException("connection refused"))
         self.db = db
         self.a = [_fresh(db, n) for n in a]
@@ -402,13 +407,31 @@ class TestSiteSteps:
         assert lost.cluster_now().lost_site == ""
         assert moves.calls == []
 
+    def test_a_disaster_promote_hands_off_through_the_real_move(self, db, spdk, evidence):
+        """The promote driven through its runner with the real hand-off: the
+        lost members are probed (none leads), the members of B answer as
+        non-leaders before and after the hand-off, and LVS_1 ends led from B."""
+        lost = _Lost(db, spdk)
+        for node in lost.b:
+            _answers(spdk[node.get_id()].get_lvstore, {"name": "LVS_1", "lvs leadership": False})
+        result = lost.promote("v1a")
+        with patch.object(ops.port_block, "set_port"):
+            assert lost.run(result.task_id)
+        task = lost.task(result.task_id)
+        assert task.status == JobSchedule.STATUS_DONE and task.function_result.startswith("promoted"), \
+            task.function_result
+        assert _fresh(db, lost.owner1).lvs_active_site == SITE_B
+        assert lost.vol("v1a").sync_active_site == SITE_B
+        for node in (*lost.a, *lost.b):
+            spdk[node.get_id()].get_lvstore.assert_any_call("LVS_1")
+
     def test_a_live_rpc_proxy_in_front_of_a_dead_spdk_is_lost(self, db, spdk, evidence, moves):
         # The RPC proxy of every lost node outlived its SPDK and answers each
         # call with no result.
         lost = _Lost(db, spdk)
         for node in lost.a:
-            _answers(spdk[node.get_id()].get_version, None)
-            _answers(spdk[node.get_id()].bdev_lvol_get_lvstores, None)
+            _answers(spdk[node.get_id()].get_version, _dead_spdk())
+            _answers(spdk[node.get_id()].get_lvstore, _dead_spdk())
         result = lost.promote("v1a")
         lost.run(result.task_id)
         assert lost.task(result.task_id).function_result.startswith("promoted")
@@ -422,7 +445,7 @@ class TestSiteSteps:
         lost = _Lost(db, spdk)
         evidence.unseen.update(n.get_id() for n in lost.a)
         # one member's RPC proxy outlived its SPDK: no leadership answer either
-        _answers(spdk[lost.a[1].get_id()].bdev_lvol_get_lvstores, None)
+        _answers(spdk[lost.a[1].get_id()].get_lvstore, _dead_spdk())
         result = lost.promote("v1a")
         lost.run(result.task_id)
         assert lost.task(result.task_id).function_result.startswith("promoted")
@@ -530,20 +553,19 @@ class TestSiteSteps:
             self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
-        _answers(spdk[lost.a[1].get_id()].bdev_lvol_get_lvstores, [{"lvs leadership": True}])
+        _answers(spdk[lost.a[1].get_id()].get_lvstore, {"name": "LVS_2", "lvs leadership": True})
         result = lost.promote("v2a")
         lost.run(result.task_id)
         assert "reports the leadership" in lost.task(result.task_id).function_result
         assert _fresh(db, lost.owner2).lvs_active_site == ""       # the marker undone
         assert [c[0] for c in moves.calls] == ["LVS_1"]
 
-    @pytest.mark.parametrize("answer", [[{"lvs leadership": False}], []], ids=["non-leader", "no-lvs"])
     def test_a_non_leader_lost_member_allows_the_hand_off(
-            self, db, spdk, evidence, moves, answer):
+            self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
         member = lost.a[1]
-        _answers(spdk[member.get_id()].bdev_lvol_get_lvstores, answer)
+        _answers(spdk[member.get_id()].get_lvstore, {"name": "LVS_2", "lvs leadership": False})
         evidence.alive.add(member.get_id())             # rebuilt under the lost-site rule: it runs
         result = lost.promote("v2a")
         lost.run(result.task_id)
@@ -551,13 +573,13 @@ class TestSiteSteps:
         assert lost.vol("v2a").sync_active_site == SITE_B
 
     @pytest.mark.parametrize("silence", [None, RPCException("connection refused")],
-                             ids=["no-result", "rpc-error"])
+                             ids=["no-lvs", "rpc-error"])
     def test_a_silent_but_seen_member_aborts_the_hand_off(
             self, db, spdk, evidence, moves, silence):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
         member = lost.a[2]
-        _answers(spdk[member.get_id()].bdev_lvol_get_lvstores, silence)
+        _answers(spdk[member.get_id()].get_lvstore, silence)
         evidence.connected.add(member.get_id())
         # a cached vote that calls the member gone is not what the check reads
         monitor._status_probe_cache.put(("dp_votes", member.get_id()), (3, 3))
@@ -574,8 +596,8 @@ class TestSiteSteps:
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
         member = lost.a[2]
-        # no result is no answer about the leadership, whatever the reason
-        _answers(spdk[member.get_id()].bdev_lvol_get_lvstores, None)
+        # no lvstore is no answer about the leadership, whatever the reason
+        _answers(spdk[member.get_id()].get_lvstore, None)
         evidence.alive.add(member.get_id())
         result = lost.promote("v2a")
         lost.run(result.task_id)
@@ -757,7 +779,7 @@ class TestLostSiteGrantGuards:
         cluster, a, b, owner = stack._one_owner_layout(db, lost_site=SITE_A)
         _seed_record(db, cluster, SITE_A, state)
         _update(db, owner, lvs_active_site=MOVING_B)
-        rpcs[a[1].get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("connection refused")
+        rpcs[a[1].get_id()].get_lvstore.side_effect = RPCException("connection refused")
         with patch.object(ops, "transfer_lvs_leadership") as transfer:
             if refused:
                 with pytest.raises(ops.LVSMoveChangedError, match="does not answer"):
@@ -1228,6 +1250,23 @@ def _statuses(db, nodes):
 ONLINE_DEV = (StorageNode.STATUS_ONLINE, NVMeDevice.STATUS_ONLINE)
 
 
+class TestMonitorSettlesAnAbandonedMove:
+    """An LVS left ``moving:`` by a promote that ended without settling it:
+    the monitor pass probes every member (get_lvstore) and settles the marker
+    on the actual leader, and the pass goes on to its site record."""
+
+    def test_the_marker_follows_the_member_that_leads(self, db, rpcs, monitor_pass):
+        cluster, a, b, owner = stack._one_owner_layout(db)
+        owner = _update(db, owner, lvs_active_site=MOVING_B)
+        rpcs.lead(a[0])             # the hand-off never happened: the source primary leads
+        with patch.object(monitor, "_apply_site_record", wraps=monitor._apply_site_record) as record:
+            monitor_pass.run(cluster)
+        assert _fresh(db, owner).lvs_active_site == SITE_A
+        record.assert_called_once()
+        for node in (*a, *b):
+            rpcs[node.get_id()].get_lvstore.assert_any_call("LVS_1")
+
+
 class TestMonitorRecord:
     """When the storage-node monitor writes, keeps or clears its record of a
     site, by the cluster's stored status."""
@@ -1395,22 +1434,22 @@ class TestMonitorRecord:
 
 def _hub(spdk, node, lvs_name, *, connected, leader=False):
     """The node's instance of ``lvs_name`` reports its redirect as SPDK does
-    (bdev_lvol_get_lvstores: ``connect_state`` / ``lvs_redirect``), tracking
+    (get_lvstore: ``connect_state`` / ``lvs_redirect``), tracking
     bdev_lvol_connect_hublvol."""
     target = spdk[node.get_id()]
     state = {"connected": connected}
 
-    def _lvstores(name=None, *args, **kwargs):
+    def _lvstore(name):
         if name != lvs_name:
-            return []
-        return [{"name": lvs_name, "lvs leadership": leader, "lvs_secondary": True,
-                 "lvs_redirect": state["connected"], "connect_state": state["connected"]}]
+            return None
+        return {"name": lvs_name, "lvs leadership": leader, "lvs_secondary": True,
+                "lvs_redirect": state["connected"], "connect_state": state["connected"]}
 
     def _connect(*args, **kwargs):
         state["connected"] = True
         return True
 
-    target.bdev_lvol_get_lvstores.side_effect = _lvstores
+    target.get_lvstore.side_effect = _lvstore
     target.bdev_lvol_connect_hublvol.side_effect = _connect
     return state
 
@@ -1469,7 +1508,7 @@ class TestFollowerRedirect:
     def test_a_leader_or_an_unknown_redirect_is_not_closed(self, db, spdk):
         cluster, a, b, owner, vol = _served(db, spdk)
         _hub(spdk, a[1], "LVS_1", connected=False, leader=True)     # a leader is not judged
-        spdk[a[2].get_id()].bdev_lvol_get_lvstores.side_effect = RPCException("busy")
+        spdk[a[2].get_id()].get_lvstore.side_effect = RPCException("busy")
         for node in (a[1], a[2]):
             ops._set_lvol_ana_on_node(vol, node, "non_optimized")
         assert [publish._seen(spdk, n, vol) for n in (a[1], a[2])] == ["non_optimized"] * 2
@@ -1496,10 +1535,16 @@ class TestFollowerRedirect:
         assert publish._seen(spdk, b[2], vol) == "inaccessible"
 
     def test_an_open_follower_whose_redirect_is_gone_is_closed(self, db, spdk):
+        from simplyblock_core.services import lvol_monitor
         cluster, a, b, owner, vol = _served(db, spdk, active_site=SITE_B)
         _hub(spdk, b[2], "LVS_1", connected=False)
         assert publish._seen(spdk, b[2], vol) == "non_optimized"
-        _sweep(cluster, owner, vol)
+        with patch.object(lvol_monitor, "try_repair_lvol_on_non_leader",
+                          wraps=lvol_monitor.try_repair_lvol_on_non_leader) as repair:
+            _sweep(cluster, owner, vol)
+        spdk[b[2].get_id()].get_lvstore.assert_any_call("LVS_1")
+        assert b[2].get_id() in {c.args[1].get_id() for c in repair.call_args_list}
+        assert db.get_lvol_by_id(vol.get_id()).health_check is False
         assert publish._seen(spdk, b[2], vol) == "inaccessible"
         assert publish._seen(spdk, b[0], vol) == "optimized"
 

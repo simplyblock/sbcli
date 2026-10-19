@@ -40,7 +40,7 @@ class TestRemoteDeviceProbeSkipsDepartedOwners(unittest.TestCase):
         owner = _node("owner", owner_status)
         prober = _node("prober", StorageNode.STATUS_ONLINE)
         rpc = MagicMock()
-        rpc.get_bdevs = MagicMock(return_value=[{"name": "x"}])
+        rpc.bdev_get = MagicMock(return_value={"name": "x"})
         rpc.bdev_nvme_controller_list = MagicMock(return_value=[])
         prober.rpc_client = MagicMock(return_value=rpc)
 
@@ -63,7 +63,7 @@ class TestRemoteDeviceProbeSkipsDepartedOwners(unittest.TestCase):
         # discards the verdict for a departed owner, so a verdict-only
         # assertion passes with the bug still in place.
         result, rpc = self._run(StorageNode.STATUS_REMOVED)
-        rpc.get_bdevs.assert_not_called()
+        rpc.bdev_get.assert_not_called()
         rpc.bdev_nvme_controller_list.assert_not_called()
         self.assertTrue(result, "a departed owner must not fail health")
 
@@ -73,7 +73,7 @@ class TestRemoteDeviceProbeSkipsDepartedOwners(unittest.TestCase):
                        StorageNode.STATUS_RESTARTING):
             with self.subTest(status=status):
                 _result, rpc = self._run(status)
-                rpc.get_bdevs.assert_not_called()
+                rpc.bdev_get.assert_not_called()
                 rpc.bdev_nvme_controller_list.assert_not_called()
 
     def test_a_live_owner_is_still_probed(self):
@@ -84,7 +84,7 @@ class TestRemoteDeviceProbeSkipsDepartedOwners(unittest.TestCase):
                        StorageNode.STATUS_UNREACHABLE):
             with self.subTest(status=status):
                 _result, rpc = self._run(status)
-                rpc.get_bdevs.assert_called_once_with("remote_alceml_d1n1")
+                rpc.bdev_get.assert_called_once_with("remote_alceml_d1n1")
                 rpc.bdev_nvme_controller_list.assert_called_once_with(
                     "remote_alceml_d1")
 

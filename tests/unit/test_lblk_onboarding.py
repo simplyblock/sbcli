@@ -37,7 +37,7 @@ def _snode(node_id="node-1", cluster_id="cluster-1", physical_label=3):
 
 
 class _FakeRpc:
-    """Minimal SPDK RPC fake for addAioDevices: get_bdevs answers from an
+    """Minimal SPDK RPC fake for addAioDevices: bdev_get answers from an
     internal registry; bdev_aio_create registers; every call is recorded."""
 
     def __init__(self, existing=None, create_ok=True, block_size=4096,
@@ -49,10 +49,10 @@ class _FakeRpc:
         self.num_blocks = num_blocks
         self.calls = []
 
-    def get_bdevs(self, name):
-        self.calls.append(("get_bdevs", name))
+    def bdev_get(self, name):
+        self.calls.append(("bdev_get", name))
         if name in self.bdevs:
-            return [self.bdevs[name]]
+            return self.bdevs[name]
         return None
 
     def bdev_aio_create(self, name, filename, block_size=0):

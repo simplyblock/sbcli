@@ -2,6 +2,7 @@
 
 import pytest
 
+from simplyblock_core.models.cluster import Cluster
 from tests.unit.web.api.v2._factories import CLUSTER_ID, EVENT_ID, make_event
 
 # max_subsys and spdk_vcpu_count are capacity decisions with real
@@ -31,6 +32,27 @@ class TestListClusters:
         (body,) = client.get('/api/v2/clusters/').json()
 
         assert body['secret'] == 'cluster-secret'
+
+
+# ClusterDTO.status is a hand-listed Literal; every persisted status must serialize.
+ALL_CLUSTER_STATUSES = [
+    getattr(Cluster, name) for name in dir(Cluster)
+    if name.startswith('STATUS_') and isinstance(getattr(Cluster, name), str)
+    and name != 'STATUS_CODE_MAP'
+]
+
+
+class TestClusterStatusSerialization:
+
+    @pytest.mark.parametrize('status', ALL_CLUSTER_STATUSES)
+    def test_every_core_status_serializes(self, client, db, cluster, status):
+        cluster.status = status
+
+        response = client.get('/api/v2/clusters/')
+
+        assert response.status_code == 200
+        (body,) = response.json()
+        assert body['status'] == status
 
 
 class TestCreateCluster:
@@ -262,6 +284,18 @@ class TestClusterStats:
         assert body['id'] == EVENT_ID
         assert body['message'] == 'started'
         cluster_ops.get_log_events.assert_called_once_with(CLUSTER_ID, 10)
+
+    def test_logs_report_an_unassigned_storage_id_as_null(self, client, cluster, cluster_ops):
+        cluster_ops.get_log_events.return_value = [
+            make_event(storage_id=-1, object_dict={'cluster_device_order': -1}),
+            make_event(storage_id=-1, object_dict={'cluster_device_order': 3}),
+            make_event(storage_id=7),
+        ]
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/logs')
+
+        assert response.status_code == 200
+        assert [entry['storage_id'] for entry in response.json()] == [None, 3, 7]
 
     def test_logs_dispatches_watch_events(self, client, cluster, cluster_ops, watch_stream):
         cluster_ops.watch_events.return_value = watch_stream([make_event()])

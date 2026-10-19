@@ -267,12 +267,12 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
                                      StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
             try:
-                ret = member.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                lvs_info = member.rpc_client().get_lvstore(snode.lvstore)
             except Exception:
                 continue
-            if not ret:
+            if not lvs_info:
                 continue
-            if ret[0].get('lvs leadership'):
+            if lvs_info.get('lvs leadership'):
                 leader_node = member
                 break
         if leader_node is not None and leader_cache is not None and cache_key is not None:

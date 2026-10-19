@@ -95,12 +95,12 @@ def _group(db, cluster, owner, members):
     return group
 
 
-def _read_back(name=None, **kwargs):
-    """get_bdevs of a node: a snapshot it was asked for exists, nothing else."""
-    if not name or "/SNAP_" not in name:
-        return []
-    return [{"uuid": str(uuid.uuid4()),
-             "driver_specific": {"lvol": {"blobid": next(_blobids), "num_allocated_clusters": 1}}}]
+def _read_back(name):
+    """bdev_get of a node: a snapshot it was asked for exists, nothing else."""
+    if "/SNAP_" not in name:
+        return None
+    return {"name": name, "uuid": str(uuid.uuid4()),
+            "driver_specific": {"lvol": {"blobid": next(_blobids), "num_allocated_clusters": 1}}}
 
 
 def _can_snapshot(rpcs, nodes):
@@ -108,8 +108,8 @@ def _can_snapshot(rpcs, nodes):
     the tick ends up asking."""
     for node in nodes:
         rpc = rpcs[node.get_id()]
-        rpc.lvol_create_snapshot2.return_value = (True, None)
-        rpc.get_bdevs.side_effect = _read_back
+        rpc.lvol_create_snapshot2.return_value = True
+        rpc.bdev_get.side_effect = _read_back
 
 
 def _leaderless(db, rpcs):
@@ -179,9 +179,9 @@ class TestLeaderlessVolume:
         _nothing_made(db, rpcs, cluster, [*a, *b])
         # it asked the active triplet, and only it
         for node in b:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_called_with("LVS_1")
+            rpcs[node.get_id()].get_lvstore.assert_called_with("LVS_1")
         for node in a:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_not_called()
+            rpcs[node.get_id()].get_lvstore.assert_not_called()
 
     def test_deferrals_log_once_and_look_up_once_per_tick(
             self, db, rpcs, hub, env, no_sleep, caplog):
@@ -189,7 +189,7 @@ class TestLeaderlessVolume:
         _due_volume(db, cluster, owner, pool)
         _due_volume(db, cluster, owner, pool)
         caplog.set_level(logging.INFO)
-        probes = rpcs[b[1].get_id()].bdev_lvol_get_lvstores   # asked once per lookup
+        probes = rpcs[b[1].get_id()].get_lvstore   # asked once per lookup
 
         _tick(cluster)
         # the second volume reused "nobody leads" ...
@@ -287,9 +287,9 @@ class TestMidTick:
         def _snapshot_then_promote(*args, **kwargs):
             # the promote ends right behind the first snapshot: a0 is demoted,
             # the LVS is open on site B and waits for its first IO there
-            rpcs[a[0].get_id()].bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+            rpcs[a[0].get_id()].get_lvstore.return_value = {"lvs leadership": False}
             _update(db, owner, lvs_active_site=SITE_B)
-            return True, None
+            return True
         rpcs[a[0].get_id()].lvol_create_snapshot2.side_effect = _snapshot_then_promote
 
         _tick(cluster)
@@ -313,8 +313,8 @@ class TestMidTick:
                 moved.append(True)
                 _update(db, owner, lvs_active_site=SITE_A)
                 rpcs.lead(a[0])
-            return [{"lvs leadership": False}]
-        rpcs[b[2].get_id()].bdev_lvol_get_lvstores.side_effect = _probed_then_moved_back
+            return {"lvs leadership": False}
+        rpcs[b[2].get_id()].get_lvstore.side_effect = _probed_then_moved_back
 
         _tick(cluster)
 
@@ -367,8 +367,8 @@ class TestGuards:
         # b0) is led by b0. Both are probed on the same three nodes.
         cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db)
         owner_a = _update(db, owner_a, lvs_active_site=SITE_B)
-        rpcs[b[0].get_id()].bdev_lvol_get_lvstores.side_effect = \
-            lambda name=None, **kwargs: [{"lvs leadership": name == "LVS_2"}]
+        rpcs[b[0].get_id()].get_lvstore.side_effect = \
+            lambda name: {"lvs leadership": name == "LVS_2"}
         triplet._journal_ready(rpcs, b[0])
         _can_snapshot(rpcs, [*a, *b])
         pool = publish._pool(db, cluster)

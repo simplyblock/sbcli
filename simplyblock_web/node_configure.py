@@ -189,7 +189,14 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--blk-names',
-        help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk)',
+        help='Comma separated list of block devices to use (requires --lblk). An entry is a '
+             'persistent /dev/disk name '
+             '(/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0, '
+             '/dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba). A kernel name '
+             "(sdb) or kernel path (/dev/sdb) is refused: it states a position in this "
+             "boot's enumeration order, and this configure runs again at every node "
+             'restart, so it names another disk after a reboot that probes the controllers '
+             'in another order',
         type=str,
         default='',
         dest='blk_names',
@@ -197,7 +204,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--blk-names-exclude',
-        help='Comma separated list of block device names to exclude, like sda (requires --lblk)',
+        help='Comma separated list of block devices to exclude (requires --lblk), spelled '
+             'the way --blk-names takes them',
         type=str,
         default='',
         dest='blk_names_exclude',

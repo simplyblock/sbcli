@@ -194,7 +194,7 @@ class HubControllerManager:
             if entry is None:
                 return None
         try:
-            if src_rpc.get_bdevs(entry.hub_bdev):
+            if src_rpc.bdev_get(entry.hub_bdev):
                 with self._lock:
                     entry.last_used = time.monotonic()
                     entry.src_rpc = src_rpc
@@ -261,7 +261,7 @@ class HubControllerManager:
     def _do_detach(self, key, entry: _HubEntry, rpc, reason: str):
         """Issue the detach RPC and record the detach timestamp."""
         try:
-            if rpc.get_bdevs(entry.hub_bdev):
+            if rpc.bdev_get(entry.hub_bdev):
                 rpc.bdev_nvme_detach_controller(entry.ctrl_name)
                 logger.info(f"[HubMgr] detached {entry.ctrl_name} ({reason})")
             else:
@@ -319,7 +319,7 @@ class HubControllerManager:
             tgt_node.create_transfer_hublvol()
 
         # Already attached (crash recovery or concurrent acquire)
-        if src_rpc.get_bdevs(tgt_node.transfer_hublvol.get_remote_bdev_name()):
+        if src_rpc.bdev_get(tgt_node.transfer_hublvol.get_remote_bdev_name()):
             return (
                 tgt_node.transfer_hublvol.bdev_name,
                 tgt_node.transfer_hublvol.get_remote_bdev_name(),

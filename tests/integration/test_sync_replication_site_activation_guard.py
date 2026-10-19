@@ -40,6 +40,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services import (
     backup_merge_service,
     tasks_runner_backup,
@@ -589,10 +590,11 @@ class TestSyncTasks:
     def _queued_delete(self, db, rpcs, cluster, owner, dest, primary):
         """The task the real producer queues when the sync delete of a bdev of
         ``owner``'s LVS fails on ``dest``, acted on by ``primary``."""
-        rpcs[dest.get_id()].delete_lvol.return_value = (False, {"message": "busy"})
+        rpcs[dest.get_id()].delete_lvol.side_effect = RPCRemoteError(message="busy", code=-16)
         bdev = f"{owner.lvstore}/LVOL_q"
         assert snapshot_controller.sync_delete_on_peer(dest, bdev, primary.get_id()) is False
         rpcs[dest.get_id()].reset_mock()
+        rpcs[dest.get_id()].delete_lvol.side_effect = None
         [task] = [t for t in db.get_job_tasks(cluster.get_id())
                   if t.function_name == JobSchedule.FN_LVOL_SYNC_DEL and t.function_params["lvol_bdev_name"] == bdev]
         assert task.function_params["primary_node"] == primary.get_id()
@@ -632,7 +634,7 @@ class TestSyncTasks:
         cluster, a, b = _activating(db, window)
         rpcs[b[2].get_id()].bdev_lvol_resize.return_value = True
         queued = self._queued_delete(db, rpcs, cluster, a[1], b[2], primary=b[0])
-        rpcs[b[2].get_id()].delete_lvol.return_value = (True, None)
+        rpcs[b[2].get_id()].delete_lvol.return_value = True
         tasks = [self._delete(db, cluster, b[1], b[2]), self._delete(db, cluster, a[1], b[2]), queued,
                  self._op(db, cluster, b[1], b[2], "register"), self._op(db, cluster, a[1], b[2], "register"),
                  self._op(db, cluster, b[1], b[2], "resize")]
@@ -657,7 +659,7 @@ class TestSyncTasks:
     @pytest.mark.parametrize("case", ["no flag", "non-sync"])
     def test_sync_tasks_run_without_a_flag(self, db, rpcs, case):
         cluster, a, b = _not_activating(db, case)
-        rpcs[b[2].get_id()].delete_lvol.return_value = (True, None)
+        rpcs[b[2].get_id()].delete_lvol.return_value = True
         tasks = [self._delete(db, cluster, b[0], b[2]), self._op(db, cluster, b[0], b[1], "register")]
         with patch.object(ops, "repair_lvol_registration_on_non_leader", return_value=(True, None)) as register:
             one_cycle(tasks_runner_sync_lvol_del.SPEC)
@@ -708,7 +710,16 @@ class TestRestartPhase:
     def test_an_operation_skips_a_node_not_rebuilt(self, db, rpcs, links):
         """a1 with no phase and no lvstore LVS_4 in its SPDK: absent, skipped."""
         cluster, a, b = _activating(db, "record")
-        rpcs[a[1].get_id()].bdev_lvol_get_lvstores.return_value = None
+        rpcs[a[1].get_id()].get_lvstore.return_value = None
+        assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "skip"
+        rpcs[a[1].get_id()].get_lvstore.assert_called_with("LVS_4")
+        links.votes.assert_not_called()
+
+    def test_an_operation_skips_a_node_whose_lvstore_cannot_be_told(self, db, rpcs, links):
+        """a1's SPDK does not answer the lvstore probe: not proof that it holds
+        LVS_4, skipped."""
+        cluster, a, b = _activating(db, "record")
+        rpcs[a[1].get_id()].get_lvstore.side_effect = RPCRemoteError(message="busy", code=-16)
         assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "skip"
         links.votes.assert_not_called()
 
@@ -716,9 +727,9 @@ class TestRestartPhase:
         """a1 with no phase whose SPDK holds LVS_4 (rebuilt by the site
         activation) takes the operation while the record stands."""
         cluster, a, b = _activating(db, "record")
-        rpcs[a[1].get_id()].bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        rpcs[a[1].get_id()].get_lvstore.return_value = {"name": "LVS_4", "lvs leadership": False}
         assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "proceed"
-        rpcs[a[1].get_id()].bdev_lvol_get_lvstores.assert_called_with("LVS_4")
+        rpcs[a[1].get_id()].get_lvstore.assert_called_with("LVS_4")
         links.votes.assert_not_called()
 
     def test_a_rebuilt_node_is_skipped_without_a_flag(self, db, rpcs, links):
@@ -726,7 +737,7 @@ class TestRestartPhase:
         skipped, its SPDK never asked."""
         cluster, a, b = _not_activating(db, "no flag")
         assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "skip"
-        rpcs[a[1].get_id()].bdev_lvol_get_lvstores.assert_not_called()
+        rpcs[a[1].get_id()].get_lvstore.assert_not_called()
 
     def test_after_the_record_the_node_is_asked(self, db, rpcs, links):
         """The record cleared, no phase: a1 counts as connected (the vote) and
@@ -751,20 +762,20 @@ class TestRestartPhase:
 # snapshots on an LVS led from B with members on the activating site
 # ---------------------------------------------------------------------------
 
-def _snapshot_bdev(name=None, **kwargs):
-    """get_bdevs of the leader: the snapshot it was asked for exists."""
-    if not name or "/SNAP_" not in name:
-        return []
-    return [{"uuid": str(uuid.uuid4()),
-             "driver_specific": {"lvol": {"blobid": 7, "num_allocated_clusters": 1}}}]
+def _snapshot_bdev(name):
+    """bdev_get of the leader: the snapshot it was asked for exists."""
+    if "/SNAP_" not in name:
+        return None
+    return {"name": name, "uuid": str(uuid.uuid4()),
+            "driver_specific": {"lvol": {"blobid": 7, "num_allocated_clusters": 1}}}
 
 
 def _leader(rpcs, node):
     """``node`` leads: its snapshot RPCs succeed and read back."""
     rpc = rpcs[node.get_id()]
-    rpc.lvol_create_snapshot2.return_value = (True, None)
+    rpc.lvol_create_snapshot2.return_value = True
     rpc.bdev_lvol_snapshot_group.return_value = True
-    rpc.get_bdevs.side_effect = _snapshot_bdev
+    rpc.bdev_get.side_effect = _snapshot_bdev
     return rpc
 
 
@@ -795,7 +806,7 @@ class TestRebuiltMembers:
 
     @staticmethod
     def _rebuilt(rpcs, a):
-        rpcs[a[2].get_id()].bdev_lvol_get_lvstores.return_value = None
+        rpcs[a[2].get_id()].get_lvstore.return_value = None
 
     def test_a_snapshot_registers_on_rebuilt_members(self, db, rpcs, links):
         cluster, a, b = _activating(db, "record")

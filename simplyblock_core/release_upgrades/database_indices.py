@@ -30,6 +30,7 @@ a class that already had some.
 """
 
 from simplyblock_core import constants, index_ops, utils
+from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.release_upgrades import UpgradePlugin
 
 logger = utils.get_logger(__name__)
@@ -78,6 +79,15 @@ class DatabaseIndices(UpgradePlugin):
         for prefix in OBSOLETE_PREFIXES:
             db.kv_store.clear_range_startswith(prefix)
             messages.append(f"Cleared obsolete key family {prefix.decode()}")
+
+        # A record written before its class was watched has no watch entry, so a
+        # stream never lists it. A no-op update gives it one without changing it.
+        for model in (Backup, BackupPolicy):
+            count = 0
+            for record in model().read_from_db(db.kv_store, id=" "):
+                db.atomic_update(record, lambda _fresh: None)
+                count += 1
+            messages.append(f"Gave {count} {model.__name__} records a watch entry")
 
         # Persisted here rather than on the object the caller holds: the caller
         # re-reads the cluster before stamping the installed release, so an

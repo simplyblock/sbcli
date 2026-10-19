@@ -258,9 +258,9 @@ class TestCheckSnapHaGating(unittest.TestCase):
 
         primary = MagicMock()
         primary.secondary_node_id = secondary_node_id
-        primary.rpc_client.return_value.get_bdevs.return_value = [{"name": "x"}]
+        primary.rpc_client.return_value.bdev_get.return_value = {"name": "x"}
         secondary = MagicMock()
-        secondary.rpc_client.return_value.get_bdevs.return_value = [{"name": "x"}]
+        secondary.rpc_client.return_value.bdev_get.return_value = {"name": "x"}
 
         db = MagicMock()
         db.get_snapshot_by_id.return_value = snap

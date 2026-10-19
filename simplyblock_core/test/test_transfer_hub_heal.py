@@ -42,10 +42,10 @@ class _TargetRPC:
         self._subsystem = subsystem
         self._raises = raises
 
-    def get_bdevs(self, name=None):
+    def bdev_get(self, name=None):
         if self._raises:
             raise RuntimeError("target unreachable")
-        return [{"name": name}] if self._bdev else []
+        return {"name": name} if self._bdev else None
 
     def subsystem_get(self, nqn):
         if self._raises:
@@ -61,8 +61,8 @@ class _SourceRPC:
         self._attach_ok = attach_ok
         self.attaches = []
 
-    def get_bdevs(self, name=None):
-        return [{"name": name}] if self._remote_present else []
+    def bdev_get(self, name=None):
+        return {"name": name} if self._remote_present else None
 
     def bdev_nvme_attach_controller(self, *args, **kwargs):
         self.attaches.append(args)

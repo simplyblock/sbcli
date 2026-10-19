@@ -3,7 +3,7 @@
 Mass create/delete run 20260712-231123 left LVS_1 leaderless for hours after a
 cluster-wide abort; every lvol/snapshot create re-ran the full leader
 probe/recovery machinery, storming each LVS member with ~61k
-bdev_lvol_get_lvstores RPCs. The fix:
+get_lvstore RPCs. The fix:
 
   * find_leader_with_failover records a "no leader" verdict in the shared
     no_leader_cache and fails fast (no probing) for NO_LEADER_TTL_SEC.

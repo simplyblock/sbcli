@@ -552,7 +552,7 @@ def main():
     print("Phase 3: Adding storage nodes to cluster (in parallel)...")
 
     # Node-add is now parallel-safe: the control plane serializes only the
-    # cross-node mesh wiring (per-cluster ClusterAddNodeLock) and allocates
+    # cross-node mesh wiring (per-cluster cluster_add DbLock) and allocates
     # ports transactionally (PortReservation), so the slow per-node SPDK
     # bring-up overlaps instead of running back-to-back. `sbctl sn add-node`
     # runs add_node synchronously and each invocation is its own process, so we

@@ -39,7 +39,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 from simplyblock_core.services import (
     tasks_runner_batch_migration,
     tasks_runner_lvol_migration,
@@ -145,7 +145,7 @@ def _volume(db, cluster, owner, pool, *, nqn=None, namespaced=False, ns_id=0,
 class FakeSpdk:
     """The nvmf state of one node: subsystems, namespaces, listeners (created
     with a listener-wide ANA state) and the per-group ANA state set later.
-    Every other RPC is a MagicMock."""
+    Every other RPC is a MagicMock; a method RPCClient lacks is refused."""
 
     def __init__(self, node_id):
         self.node_id = node_id
@@ -156,7 +156,7 @@ class FakeSpdk:
         self.others: dict = {}
 
     def __getattr__(self, name):
-        if name.startswith("__"):
+        if name.startswith("__") or not callable(getattr(RPCClient, name, None)):
             raise AttributeError(name)
         return self.others.setdefault(name, MagicMock(name=f"{self.node_id}.{name}"))
 
@@ -173,19 +173,24 @@ class FakeSpdk:
                                          "listen_addresses": []})
         return True
 
-    def nvmf_subsystem_add_ns2(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, **kwargs):
+    def nvmf_subsystem_add_ns2(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
+                               idempotent=True):
         sub = self.subsystems.get(nqn)
         if sub is None:
-            return None, {"code": -32602, "message": "no subsystem"}
+            raise RPCRemoteError(message="no subsystem", code=-32602)
         nsid = nsid or max((n["nsid"] for n in sub["namespaces"]), default=0) + 1
         sub["namespaces"].append({"nsid": nsid, "uuid": uuid, "bdev_name": dev_name})
-        return nsid, None
+        return nsid
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, **kwargs):
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
+                              idempotent=True):
         sub = self.subsystems.get(nqn)
         if sub is not None and nsid and any(n["nsid"] == nsid for n in sub["namespaces"]):
             return nsid     # idempotent re-add
-        return self.nvmf_subsystem_add_ns2(nqn, dev_name, uuid, nguid, nsid)[0]
+        try:
+            return self.nvmf_subsystem_add_ns2(nqn, dev_name, uuid, nguid, nsid)
+        except RPCRemoteError:
+            return None
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
         sub = self.subsystems.get(nqn)
@@ -204,11 +209,6 @@ class FakeSpdk:
         self.default[(nqn, ip)] = state or "optimized"
         return True
 
-    def nvmf_subsystem_add_listener(self, nqn, trtype, traddr, trsvcid, ana_state=None):
-        if self._add_listener(nqn, trtype, traddr, trsvcid, ana_state):
-            return True, None
-        return False, {"code": -32602, "message": "listener exists"}
-
     def listeners_create(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         return self._add_listener(nqn, trtype, traddr, trsvcid, ana_state) or None
 
@@ -226,8 +226,8 @@ class FakeSpdk:
         self.groups[(nqn, ip, anagrpid)] = ana
         return True
 
-    def get_bdevs(self, name=None):
-        return [{"uuid": "bdev-uuid", "driver_specific": {"lvol": {"blobid": 7}}}]
+    def bdev_get(self, name):
+        return {"name": name, "uuid": "bdev-uuid", "driver_specific": {"lvol": {"blobid": 7}}}
 
     def listeners_list(self, nqn):
         """nvmf_subsystem_get_listeners: every listener with the state of
@@ -720,7 +720,7 @@ class TestFailedGroup:
             return real(nqn_, trtype, ip, port, ana_state=ana_state)
 
         with patch.object(target, "listeners_create", side_effect=_second_nic_raises):
-            with pytest.raises(RPCException):
+            with pytest.raises(RuntimeError, match="connection error"):
                 lvol_controller.recreate_lvol_on_node(first, node)
         assert self._retry_all(db, cluster) == sorted([first.get_id(), second.get_id()])
         self._right(spdk, node, first, second, nics=2)
@@ -735,17 +735,17 @@ class TestFailedGroup:
         lvol_controller.add_lvol_on_node(creator, owner, defer_listeners=True)
         lvol_controller.add_lvol_on_node(joiner, owner)       # no listener yet: skips
         joiner.write_to_db(db.kv_store)                        # its ns_id, as the create persists it
-        real = target.nvmf_subsystem_add_listener
+        real = target.listeners_create
 
         def _second_nic_raises(nqn_, trtype, ip, port, ana_state=None):
             if ip == _ip(owner, 1):
                 raise RPCException("connection error")
             return real(nqn_, trtype, ip, port, ana_state=ana_state)
 
-        with patch.object(target, "nvmf_subsystem_add_listener", side_effect=_second_nic_raises):
+        with patch.object(target, "listeners_create", side_effect=_second_nic_raises):
             ok, err = lvol_controller.publish_lvol_listeners(creator, owner, is_primary=True,
                                                              ns_id=creator.ns_id)
-        assert not ok and "connection error" in err
+        assert (ok, err) == (False, f"Failed to create listener for {creator.get_id()}")
         assert not target.subsystems[nqn]["listen_addresses"]        # rolled back
         assert self._retry_all(db, cluster) == [joiner.get_id()]
         for i in (0, 1):
@@ -834,7 +834,7 @@ class TestMonitorSelfHeal:
             raise RPCException("connection error")
 
         with patch.object(target, "listeners_create", side_effect=_applied_then_lost):
-            with pytest.raises(RPCException):
+            with pytest.raises(RuntimeError, match="connection error"):
                 lvol_controller.recreate_lvol_on_node(vol, owner)
         assert health_controller.check_subsystem(vol.nqn, rpc_client=target, ns_uuid=vol.get_ns_uuid())
         assert _seen(spdk, owner, vol) == "inaccessible"
@@ -919,7 +919,7 @@ def _absent_until_created(rpc, nqn):
 def _examines(rpc, *vols):
     """The examine of the LVS on the node brings ``vols``' bdevs back."""
     names = {n for vol in vols for n in (vol.lvol_uuid, f"{vol.lvs_name}/{vol.lvol_bdev}")}
-    rpc.get_bdevs.side_effect = lambda name=None, **kwargs: [{"name": name}] if name in names else []
+    rpc.bdev_get.side_effect = lambda name: {"name": name} if name in names else None
 
 
 def _leads(rpcs, node):
@@ -1007,15 +1007,18 @@ class TestRestart:
         _leads(rpcs, a[1])
         _absent_until_created(rpcs[owner.get_id()], vol.nqn)
         _examines(rpcs[owner.get_id()], vol)
-        with patch.object(ops, "transfer_lvs_leadership", return_value=[]):
+        with patch.object(ops, "transfer_lvs_leadership", return_value=[]), \
+                patch.object(ops, "demote_old_leader_listeners") as demote:
             assert ops.recreate_lvstore(_fresh(db, owner)) is True
         rpc = rpcs[owner.get_id()]
         assert _min_cntlid(rpc, vol.nqn) == [1]
         assert _ana_calls(rpc, vol.nqn) == [(1, "inaccessible")]
-        # the old leader keeps its fence (no raw non_optimized listener re-add)
+        # the old leader keeps its fence (no raw non_optimized listener re-add):
+        # step 11 applies the site rule, never the non-sync demote
         peer = rpcs[a[1].get_id()]
         assert (1, "inaccessible") in _ana_calls(peer, vol.nqn)
         assert not [c for c in peer.listeners_create.call_args_list if c.args[0] == vol.nqn]
+        demote.assert_not_called()
 
     def test_a_home_primary_leader_restart_opens_its_site(self, db, rpcs, hub, env, attached):
         cluster, a, b, owner = _layout(db)
@@ -1027,6 +1030,71 @@ class TestRestart:
             assert ops.recreate_lvstore(_fresh(db, owner)) is True
         assert _ana_calls(rpcs[owner.get_id()], vol.nqn) == [(1, "optimized")]
         assert (1, "non_optimized") in _ana_calls(rpcs[a[1].get_id()], vol.nqn)
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_a_lvstore_the_examine_does_not_bring_back(self, db, rpcs, hub, env, attached, force):
+        """The validation after the examine (inside the fence, before the
+        grant) reads get_lvstore: no lvstore aborts the rebuild, unless forced."""
+        cluster, a, b, owner = _layout(db)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        _leads(rpcs, a[1])
+        rpcs[owner.get_id()].get_lvstore.return_value = None
+        _absent_until_created(rpcs[owner.get_id()], vol.nqn)
+        _examines(rpcs[owner.get_id()], vol)
+
+        def _transfer(*args, before_grant=None, **kwargs):
+            before_grant()
+            return []
+
+        with patch.object(ops, "transfer_lvs_leadership", side_effect=_transfer), \
+                patch.object(ops, "_kill_spdk_until_dead", return_value=True):
+            if force:
+                assert ops.recreate_lvstore(_fresh(db, owner), force=True) is True
+            else:
+                with pytest.raises(ops.LeadershipTransferError, match="Failed to recover lvstore"):
+                    ops.recreate_lvstore(_fresh(db, owner))
+        rpcs[owner.get_id()].get_lvstore.assert_any_call("LVS_1")
+
+    @pytest.mark.parametrize("wired", [True, False])
+    def test_a_home_primary_restart_fails_back_the_secondary_by_its_redirect(
+            self, db, rpcs, hub, env, attached, wired):
+        """The home primary rebuilding its own LVS (no takeover) with a live
+        volume: _failback_primary_ana reads the secondary's lvstore while it
+        still leads (a leader's redirect is not judged) and demotes its path
+        to non_optimized before the window; after the hand-off step 11 applies
+        the redirect rule - non_optimized while the redirect to the new leader
+        is wired, inaccessible and queued for the retry while not."""
+        cluster, a, b, owner = _layout(db)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        _leads(rpcs, a[1])
+        sec = rpcs[a[1].get_id()]
+
+        def _transfer(*args, **kwargs):
+            sec.get_lvstore.return_value = {"name": "LVS_1", "lvs leadership": False,
+                                            "connect_state": wired, "lvs_redirect": wired}
+            return []
+
+        real_failback, in_failback = ops._failback_primary_ana, {}
+
+        def _failback(node):
+            probes, sent = sec.get_lvstore.call_count, len(_ana_calls(sec, vol.nqn))
+            real_failback(node)
+            in_failback.update(probes=sec.get_lvstore.call_count - probes,
+                               states=_ana_calls(sec, vol.nqn)[sent:])
+
+        _absent_until_created(rpcs[owner.get_id()], vol.nqn)
+        _examines(rpcs[owner.get_id()], vol)
+        with patch.object(ops, "transfer_lvs_leadership", side_effect=_transfer), \
+                patch.object(ops, "_failback_primary_ana", side_effect=_failback) as failback:
+            assert ops.recreate_lvstore(_fresh(db, owner)) is True
+        assert [c.args[0].get_id() for c in failback.call_args_list] == [owner.get_id()]
+        assert in_failback["probes"] >= 1
+        assert in_failback["states"] == [(1, "non_optimized")]
+        assert _ana_calls(sec, vol.nqn)[-1] == (1, "non_optimized" if wired else "inaccessible")
+        retries = [t for t in db.get_job_tasks(cluster.get_id())
+                   if t.function_name == JobSchedule.FN_LVOL_SYNC_OP and t.node_id == a[1].get_id()
+                   and t.status != JobSchedule.STATUS_DONE]
+        assert bool(retries) is not wired
 
 
 class TestRepair:
@@ -1290,7 +1358,9 @@ class TestRefused:
         response = web_client.post(
             f"/api/v2/clusters/{cluster.get_id()}/subsystems/{vol.nqn}/migrations/",
             json={"target_node_id": target.get_id()})
-        assert response.status_code == 400, response.text
+        # a refused precondition is a 409 on this route (SyncReplicationUnsupportedError
+        # is a PreconditionError)
+        assert response.status_code == 409, response.text
         assert "sync-replication" in response.text
         assert db.get_migrations(cluster.get_id()) == []
         assert db.get_migration_groups(cluster.get_id()) == []

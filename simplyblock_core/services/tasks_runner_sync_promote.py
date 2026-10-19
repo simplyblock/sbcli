@@ -107,7 +107,10 @@ def _checkpoint(task):
 
 
 def _settle_markers(task) -> None:
-    """Settle every ``moving:`` marker the (DONE) task still holds."""
+    """Settle every ``moving:`` marker the (DONE) task still holds, each
+    owner on its own. A reconcile that fails operationally (a member's RPC, a
+    changed precondition, a record gone) leaves that marker to the
+    storage-node monitor (reconcile_abandoned_moves)."""
     params = task.function_params
     moving = storage_node_ops.lvs_moving_value(params["site"])
     transferring = set(params.get("transferring", []))
@@ -120,7 +123,12 @@ def _settle_markers(task) -> None:
         if owner.lvs_active_site != moving:
             continue
         if lvs_name in transferring:
-            settled = storage_node_ops.reconcile_lvs_move(owner_id)
+            try:
+                settled = storage_node_ops.reconcile_lvs_move(owner_id)
+            except (RPCException, PreconditionError, KeyError) as e:
+                logger.error("LVS %s: reconciling the move of an ended promote failed, "
+                             "left to the monitor: %s", lvs_name, e)
+                continue
             logger.warning("LVS %s: move of an ended promote reconciled to %r", lvs_name, settled)
         elif storage_node_ops.set_lvs_active_site(owner_id, previous, expect=moving):
             logger.warning("LVS %s: move of an ended promote undone, lvs_active_site=%r",
@@ -317,9 +325,9 @@ def _lost_members_not_leading(lvs_name, owner_id, site):
     report the leadership, when it does not answer and is gone
     (_not_gone_reason), or when it does not answer and is an ONLINE node of the
     recorded site, which holds no instance
-    (storage_node_ops.member_absent_on_recorded_site). No result is no answer,
-    like an RPC error: that is what the RPC proxy of a dead SPDK returns, and
-    what an SPDK without the LVS returns."""
+    (storage_node_ops.member_absent_on_recorded_site). No lvstore (get_lvstore
+    None: an SPDK without the LVS) is no answer, like an RPC error (the RPC
+    proxy of a dead SPDK)."""
     owner = db.get_storage_node_by_id(owner_id)
     cluster = db.get_cluster_by_id(owner.cluster_id)
     problems = []
@@ -331,11 +339,11 @@ def _lost_members_not_leading(lvs_name, owner_id, site):
         if node.site != site or node.status == StorageNode.STATUS_REMOVED:
             continue
         try:
-            ret = node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(lvs_name)
+            lvs = node.rpc_client(timeout=5, retry=1).get_lvstore(lvs_name)
         except RPCException:
-            ret = None
-        if ret is not None:
-            if ret and ret[0].get("lvs leadership"):
+            lvs = None
+        if lvs is not None:
+            if lvs.get("lvs leadership"):
                 problems.append(f"{node_id} reports the leadership")
             continue
         if storage_node_ops.member_absent_on_recorded_site(cluster, node):

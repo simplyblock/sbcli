@@ -15,7 +15,6 @@ Tests cover:
   - RPC client bdev_s3_create / bdev_lvol_s3_bdev methods
   - CLI argument registration
   - Cluster model backup_config field
-  - snapshot_controller.add with backup=True
   - Task runner dispatch
 
 All external dependencies (FDB, RPC) are mocked.
@@ -54,6 +53,7 @@ def _node(uuid="node-1", status=StorageNode.STATUS_ONLINE, lvstore="lvs_test",
     n.rpc_username = "admin"
     n.rpc_password = "pass"
     n.app_thread_mask = "0x8"  # core 3
+    n.jc_singleton_mask = "0x2"  # core 1
     n.cpu = 8  # 8 system vCPUs
     return n
 
@@ -264,15 +264,15 @@ class TestComputeS3CpuMasks(unittest.TestCase):
 
     def test_masks_from_node(self):
         from simplyblock_core.controllers.backup.device import _compute_s3_cpu_masks
-        node = _node()  # app_thread_mask="0x8", cpu=8
+        node = _node()  # jc_singleton_mask="0x2", cpu=8
         bdb, s3 = _compute_s3_cpu_masks(node)
-        self.assertEqual(bdb, 0x8)       # app thread core 3
+        self.assertEqual(bdb, 0x2)        # JC singleton core 1
         self.assertEqual(s3, 0xFF)        # all 8 vCPUs — no pinning
 
-    def test_no_app_thread_mask(self):
+    def test_no_jc_singleton_mask(self):
         from simplyblock_core.controllers.backup.device import _compute_s3_cpu_masks
         node = _node()
-        node.app_thread_mask = ""
+        node.jc_singleton_mask = ""
         bdb, s3 = _compute_s3_cpu_masks(node)
         # None, not 0: a zero mask selects no CPUs, and the RPC omits the
         # parameter so the data plane derives one from the app core mask.
@@ -284,7 +284,7 @@ class TestComputeS3CpuMasks(unittest.TestCase):
         node = _node()
         node.cpu = 0
         bdb, s3 = _compute_s3_cpu_masks(node)
-        self.assertEqual(bdb, 0x8)
+        self.assertEqual(bdb, 0x2)
         self.assertIsNone(s3)             # omitted; data plane picks
 
     def test_large_cpu_count(self):
@@ -315,9 +315,9 @@ class TestCreateS3Bdev(unittest.TestCase):
         create_s3_bdev(node, _backup_config())
 
         mock_rpc.bdev_s3_create.assert_called_once()
-        # Verify CPU masks: bdb_lcpu_mask=app_thread(0x8=8), s3_lcpu_mask=all 8 vCPUs(0xFF=255)
+        # Verify CPU masks: bdb_lcpu_mask=jc_singleton(0x2=2), s3_lcpu_mask=all 8 vCPUs(0xFF=255)
         _, kwargs = mock_rpc.bdev_s3_create.call_args
-        self.assertEqual(kwargs["bdb_lcpu_mask"], 0x8)
+        self.assertEqual(kwargs["bdb_lcpu_mask"], 0x2)
         self.assertEqual(kwargs["s3_lcpu_mask"], 0xFF)
         self.assertEqual(kwargs["bucket_name"], "simplyblock-backup-cluster-1")
         mock_rpc.bdev_lvol_s3_bdev.assert_called_once_with("lvs_test", "s3_lvs_test")
@@ -1111,25 +1111,7 @@ class TestJobScheduleBackupConstants(unittest.TestCase):
 
 
 # ===========================================================================
-# 16. snapshot_controller.add with backup=True
-# ===========================================================================
-
-class TestSnapshotAddWithBackup(unittest.TestCase):
-
-    @patch("simplyblock_core.controllers.snapshot_controller.snapshot_events")
-    @patch("simplyblock_core.controllers.snapshot_controller.db_controller")
-    def test_add_signature_accepts_backup(self, mock_db, mock_events):
-        """Verify snapshot_controller.add accepts backup parameter."""
-        import inspect
-
-        from simplyblock_core.controllers.snapshot_controller import add
-        sig = inspect.signature(add)
-        self.assertIn("backup", sig.parameters)
-        self.assertEqual(sig.parameters["backup"].default, False)
-
-
-# ===========================================================================
-# 17. RPC client methods
+# 16. RPC client methods
 # ===========================================================================
 
 class TestRPCClientBackupMethods(unittest.TestCase):
@@ -1181,7 +1163,7 @@ class TestRPCClientBackupMethods(unittest.TestCase):
 
 
 # ===========================================================================
-# 18. CLI argument registration
+# 17. CLI argument registration
 # ===========================================================================
 
 class TestCLIBackupArgs(unittest.TestCase):
@@ -1224,7 +1206,7 @@ class TestCLIBackupArgs(unittest.TestCase):
 
 
 # ===========================================================================
-# 19. CLIBase handler methods exist
+# 18. CLIBase handler methods exist
 # ===========================================================================
 
 class TestCLIBaseHandlers(unittest.TestCase):
@@ -1244,7 +1226,7 @@ class TestCLIBaseHandlers(unittest.TestCase):
 
 
 # ===========================================================================
-# 20. Backup.get_location
+# 19. Backup.get_location
 # ===========================================================================
 
 class TestBackupLocationAccessor(unittest.TestCase):
@@ -1283,7 +1265,7 @@ class TestBackupLocationAccessor(unittest.TestCase):
 
 
 # ===========================================================================
-# 21. _trigger_merge
+# 20. _trigger_merge
 # ===========================================================================
 
 class TestTriggerMerge(unittest.TestCase):

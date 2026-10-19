@@ -34,7 +34,7 @@ def test_rpc_failure_skips_the_sample_instead_of_raising():
 def test_secondary_rpc_failure_is_contained_too():
     rpc = MagicMock()
     rpc.get_lvol_stats.return_value = None
-    rpc.get_bdevs.return_value = None
+    rpc.bdev_get.return_value = None
 
     sec_node = MagicMock()
     sec_node.status = collector.StorageNode.STATUS_ONLINE

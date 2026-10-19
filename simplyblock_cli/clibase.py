@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, constants, db_controller, utils
@@ -150,13 +151,15 @@ def _bucket_config(args) -> BackupConfig:
     cluster -- which is the point of them, since after a disaster there may be no
     cluster left to ask.
     """
+    # Left to the model's default unless the flag is given.
+    addressing: dict[str, Any] = {"use_path_style": True} if getattr(args, 'path_style', False) else {}
     return BackupConfig(
         bucket_name=args.bucket,
         region=getattr(args, 'region', None) or None,
         endpoint=getattr(args, 'endpoint', None) or None,
         verify_tls=not getattr(args, 'no_verify_tls', False),
-        use_path_style=getattr(args, 'path_style', False),
         credentials=_s3_credentials(args),
+        **addressing,
     )
 
 
@@ -998,9 +1001,20 @@ class CLIWrapperBase:
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        backup = getattr(args, 'backup', False)
-        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name, backup=backup)
+        if backup_controller.is_reserved_snapshot_name(name):
+            print(f"Error: {backup_controller.RESERVED_SNAPSHOT_NAME_ERROR}")
+            return False
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
         return snapshot_id if not error else error
+
+    def volume__backup(self, sub_command, args):
+        try:
+            backup_id = backup_controller.backup_lvol(args.volume_id)
+        except (PreconditionError, RuntimeError) as e:
+            print(f"Error: {e}")
+            return False
+        print(f"Backup task created: {backup_id}")
+        return True
 
     def volume__clone(self, sub_command, args):
         clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, args.resize, args.namespaced)
@@ -1108,6 +1122,9 @@ class CLIWrapperBase:
         return lvol_controller.resume_lvol(args.lvol_id)
 
     def volume__clone_lvol(self, sub_command, args):
+        if backup_controller.is_reserved_snapshot_name(args.clone_name):
+            print(f"Error: {backup_controller.RESERVED_SNAPSHOT_NAME_ERROR}")
+            return False
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
     def volume__migrate(self, sub_command, args):
@@ -1148,6 +1165,7 @@ class CLIWrapperBase:
                     group_id=args.migration_id,
                     max_retries=args.max_retries,
                     deadline_seconds=args.deadline_seconds,
+                    retry_on_failure=getattr(args, 'retry_on_failure', False),
                 )
             except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
                 print(f"Error: {e}")
@@ -1159,6 +1177,7 @@ class CLIWrapperBase:
                 migration_id=args.migration_id,
                 max_retries=args.max_retries,
                 deadline_seconds=args.deadline_seconds,
+                retry_on_failure=getattr(args, 'retry_on_failure', False),
             )
         except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
             print(f"Error: {e}")
@@ -1300,8 +1319,10 @@ class CLIWrapperBase:
         return True
 
     def snapshot__add(self, sub_command, args):
-        backup = getattr(args, 'backup', False)
-        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name, backup=backup)
+        if backup_controller.is_reserved_snapshot_name(args.name):
+            print(f"Error: {backup_controller.RESERVED_SNAPSHOT_NAME_ERROR}")
+            return False
+        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name)
         return snapshot_id if not error else error
 
     def snapshot__backup(self, sub_command, args):

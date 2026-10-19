@@ -13,7 +13,7 @@ Storage nodes (RPC, node API), ping and the port block are mocked; the
 database, the task queue and the status writes never are.
 """
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
@@ -29,6 +29,7 @@ from simplyblock_core.models.nvme_device import (
     RemoteJMDevice,
 )
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.services import health_check_service, storage_node_monitor
 from simplyblock_core.utils import port_block
 from tests.integration import test_sync_replication_lvs_stack as stack
@@ -66,9 +67,9 @@ class _Spdk(dict):
         node_id = node.get_id()
         lvs = self._lvs[node_id] = {}
         blocked = self._blocked[node_id] = set()
-        rpc = MagicMock(name=f"rpc-{node_id}")
+        rpc = create_autospec(RPCClient, instance=True, name=f"rpc-{node_id}")
         rpc.get_version.return_value = {"version": "test"}
-        rpc.get_bdevs.side_effect = lambda name=None, **kwargs: [{"name": name}]
+        rpc.bdev_get.side_effect = lambda name: {"name": name}
         rpc.subsystem_get.side_effect = lambda nqn: {
             "nqn": nqn, "namespaces": [{"uuid": "ns"}],
             "listen_addresses": [{"traddr": "10.9.0.1", "trsvcid": "4420"}]}
@@ -77,11 +78,11 @@ class _Spdk(dict):
         rpc.nvmf_get_blocked_ports.side_effect = lambda: {
             "blocked_ports": [{"port": port} for port in sorted(blocked)]}
         rpc.jc_get_jm_status.return_value = {"jm": True}
-        rpc.bdev_lvol_get_lvstores.side_effect = lambda name=None: [dict(lvs[name])] if name in lvs else []
+        rpc.get_lvstore.side_effect = lambda name: dict(lvs[name]) if name in lvs else None
         self[node_id] = rpc
 
     def reports(self, node, info):
-        """``node`` answers bdev_lvol_get_lvstores for ``info["name"]`` with ``info``."""
+        """``node`` answers get_lvstore for ``info["name"]`` with ``info``."""
         self._lvs[node.get_id()][info["name"]] = info
 
     def block(self, node, port):
@@ -89,7 +90,7 @@ class _Spdk(dict):
 
     def lvstore_reads(self, node):
         """The lvstore names ``node`` was asked about, in order."""
-        return [c.args[0] for c in self[node.get_id()].bdev_lvol_get_lvstores.call_args_list]
+        return [c.args[0] for c in self[node.get_id()].get_lvstore.call_args_list]
 
     def _controllers(self, node_id, name):
         """The named controller, or - asked for all - the ones the node's

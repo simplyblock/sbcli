@@ -75,16 +75,16 @@ class _Snap:
 
 
 class _RPC:
-    """get_bdevs returning each blob's base_snapshot -- the chain topology."""
+    """bdev_get returning each blob's base_snapshot -- the chain topology."""
 
     def __init__(self, bases):
         self._bases = bases      # {bdev_name: base bdev short name or None}
 
-    def get_bdevs(self, name):
+    def bdev_get(self, name):
         if name not in self._bases:
             return None
         base = self._bases[name]
-        return [{"driver_specific": {"lvol": {"base_snapshot": base}}}]
+        return {"driver_specific": {"lvol": {"base_snapshot": base}}}
 
 
 class _Node:
@@ -422,6 +422,7 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
             self.cluster_id = "CL_tgt"
+            self.hostname = f"host-{nid}"
             self.lvol_subsys_port = 4420
 
         def rpc_client(self):
@@ -483,6 +484,13 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     assert evicted == ["P", "S"], \
         "stale-namespace eviction must run on the primary AND every online HA peer"
     assert ("S", False) in added
+    # Regression: 2026-09-29-clone-keeps-source-hostname — the clone is a deep copy
+    # of the source, which carries the SOURCE node's hostname. On the target cluster
+    # that name is stale; the clone lives on target_node now, so its hostname must
+    # follow node_id to the target (the fail-over/relocate clone reported the wrong
+    # host in listings until this was set alongside node_id).
+    assert new_lvol.hostname == primary.hostname
+    assert new_lvol.node_id == primary.get_id()
 
 
 def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
@@ -519,6 +527,7 @@ def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
             self.cluster_id = "CL_tgt"
+            self.hostname = f"host-{nid}"
 
         def get_lvol_subsys_port(self, lvstore):
             return 4420
@@ -680,7 +689,7 @@ def test_clone_register_confirms_the_bdev_before_add_ns():
     assert "not appear within 20s" in src[reg:], \
         "clone_register must be followed by a bdev confirmation poll"
     poll = src.index("not appear within 20s", reg)
-    assert "get_bdevs" in src[reg:poll], "the poll must probe get_bdevs"
+    assert "bdev_get" in src[reg:poll], "the poll must probe bdev_get"
 
 
 def test_retired_landing_records_are_record_only_deletions():
@@ -841,15 +850,12 @@ class _RollbackRPC:
         self.ns = [n for n in self.ns if n.get("nsid") != nsid]
         return True
 
-    def get_bdevs(self, name):
-        return [{"name": name}]
-
     def bdev_get(self, name):
         return {"name": name}
 
     def delete_lvol(self, name, sync=False):
         self.deletes.append((name, sync))
-        return True, None
+        return True
 
 
 def test_replica_rollback_clears_its_namespace_and_syncs_the_delete():

@@ -4,8 +4,10 @@ creation parameters, the remote JM name lookups of the liveness probes and the
 JM replacement on node removal. Storage nodes (RPC) are mocked; the database
 never is. The pure rules are in tests/unit/test_sync_replication_jm_selection.py.
 """
+import json
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
+from urllib.parse import urlparse
 
 import pytest
 
@@ -15,8 +17,9 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, RemoteJMDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 from simplyblock_core.services import storage_node_monitor
+from tests.integration import test_sync_replication_lvs_stack as stack
 
 
 @pytest.fixture()
@@ -28,8 +31,8 @@ class _Rpcs(dict):
     """One RPC mock per node id, created on first use."""
 
     def __missing__(self, node_id):
-        rpc = MagicMock(name=f"rpc-{node_id}")
-        rpc.get_bdevs.side_effect = lambda name=None: [{"name": name}] if name else []
+        rpc = create_autospec(RPCClient, instance=True, name=f"rpc-{node_id}")
+        rpc.bdev_get.side_effect = lambda name: {"name": name}
         self[node_id] = rpc
         return rpc
 
@@ -267,10 +270,45 @@ class TestRemoteJmNames:
             rpcs[peer.get_id()].bdev_nvme_controller_list.return_value = [{"ctrlrs": [{"state": "enabled"}]}]
         with patch.object(health_controller, "repairs_allowed", return_value=True):
             assert storage_node_monitor._count_data_plane_votes_uncached(node) == (0, 2)
-        rpcs[same.get_id()].get_bdevs.assert_called_with(f"remote_jm_{node.get_id()}n1")
+        rpcs[same.get_id()].bdev_get.assert_called_with(f"remote_jm_{node.get_id()}n1")
         rpcs[same.get_id()].bdev_nvme_controller_list.assert_called_with(f"remote_jm_{node.get_id()}")
-        rpcs[cross.get_id()].get_bdevs.assert_called_with(f"remote_xs_jm_{node.get_id()}n1")
+        rpcs[cross.get_id()].bdev_get.assert_called_with(f"remote_xs_jm_{node.get_id()}n1")
         rpcs[cross.get_id()].bdev_nvme_controller_list.assert_called_with(f"remote_xs_jm_{node.get_id()}")
+
+    def test_data_plane_vote_through_the_real_client(self, db):
+        """The peers answer as JSON-RPC: a remote error of the bdev probe is
+        an abstain, a present bdev whose controller lookup comes back EINVAL
+        (unmatched name, 22 un-negated) a disconnected vote, an enabled
+        controller a connected one."""
+        cluster = _seed_cluster(db)
+        node = _seed_node(db, cluster, "t", "site-a")
+        busy = _seed_node(db, cluster, "p1", "site-a", jm_vuid=1)
+        gone = _seed_node(db, cluster, "p2", "site-b", jm_vuid=2)
+        up = _seed_node(db, cluster, "p3", "site-a", jm_vuid=3)
+        controllers = [{"ctrlrs": [{"state": "enabled"}]}]
+        answers = {
+            busy.mgmt_ip: {"bdev_get_bdevs": {"code": -16, "message": "busy"}},
+            gone.mgmt_ip: {"bdev_get_bdevs": [{"name": "x"}],
+                           "bdev_nvme_get_controllers": {"code": 22, "message": "no such controller"}},
+            up.mgmt_ip: {"bdev_get_bdevs": [{"name": "x"}], "bdev_nvme_get_controllers": controllers},
+        }
+
+        def _post(url, data, **kwargs):
+            answer = answers[urlparse(url).hostname][json.loads(data)["method"]]
+            body = ({"jsonrpc": "2.0", "id": 1, "error": answer} if isinstance(answer, dict)
+                    else {"jsonrpc": "2.0", "id": 1, "result": answer})
+            response = MagicMock(status_code=200, text=json.dumps(body))
+            response.json.return_value = body
+            return response
+
+        with patch("simplyblock_core.rpc_client.requests.session") as session, \
+                patch.object(health_controller, "repairs_allowed", return_value=True):
+            session.return_value.post.side_effect = _post
+            assert storage_node_monitor._count_data_plane_votes_uncached(node) == (1, 2)
+        sent = [(urlparse(c.args[0]).hostname, json.loads(c.kwargs["data"]))
+                for c in session.return_value.post.call_args_list]
+        assert (gone.mgmt_ip, {"id": 1, "method": "bdev_get_bdevs",
+                               "params": {"name": f"remote_xs_jm_{node.get_id()}n1"}}) in sent
 
     def test_health_check_uses_the_cross_site_controller(self, db, rpcs):
         cluster = _seed_cluster(db)
@@ -282,7 +320,7 @@ class TestRemoteJmNames:
         record.remote_bdev = f"remote_xs_{owner.jm_device.jm_bdev}n1"
         node = _seed_node(db, cluster, "b1", "site-b", jm_ids=[_jm(owner)], remote_jm_devices=[record])
         rpc = rpcs[node.get_id()]
-        rpc.get_bdevs.side_effect = lambda name=None: [{"name": name, "driver_specific": {"mp_policy": "x"}}]
+        rpc.bdev_get.side_effect = lambda name: {"name": name, "driver_specific": {"mp_policy": "x"}}
         rpc.bdev_nvme_controller_list.return_value = [
             {"ctrlrs": [{"trid": {"traddr": "10.0.0.1", "trsvcid": "4420"}}]}]
         with patch.object(health_controller, "_check_node_ping", return_value=True), \
@@ -300,13 +338,13 @@ class TestRemoteJmNames:
 
 def _distr_stack():
     return [{"type": "bdev_distr", "name": "distrib_1",
-             "params": {"name": "distrib_1", "vuid": 11, "jm_vuid": 7}}]
+             "params": stack._distrib_params("distrib_1", 7, 11)}]
 
 
 class TestDistribCreation:
 
     def _create(self, rpcs, snode, primary_node=None):
-        rpcs[snode.get_id()].get_bdevs.side_effect = lambda name=None: []   # nothing exists yet
+        rpcs[snode.get_id()].bdev_get.side_effect = lambda name: None   # nothing exists yet
         with patch.object(ops.distr_controller, "send_cluster_map_to_distr", return_value=True) as push:
             ok, err = ops._create_bdev_stack(snode, _distr_stack(), primary_node=primary_node)
         return ok, err, push
@@ -336,18 +374,34 @@ class TestDistribCreation:
         push.assert_called_once_with(host, "distrib_1", home_site="site-a")
 
     def test_a_rejected_map_push_is_retried(self, db, rpcs):
-        # the RPC client hands a JSON-RPC error back as None, not as an exception
+        # a JSON-RPC error of the push raises; send_cluster_map_to_distr reads it as False
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b)
         rpc = rpcs[owner.get_id()]
-        rpc.get_bdevs.side_effect = lambda name=None: []
-        rpc.distr_send_cluster_map.side_effect = [None, True]
+        rpc.bdev_get.side_effect = lambda name: None
+        rpc.distr_send_cluster_map.side_effect = [RPCRemoteError(message="stale map", code=-22), True]
         with patch.object(ops.time, "sleep"):
             ok, err = ops._create_bdev_stack(owner, _distr_stack())
         assert ok is True, err
         assert rpc.bdev_distrib_create.call_count == 2
         assert [c.args[0]["name"] for c in rpc.distr_send_cluster_map.call_args_list] == ["distrib_1"] * 2
+
+    def test_a_rejected_create_is_retried_with_its_sync_parameters(self, db, rpcs):
+        cluster = _seed_cluster(db)
+        a, b = _two_sites(db, cluster)
+        owner = _owner_with_journal(db, cluster, a, b)
+        rpc = rpcs[owner.get_id()]
+        rpc.bdev_get.side_effect = lambda name: None
+        rpc.bdev_distrib_create.side_effect = [RPCRemoteError(message="stale map", code=-22), True]
+        with patch.object(ops.time, "sleep"), \
+                patch.object(ops.distr_controller, "send_cluster_map_to_distr", return_value=True):
+            ok, err = ops._create_bdev_stack(owner, _distr_stack())
+        assert ok is True, err
+        calls = rpc.bdev_distrib_create.call_args_list
+        assert len(calls) == 2
+        assert [(c.kwargs["synchronous_replication_mode"], c.kwargs["jm_n_local"]) for c in calls] == [(1, 3)] * 2
+        rpc.bdev_distrib_delete.assert_called_once_with("distrib_1")
 
     def test_a_journal_without_other_site_copies_is_refused(self, db, rpcs):
         cluster = _seed_cluster(db)

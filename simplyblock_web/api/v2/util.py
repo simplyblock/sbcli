@@ -7,9 +7,10 @@ from uuid import UUID
 from fastapi import HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import AfterValidator, BaseModel, BeforeValidator, Field
 
 from simplyblock_core import utils as core_utils
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.exceptions import (
     SyncGateError,
     SyncGroupMemberError,
@@ -27,6 +28,11 @@ Percent = Annotated[int, Field(ge=0, le=100)]
 Port = Annotated[int, Field(ge=0, lt=65536)]
 # Records spell an unset reference as an empty string rather than omitting it.
 OptionalUUID = Annotated[UUID | None, BeforeValidator(lambda value: value or None)]
+# Records spell an unassigned slot in the cluster map as -1 rather than omitting it.
+OptionalIndex = Annotated[
+    Unsigned | None,
+    BeforeValidator(lambda value: None if isinstance(value, int) and value < 0 else value),
+]
 
 #: Re-exported rather than redefined: the manifest in the core layer needs the
 #: same type, and one definition is what keeps the two from drifting. Here so
@@ -46,6 +52,20 @@ def _validate_url_path(value: Any) -> str:
     return value
 
 UrlPath = Annotated[str, _validate_url_path]
+
+
+def _validate_snapshot_name(value: str) -> str:
+    if backup_controller.is_reserved_snapshot_name(value):
+        raise ValueError(backup_controller.RESERVED_SNAPSHOT_NAME_ERROR)
+    return value
+
+#: A user-supplied name that will become a `SnapShot.snap_name` -- directly
+#: (creating a snapshot) or as a side effect (a clone's name is also the
+#: snapshot `lvol_controller.clone_lvol` takes to produce it). Rejects a
+#: reserved prefix at the request-validation layer rather than inside the
+#: controller, which also creates snapshots under those same prefixes for
+#: its own internal, trusted reasons.
+SnapshotName = Annotated[str, AfterValidator(_validate_snapshot_name)]
 
 CreationResponseFormat = Literal["empty", "full", "identifier"]
 CreationResponseFormatParameter = Annotated[CreationResponseFormat, Query(alias="response-format")]

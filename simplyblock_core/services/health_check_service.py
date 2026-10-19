@@ -392,7 +392,7 @@ def check_node(snode):
             if snode.jm_device and snode.jm_device.get_id():
                 jm_device = snode.jm_device
                 logger.info(f"Node JM: {jm_device.get_id()}")
-                if rpc_client.get_bdevs(jm_device.jm_bdev):
+                if rpc_client.bdev_get(jm_device.jm_bdev):
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     connected_jms.append(jm_device.get_id())
                 else:
@@ -550,9 +550,8 @@ def check_node(snode):
                                 repair_paths=True)
                             if not sec_node_check:
                                 if snode.status == StorageNode.STATUS_ONLINE:
-                                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                                    if ret:
-                                        lvs_info = ret[0]
+                                    lvs_info = sec_node.rpc_client().get_lvstore(snode.lvstore)
+                                    if lvs_info:
                                         if lvs_info.get('lvs leadership'):
                                             jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
                                                 snode.jm_vuid)
@@ -653,7 +652,11 @@ def main():
             for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t = threading.Thread(
+                        target=loop_for_node,
+                        args=(node,),
+                        daemon=True,  # prevents main thread failures from keeping the process alive
+                    )
                     t.start()
                     threads_maps[node_id] = t
 

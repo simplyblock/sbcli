@@ -324,9 +324,9 @@ class TestCreateQueuesTheEmptyMembers:
 _LVS_OBJECTS = ("distrib_", "raid0_", "LVS_")
 
 #: The RPCs that build an LVS object or a path on a node.
-_BUILDING_RPCS = ("bdev_distrib_create", "bdev_raid_create", "bdev_lvol_create_lvstore",
+_BUILDING_RPCS = ("bdev_distrib_create", "bdev_raid_create", "create_lvstore",
                   "bdev_lvol_set_leader", "bdev_lvol_create_hublvol", "subsystem_create",
-                  "nvmf_subsystem_add_ns", "nvmf_subsystem_add_listener", "listeners_create",
+                  "nvmf_subsystem_add_ns", "nvmf_subsystem_add_ns2", "listeners_create",
                   "bdev_nvme_attach_controller", "nvmf_port_unblock", "nvmf_port_block")
 
 
@@ -352,11 +352,11 @@ def _emptied(spdk, node):
     distrib, raid, lvstore or hublvol bdev, no hublvol subsystem, no controller
     to a hublvol, no lvstore to report."""
     rpc = spdk[node.get_id()]
-    devices = rpc.get_bdevs.side_effect
+    devices = rpc.bdev_get.side_effect
     controllers = rpc.bdev_nvme_controller_list.side_effect
     subsystems = rpc.subsystem_get.side_effect
-    rpc.get_bdevs.side_effect = lambda name=None, **kwargs: (
-        [] if name and name.startswith(_LVS_OBJECTS) else devices(name, **kwargs))
+    rpc.bdev_get.side_effect = lambda name: None if name.startswith(_LVS_OBJECTS) else devices(name)
+    rpc.get_lvstore.side_effect = lambda name: None
     rpc.bdev_nvme_controller_list.side_effect = lambda name=None: (
         [] if name and name.startswith(_LVS_OBJECTS) else controllers(name))
     rpc.subsystem_get.side_effect = lambda nqn: None if nqn.startswith("nqn.hub.") else subsystems(nqn)

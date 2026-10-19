@@ -83,6 +83,21 @@ class TestUpgradeComplete(unittest.TestCase):
             phase.build_indices.assert_called_once()
             self.assertIn('built', messages)
 
+    def test_gives_records_of_newly_watched_models_a_watch_entry(self):
+        """Regression: 2026-10-01-backup-inventory-empty. Backups and policies
+        written before they were watched have no watch entry, so a stream never
+        lists them and the Kubernetes operator drops their StorageBackup objects.
+        A no-op atomic_update bumps the entry without touching the record."""
+        backup, policy = MagicMock(), MagicMock()
+        with _Phase() as phase, \
+                patch.object(database_indices.Backup, 'read_from_db', return_value=[backup]), \
+                patch.object(database_indices.BackupPolicy, 'read_from_db', return_value=[policy]):
+            phase.plugin.upgrade_complete(phase.cluster)
+            touched = [call.args[0] for call in phase.db.atomic_update.call_args_list]
+            self.assertEqual(touched, [backup, policy])
+            mutate = phase.db.atomic_update.call_args_list[0].args[1]
+            self.assertIsNone(mutate(backup))
+
     def test_clears_the_legacy_key_families(self):
         with _Phase() as phase:
             phase.plugin.upgrade_complete(phase.cluster)

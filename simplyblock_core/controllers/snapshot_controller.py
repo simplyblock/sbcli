@@ -1,5 +1,6 @@
 import builtins
 import contextlib
+import errno
 import logging as lg
 import math
 import os
@@ -8,6 +9,14 @@ import threading
 import time
 import uuid
 from datetime import datetime
+
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_result,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import (
@@ -22,7 +31,11 @@ from simplyblock_core.controllers import (
     tasks_controller,
 )
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
-from simplyblock_core.exceptions import PreconditionError, SyncLeadershipMovingError
+from simplyblock_core.exceptions import (
+    ChainLockTimeout,
+    PreconditionError,
+    SyncLeadershipMovingError,
+)
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.models.cluster import Cluster
@@ -31,6 +44,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 
 logger = lg.getLogger()
 
@@ -212,7 +226,7 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
     storage_node_ops.find_leader_with_failover): probe only the
     recently-confirmed leader — the probe is itself a fresh confirmation, so a
     moved leadership simply misses and falls back to scanning every candidate.
-    Replaces the per-create full scan, which paid one bdev_lvol_get_lvstores
+    Replaces the per-create full scan, which paid one get_lvstore
     RPC per candidate node on every snapshot/clone.
 
     No-leader fail-fast: when the LVS was recently confirmed leaderless,
@@ -319,16 +333,16 @@ def delete_bdev_absent_ok(node, bdev_name, sync=False, special_delete=False):
     disagreed about what had happened.
     """
     try:
-        ret, err = node.rpc_client().delete_lvol(
+        node.rpc_client().delete_lvol(
             bdev_name, sync=sync, special_delete=special_delete)
-    except Exception as e:
-        ret, err = False, {"message": str(e)}
-    if ret:
         return True
-    if isinstance(err, dict) and err.get("code") == -19:
-        logger.info(f"Delete of {bdev_name} on {node.get_id()[:8]}: already absent")
-        return True
-    return False
+    except RPCRemoteError as e:
+        if e.code == -errno.ENODEV:
+            logger.info(f"Delete of {bdev_name} on {node.get_id()[:8]}: already absent")
+            return True
+        return False
+    except Exception:
+        return False
 
 
 def sync_delete_on_peer(peer_node, bdev_name, primary_node_id, special_delete=False):
@@ -341,17 +355,19 @@ def sync_delete_on_peer(peer_node, bdev_name, primary_node_id, special_delete=Fa
     in `suspended`). A failure is only worth a retry task when the peer is
     still alive; when it is gone, the delete is already satisfied.
     """
+    err: BaseException
     try:
-        ret, err = peer_node.rpc_client().delete_lvol(
+        peer_node.rpc_client().delete_lvol(
             bdev_name, sync=True, special_delete=special_delete)
+        return True
+    except RPCRemoteError as e:
+        if e.code == -errno.ENODEV:
+            logger.info(f"Sync delete of {bdev_name} on {peer_node.get_id()[:8]}: "
+                        f"already absent")
+            return True
+        err = e
     except Exception as e:
-        ret, err = False, {"message": str(e)}
-    if ret:
-        return True
-    if isinstance(err, dict) and err.get("code") == -19:
-        logger.info(f"Sync delete of {bdev_name} on {peer_node.get_id()[:8]}: "
-                    f"already absent")
-        return True
+        err = e
 
     try:
         fresh = db_controller.get_storage_node_by_id(peer_node.get_id())
@@ -458,7 +474,7 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True,
                 chain_root)
             yield
             return
-        raise PreconditionError(
+        raise ChainLockTimeout(
             f"Timed out acquiring chain lock on {chain_root} "
             f"(for {object_uuid})")
     stop = threading.Event()
@@ -513,10 +529,11 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
     delete_completed = False
     with lvstore_op_lock(cluster_id, lvs_name,
                          node_id=primary_node.get_id(), enabled=lock):
-        ret, _ = rpc_client.delete_lvol(bdev_name)  # async initial delete
-        if not ret:
+        try:
+            rpc_client.delete_lvol(bdev_name)  # async initial delete
+        except RPCRemoteError as e:
             logger.error(f"Rollback: failed to delete {bdev_name} from node: "
-                         f"{primary_node.get_id()}")
+                         f"{primary_node.get_id()}: {e}")
         else:
             # Bounded completion poll INSIDE the lock: the delete window on
             # the leader stays exclusive until the async pass has finished.
@@ -539,12 +556,14 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
             else:
                 # The async pass only cleared data clusters; this sync delete
                 # removes the leader's blob metadata and bdev registration
-                # (see invariant above). -19 answers "already clean".
-                ret2, err2 = rpc_client.delete_lvol(bdev_name, sync=True)
-                if not ret2 and not (err2 and err2.get("code") == -19):
-                    logger.error(f"Rollback: leader sync delete of {bdev_name} "
-                                 f"on {primary_node.get_id()[:8]} failed "
-                                 f"({err2})")
+                # (see invariant above). ENODEV answers "already clean".
+                try:
+                    rpc_client.delete_lvol(bdev_name, sync=True)
+                except RPCRemoteError as e:
+                    if e.code != -errno.ENODEV:
+                        logger.error(f"Rollback: leader sync delete of {bdev_name} "
+                                     f"on {primary_node.get_id()[:8]} failed "
+                                     f"({e})")
 
     # Every non-leader LVS member owes a sync delete (see invariant above).
     # Everyone reachable gets it now (under their own lvstore lock); everyone
@@ -556,11 +575,13 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
             try:
                 with lvstore_op_lock(cluster_id, lvs_name,
                                      node_id=node.get_id(), enabled=lock):
-                    ret, err = node.rpc_client().delete_lvol(bdev_name, sync=True)
-                if ret or (err and err.get("code") == -19):
+                    node.rpc_client().delete_lvol(bdev_name, sync=True)
+                continue
+            except RPCRemoteError as e:
+                if e.code == -errno.ENODEV:
                     continue
                 logger.error(f"Rollback: sync delete of {bdev_name} on "
-                             f"{node.get_id()[:8]} failed ({err}); adding task")
+                             f"{node.get_id()[:8]} failed ({e}); adding task")
             except Exception as e:
                 logger.error(f"Rollback: sync delete of {bdev_name} on "
                              f"{node.get_id()[:8]} raised: {e}; adding task")
@@ -628,7 +649,7 @@ def check_snapshot_capacity(pool, cluster, lvol, all_snaps=None):
     return None
 
 
-def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
+def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
         bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -772,12 +793,12 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             if not ret:
                 return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
-            snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
+            snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
             if snap_bdev:
-                snap_uuid = snap_bdev[0]['uuid']
-                blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+                snap_uuid = snap_bdev['uuid']
+                blobid = snap_bdev['driver_specific']['lvol']['blobid']
                 cluster_size = cluster.page_size_in_blocks
-                num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+                num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
                 used_size = int(num_allocated_clusters*cluster_size)
         else:
             msg = f"Host node is not online {snode.get_id()}"
@@ -840,19 +861,24 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
-                ret = False
+
+                @retry(
+                    retry=retry_if_result(lambda result: not result[0] and result[1] and result[1].get("code") == -32602),
+                    stop=stop_after_attempt(5),
+                    wait=wait_fixed(2),
+                    before_sleep=before_sleep_log(logger, lg.WARNING),
+                    retry_error_callback=lambda state: state.outcome.result() if state.outcome else (False, None),
+                )
+                def _create_snapshot_bdev():
+                    try:
+                        return rpc_client.lvol_create_snapshot2(
+                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name), None
+                    except RPCRemoteError as e:
+                        return None, {"code": e.code, "message": str(e), "data": e.data}
+
                 with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
                                      node_id=primary_node.get_id(), enabled=lock):
-                    for i in range(5):
-                        ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
-                        if not ret:
-                            if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
-                                logger.error(f"Failed to create snapshot, retrying: {err}")
-                                time.sleep(0.1)
-                            else:
-                                break
-                        else:
-                            break
+                    ret, err = _create_snapshot_bdev()
                 if not ret:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
@@ -860,12 +886,12 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 # the lock exists to keep lvstore mutations from interleaving,
                 # and holding it across this read serialized every other
                 # waiter behind a query that mutates nothing.
-                snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
+                snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
                 if snap_bdev:
-                    snap_uuid = snap_bdev[0]['uuid']
-                    blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+                    snap_uuid = snap_bdev['uuid']
+                    blobid = snap_bdev['driver_specific']['lvol']['blobid']
                     cluster_size = cluster.page_size_in_blocks
-                    num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+                    num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
                     used_size = int(num_allocated_clusters*cluster_size)
                 else:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
@@ -892,8 +918,11 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
                 with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
                                      node_id=sec.get_id(), enabled=lock):
-                    ret = sec_rpc_client.bdev_lvol_snapshot_register(
-                        f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+                    try:
+                        ret = sec_rpc_client.bdev_lvol_snapshot_register(
+                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+                    except RPCException:
+                        ret = None
                 if not ret:
                     msg = f"Failed to register snapshot on node: {sec.get_id()}"
                     logger.error(msg)
@@ -979,12 +1008,6 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                         logger.info("Created snapshot replication task on original node")
             except KeyError:
                 pass
-
-    if backup:
-        from simplyblock_core.controllers.backup import controller as backup_controller
-        backup_id, backup_err = backup_controller.backup_snapshot(snap.uuid)
-        if backup_err:
-            logger.warning(f"Snapshot created but backup failed: {backup_err}")
 
     return snap.uuid, False
 
@@ -1267,6 +1290,21 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
                 all_nodes.append(db_controller.get_storage_node_by_id(snode.tertiary_node_id))
             except KeyError:
                 pass
+
+        # Probe order, not membership: a node the removal has already shut down
+        # cannot answer, so asking it first costs the SnodeAPI retry budget
+        # (3 attempts, ~6s) before the exception is swallowed and we move on.
+        # Live 2026-09-15: every intermediate-snapshot cleanup during a node
+        # drain burned that on the departing node -- "Failed to resolve
+        # ...bd4qf...svc.cluster.local" x3 -- then succeeded immediately
+        # against the secondary, which was the leader all along.
+        #
+        # Ordered rather than filtered so the "detect leader via RPC, no status
+        # checks" contract above still holds: every candidate is still probed,
+        # including a departing one if nothing else answers. Only the sequence
+        # changes, so this cannot pick a different leader than before.
+        all_nodes.sort(
+            key=lambda n: n.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES)
 
         primary_node = None
         for candidate in all_nodes:

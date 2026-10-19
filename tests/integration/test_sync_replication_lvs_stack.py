@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from contextlib import ExitStack
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
@@ -25,7 +25,12 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import (
+    RPCClient,
+    RPCConnectionError,
+    RPCException,
+    RPCRemoteError,
+)
 
 SITE_A = "site-a"
 SITE_B = "site-b"
@@ -38,19 +43,21 @@ def db():
 
 
 class _Rpcs(dict):
-    """One RPC mock per node id: nothing built yet, no leadership anywhere."""
+    """One RPC mock per node id: nothing built yet, no leadership anywhere.
+    Spec'd on RPCClient, so a method the client lacks fails the test."""
 
     def __missing__(self, node_id):
-        rpc = MagicMock(name=f"rpc-{node_id}")
-        rpc.get_bdevs.side_effect = lambda name=None, **kwargs: []
+        rpc = create_autospec(RPCClient, instance=True, name=f"rpc-{node_id}")
         rpc.bdev_get.return_value = None
-        rpc.jc_suspend_compression.return_value = (True, None)
-        rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        rpc.jc_suspend_compression.return_value = True
+        rpc.jc_compression_get_status.return_value = False
+        rpc.bdev_distrib_check_inflight_io.return_value = False
+        rpc.get_lvstore.return_value = {"lvs leadership": False}
         self[node_id] = rpc
         return rpc
 
     def lead(self, node):
-        self[node.get_id()].bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        self[node.get_id()].get_lvstore.return_value = {"lvs leadership": True}
 
 
 @pytest.fixture()
@@ -167,12 +174,18 @@ def _update(db, node, **fields):
     return fresh
 
 
+def _distrib_params(name, jm_vuid, vuid):
+    """The params a distrib's stack entry carries (create_lvstore's)."""
+    return {"name": name, "jm_vuid": jm_vuid, "vuid": vuid, "ndcs": 1, "npcs": 1,
+            "num_blocks": 262144, "block_size": 4096, "chunk_size": 4096, "pba_page_size": 2097152}
+
+
 def _stack(lvs_id):
     return [
         {"type": "bdev_distr", "name": f"distrib_{lvs_id}1",
-         "params": {"name": f"distrib_{lvs_id}1", "jm_vuid": lvs_id, "vuid": lvs_id * 10 + 1}},
+         "params": _distrib_params(f"distrib_{lvs_id}1", lvs_id, lvs_id * 10 + 1)},
         {"type": "bdev_distr", "name": f"distrib_{lvs_id}2",
-         "params": {"name": f"distrib_{lvs_id}2", "jm_vuid": lvs_id, "vuid": lvs_id * 10 + 2}},
+         "params": _distrib_params(f"distrib_{lvs_id}2", lvs_id, lvs_id * 10 + 2)},
         {"type": "bdev_raid", "name": f"raid0_{lvs_id}",
          "params": {"name": f"raid0_{lvs_id}", "strip_size_kb": 64},
          "distribs_list": [f"distrib_{lvs_id}1", f"distrib_{lvs_id}2"]},
@@ -236,7 +249,7 @@ def _grant_takes(rpcs, node):
 
     def _set_leader(lvs_name, leader=False, **kwargs):
         if leader:
-            rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+            rpc.get_lvstore.return_value = {"lvs leadership": True}
         return True
     rpc.bdev_lvol_set_leader.side_effect = _set_leader
 
@@ -251,8 +264,8 @@ def _transfer_ready(rpcs, leader):
 
 def _goes_silent(rpcs, node, answer):
     """``node`` stops answering the leadership probe: it raises ``answer`` or
-    returns it (None / an empty list)."""
-    probe = rpcs[node.get_id()].bdev_lvol_get_lvstores
+    returns it (None: no lvstore)."""
+    probe = rpcs[node.get_id()].get_lvstore
     if isinstance(answer, Exception):
         probe.side_effect = answer
     else:
@@ -586,7 +599,8 @@ class TestRebuildAnchor:
     def _anchor(self, db, owner, node):
         return ops._rebuild_anchor(_fresh(db, owner), _fresh(db, node), db).get_id()
 
-    @pytest.mark.parametrize("answer", [RPCException("no answer"), None, []])
+    @pytest.mark.parametrize("answer", [RPCConnectionError("no answer"), None,
+                                        RPCRemoteError(message="busy", code=-16)])
     @pytest.mark.parametrize("reporter", [None, 0, 2])
     def test_a_silent_candidate_makes_the_leader_unknown(
             self, db, rpcs, env, answer, reporter):
@@ -631,7 +645,7 @@ class TestRebuildAnchor:
         members, owner = self._layout(db, active_site)
         assert self._anchor(db, owner, members[restarting]) == members[anchor].get_id()
         # every other member of the active triplet was asked, nobody else
-        asked = {n.get_id() for n in members if rpcs[n.get_id()].bdev_lvol_get_lvstores.called}
+        asked = {n.get_id() for n in members if rpcs[n.get_id()].get_lvstore.called}
         active = members[3:] if active_site else members[:3]
         assert asked == {n.get_id() for n in active} - {members[restarting].get_id()}
 
@@ -642,7 +656,7 @@ class TestRebuildAnchor:
         # a disconnected candidate is not asked, so its silence is no "unknown"
         _goes_silent(rpcs, members[0], None)
         assert self._anchor(db, owner, members[4]) == members[1].get_id()
-        rpcs[members[0].get_id()].bdev_lvol_get_lvstores.assert_not_called()
+        rpcs[members[0].get_id()].get_lvstore.assert_not_called()
 
     def test_nobody_connected_the_first_candidate_and_no_probe(self, db, rpcs, env):
         members, owner = self._layout(db)
@@ -662,7 +676,7 @@ class TestRebuildAnchor:
         members, owner = self._layout(db, "moving:" + target)
         assert self._anchor(db, owner, members[restarting]) == members[anchor].get_id()
         # both triplets were asked
-        asked = {n.get_id() for n in members if rpcs[n.get_id()].bdev_lvol_get_lvstores.called}
+        asked = {n.get_id() for n in members if rpcs[n.get_id()].get_lvstore.called}
         assert asked == {n.get_id() for n in members} - {members[restarting].get_id()}
 
     def test_non_sync_owner_is_the_anchor_without_a_probe(self, db, rpcs, env):
@@ -889,22 +903,149 @@ class TestRemovalTeardown:
         assert not rpcs[b[2].get_id()].method_calls
         assert ops.remote_triplet_refs(_fresh(db, owner_a)) == ("", "", "")
 
+    def test_a_retried_teardown_deletes_the_distribs_left_under_a_gone_raid(self, db, rpcs):
+        """The first teardown stopped at the raid (already gone: -19), the
+        distribs below it survived; they are deleted, and only then does JC
+        let go of the vuid's JM contexts."""
+        _, a, b, owner_a, _ = _two_owner_layout(db)
+        owner_a = _update(db, owner_a, status=StorageNode.STATUS_IN_REMOVAL)
+        rpc = rpcs[b[1].get_id()]
+        present = {"distrib_11", "distrib_12"}
+        released = []
+
+        def _distrib_delete(name):
+            present.discard(name)
+            return True
+
+        def _jc_remove_jm(name):
+            if present:
+                raise RPCRemoteError(message="JM in use by a vuid", code=-22)
+            released.append(name)
+            return True
+
+        rpc.bdev_get.side_effect = lambda name: {"name": name} if name in present else None
+        rpc.bdev_raid_delete.side_effect = RPCRemoteError(message="No such device", code=-19)
+        rpc.bdev_distrib_delete.side_effect = _distrib_delete
+        rpc.jc_remove_jm.side_effect = _jc_remove_jm
+        rpc.jc_get_jm_status.return_value = {}          # no other vuid uses a member
+        assert ops._teardown_replicas_of_primary(owner_a) is True
+        assert present == set()
+        assert {c.args[0] for c in rpc.bdev_distrib_delete.call_args_list} == {"distrib_11", "distrib_12"}
+        rpc.bdev_lvol_delete_lvstore.assert_not_called()
+        names = [c[0] for c in rpc.method_calls]
+        last_delete = max(i for i, n in enumerate(names) if n == "bdev_distrib_delete")
+        assert "jc_remove_jm" in names[last_delete:]
+        assert released and all(n.startswith("remote_") for n in released)
+        assert ops.remote_triplet_refs(_fresh(db, owner_a)) == ("", "", "")
+
+    def test_a_member_a_remote_instance_uses_is_not_released(self, db, rpcs):
+        """b1 drops its LVS_2 instance (b0's vuid 2); every member of it is
+        also a member of LVS_1's vuid 1, whose remote instance b1 runs: JC is
+        asked about vuid 1, and nothing is released."""
+        _, a, b, owner_a, owner_b = _two_owner_layout(db)
+        host = _fresh(db, b[1])
+        shared = ops.get_node_jm_names(_fresh(db, owner_a), remote_node=host).names
+        rpc = rpcs[host.get_id()]
+        rpc.jc_get_jm_status.side_effect = lambda vuid: {name: True for name in shared}
+        ops._release_jm_contexts_of_deleted_vuid(host, _fresh(db, owner_b))
+        assert [c.args[0] for c in rpc.jc_get_jm_status.call_args_list] == [owner_a.jm_vuid]
+        rpc.jc_remove_jm.assert_not_called()
+
     def test_phase_2_learns_the_remote_carriers(self, db, rpcs):
         _, a, b, owner_a, _ = _two_owner_layout(db)
+        steps = []
+        cursor = ops.RemovalCursor(persist=lambda **fields: steps.append(fields["step"]))
         with patch.object(ops, "shutdown_storage_node", return_value=True), \
                 patch.object(ops, "set_node_status"), \
                 patch.object(ops.cluster_ops, "set_cluster_status"), \
+                patch.object(ops, "_recheck_removal_conditions", return_value=(True, "")), \
+                patch.object(ops, "_fail_and_migrate_node_devices", return_value=True), \
+                patch.object(ops, "_drain_lvols_from_node", return_value=True), \
                 patch.object(ops, "_check_replica_relocation_feasible", return_value=(True, "")), \
                 patch.object(ops, "_teardown_replicas_of_primary", return_value=True), \
                 patch.object(ops, "_decommission_node_jm") as decommission, \
                 patch.object(ops, "_relocate_replicas_hosted_on", return_value=True), \
                 patch.object(ops, "_verify_replica_stacks"), \
-                patch.object(ops, "_reselect_remote_roles_held_by", return_value=True), \
+                patch.object(ops, "_reselect_remote_roles_held_by", return_value=True) as reselect, \
                 patch.object(ops, "_finalize_node_removal"), \
                 patch.object(ops, "_decommission_node_devices", return_value=True):
-            assert ops.node_removal_orchestrate(owner_a.get_id()) is True
+            assert ops.node_removal_orchestrate(owner_a.get_id(), cursor=cursor) is True
         peers = decommission.call_args.kwargs["replica_peer_ids"]
         assert set(peers) == {a[1].get_id(), a[2].get_id(), *[n.get_id() for n in b]}
+        reselect.assert_called_once()
+        entered = list(dict.fromkeys(steps))
+        assert [s for s in entered if s in ops.REMOVAL_STEPS] == [s for s in ops.REMOVAL_STEPS if s in entered]
+        assert entered.index("verify_stacks") < entered.index("reselect_remote_roles") < entered.index("finalize")
+
+
+class TestRelocationMarksTheOwner:
+    """_rebuild_replica_for_relocation on an LVS led from B: the rebuild
+    stands behind b0 (the anchor), while the in_creation marker the monitor
+    reads goes on the owner, and is cleared on any failure."""
+
+    def _layout(self, db, rpcs):
+        _, a, b, owner = _one_owner_layout(db)
+        owner = _update(db, owner, lvs_active_site=SITE_B)
+        rpcs.lead(b[0])
+        return a, b, owner
+
+    @pytest.mark.parametrize("outcome", [True, False, RPCException("build failed")],
+                             ids=["built", "not-built", "raised"])
+    def test_the_owner_is_marked_while_the_anchor_is_quiesced(self, db, rpcs, env, outcome):
+        a, b, owner = self._layout(db, rpcs)
+        seen = {}
+
+        def _build(new_host, leader, primary, role=None, **kwargs):
+            seen.update(leader=leader.get_id(), primary=primary.get_id(),
+                        status=_fresh(db, owner).lvstore_status)
+            if isinstance(outcome, Exception):
+                raise outcome
+            if outcome:     # the build's own success path clears the marker
+                _update(db, owner, lvstore_status="ready")
+            return outcome
+
+        args = (_fresh(db, a[1]), _fresh(db, owner), "secondary", db)
+        with patch.object(ops, "recreate_lvstore_on_non_leader", side_effect=_build):
+            if isinstance(outcome, Exception):
+                with pytest.raises(RPCException):
+                    ops._rebuild_replica_for_relocation(*args)
+            else:
+                assert ops._rebuild_replica_for_relocation(*args) is outcome
+        assert seen == {"leader": b[0].get_id(), "primary": owner.get_id(), "status": "in_creation"}
+        assert _fresh(db, owner).lvstore_status == "ready"
+        assert _fresh(db, b[0]).lvstore_status == ""
+
+    def test_an_unknown_anchor_writes_nothing(self, db, rpcs, env):
+        a, b, owner = self._layout(db, rpcs)
+        rpcs.lead(b[1])             # two members report the leadership
+        with patch.object(ops, "recreate_lvstore_on_non_leader") as build:
+            with pytest.raises(ops.LVSLeaderUnknownError):
+                ops._rebuild_replica_for_relocation(_fresh(db, a[1]), _fresh(db, owner), "secondary", db)
+        build.assert_not_called()
+        assert _fresh(db, owner).lvstore_status == "ready"
+
+
+class TestRemovalReleasesOrphanedJm:
+    """_decommission_node_jm releases, on each node with no group using the
+    removed JM, the JC context it may still hold - by the name that node
+    reaches the JM by: ``remote_xs_`` across sites."""
+
+    def _layout(self, db):
+        cluster = _seed_cluster(db)
+        a, b = _sites(db, cluster, per_site=4)
+        _make_owner(db, a[0], a[:3], b[:3], lvs_id=1)
+        return a, b
+
+    @pytest.mark.parametrize("carrier", [False, True])
+    def test_each_node_releases_the_name_it_knows_the_jm_by(self, db, rpcs, carrier):
+        a, b = self._layout(db)
+        removed = _fresh(db, a[3])          # its JM is in no group
+        jm = removed.jm_device.jm_bdev
+        peers = (b[3].get_id(),) if carrier else ()
+        with patch.object(ops.device_controller, "remove_jm_device"):
+            ops._decommission_node_jm(removed, replica_peer_ids=peers)
+        rpcs[b[3].get_id()].jc_remove_jm.assert_called_once_with(f"remote_xs_{jm}n1")
+        rpcs[a[1].get_id()].jc_remove_jm.assert_called_once_with(f"remote_{jm}n1")
 
 
 class TestRemovalReselection:

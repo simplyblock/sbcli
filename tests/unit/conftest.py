@@ -26,8 +26,11 @@ if 'fdb' not in sys.modules:
     # tests pass a MagicMock kv_store, so running the body directly against
     # it keeps existing ``kv_store.set(...)`` assertions working while
     # watched-model writes land their counter ``add(...)`` on the same mock.
+    # ``api_version`` is a no-op here: the real one selects the C API and is
+    # called at import by modules that decorate with ``fdb.transactional``
+    # (simplyblock_core/models/lock/store.py).
     _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError,
-          transactional=lambda f: f)
+          transactional=lambda f: f, api_version=lambda _ver: None)
     _stub('fdb.tuple')
 
 

@@ -3,7 +3,7 @@ marker check, the zone predicate, the running-node refusal, the whole-site-loss
 predicate of the cluster status and the activation leader builder. The
 DB-backed flows are in tests/integration/test_sync_replication_disaster.py.
 """
-from unittest.mock import MagicMock
+from unittest.mock import create_autospec
 
 import pytest
 
@@ -13,7 +13,13 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import (
+    RPCClient,
+    RPCConnectionError,
+    RPCException,
+    RPCHTTPError,
+    RPCRemoteError,
+)
 from simplyblock_core.services import storage_node_monitor
 
 SITE_A, SITE_B = "site-a", "site-b"
@@ -180,34 +186,39 @@ class TestFollowerRedirectOk:
 
     @staticmethod
     def _rpc(answer=None, error=None):
-        rpc = MagicMock()
+        rpc = create_autospec(RPCClient, instance=True)
         if error is not None:
-            rpc.bdev_lvol_get_lvstores.side_effect = error
+            rpc.get_lvstore.side_effect = error
         else:
-            rpc.bdev_lvol_get_lvstores.return_value = answer
+            rpc.get_lvstore.return_value = answer
         return rpc
 
     @pytest.mark.parametrize("connected,redirect,expected", [
         (True, True, True), (False, True, False), (True, False, False), (False, False, False)])
     def test_a_follower_needs_both(self, connected, redirect, expected):
-        rpc = self._rpc([{"lvs leadership": False, "connect_state": connected, "lvs_redirect": redirect}])
+        rpc = self._rpc({"lvs leadership": False, "connect_state": connected, "lvs_redirect": redirect})
         assert ops.follower_redirect_ok(rpc, "LVS_1") is expected
-        rpc.bdev_lvol_get_lvstores.assert_called_once_with("LVS_1")
+        rpc.get_lvstore.assert_called_once_with("LVS_1")
 
     def test_a_leader_has_no_redirect_to_judge(self):
-        rpc = self._rpc([{"lvs leadership": True, "connect_state": False, "lvs_redirect": False}])
+        rpc = self._rpc({"lvs leadership": True, "connect_state": False, "lvs_redirect": False})
         assert ops.follower_redirect_ok(rpc, "LVS_1") is None
 
     @pytest.mark.parametrize("answer", [
-        [], None, "x", [{"lvs leadership": False}],
-        [{"lvs leadership": False, "connect_state": 1, "lvs_redirect": True}],
-        [{"connect_state": True, "lvs_redirect": True}],
-        [{"lvs leadership": "yes", "connect_state": True, "lvs_redirect": True}]])
+        None, "x", [{"lvs leadership": False, "connect_state": True, "lvs_redirect": True}],
+        {"lvs leadership": False},
+        {"lvs leadership": False, "connect_state": 1, "lvs_redirect": True},
+        {"connect_state": True, "lvs_redirect": True},
+        {"lvs leadership": "yes", "connect_state": True, "lvs_redirect": True}])
     def test_what_cannot_be_told_is_none(self, answer):
+        # None: no lvstore (get_lvstore's ENODEV).
         assert ops.follower_redirect_ok(self._rpc(answer), "LVS_1") is None
 
-    def test_a_failing_rpc_is_none(self):
-        assert ops.follower_redirect_ok(self._rpc(error=RPCException("down")), "LVS_1") is None
+    @pytest.mark.parametrize("error", [
+        RPCConnectionError("down"), RPCRemoteError(message="busy", code=-16),
+        RPCHTTPError("HTTP 500", status_code=500, response_text="")])
+    def test_a_failing_rpc_is_none(self, error):
+        assert ops.follower_redirect_ok(self._rpc(error=error), "LVS_1") is None
 
 
 class TestUnwiredFollower:
@@ -218,20 +229,20 @@ class TestUnwiredFollower:
         return lvol
 
     def test_only_non_optimized_paths_are_checked_once(self):
-        rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False, "connect_state": False,
-                                                     "lvs_redirect": False}]
+        rpc = create_autospec(RPCClient, instance=True)
+        rpc.get_lvstore.return_value = {"lvs leadership": False, "connect_state": False,
+                                        "lvs_redirect": False}
         node, memo = _node("a1"), {}
         assert not ops._unwired_follower(rpc, self._lvol(), node, "optimized", memo)
         assert not ops._unwired_follower(rpc, self._lvol(), node, "inaccessible", memo)
-        rpc.bdev_lvol_get_lvstores.assert_not_called()
+        rpc.get_lvstore.assert_not_called()
         assert ops._unwired_follower(rpc, self._lvol(), node, "non_optimized", memo)
         assert ops._unwired_follower(rpc, self._lvol(), node, "non_optimized", memo)
-        assert rpc.bdev_lvol_get_lvstores.call_count == 1
+        assert rpc.get_lvstore.call_count == 1
 
     def test_unknown_changes_nothing(self):
-        rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.side_effect = RPCException("x")
+        rpc = create_autospec(RPCClient, instance=True)
+        rpc.get_lvstore.side_effect = RPCException("x")
         assert not ops._unwired_follower(rpc, self._lvol(), _node("a1"), "non_optimized", {})
 
 

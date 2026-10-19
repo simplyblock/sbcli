@@ -5,9 +5,10 @@ Node-add is parallelized so the slow node-local setup (SPDK boot, device prep)
 runs concurrently across node-add tasks, while the two things that must NOT
 race are guarded:
 
-  1. The cross-node mesh wiring — serialized per cluster by ClusterAddNodeLock
-     (db_controller acquire/refresh/release FDB transactions + the blocking
-     acquire/heartbeat helpers in storage_node_ops).
+  1. The cross-node mesh wiring — serialized per cluster by a DbLock named
+     "cluster_add/<cluster_id>", whose own acquire/refresh/release/expiry
+     behaviour is covered by tests/unit/test_db_lock.py and
+     tests/integration/db_lock/.
   2. NVMe-oF port allocation — made atomic against concurrent adds by
      transactional PortReservation (db_controller.reserve_cluster_nvmf_port).
 
@@ -21,7 +22,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
-from simplyblock_core.models.cluster import ClusterAddNodeLock, PortReservation
+from simplyblock_core.models.cluster import PortReservation
 from simplyblock_core.models.storage_node import StorageNode
 
 # ---------------------------------------------------------------------------
@@ -84,112 +85,6 @@ class FakeTx:
 def _new_db():
     from simplyblock_core.db_controller import DBController
     return DBController.__new__(DBController)
-
-
-# ---------------------------------------------------------------------------
-# 1. ClusterAddNodeLock acquire / refresh / release transactions
-# ---------------------------------------------------------------------------
-
-class TestClusterAddLockTx(unittest.TestCase):
-
-    def _key(self, cluster_id):
-        lock = ClusterAddNodeLock()
-        lock.cluster_id = cluster_id
-        return lock.get_db_id().encode()
-
-    def test_acquire_when_absent(self):
-        db = _new_db()
-        tr = FakeTx()
-        won, current = db._try_acquire_cluster_add_lock_tx(tr, "c1", "ownerA", now=1000)
-        self.assertTrue(won)
-        self.assertIsNone(current)
-        written = tr.store[self._key("c1")]
-        self.assertEqual(written["owner"], "ownerA")
-        self.assertEqual(written["acquired_at"], 1000)
-        self.assertEqual(written["heartbeat_at"], 1000)
-
-    def test_blocked_when_held_by_live_owner(self):
-        db = _new_db()
-        existing = {"cluster_id": "c1", "owner": "ownerA",
-                    "acquired_at": 1000, "heartbeat_at": 1000}
-        tr = FakeTx({self._key("c1"): existing})
-        # heartbeat 1000, now within TTL -> still alive
-        now = 1000 + constants.CLUSTER_ADD_LOCK_TTL_SEC - 1
-        won, current = db._try_acquire_cluster_add_lock_tx(tr, "c1", "ownerB", now=now)
-        self.assertFalse(won)
-        self.assertEqual(current, "ownerA")
-        # must not have overwritten the lock
-        self.assertEqual(tr.store[self._key("c1")]["owner"], "ownerA")
-
-    def test_reclaims_stale_lock(self):
-        db = _new_db()
-        existing = {"cluster_id": "c1", "owner": "ownerA",
-                    "acquired_at": 1000, "heartbeat_at": 1000}
-        tr = FakeTx({self._key("c1"): existing})
-        now = 1000 + constants.CLUSTER_ADD_LOCK_TTL_SEC + 1  # heartbeat went stale
-        won, current = db._try_acquire_cluster_add_lock_tx(tr, "c1", "ownerB", now=now)
-        self.assertTrue(won)
-        self.assertIsNone(current)
-        written = tr.store[self._key("c1")]
-        self.assertEqual(written["owner"], "ownerB")
-        self.assertEqual(written["acquired_at"], now)  # fresh acquisition
-
-    def test_same_owner_reacquire_preserves_acquired_at(self):
-        db = _new_db()
-        existing = {"cluster_id": "c1", "owner": "ownerA",
-                    "acquired_at": 1000, "heartbeat_at": 1005}
-        tr = FakeTx({self._key("c1"): existing})
-        won, current = db._try_acquire_cluster_add_lock_tx(tr, "c1", "ownerA", now=1010)
-        self.assertTrue(won)
-        written = tr.store[self._key("c1")]
-        self.assertEqual(written["acquired_at"], 1000)   # preserved
-        self.assertEqual(written["heartbeat_at"], 1010)  # refreshed
-
-    def test_refresh_updates_heartbeat_for_owner(self):
-        db = _new_db()
-        existing = {"cluster_id": "c1", "owner": "ownerA",
-                    "acquired_at": 1000, "heartbeat_at": 1000}
-        tr = FakeTx({self._key("c1"): existing})
-        ok = db._refresh_cluster_add_lock_tx(tr, "c1", "ownerA", now=1050)
-        self.assertTrue(ok)
-        self.assertEqual(tr.store[self._key("c1")]["heartbeat_at"], 1050)
-
-    def test_refresh_fails_when_not_owner(self):
-        db = _new_db()
-        existing = {"cluster_id": "c1", "owner": "ownerA",
-                    "acquired_at": 1000, "heartbeat_at": 1000}
-        tr = FakeTx({self._key("c1"): existing})
-        ok = db._refresh_cluster_add_lock_tx(tr, "c1", "ownerB", now=1050)
-        self.assertFalse(ok)
-        self.assertEqual(tr.store[self._key("c1")]["heartbeat_at"], 1000)
-
-    def test_refresh_fails_when_absent(self):
-        db = _new_db()
-        tr = FakeTx()
-        self.assertFalse(db._refresh_cluster_add_lock_tx(tr, "c1", "ownerA", now=1050))
-
-    def test_release_deletes_for_owner(self):
-        db = _new_db()
-        existing = {"cluster_id": "c1", "owner": "ownerA",
-                    "acquired_at": 1000, "heartbeat_at": 1000}
-        tr = FakeTx({self._key("c1"): existing})
-        db._release_cluster_add_lock_tx(tr, "c1", "ownerA")
-        self.assertIn(self._key("c1"), tr.deleted)
-
-    def test_release_noop_for_non_owner(self):
-        db = _new_db()
-        existing = {"cluster_id": "c1", "owner": "ownerA",
-                    "acquired_at": 1000, "heartbeat_at": 1000}
-        tr = FakeTx({self._key("c1"): existing})
-        db._release_cluster_add_lock_tx(tr, "c1", "ownerB")
-        self.assertEqual(tr.deleted, [])
-        self.assertIn(self._key("c1"), tr.store)
-
-    def test_release_noop_when_absent(self):
-        db = _new_db()
-        tr = FakeTx()
-        db._release_cluster_add_lock_tx(tr, "c1", "ownerA")  # must not raise
-        self.assertEqual(tr.deleted, [])
 
 
 # ---------------------------------------------------------------------------
@@ -261,49 +156,6 @@ class TestPortReservationTx(unittest.TestCase):
         p2 = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "b", now=1000)
         self.assertNotEqual(p1, p2)
         self.assertEqual({p1, p2}, {4420, 4421})
-
-
-# ---------------------------------------------------------------------------
-# 3. Blocking-acquire / heartbeat helpers in storage_node_ops
-# ---------------------------------------------------------------------------
-
-class TestBlockingAcquireHelper(unittest.TestCase):
-
-    def test_returns_true_on_immediate_acquire(self):
-        from simplyblock_core.storage_node_ops import _acquire_cluster_add_lock_blocking
-        db = MagicMock()
-        db.acquire_cluster_add_lock.return_value = (True, None)
-        self.assertTrue(_acquire_cluster_add_lock_blocking(db, "c1", "owner"))
-
-    def test_returns_false_on_timeout(self):
-        from simplyblock_core.storage_node_ops import _acquire_cluster_add_lock_blocking
-        db = MagicMock()
-        db.acquire_cluster_add_lock.return_value = (False, "someone-else")
-        # timeout=0 -> one failed attempt, then deadline reached, no sleep
-        self.assertFalse(_acquire_cluster_add_lock_blocking(db, "c1", "owner", timeout=0))
-
-    def test_retries_until_acquired(self):
-        from simplyblock_core.storage_node_ops import _acquire_cluster_add_lock_blocking
-        db = MagicMock()
-        db.acquire_cluster_add_lock.side_effect = [
-            (False, "other"), (False, "other"), (True, None)]
-        with patch("simplyblock_core.storage_node_ops.time.sleep"):
-            self.assertTrue(
-                _acquire_cluster_add_lock_blocking(db, "c1", "owner", timeout=100, poll=0))
-        self.assertEqual(db.acquire_cluster_add_lock.call_count, 3)
-
-    def test_heartbeat_stops_when_lock_lost(self):
-        import threading
-
-        from simplyblock_core.storage_node_ops import _cluster_add_lock_heartbeat
-        db = MagicMock()
-        db.refresh_cluster_add_lock.return_value = False  # lost the lock
-        stop = threading.Event()
-        # wait() patched to return False once (fire) then we rely on the lost
-        # refresh to break the loop.
-        with patch.object(stop, "wait", side_effect=[False, True]):
-            _cluster_add_lock_heartbeat(db, "c1", "owner", stop)
-        db.refresh_cluster_add_lock.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -382,54 +234,10 @@ class TestSetClusterStatusAtomic(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. Public DBController lock/reservation wrappers (now computation + kv guard)
+# 5. Public DBController reservation wrapper (now computation + kv guard)
 # ---------------------------------------------------------------------------
 
-class TestLockWrappers(unittest.TestCase):
-
-    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
-    def test_acquire_wrapper_runs_tx(self, mock_transactional):
-        mock_transactional.return_value = MagicMock(return_value=(True, None))
-        db = _new_db()
-        db.kv_store = MagicMock()
-        won, current = db.acquire_cluster_add_lock("c1", "owner")
-        self.assertTrue(won)
-        self.assertIsNone(current)
-        mock_transactional.assert_called_once()
-
-    def test_acquire_wrapper_no_db(self):
-        db = _new_db()
-        db.kv_store = None
-        won, reason = db.acquire_cluster_add_lock("c1", "owner")
-        self.assertFalse(won)
-        self.assertEqual(reason, "No DB connection")
-
-    def test_refresh_wrapper_no_db(self):
-        db = _new_db()
-        db.kv_store = None
-        self.assertFalse(db.refresh_cluster_add_lock("c1", "owner"))
-
-    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
-    def test_refresh_wrapper_runs_tx(self, mock_transactional):
-        mock_transactional.return_value = MagicMock(return_value=True)
-        db = _new_db()
-        db.kv_store = MagicMock()
-        self.assertTrue(db.refresh_cluster_add_lock("c1", "owner"))
-
-    def test_release_wrapper_no_db_is_noop(self):
-        db = _new_db()
-        db.kv_store = None
-        # Must not raise.
-        db.release_cluster_add_lock("c1", "owner")
-
-    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
-    def test_release_wrapper_runs_tx(self, mock_transactional):
-        inner = MagicMock()
-        mock_transactional.return_value = inner
-        db = _new_db()
-        db.kv_store = MagicMock()
-        db.release_cluster_add_lock("c1", "owner")
-        inner.assert_called_once()
+class TestReservationWrapper(unittest.TestCase):
 
     @patch("simplyblock_core.utils.get_node_nvmf_ports", return_value={4420})
     @patch("simplyblock_core.utils.get_nvmf_base_port", return_value=4420)

@@ -262,7 +262,7 @@ class TestRunnerOwnsTheDevice:
         device still there, and the data plane refuses a duplicate name."""
         node.rpc_client = MagicMock()
         rpc = node.rpc_client.return_value
-        rpc.get_bdevs.return_value = [{"name": "s3_restore_b-1"}]
+        rpc.bdev_get.return_value = {"name": "s3_restore_b-1"}
         rpc.bdev_s3_create.side_effect = RPCException("Bdev already exists")
 
         backup_device.create_restore_s3_bdev(
@@ -275,7 +275,7 @@ class TestRunnerOwnsTheDevice:
         """A node restart mid-restore takes the device with it."""
         node.rpc_client = MagicMock()
         rpc = node.rpc_client.return_value
-        rpc.get_bdevs.return_value = None
+        rpc.bdev_get.return_value = None
 
         backup_device.create_restore_s3_bdev(
             node, _config(FOREIGN_BUCKET), "s3_restore_b-1")

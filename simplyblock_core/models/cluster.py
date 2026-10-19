@@ -176,6 +176,24 @@ class Cluster(BaseModel):
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False
+    # is_re_balancing covers every data-moving task, the cluster's own volume
+    # migrations included. is_data_rebalancing covers only the device and
+    # balancing tasks -- data the cluster is moving by itself -- so a caller
+    # that drives volume migrations (a node drain) can wait for the one
+    # without waiting on its own work. active_lvol_migrations counts the rest.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
+    # A node removal is in progress: some node is between pending_removal and
+    # in_removal. A flag beside the status, not a status: the status stays the
+    # calculated one (active, degraded, ...), which leaves the removal's own
+    # node out once its data is rebuilt, so "active + shrinking" (and
+    # rebalancing) can hold at once. Recomputed from the node statuses on every
+    # monitor tick; it replaces the IN_SHRINK status, which new code never sets.
+    is_shrinking: bool = False
+    # The calculated status is DEGRADED only because of the node being removed
+    # (its devices are not all rebuilt yet); without that node it would be
+    # ACTIVE. A removal driver must not pause on that degraded state.
+    is_degraded_by_removal: bool = False
     # Suspend-recovery drain phase marker.
     #
     # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes
@@ -418,56 +436,6 @@ class Cluster(BaseModel):
         else:
             backup_path = os.path.join(constants.KVD_DB_BACKUP_PATH, self.uuid, path)
         return backup_path
-
-
-class ClusterAddNodeLock(BaseModel):
-    """Cluster-scoped mutex held while a node-add performs its cross-node mesh
-    wiring (connect to remote devices, go ONLINE, make peers reverse-connect,
-    push the cluster map). Only this section needs serializing; the slow,
-    node-local part of add_node (SPDK boot, local device prep) runs in parallel
-    across concurrent node-add tasks.
-
-    Keyed by ``cluster_id`` so there is at most one in-flight mesh section per
-    cluster. ``heartbeat_at`` is refreshed by the holder while the section runs;
-    a lock whose heartbeat is older than ``CLUSTER_ADD_LOCK_TTL_SEC`` is
-    considered abandoned (holder crashed) and may be reclaimed.
-    """
-
-    cluster_id: str = ""
-    owner: str = ""
-    acquired_at: int = 0
-    heartbeat_at: int = 0
-
-    def get_id(self):
-        return self.cluster_id or self.uuid
-
-
-class ClusterCreateLock(BaseModel):
-    """Mutex serializing add_cluster() calls for a given cluster name.
-
-    add_cluster()'s duplicate-name check reads all clusters and raises if one
-    already carries the requested name — a plain read-then-write with no
-    atomicity, so concurrent/retried create calls for the same name can all
-    pass the check before any of them has committed (observed 2026-07-28: a
-    control-plane readiness flap made the operator retry cluster-create in a
-    burst, producing 6 separate clusters named "simplyblock-cluster" instead
-    of one).
-
-    Keyed by ``lock_name`` so only one create can be in flight for a given name
-    at a time (not ``name``: that is BaseModel key material — the class-name
-    segment of the FDB key — and shadowing it would write each lock into the
-    keyspace its name spells). No heartbeat — add_cluster() is a single
-    synchronous call, not a long-lived section like node-add's mesh wiring —
-    just a generous TTL (``CLUSTER_CREATE_LOCK_TTL_SEC``) so a crashed holder's
-    lock is eventually reclaimable by a genuine retry.
-    """
-
-    lock_name: str = ""
-    owner: str = ""
-    acquired_at: int = 0
-
-    def get_id(self):
-        return self.lock_name or self.uuid
 
 
 class PortReservation(BaseModel):

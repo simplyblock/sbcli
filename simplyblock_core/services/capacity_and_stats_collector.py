@@ -398,7 +398,11 @@ def main():
                     except Exception as e:
                         logger.error(e)
                         continue
-                    ret = rpc_client.get_lvol_stats(device.nvme_bdev)
+                    try:
+                        ret = rpc_client.get_lvol_stats(device.nvme_bdev)
+                    except RPCException as e:
+                        logger.error("Failed to get iostat for device %s: %s", device.get_id(), e)
+                        continue
                     if ret:
                         stats_dict = ret['bdevs'][0]
                         record = add_device_stats(cl, device, capacity_dict, stats_dict)

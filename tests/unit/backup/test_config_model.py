@@ -23,7 +23,7 @@ class TestBackupLocation:
         assert location.secondary_target is SecondaryTarget.S3
         assert location.snapshot_backups is True
         assert location.verify_tls is True
-        assert location.use_path_style is False
+        assert location.use_path_style is True
 
     def test_a_bucket_name_is_mandatory(self):
         """Nothing can invent one: a device without a bucket services no I/O."""
@@ -140,6 +140,26 @@ class TestBackupConfig:
         )
         assert "AKIA" not in repr(config)
         assert "s3cr3t" not in repr(config)
+
+
+class TestPathStyleDefault:
+    """Path-style addressing is the default; the data plane has no automatic mode."""
+
+    # Regression: 2026-10-01-backup-minio-path-style. The first backup against an
+    # in-cluster MinIO failed because use_path_style defaulted to False.
+    @pytest.mark.parametrize("endpoint", [None, "http://minio:9000", "https://s3.amazonaws.com"])
+    def test_path_style_is_the_default(self, endpoint):
+        data = {**MINIMAL, "endpoint": endpoint} if endpoint else MINIMAL
+        for model in (BackupLocation, BackupConfig, UnresolvedBackupConfig):
+            assert model.model_validate(data).use_path_style is True
+
+    def test_a_stated_value_wins_over_the_default(self):
+        config = BackupConfig.model_validate({**MINIMAL, "use_path_style": False})
+        assert config.use_path_style is False
+
+    def test_a_stored_config_keeps_the_value_it_was_written_with(self):
+        stored = BackupConfig.model_validate({**MINIMAL, "use_path_style": False}).model_dump()
+        assert BackupConfig.model_validate(stored).use_path_style is False
 
 
 class TestLegacyMigration:

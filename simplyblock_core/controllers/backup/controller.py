@@ -6,7 +6,6 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
-from simplyblock_core import constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.chain import BackupChain, location_of
@@ -26,6 +25,8 @@ from simplyblock_core.models.backup_config import (
     BackupLocation,
     S3Credentials,
 )
+from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -35,6 +36,14 @@ db_controller = DBController()
 
 def _generate_backup_id():
     return str(uuid4())
+
+
+async def watch_backups(cluster_id):
+    """Stream backup changes for one cluster (same scope as the list endpoint)."""
+    async for batch in db_controller.watch(
+            Backup, scope=(cluster_id,),
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
 
 
 def get_latest_backup_for_lvol(lvol_id):
@@ -171,7 +180,11 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
                        "object size", backup.cluster_id, backup.uuid)
     else:
         cluster_name = cluster.cluster_name
-        cluster_size = cluster.page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
+        # Same sizing as create_lvstore, for the same reason as the stat
+        # collector: the manifest records object sizes derived from it, and a
+        # cluster that records no data-chunk count falls back to one page
+        # rather than describing its objects as zero-sized.
+        cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
 
     return backup_manifest.BackupManifest(
         backup_id=UUID(backup.uuid),
@@ -361,36 +374,53 @@ def delete_manifest(backup: Backup) -> None:
     backup_manifest.delete(_config_for(backup), UUID(backup.uuid))
 
 
-def _get_snapshot_chain(snapshot):
-    """Build the snapshot chain ending at this snapshot, oldest first.
+def _blob_parent_id(snapshot: SnapShot) -> str | None:
+    """The snapshot this one's blob is a delta against, or ``None`` at a root.
 
-    For cloned volumes, walks snap_ref_id upward.  For regular volumes
-    (no snap_ref_id), collects all snapshots of the same lvol that were
-    created at or before this snapshot, ordered by created_at.
+    See ``SnapShot.prev_snap_uuid`` and ``SnapShot.snap_ref_id`` for which
+    pointer carries blob ancestry and which only looks like it does.
     """
-    if snapshot.snap_ref_id:
-        # Clone-based chain: walk snap_ref_id
-        chain = [snapshot]
-        current = snapshot
-        while current.snap_ref_id:
-            try:
-                parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
-                chain.append(parent)
-                current = parent
-            except KeyError:
-                break
-        chain.reverse()  # oldest first
-        return chain
+    if snapshot.prev_snap_uuid:
+        return snapshot.prev_snap_uuid
 
-    # Regular volume: all snapshots of the same lvol up to this one
-    lvol_id = snapshot.lvol.get_id() if snapshot.lvol else None
-    if not lvol_id:
-        return [snapshot]
+    if snapshot.lvol and snapshot.lvol.cloned_from_snap:
+        return snapshot.lvol.cloned_from_snap
 
-    all_snaps = db_controller.get_snapshots_by_lvol_id(lvol_id)
-    # Filter to snapshots created at or before this one, sort oldest first
-    chain = [s for s in all_snaps if s.created_at <= snapshot.created_at]
-    chain.sort(key=lambda s: s.created_at)
+    return None
+
+
+def _get_snapshot_chain(snapshot: SnapShot) -> list[SnapShot]:
+    """Every snapshot a restore of this one needs, oldest first.
+
+    One backup uploads one snapshot's blob, which holds only the clusters
+    written since that snapshot's own parent, so the chain has to reach back
+    to a snapshot whose blob stands alone.
+
+    Raises:
+        PreconditionError: an ancestor cannot be reached, so no restorable
+            chain exists. Reported rather than truncated: a short chain
+            restores a volume with holes in it and reports success.
+    """
+    chain = [snapshot]
+    seen = {snapshot.get_id()}
+
+    while (parent_id := _blob_parent_id(chain[-1])) is not None:
+        if parent_id in seen:
+            raise PreconditionError(
+                f"Snapshot {snapshot.get_id()} has a cyclic ancestry at {parent_id}")
+
+        try:
+            parent = db_controller.get_snapshot_by_id(parent_id)
+        except KeyError as e:
+            raise PreconditionError(
+                f"Snapshot {chain[-1].get_id()} is a delta against {parent_id}, "
+                "which no longer exists, so its ancestry cannot be backed up as "
+                "a restorable chain.") from e
+
+        seen.add(parent_id)
+        chain.append(parent)
+
+    chain.reverse()
     return chain
 
 
@@ -474,12 +504,268 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
     return backup
 
 
+def _require_restorable_chain(location: BackupLocation, encrypted: bool,
+                              backed_snapshots: list[SnapShot], length: int,
+                              what: str) -> None:
+    """Refuse a chain of ``length`` links, continuing whatever backups already
+    exist for ``backed_snapshots``, that would not be restorable.
+
+    One rule, so a refusal before a snapshot is taken
+    (`chain_would_be_restorable`) and a refusal while actually writing one
+    (`ensure_snapshot_chain_backed_up`) can never disagree about the same
+    volume.
+
+    Raises:
+        PreconditionError: see `BackupChain.require_restorable`.
+    """
+    BackupChain.assemble(
+        location, encrypted, _existing_chain_backups(backed_snapshots),
+    ).require_restorable(length=length, what=what)
+
+
+def chain_would_be_restorable(lvol, location: BackupLocation, what: str) -> None:
+    """Refuse if the snapshot a scheduled backup is about to take could never
+    be folded into a restorable chain.
+
+    Checked against the volume's real snapshot ancestry and the backups that
+    already exist for it, one link short of what `ensure_snapshot_chain_backed_up`
+    will see once that snapshot exists -- so a schedule refuses before taking
+    it and leaving an orphan `auto_*` snapshot behind, for the same reason
+    `ensure_snapshot_chain_backed_up` would refuse afterwards.
+
+    Raises:
+        PreconditionError: the eventual chain would be longer than the data
+            plane accepts, or the volume's existing chain lives in a
+            different bucket or encoding than `location` declares.
+    """
+    latest_snapshot = db_controller.get_lvol_latest_snapshot(lvol.get_id())
+    existing_chain = _get_snapshot_chain(latest_snapshot) if latest_snapshot is not None else []
+    _require_restorable_chain(
+        location, bool(lvol.crypto_bdev), existing_chain, len(existing_chain) + 1, what)
+
+
+def ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id,
+                                    location: BackupLocation) -> str:
+    """Make every ancestor of ``snapshot`` backed up, and return the id of the
+    backup covering ``snapshot`` itself.
+
+    A single snapshot's backup is only a delta: the data plane uploads just
+    the clusters written since the snapshot's own parent
+    (``_get_snapshot_chain``'s docstring), and is never told anything about
+    `Backup.prev_backup_id` -- `bdev_lvol_s3_backup` takes only a snapshot
+    name. So the one thing that is allowed to decide a new backup's
+    predecessor is the snapshot's own parent, walked here, never "whatever
+    `Backup` record happens to be newest for this lvol": the moment an
+    ancestor's backup fails, those two stop agreeing, and a backup computed
+    the second way silently records itself as a full backup while the data
+    plane only ever sent its own delta. A restore of it then pulls only its
+    own objects and produces a volume missing everything the failed ancestor
+    covered -- see `backup-retry-empty-issue.md`. This is the one place that
+    walk happens, so every entry point -- the CLI, the API, or a schedule --
+    goes through it rather than re-deriving the same answer.
+
+    This also serializes concurrent callers that would otherwise race to
+    link the same gap in the chain (`acquire_backup_chain_locks`).
+
+    Args:
+        location: where this chain's objects will be written. Resolved by the
+            caller so every backup in it is guaranteed to share it.
+
+    Raises:
+        PreconditionError: the resulting chain would not be restorable (wrong
+            bucket, wrong encryption, too long), or another backup of this
+            same snapshot chain is already being prepared, or `snapshot`
+            already has a valid backup (nothing to do).
+    """
+    # Everything that could make this backup unrestorable is checked here,
+    # before the chain lock is taken, before any KMS key is created and before
+    # any task is enqueued. A backup either is restorable or was never created.
+    snap_chain = _get_snapshot_chain(snapshot)
+    _require_restorable_chain(
+        location, bool(lvol.crypto_bdev), snap_chain,
+        # Every snapshot in the chain gets a backup below, including the ones
+        # that have none yet, so the eventual length is the chain's.
+        length=len(snap_chain),
+        what="This snapshot chain")
+
+    chain_snapshot_ids = [snap.get_id() for snap in snap_chain]
+    acquired, existing_lock = db_controller.acquire_backup_chain_locks(
+        chain_snapshot_ids, snapshot.get_id(), lvol.get_id())
+    if not acquired:
+        lock_snapshot = getattr(existing_lock, "requested_snapshot_id", "") or getattr(existing_lock, "snapshot_id", "")
+        raise PreconditionError(
+            "A backup request is already preparing this snapshot chain"
+            + (f" (requested snapshot {lock_snapshot})" if lock_snapshot else ""))
+
+    prev_backup = get_latest_backup_for_lvol(lvol.get_id())
+    final_backup_id = None
+    try:
+        # Walk the snapshot chain and back up all unbacked ancestors first
+        for snap in snap_chain:
+            if _snapshot_has_backup(snap.get_id()):
+                # Already backed up — update prev_backup pointer for chain linking
+                backups = db_controller.get_backups_by_snapshot_id(snap.get_id())
+                existing = next(
+                    (b for b in backups if b.status in (
+                        Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
+                        Backup.STATUS_COMPLETED)),
+                    None)
+                if existing:
+                    prev_backup = existing
+                continue
+
+            backup = create_single_backup(snap, lvol, node_id, cluster_id, prev_backup, location)
+            time.sleep(1)
+            prev_backup = backup
+            if snap.get_id() == snapshot.get_id():
+                final_backup_id = backup.uuid
+    finally:
+        db_controller.release_backup_chain_locks(chain_snapshot_ids)
+
+    if not final_backup_id:
+        # The target snapshot was already backed up
+        raise PreconditionError(f"Snapshot {snapshot.get_id()} already has a backup")
+
+    return final_backup_id
+
+
+#: Prefix on the name of the snapshot `backup_lvol` creates for itself.
+#: Fixed, and never influenced by a caller: a later cleanup pass that wants
+#: to find and prune a direct backup's own snapshot only gets to rely on a
+#: name shaped like this if nothing but `backup_lvol` ever produces one.
+#: Leading underscore so it cannot collide with a name a user supplies -- see
+#: `is_reserved_snapshot_name`, which every entry point taking a
+#: user-supplied snapshot name checks to enforce that.
+DIRECT_BACKUP_SNAPSHOT_PREFIX = "_backup_"
+
+#: Prefix on the name of the snapshot the scheduler's auto-backups create for
+#: themselves (`backup.policy._auto_backup_lvol`). Reserved for the same
+#: reason as `DIRECT_BACKUP_SNAPSHOT_PREFIX`.
+SCHEDULED_BACKUP_SNAPSHOT_PREFIX = "auto_"
+
+#: Every prefix a user-supplied snapshot name must not start with.
+RESERVED_SNAPSHOT_NAME_PREFIXES = (
+    DIRECT_BACKUP_SNAPSHOT_PREFIX,
+    SCHEDULED_BACKUP_SNAPSHOT_PREFIX,
+)
+
+#: Shared wording for every entry point's rejection of a reserved name, so
+#: the message is one string to update rather than one per entry point.
+RESERVED_SNAPSHOT_NAME_ERROR = (
+    f"Snapshot name must not start with any of {RESERVED_SNAPSHOT_NAME_PREFIXES} "
+    "(reserved for backups created by the system)"
+)
+
+
+def is_reserved_snapshot_name(name: str) -> bool:
+    """Whether ``name`` collides with a prefix reserved for the backup
+    subsystem's own snapshots.
+
+    A predicate, not a check: an entry point that takes a snapshot name from
+    a caller (CLI, v1, v2) decides what to do with a collision itself -- a
+    printed error, an HTTP response, a pydantic validator -- rather than this
+    function raising the same way for all of them. Never consulted inside
+    `snapshot_controller.add` itself, since the subsystem's own internal
+    callers (`backup_lvol`, `backup.policy._auto_backup_lvol`) go through
+    that same function to create exactly these reserved names.
+    """
+    return name.startswith(RESERVED_SNAPSHOT_NAME_PREFIXES)
+
+
+def _create_snapshot_and_back_up(lvol, snap_name: str) -> str:
+    """Create ``snap_name`` on ``lvol``, then back up its whole unbacked ancestry.
+
+    The shared core of `backup_lvol` (a direct user-requested backup) and
+    `backup.policy._auto_backup_lvol` (the scheduler's auto-backups): both
+    want "create a snapshot of this volume, then back it up" and nothing
+    more. The cluster is always the volume's own node's cluster -- derived
+    here, never taken from a caller -- so nothing can record this backup
+    under a cluster other than the one the snapshot actually lives in.
+    Refuses up front, via `chain_would_be_restorable`, if the chain the new
+    snapshot would join could never be restorable -- before taking it, so a
+    refusal never leaves an orphaned snapshot behind. The snapshot it creates
+    is then handed to `ensure_snapshot_chain_backed_up`, the function that
+    backs up an existing snapshot, rather than re-deriving that walk here: a
+    caller that already has a snapshot calls `backup_snapshot` directly and
+    this function is never on its path.
+
+    Takes the snapshot's name rather than generating one, because the two
+    callers use different, non-overridable naming schemes to stay tellable
+    apart afterwards (`auto_*` vs `DIRECT_BACKUP_SNAPSHOT_PREFIX`); neither
+    exposes this parameter to anything outside this package.
+
+    Returns the id of the backup covering the new snapshot.
+
+    Raises:
+        PreconditionError: the volume's node or cluster cannot be found or
+            used, or the chain would not be restorable.
+        RuntimeError: the snapshot itself could not be created -- a
+            data-plane failure, not a precondition, since every precondition
+            on taking it was already checked above.
+    """
+    from simplyblock_core.controllers import snapshot_controller
+
+    try:
+        node_id = lvol.node_id
+        snode = db_controller.get_storage_node_by_id(node_id)
+        if snode.status != StorageNode.STATUS_ONLINE:
+            raise PreconditionError(f"Node {node_id} is not online (status: {snode.status})")
+
+        cluster_id = snode.cluster_id
+
+        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
+        chain_would_be_restorable(
+            lvol, location, what=f"The backup chain of volume {lvol.lvol_name}")
+    except (KeyError, ValueError) as e:
+        raise PreconditionError(str(e)) from e
+
+    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
+    if error:
+        raise RuntimeError(error)
+
+    try:
+        snapshot = db_controller.get_snapshot_by_id(snap_id)
+    except KeyError as e:
+        raise RuntimeError(f"Snapshot {snap_id} not found right after creation: {e}") from e
+
+    return ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id, location)
+
+
+def backup_lvol(lvol_id) -> str:
+    """Create a backup directly from a volume, without an existing snapshot.
+
+    The snapshot taken to do this is named here, under
+    `DIRECT_BACKUP_SNAPSHOT_PREFIX`, and a caller has no way to influence that
+    name -- unlike a snapshot a user takes directly, this one exists purely
+    to serve this backup, and a future cleanup pass needs to be able to find
+    and prune it by that marker alone. The cluster it backs up into is
+    likewise never a caller's choice: it is always the volume's own node's
+    cluster (see `_create_snapshot_and_back_up`).
+
+    Returns the id of the backup covering the new snapshot.
+
+    Raises:
+        PreconditionError: the volume, its node or its cluster cannot be
+            found or used, or the chain would not be restorable.
+        RuntimeError: the snapshot itself could not be created.
+    """
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        raise PreconditionError(str(e)) from e
+
+    snap_name = f"{DIRECT_BACKUP_SNAPSHOT_PREFIX}{lvol.lvol_name}_{int(time.time())}"
+    return _create_snapshot_and_back_up(lvol, snap_name)
+
+
 def backup_snapshot(snapshot_id, cluster_id=None):
     """Create a backup from an existing snapshot.
 
     Walks the snapshot chain to ensure all ancestor snapshots are also
     backed up, since a single snapshot backup is only a delta and cannot
-    be restored without its ancestors.
+    be restored without its ancestors. See `ensure_snapshot_chain_backed_up`
+    for why that walk has to happen from the snapshot's own ancestry rather
+    than from `Backup` records.
 
     Returns (backup_id, error_message) where backup_id is the ID of the
     backup for the requested snapshot.
@@ -502,63 +788,14 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     if not cluster_id:
         cluster_id = snode.cluster_id
 
-    snap_chain = _get_snapshot_chain(snapshot)
-
-    # Everything that could make this backup unrestorable is checked here,
-    # before the chain lock is taken, before any KMS key is created and before
-    # any task is enqueued. A backup either is restorable or was never created.
     try:
         location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
-        BackupChain.assemble(
-            location, bool(lvol.crypto_bdev), _existing_chain_backups(snap_chain),
-        ).require_restorable(
-            # Every snapshot in the chain gets a backup below, including the ones
-            # that have none yet, so the eventual length is the chain's.
-            length=len(snap_chain),
-            what="This snapshot chain")
+        backup_id = ensure_snapshot_chain_backed_up(
+            snapshot, lvol, node_id, cluster_id, location)
     except (KeyError, ValueError, PreconditionError) as e:
         return None, str(e)
 
-    chain_snapshot_ids = [snap.get_id() for snap in snap_chain]
-    acquired, existing_lock = db_controller.acquire_backup_chain_locks(
-        chain_snapshot_ids, snapshot_id, lvol.get_id())
-    if not acquired:
-        lock_snapshot = getattr(existing_lock, "requested_snapshot_id", "") or getattr(existing_lock, "snapshot_id", "")
-        return None, (
-            "A backup request is already preparing this snapshot chain"
-            + (f" (requested snapshot {lock_snapshot})" if lock_snapshot else "")
-        )
-
-    prev_backup = get_latest_backup_for_lvol(lvol.get_id())
-    final_backup_id = None
-    try:
-        # Walk the snapshot chain and back up all unbacked ancestors first
-        for snap in snap_chain:
-            if _snapshot_has_backup(snap.get_id()):
-                # Already backed up — update prev_backup pointer for chain linking
-                backups = db_controller.get_backups_by_snapshot_id(snap.get_id())
-                existing = next(
-                    (b for b in backups if b.status in (
-                        Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
-                        Backup.STATUS_COMPLETED)),
-                    None)
-                if existing:
-                    prev_backup = existing
-                continue
-
-            backup = create_single_backup(snap, lvol, node_id, cluster_id, prev_backup, location)
-            time.sleep(1)
-            prev_backup = backup
-            if snap.get_id() == snapshot_id:
-                final_backup_id = backup.uuid
-    finally:
-        db_controller.release_backup_chain_locks(chain_snapshot_ids)
-
-    if not final_backup_id:
-        # The target snapshot was already backed up
-        return None, f"Snapshot {snapshot_id} already has a backup"
-
-    return final_backup_id, None
+    return backup_id, None
 
 
 def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,

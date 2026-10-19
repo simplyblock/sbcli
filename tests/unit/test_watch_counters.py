@@ -7,7 +7,7 @@ import pytest
 
 from simplyblock_core.models import watches
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation
+from simplyblock_core.models.cluster import Cluster, PortReservation
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolMini
@@ -18,8 +18,7 @@ from simplyblock_core.models.storage_node import StorageNode
 
 WATCHED_CLASSES = [Cluster, StorageNode, Pool, LVol, SnapShot, JobSchedule, EventObj]
 UNWATCHED_CLASSES = [
-    LVolMini, SnapShotMini, StatsObject, LVolStatObject,
-    ClusterAddNodeLock, PortReservation,
+    LVolMini, SnapShotMini, StatsObject, LVolStatObject, PortReservation,
 ]
 
 

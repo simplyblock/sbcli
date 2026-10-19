@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import argparse
 import logging
 import sys
 import traceback
@@ -106,8 +107,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.', type=str, default='', dest='size_range', required=False)
         subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         subcommand.add_argument('--lblk', help='Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition.', dest='lblk', action='store_true')
-        subcommand.add_argument('--blk-names', help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk). Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
-        subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block device names to exclude, like sda (requires --lblk). All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
+        subcommand.add_argument('--blk-names', help='Comma separated list of block devices to use (requires --lblk). Each entry is a persistent /dev/disk name, such as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 or /dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba. A kernel name (sdb) or kernel path (/dev/sdb) is refused: it states a position in this boot\'s enumeration order, and the selection is resolved again at every node restart, so it names another disk after a reboot that probes the controllers in another order. Use --blk-serials for a device udev published no persistent name for. Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
+        subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block devices to exclude (requires --lblk), spelled the way --blk-names takes them. All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
         subcommand.add_argument('--blk-serials', help='Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk).', type=str, default='', dest='blk_serials', required=False)
         subcommand.add_argument('--jm-percent', help='Journal size in percent of the node\'s total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`.', type=int, default=3, dest='jm_percent', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format.', dest='force', action='store_true')
@@ -592,7 +593,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__update(self, subparser):
         subcommand = self.add_sub_command(subparser, 'update', 'Updates a cluster to new version.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
-        subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', type=bool, default=False, dest='mgmt_only')
+        subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', default=False, dest='mgmt_only', action=argparse.BooleanOptionalAction)
         subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image.', type=str, dest='spdk_image')
         subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image.', type=str, dest='mgmt_image')
         subcommand.add_argument('--max-subsys', help='Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs.', type=int, dest='max_subsys')
@@ -752,6 +753,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__connect(subparser)
         self.init_volume__resize(subparser)
         self.init_volume__create_snapshot(subparser)
+        self.init_volume__backup(subparser)
         self.init_volume__clone(subparser)
         if self.developer_mode:
             self.init_volume__move(subparser)
@@ -805,7 +807,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type. Default: `default`.', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
         subcommand.add_argument('--fabric', help='The transport fabric type (tcp or rdma). The cluster must support the chosen fabric. Default: `tcp`.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         subcommand.add_argument('--lvol-priority-class', help='The logical volume priority class. Default: `0`.', type=int, default=0, dest='lvol_priority_class')
-        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`.', type=bool, default=False, dest='namespaced')
+        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`.', default=False, dest='namespaced', action=argparse.BooleanOptionalAction)
         if self.developer_mode:
             subcommand.add_argument('--uid', help='Set logical volume id.', type=str, dest='uid')
         subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
@@ -856,14 +858,17 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('name', help='The snapshot name.', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot.', dest='backup', action='store_true')
+
+    def init_volume__backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup', 'Creates a backup directly from a logical volume, snapshotting it first.')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
 
     def init_volume__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a logical volumes from an existing snapshot.')
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
         subcommand.add_argument('clone_name', help='The clone name.', type=str)
         subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`.', type=size_type(), default='0', dest='resize')
-        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`.', type=bool, default=True, dest='namespaced')
+        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`.', default=True, dest='namespaced', action=argparse.BooleanOptionalAction)
 
     def init_volume__move(self, subparser):
         subcommand = self.add_sub_command(subparser, 'move', 'Moves a full copy of the logical volume between nodes.')
@@ -981,6 +986,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
         subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
+        subcommand.add_argument('--retry-on-failure', help='If this migration ends in failure, automatically start a brand-new migration (full precreate + start) for the same volume/target once preconditions are met again (no rebalancing, source and target both online).', dest='retry_on_failure', action='store_true')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')
@@ -1128,7 +1134,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new snapshot.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('name', help='The new snapshot name.', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot.', dest='backup', action='store_true')
 
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots.')
@@ -1154,7 +1159,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
         subcommand.add_argument('lvol_name', help='The logical volume name.', type=str)
         subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`.', type=size_type(), default='0', dest='resize')
-        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`.', type=bool, default=True, dest='namespaced')
+        subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`.', default=True, dest='namespaced', action=argparse.BooleanOptionalAction)
 
     def init_snapshot__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists snapshots replication status')
@@ -1703,6 +1708,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__resize(sub_command, args)
                 elif sub_command in ['create-snapshot']:
                     ret = self.volume__create_snapshot(sub_command, args)
+                elif sub_command in ['backup']:
+                    ret = self.volume__backup(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.volume__clone(sub_command, args)
                 elif sub_command in ['move']:

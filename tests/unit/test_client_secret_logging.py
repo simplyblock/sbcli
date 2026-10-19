@@ -46,10 +46,10 @@ def test_rpc_client_request_body_carries_unwrapped_param(rpc_client, caplog):
     })
 
     with caplog.at_level(logging.DEBUG):
-        rpc_client._request2("nvmf_subsystem_add_host", {
-            "nqn": "nqn.example",
-            "dhchap_key": SecretStr("DHCHAPVALUE"),
-        })
+        rpc_client._request("nvmf_subsystem_add_host",
+            nqn="nqn.example",
+            dhchap_key=SecretStr("DHCHAPVALUE"),
+        )
 
     posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
     parsed = json.loads(posted_body)
@@ -65,7 +65,7 @@ def test_rpc_client_response_body_hidden_when_flag_off(rpc_client, caplog, monke
         "jsonrpc": "2.0", "id": 1, "result": {"sensitive": "RESPVALUE"},
     })
     with caplog.at_level(logging.DEBUG):
-        rpc_client._request2("some_method", {})
+        rpc_client._request("some_method")
 
     assert "RESPVALUE" not in _captured_logs_text(caplog)
 
@@ -76,7 +76,7 @@ def test_rpc_client_response_body_logged_when_flag_on(rpc_client, caplog, monkey
         "jsonrpc": "2.0", "id": 1, "result": {"sensitive": "RESPVALUE"},
     })
     with caplog.at_level(logging.DEBUG):
-        rpc_client._request2("some_method", {})
+        rpc_client._request("some_method")
 
     assert "RESPVALUE" in _captured_logs_text(caplog)
 
@@ -90,12 +90,12 @@ def test_rpc_client_masks_plaintext_crypto_keys_by_param_name(rpc_client, caplog
     })
 
     with caplog.at_level(logging.DEBUG):
-        rpc_client._request2("accel_crypto_key_create", {
-            "cipher": "AES_XTS",
-            "name": "key_lvol_1",
-            "key": "DEKPLAINONE",
-            "key2": "DEKPLAINTWO",
-        })
+        rpc_client._request("accel_crypto_key_create",
+            cipher="AES_XTS",
+            name="key_lvol_1",
+            key="DEKPLAINONE",
+            key2="DEKPLAINTWO",
+        )
 
     posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
     parsed = json.loads(posted_body)
@@ -116,7 +116,7 @@ def _sent_params(client):
 
 def test_bdev_s3_create_keys_reach_the_wire_but_not_the_log(rpc_client, caplog):
     # bdev_s3_create is the only RPC carrying S3 keys, and it goes through
-    # _request3, which logs its parameter dict directly -- only a SecretStr
+    # _request, which logs its parameter dict directly -- only a SecretStr
     # masks there.
     rpc_client._fake_session.post.return_value = _make_json_response({
         "jsonrpc": "2.0", "id": 1, "result": True,
@@ -156,11 +156,42 @@ def test_bdev_s3_create_omits_absent_credentials(rpc_client):
     # Same for every other optional: the data plane reads 0 as "unset" for the
     # masks and the pool size, so sending one would be indistinguishable from
     # omitting it while reading as a deliberate choice.
-    for absent in ("endpoint", "bdb_lcpu_mask", "s3_lcpu_mask", "s3_thread_pool_size"):
+    for absent in (
+        "endpoint", "bdb_lcpu_mask", "s3_lcpu_mask", "s3_thread_pool_size",
+        "s3_request_timeout_ms", "s3_request_hard_abort_ms",
+        "s3_request_max_attempts", "s3_retry_burst", "s3_retry_refill_ms",
+    ):
         assert absent not in params
 
     # ... and what is not optional is always present.
     assert params["region"] == "eu-central-1"
+
+
+def test_bdev_s3_create_forwards_retry_and_timeout_params(rpc_client):
+    # Regression test: these five were accepted by the method signature but
+    # dropped before the RPC body was built, so callers configuring the S3
+    # watchdog's timeouts (e.g. restore's create_restore_s3_bdev) silently
+    # got the data plane's defaults instead.
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    rpc_client.bdev_s3_create(
+        name="s3_lvs_test", bucket_name="bucket",
+        secondary_target=0, with_compression=False, snapshot_backups=True,
+        s3_request_timeout_ms=4000,
+        s3_request_hard_abort_ms=6000,
+        s3_request_max_attempts=2,
+        s3_retry_burst=16,
+        s3_retry_refill_ms=1000,
+    )
+
+    params = _sent_params(rpc_client)
+    assert params["s3_request_timeout_ms"] == 4000
+    assert params["s3_request_hard_abort_ms"] == 6000
+    assert params["s3_request_max_attempts"] == 2
+    assert params["s3_retry_burst"] == 16
+    assert params["s3_retry_refill_ms"] == 1000
 
 
 @pytest.fixture
@@ -214,7 +245,7 @@ def test_snode_write_key_file_masks_pool_key(snode_client, caplog):
         {"results": "/etc/simplyblock/dhchap/pool_key"})
 
     rpc_client = MagicMock()
-    rpc_client._request2.return_value = ({"ok": True}, None)
+    rpc_client.keyring_file_add_key.return_value = {"ok": True}
 
     with caplog.at_level(logging.DEBUG):
         key_names = host_auth._register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
@@ -241,7 +272,7 @@ def test_snode_write_key_file_masks_per_host_key(snode_client, caplog):
         {"results": "/etc/simplyblock/dhchap/host_key"})
 
     rpc_client = MagicMock()
-    rpc_client._request2.return_value = ({"ok": True}, None)
+    rpc_client.keyring_file_add_key.return_value = {"ok": True}
 
     with caplog.at_level(logging.DEBUG):
         key_names = host_auth._register_dhchap_keys_on_node(

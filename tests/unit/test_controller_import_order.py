@@ -20,12 +20,17 @@ import sys
 import pytest
 
 #: fdb stub mirroring tests/unit/conftest.py, for interpreters without libfdb_c.
+#: ``api_version`` is a no-op here: the real one selects the C API and is called
+#: at import by modules that decorate with ``fdb.transactional``
+#: (simplyblock_core/models/lock/store.py, reached from every controller in the
+#: cycle below).
 _FDB_STUB = """
 import sys, types
 _fdb = types.ModuleType('fdb')
 _fdb.open = lambda *a, **k: None
 _fdb.FDBError = Exception
 _fdb.transactional = lambda f: f
+_fdb.api_version = lambda _ver: None
 sys.modules['fdb'] = _fdb
 sys.modules['fdb.tuple'] = types.ModuleType('fdb.tuple')
 """

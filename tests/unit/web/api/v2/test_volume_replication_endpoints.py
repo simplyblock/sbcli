@@ -474,7 +474,10 @@ class TestCutover:
         response = client.post(REPLICATION_URL + 'demote')
 
         assert response.status_code == 500
-        assert response.json()['detail'] == 'no space'
+        # The internal error is logged server-side, never exposed to the caller
+        # (CodeQL: information exposure through an exception).
+        assert response.json()['detail'] == 'demote failed'
+        assert 'no space' not in response.json()['detail']
 
     def test_failback(self, client, db, volume, lvol_controller):
         lvol_controller.replication_failback.return_value = True

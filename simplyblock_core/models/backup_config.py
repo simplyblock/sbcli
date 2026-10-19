@@ -89,7 +89,10 @@ class BackupLocation(BaseModel):
     snapshot_backups: bool = True
 
     verify_tls: bool = True
-    use_path_style: bool = False
+    #: The data plane's S3 client has no automatic addressing mode, and
+    #: virtual-hosted addressing needs DNS for ``<bucket>.<host>``, which an
+    #: in-cluster or on-premises store does not have. Path style works for both.
+    use_path_style: bool = True
 
     @property
     def endpoint_url(self) -> str | None:

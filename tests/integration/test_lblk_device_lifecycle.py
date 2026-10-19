@@ -166,13 +166,13 @@ class TestRestartIdentityContract:
 
         rpc = MagicMock()
         rpc.host = "t"
-        rpc.get_bdevs.return_value = None
+        rpc.bdev_get.return_value = None
         created = {}
 
         def _create(name, filename, block_size=0):
             created[name] = filename
-            rpc.get_bdevs.return_value = [
-                {"name": name, "block_size": 4096, "num_blocks": 100}]
+            rpc.bdev_get.return_value = {
+                "name": name, "block_size": 4096, "num_blocks": 100}
             return name
 
         rpc.bdev_aio_create.side_effect = _create
@@ -302,7 +302,7 @@ class TestResetAgainstDb:
         _seed_node(db, [dev])
 
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": dev.nvme_bdev}]
+        rpc.bdev_get.return_value = {"name": dev.nvme_bdev}
 
         patches = _patched_fanout()
         for p in patches:

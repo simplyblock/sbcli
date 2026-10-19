@@ -20,6 +20,17 @@ from unittest.mock import patch
 from simplyblock_core import utils
 
 
+def _by_id(name):
+    """The persistent /dev/disk name of a fixture device.
+
+    Selection takes these and not kernel names, so a test that is about
+    something else has to spell one. It is derived from the kernel name here
+    purely so the fixtures stay readable: on a real host the two have nothing to
+    do with each other, which is the whole reason the kernel name is refused.
+    """
+    return f"/dev/disk/by-id/acme-{name}"
+
+
 def _blk(name, serial="", size=100 << 30, mounted=False, holders=None,
          root=False, ro=False, parts=False, dtype="disk", by_id="",
          numa=0, synthetic=False, model="MODEL-X", wwn=""):
@@ -39,7 +50,7 @@ def _blk(name, serial="", size=100 << 30, mounted=False, holders=None,
         "mounted_in_subtree": mounted,
         "holders": holders or [],
         "is_root_disk": root,
-        "by_id_path": by_id,
+        "by_id_path": by_id or _by_id(name),
         "numa_node": numa,
     }
 
@@ -61,7 +72,7 @@ class TestEligibility(unittest.TestCase):
 
     def test_idle_partition_is_eligible_when_requested(self):
         devs = [_blk("sdb1", dtype="part")]
-        sel, _ = utils.filter_eligible_block_devices(devs, include_names=["sdb1"])
+        sel, _ = utils.filter_eligible_block_devices(devs, include_names=[_by_id("sdb1")])
         self.assertEqual([d["name"] for d in sel], ["sdb1"])
 
     def test_mounted_partition_rejected(self):
@@ -79,7 +90,7 @@ class TestEligibility(unittest.TestCase):
         devs = [_blk("sdb", parts=True), part]
         with self.assertRaises(ValueError) as ctx:
             utils.filter_eligible_block_devices(
-                devs, include_names=["sdb", "sdb1"], force_format=True)
+                devs, include_names=[_by_id("sdb"), _by_id("sdb1")], force_format=True)
         self.assertIn("itself selected", str(ctx.exception))
 
     def test_special_prefixes_rejected(self):
@@ -125,23 +136,25 @@ class TestEligibility(unittest.TestCase):
 
     def test_include_names_selects_only_requested(self):
         devs = [_blk("sdb"), _blk("sdc"), _blk("sdd")]
-        sel, _ = utils.filter_eligible_block_devices(devs, include_names=["sdb", "sdd"])
+        sel, _ = utils.filter_eligible_block_devices(
+            devs, include_names=[_by_id("sdb"), _by_id("sdd")])
         self.assertEqual(sorted(d["name"] for d in sel), ["sdb", "sdd"])
 
     def test_include_names_busy_device_is_hard_error(self):
         devs = [_blk("sdb", mounted=True)]
         with self.assertRaises(ValueError) as ctx:
-            utils.filter_eligible_block_devices(devs, include_names=["sdb"])
+            utils.filter_eligible_block_devices(devs, include_names=[_by_id("sdb")])
         self.assertIn("busy", str(ctx.exception))
 
     def test_include_names_absent_device_is_hard_error(self):
         with self.assertRaises(ValueError) as ctx:
-            utils.filter_eligible_block_devices([_blk("sdb")], include_names=["sdz"])
+            utils.filter_eligible_block_devices(
+                [_blk("sdb")], include_names=[_by_id("sdz")])
         self.assertIn("not present", str(ctx.exception))
 
     def test_exclude_names(self):
         devs = [_blk("sdb"), _blk("sdc")]
-        sel, _ = utils.filter_eligible_block_devices(devs, exclude_names=["sdb"])
+        sel, _ = utils.filter_eligible_block_devices(devs, exclude_names=[_by_id("sdb")])
         self.assertEqual([d["name"] for d in sel], ["sdc"])
 
     def test_include_serials(self):
@@ -185,7 +198,8 @@ class TestDetectLblkDevices(unittest.TestCase):
         part["parent_serial"] = "S2"
         devs = [_blk("sdb", serial="S1", size=42), part]
         with patch.object(utils.node_utils, "get_block_devices_info", return_value=devs):
-            result = utils.detect_lblk_devices(include_names=["sdb", "sdc1"])
+            result = utils.detect_lblk_devices(
+                include_names=[_by_id("sdb"), _by_id("sdc1")])
         self.assertEqual(result["sdc1"]["type"], "part")
         self.assertEqual(result["sdc1"]["partuuid"], "uuid1")
         self.assertEqual(result["sdc1"]["parent_serial"], "S2")

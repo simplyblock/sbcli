@@ -35,7 +35,7 @@ from simplyblock_core.controllers import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 
 logger = utils.get_logger(__name__)
 
@@ -144,9 +144,14 @@ def _start(task, cluster, owner, leader, rpc, distribs):
         if db.get_task_by_id(task.uuid).canceled:
             return _finish(task, "canceled")
         try:
-            started = bool(rpc.distr_migration_expansion_start(
-                name, qos_high_priority, job_size=constants.MIG_JOB_SIZE,
-                jobs=constants.MIG_PARALLEL_JOBS))
+            try:
+                started = bool(rpc.distr_migration_expansion_start(
+                    name, qos_high_priority, job_size=constants.MIG_JOB_SIZE,
+                    jobs=constants.MIG_PARALLEL_JOBS))
+            except RPCRemoteError as e:
+                logger.info("LVS %s: %s start answered %s; probing for a run in progress",
+                            owner.lvstore, name, e)
+                started = False
             # An error answer includes "Migration is already in progress" (a
             # run started before a lost status answer or a runner restart):
             # adopt that one instead of failing it.

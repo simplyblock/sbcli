@@ -15,8 +15,8 @@ for target_id, dev_id in MISMATCHES:
     expected_prefix = f"remote_{dev.alceml_bdev}"
     in_db = any(rd.get_id() == dev_id for rd in target.remote_devices)
     rpc = target.rpc_client(timeout=5, retry=1)
-    bdevs = rpc.get_bdevs()
-    found = [b["name"] for b in bdevs or [] if b["name"].startswith(expected_prefix)]
+    bdevs = rpc.bdev_list()
+    found = [b["name"] for b in bdevs if b["name"].startswith(expected_prefix)]
     print(
         f"target={target_id} target_ip={target.mgmt_ip} dev={dev_id} "
         f"dev_node={dev.node_id} expected={expected_prefix} in_db={in_db} found_bdevs={found}"

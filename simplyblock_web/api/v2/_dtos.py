@@ -64,6 +64,7 @@ ClusterStatus = Literal[
     "unready",
     "in_activation",
     "in_expansion",
+    "in_shrink",
 ]
 
 StoragePoolStatus = Literal["active", "inactive"]
@@ -81,6 +82,9 @@ StorageNodeStatus = Literal[
     "down",
     "in_removal",
     "pending_removal",
+    "migrating_devices",
+    "migrating_lvols",
+    "removed_failed",
 ]
 
 TaskStatus = Literal["new", "running", "suspended", "done"]
@@ -112,12 +116,11 @@ SyncReplicationRole = Literal["primary", "secondary"]
 #: Sync replication: the cluster-wide state, the worst over every LVS.
 SyncReplicationState = Literal["healthy", "degraded", "resyncing"]
 
-# Every JobSchedule.FN_* value the scheduler can persist must appear here, or a
-# single task of a missing type makes the whole /tasks list (and its SSE watch)
-# 500 with a pydantic literal_error. This is a hand-maintained duplicate of the
-# FN_* constants and drifts the moment one is added without the matching entry
-# (2026-10: a sync_promote task crashed every /tasks watch); test_task_endpoints'
-# test_serializes_every_task_function_name is the guard.
+# Every value of JobSchedule's FN_* constants: the /tasks endpoints serialize a
+# task of any type the scheduler can persist, so an omission here is not a
+# narrower API -- it is a 500 (pydantic literal_error) the moment such a task
+# exists. Keep in lockstep with simplyblock_core.models.job_schedule.JobSchedule;
+# test_task_endpoints.test_serializes_every_task_function_name pins the two together.
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -173,6 +176,14 @@ class ClusterDTO(BaseModel):
     nqn: str
     status: ClusterStatus
     is_re_balancing: bool
+    # Device/balancing tasks only; is_re_balancing also counts volume migrations.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
+    # A node removal is in progress; the status beside it is the calculated
+    # one (in_shrink is no longer set as a status).
+    is_shrinking: bool = False
+    # The status is degraded only because of the node being removed.
+    is_degraded_by_removal: bool = False
     block_size: util.Unsigned
     distr_ndcs: int
     distr_npcs: int
@@ -205,6 +216,10 @@ class ClusterDTO(BaseModel):
             nqn=model.nqn,
             status=cast(ClusterStatus, model.status),
             is_re_balancing=model.is_re_balancing,
+            is_data_rebalancing=model.is_data_rebalancing,
+            active_lvol_migrations=model.active_lvol_migrations,
+            is_shrinking=model.is_shrinking,
+            is_degraded_by_removal=model.is_degraded_by_removal,
             block_size=model.blk_size,
             distr_ndcs=model.distr_ndcs,
             distr_npcs=model.distr_npcs,
@@ -237,17 +252,16 @@ class ClusterLogEntryDTO(BaseModel):
     event: str
     level: str
     message: str
-    storage_id: int | None
+    storage_id: util.OptionalIndex
     vuid: int | None
     status: str
 
     @staticmethod
     def from_model(model: EventObj):
-        storage_id = None
-        if model.storage_id >= 0:
-            storage_id = model.storage_id
-        elif 'cluster_device_order' in model.object_dict:
-            storage_id = model.object_dict['cluster_device_order']
+        storage_id = (
+            model.storage_id if model.storage_id >= 0
+            else model.object_dict.get('cluster_device_order')
+        )
 
         message = model.message
         if model.event in ("device_status", "node_status"):
@@ -282,7 +296,8 @@ class DeviceDTO(BaseModel):
     health_check: bool | None
     retries_exhausted: bool
     size: int
-    cluster_device_order: util.Unsigned
+    # None until the device joins the cluster map (i.e. while it is `new`)
+    cluster_device_order: util.OptionalIndex
     io_error: bool
     is_partition: bool
     nvmf_ips: list[IPv4Address]
@@ -309,7 +324,8 @@ class DeviceDTO(BaseModel):
             cluster_device_order=model.cluster_device_order,
             io_error=model.io_error,
             is_partition=model.is_partition,
-            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",")],
+            # Empty until the device stack is created, so a `new` device has none
+            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",") if ip],
             nvmf_nqn=model.nvmf_nqn,
             nvmf_port=model.nvmf_port,
             capacity=CapacityStatDTO.from_model(
@@ -422,6 +438,9 @@ class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
     secondary_node_id: UUID | None
+    # The node's second HA replica. A drain prefers migration targets whose
+    # replica set does not include the node being removed.
+    tertiary_node_id: UUID | None = None
     status: StorageNodeStatus
     uptime: timedelta | None
     hostname: str
@@ -453,6 +472,7 @@ class StorageNodeDTO(BaseModel):
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
             secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
+            tertiary_node_id=UUID(model.tertiary_node_id) if model.tertiary_node_id else None,
             status=cast(StorageNodeStatus, model.status),
             uptime=model.uptime(),
             hostname=model.hostname,
@@ -810,6 +830,7 @@ class ConsistencyGroupDTO(BaseModel):
     name: str
     node_id: util.OptionalUUID = None
     lvs_name: str = ""
+    policy_id: util.OptionalUUID = None
     member_count: int
     last_group_seq: int
 
@@ -823,6 +844,11 @@ class ConsistencyGroupDTO(BaseModel):
             name=model.group_name,
             node_id=UUID(model.node_id) if model.node_id else None,
             lvs_name=model.lvs_name,
+            # The group carries its replication policy (attach_group_policy sets
+            # group.policy_id); expose it so a client can find the group's policy
+            # without the placement/flag heuristic, which a group-first attach
+            # leaves empty.
+            policy_id=UUID(model.policy_id.split('/')[-1]) if model.policy_id else None,
             member_count=current,
             last_group_seq=model.last_group_seq,
         )
@@ -841,6 +867,42 @@ class ConsistencyGroupMemberDTO(BaseModel):
 class ConsistencyGroupMemberJoinDTO(BaseModel):
     """Request body for the late join of an existing volume (design §4.5)."""
     lvol_id: str
+
+
+class ConsistencyGroupJoinPlanDTO(BaseModel):
+    """The steps a late join of an existing volume takes (co-location design
+    §5): ``migrate`` (live-migrate ``migrate_lvol_ids`` to ``target_node_id``
+    first), ``join``, ``colocate`` (move into ``target_nqn``)."""
+    steps: list[str]
+    target_node_id: str = ""
+    migrate_lvol_ids: list[str] = []
+    target_nqn: str = ""
+
+
+class ConsistencyGroupColocateDTO(BaseModel):
+    """Request body for moving a member into its group's subsystem."""
+    client_swap_ready: bool = False
+
+
+class ConsistencyGroupMigrationCreateDTO(BaseModel):
+    """Request body for a consistency-group migration: the group's scope (its
+    members, every subsystem sibling, transitively) moves to the node."""
+    target_node_id: str
+    host_nqn: str | None = None
+
+
+class ConsistencyGroupMigrationItemDTO(BaseModel):
+    nqn: str
+    kind: str
+    id: str
+    lvol_ids: list[str]
+    connect_strings: list[dict] = []
+
+
+class ConsistencyGroupMigrationDTO(BaseModel):
+    target_node_id: str = ""
+    status: str = "none"
+    items: list[ConsistencyGroupMigrationItemDTO] = []
 
 
 class ConsistencyGroupGenerationMemberDTO(BaseModel):
@@ -1011,6 +1073,23 @@ class ConsistencyGroupReplicationIntentDTO(BaseModel):
     replication_policy_id: UUID | None
 
 
+class ConsistencyGroupLineageMemberDTO(BaseModel):
+    """One protected volume of a consistency group: the handle its
+    PersistentVolume carries and the volume serving its data now."""
+    origin_handle: str
+    active_handle: str
+
+
+class ConsistencyGroupResolutionDTO(BaseModel):
+    """Where a consistency group's data lives now (replication_policy_controller.
+    resolve_group). ``active_*`` are empty when no group holds a live member."""
+    cluster_id: str
+    group_id: str
+    active_cluster_id: str = ""
+    active_group_id: str = ""
+    members: list[ConsistencyGroupLineageMemberDTO] = []
+
+
 class ConsistencyGroupReplicationStatusDTO(BaseModel):
     """The replication status of a consistency group as one unit.
 
@@ -1105,6 +1184,7 @@ class MigrationDTO(BaseModel):
     id: UUID
     lvol_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     phase: str
     status: str
@@ -1125,6 +1205,7 @@ class MigrationDTO(BaseModel):
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             phase=model.phase,
             status=model.status,
@@ -1145,6 +1226,7 @@ class BatchMigrationDTO(BaseModel):
     id: UUID
     cluster_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     target_nqn: str
     phase: str
@@ -1159,6 +1241,7 @@ class BatchMigrationDTO(BaseModel):
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             target_nqn=model.target_nqn,
             phase=model.phase,

@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import policy as backup_policy
@@ -20,14 +21,17 @@ from .._dtos import (
     BackupManifestDTO,
     BackupPolicyDTO,
 )
+from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from ..util import CreationResponseFormatParameter, creation_response
 
 api = APIRouter()
 db = DBController()
 
 
-@api.get('/', name='clusters:backups:list')
-def list_backups(cluster: Cluster) -> list[BackupDTO]:
+@api.get('/', name='clusters:backups:list', response_model=list[BackupDTO], responses=WATCH_RESPONSES)
+def list_backups(cluster: Cluster, watch: WatchParam = False) -> Union[list[BackupDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(backup_controller.watch_backups(cluster.get_id()), BackupDTO.from_model)
     backups = db.get_backups(cluster.get_id())
     backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in backups]
@@ -192,8 +196,10 @@ def delete_backups(cluster: Cluster, volume_id: UUID) -> Response:
 policy_api = APIRouter()
 
 
-@policy_api.get('/', name='clusters:backup-policies:list')
-def list_policies(cluster: Cluster) -> list[BackupPolicyDTO]:
+@policy_api.get('/', name='clusters:backup-policies:list', response_model=list[BackupPolicyDTO], responses=WATCH_RESPONSES)
+def list_policies(cluster: Cluster, watch: WatchParam = False) -> Union[list[BackupPolicyDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(backup_policy.watch_policies(cluster.get_id()), BackupPolicyDTO.from_model)
     policies = db.get_backup_policies(cluster.get_id())
     return [BackupPolicyDTO.from_model(p) for p in policies]
 

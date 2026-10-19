@@ -33,12 +33,12 @@ class _Base(unittest.TestCase):
         # that always answers "7" hides a mismatch between the claim and the
         # persisted value.
         self.rpc.nvmf_subsystem_add_ns2.side_effect = (
-            lambda *a, **kw: (str(kw.get("nsid") or 7), None))
+            lambda *a, **kw: str(kw.get("nsid") or 7))
         self.rpc.nvmf_subsystem_add_ns.side_effect = (
             lambda *a, **kw: str(kw.get("nsid") or 7))
-        self.rpc.get_bdevs.return_value = [
-            {"uuid": "lvol-bdev-uuid",
-             "driver_specific": {"lvol": {"blobid": 33}}}]
+        self.rpc.bdev_get.return_value = {
+            "uuid": "lvol-bdev-uuid",
+            "driver_specific": {"lvol": {"blobid": 33}}}
 
         self.snode = MagicMock(name="snode")
         self.snode.rpc_client.return_value = self.rpc

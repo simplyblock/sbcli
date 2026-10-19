@@ -14,6 +14,7 @@ Two defences: do not enqueue such a task, and if one exists anyway, end it
 instead of retrying.
 """
 import inspect
+from types import SimpleNamespace
 
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -74,7 +75,8 @@ def test_undeliverable_forward_task_is_ended_not_retried(monkeypatch):
         raise AssertionError("looked up a storage node with a blank id")
 
     monkeypatch.setattr(sr.db, "get_storage_node_by_id", _boom)
-    monkeypatch.setattr(sr, "_source_leader_node", lambda s: object())
+    monkeypatch.setattr(sr, "_select_source_node",
+                        lambda s, exclude=(): (SimpleNamespace(get_id=lambda: "N_SRC"), "primary"))
     # The chain-completeness gate has its own suite
     # (test_replication_chain_completeness); this test is about the
     # destination guard behind it.
@@ -99,7 +101,8 @@ def test_volume_with_a_destination_is_still_processed(monkeypatch):
         raise RuntimeError("stop here — past the guard is all this test needs")
 
     monkeypatch.setattr(sr.db, "get_storage_node_by_id", _node)
-    monkeypatch.setattr(sr, "_source_leader_node", lambda s: object())
+    monkeypatch.setattr(sr, "_select_source_node",
+                        lambda s, exclude=(): (SimpleNamespace(get_id=lambda: "N_SRC"), "primary"))
     monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
                         lambda snode, snapshot, to_source: ("ok", None, ""))
     try:
@@ -108,3 +111,56 @@ def test_volume_with_a_destination_is_still_processed(monkeypatch):
         pass
     assert reached.get("node") == "N_DEST"
     assert task.status != JobSchedule.STATUS_DONE
+
+
+def test_landing_copy_inherits_source_subsystem_packing(monkeypatch):
+    """Regression (2026-09-30): the REP_* landing copy a transfer creates was
+    added WITHOUT the source's namespaced/max_namespace_per_subsys, so it
+    defaulted to a one-namespace subsystem. Every replicated copy — and every
+    clone taken from it (test-failover, fail-over) — then landed in its own
+    subsystem at NSID 1, ignoring a max_namespace_per_subsys=10 storage class:
+    a namespaced subsystem capped at one namespace can never be joined, so the
+    packing silently degenerates to one-subsystem-per-volume. The landing copy
+    must carry the source volume's subsystem-packing capacity."""
+    lvol = _lvol("LV1", repl_node="N_DEST")
+    lvol.max_namespace_per_subsys = 10
+    lvol.ha_type = "ha"
+    snap = _snap("S1", lvol)
+    snap.snap_name = "snap1"
+    snap.size = 1073741824
+    snap.cluster_id = "CL_SRC"
+    task = _Task()
+
+    class _Node:
+        cluster_id = "CL_SRC"
+
+        def get_id(self):
+            return "N_DEST"
+
+    monkeypatch.setattr(sr, "_select_source_node", lambda s, exclude=(): (_Node(), "primary"))
+    monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
+                        lambda snode, snapshot, to_source: ("ok", None, ""))
+    monkeypatch.setattr(sr.db, "get_storage_node_by_id", lambda _id: _Node())
+    monkeypatch.setattr(sr, "_destination_pool_uuid", lambda *a, **k: "POOL_REMOTE")
+
+    def _no_existing(name, include_deleted=False):
+        raise KeyError(name)
+
+    monkeypatch.setattr(sr.db, "get_lvol_by_name", _no_existing)
+
+    captured = {}
+
+    def _fake_add(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return None, "stop"          # end the function cleanly after the call
+
+    monkeypatch.setattr(sr.lvol_controller, "add_lvol_ha", _fake_add)
+
+    sr.process_snap_replicate_start(task, snap)
+
+    assert captured, "never reached the landing-copy creation"
+    kw = captured["kwargs"]
+    assert kw.get("max_namespace_per_subsys") == 10, \
+        "the landing copy must inherit the source's max_namespace_per_subsys"
+    assert kw.get("namespaced") is True, \
+        "a source with a shareable subsystem must produce a namespaced landing copy"

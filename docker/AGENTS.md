@@ -118,8 +118,10 @@ let the scan go green while the published image still carries the vulnerability.
 - **No compiler toolchain, no `python3-pip`.** Every dependency resolves to a `cp314t` wheel and
   `foundationdb` is a pure-Python sdist, so nothing needs to compile. If a future dependency has
   no free-threaded wheel the build fails loudly — that is the intended signal, not a reason to add
-  `gcc` back. `uv` creates the venv without `pip`/`setuptools`/`wheel`, so there is nothing to
-  uninstall and no vendored pip bundle for the image scan to flag.
+  `gcc` back. `uv` creates the venv without `pip`/`setuptools`/`wheel`, but the managed
+  interpreter under `/opt/python` ships its own `pip`, so the builder stage deletes it right
+  after `uv python install`. That keeps pip's vendored bundle (urllib3, msgpack, setuptools) out
+  of the image, so the scan has no `.trivyignore` to maintain — do not re-add one for pip.
 
 - **No `RUN --mount=type=cache`.** Cache mounts are not exported to the `gha` or `registry` cache
   backends, so on a fresh CI runner they are never populated.

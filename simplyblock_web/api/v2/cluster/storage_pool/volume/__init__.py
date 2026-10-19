@@ -313,8 +313,7 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
 
 
 class _SnapshotParams(BaseModel):
-    name: str
-    backup: bool = False
+    name: util.SnapshotName
 
 
 @instance_api.post('/snapshots', name='clusters:storage-pools:volumes:snapshots:create', status_code=201, responses={201: {"content": None}})
@@ -324,7 +323,7 @@ def create_snapshot(
         parameters: _SnapshotParams
 ) -> Response:
     snapshot_id, err_or_false = snapshot_controller.add(
-        volume.get_id(), parameters.name, backup=parameters.backup
+        volume.get_id(), parameters.name
     )
     if err_or_false:
         # FIXME: snapshot_controller.add() should raise a named exception directly
@@ -362,7 +361,7 @@ def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 @instance_api.post('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
 def clone(
         request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
-        clone_name: str,
+        clone_name: util.SnapshotName,
         new_size: str | None = None,
         pvc_name: str | None = None,
 ) -> Response:
@@ -389,6 +388,20 @@ def backups(volume: Volume) -> builtins.list[BackupDTO]:
     rows = db.get_backups_by_lvol_id(volume.get_id())
     rows = sorted(rows, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in rows]
+
+
+@instance_api.post('/backups', name='clusters:storage-pools:volumes:backups:create', status_code=201, responses={201: {"content": None}})
+def create_backup(
+        request: Request,
+        cluster: Cluster, pool: StoragePool, volume: Volume,
+) -> Response:
+    backup_id = backup_controller.backup_lvol(volume.get_id())
+
+    entity_url = request.app.url_path_for(
+        'clusters:backups:detail',
+        cluster_id=cluster.get_id(), backup_id=backup_id,
+    )
+    return Response(status_code=201, headers={'Location': str(entity_url)})
 
 
 @instance_api.delete(

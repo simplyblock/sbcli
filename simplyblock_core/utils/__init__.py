@@ -1427,11 +1427,7 @@ def addNvmeDevices(rpc_client, snode, devs):
             nvme_controller = ctr_map[pcie]
             nvme_bdevs = []
             # Node-add cold path: full dump is fine, the node carries no lvols yet.
-            bdevs = rpc_client.get_bdevs(all_bdevs=True)
-            if bdevs is None:
-                # None is an RPC failure (timeout / non-200), not an empty
-                # list; fail loudly instead of crashing on a None iteration.
-                raise Exception(f"get_bdevs failed on {rpc_client.host}")
+            bdevs = rpc_client.bdev_list()
             for bdev in bdevs:
                 if bdev['name'].startswith(nvme_controller):
                     nvme_bdevs.append(bdev['name'])
@@ -1444,8 +1440,7 @@ def addNvmeDevices(rpc_client, snode, devs):
             rpc_client.bdev_examine(nvme_bdev)
             rpc_client.bdev_wait_for_examine()
 
-            ret = rpc_client.get_bdevs(nvme_bdev)
-            nvme_dict = ret[0]
+            nvme_dict = rpc_client.bdev_get(nvme_bdev)
             nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
@@ -1568,7 +1563,7 @@ def addAioDevices(rpc_client, snode, blk_entries):
     next_physical_label = snode.physical_label
     for entry in blk_entries:
         bdev_name = aio_bdev_name_for_serial(entry["serial"])
-        ret = rpc_client.get_bdevs(bdev_name)
+        ret = rpc_client.bdev_get(bdev_name)
         if not ret:
             # Prefer the by-id path as the filename so a udev rename between
             # resolution and create cannot swap devices under us.
@@ -1581,10 +1576,9 @@ def addAioDevices(rpc_client, snode, blk_entries):
         rpc_client.bdev_examine(bdev_name)
         rpc_client.bdev_wait_for_examine()
 
-        ret = rpc_client.get_bdevs(bdev_name)
-        if not ret:
+        bdev = rpc_client.bdev_get(bdev_name)
+        if not bdev:
             raise Exception(f"AIO bdev {bdev_name} not found after create on {rpc_client.host}")
-        bdev = ret[0]
         total_size = bdev['block_size'] * bdev['num_blocks']
         if total_size == 0:
             logger.warning(f"Skipping zero-size block device {entry['name']} ({bdev_name})")
@@ -1790,6 +1784,89 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
     return nvmes
 
 
+def device_selectors(dev) -> set:
+    """Every spelling one block device may be selected by.
+
+    The persistent /dev/disk links, and only those. They are built from what the
+    device reports about itself and they follow it: on the lab workers the disk
+    the kernel calls sdb is the one the hypervisor calls drive-scsi0 and sda is
+    drive-scsi2, so a host that probes its controllers in another order hands
+    each kernel name to another disk while the links stay put.
+
+    The kernel name (``sdb``) and the kernel path (``/dev/sdb``) are not here.
+    They name a position in one boot's enumeration order, and a selection is not
+    resolved once: ``sn_config_file`` is discarded and written whole on every
+    configure, so nothing carries a resolution forward and the selector is read
+    again at every node restart. A kernel name in it means the identity of a disk
+    in a deployment is whichever disk the kernel enumerated into that position
+    this time, which is the defect persistent names exist to close rather than a
+    convenience to keep beside them.
+
+    Every link the device answers to is a selector, not only the preferred one.
+    The side that records a device and the side that looks it up again run
+    different code on different machines, and a lookup matched against one
+    side's ranking would miss a device present under another of its own names.
+    ``by_id_path`` is included beside ``by_id_paths`` so an inventory taken
+    before the second existed still resolves.
+    """
+    selectors = set(dev.get("by_id_paths") or [])
+    selectors.add(dev.get("by_id_path", ""))
+    selectors.discard("")
+    return selectors
+
+
+def _refuse_impersistent_names(names, devices, flag) -> None:
+    """Refuse a selector that is a kernel name, saying what to use instead.
+
+    The message carries the persistent names the device does answer to, so the
+    correction is a copy rather than a trip to ``ls -l /dev/disk/by-id``, and
+    names ``--blk-serials`` for a device udev published no link for: that device
+    has no persistent name to offer and its serial is the only identity it has.
+    """
+    impersistent = {}
+    for dev in devices:
+        for kernel in (dev.get("name", ""), dev.get("device_path", "")):
+            if kernel and kernel in names:
+                impersistent[kernel] = sorted(device_selectors(dev))
+    if not impersistent:
+        return
+
+    parts = []
+    for kernel, persistent in sorted(impersistent.items()):
+        if persistent:
+            parts.append(f"{kernel} (use {' or '.join(persistent)})")
+        else:
+            parts.append(f"{kernel} (udev published no persistent name for it; "
+                         f"select it with --blk-serials instead)")
+    raise ValueError(
+        f"{flag} takes a persistent /dev/disk name, and these are kernel names: "
+        f"{', '.join(parts)}. A kernel name is a position in this boot's "
+        f"enumeration order, and the selection is resolved again at every node "
+        f"restart, so it names another disk after a reboot that probes the "
+        f"controllers in another order")
+
+
+def _index_by_selector(devices) -> dict:
+    """Devices indexed by every spelling each one answers to."""
+    return {selector: dev for dev in devices for selector in device_selectors(dev)}
+
+
+def _unique_devices(devices) -> list:
+    """The devices given, in order, with a device named twice kept once.
+
+    A selection may name one device by two of its spellings -- its kernel name
+    and one of its links -- and taking it twice would fail the duplicate-serial
+    check below with a message about identity rather than about the selection.
+    """
+    seen, out = set(), []
+    for dev in devices:
+        if id(dev) in seen:
+            continue
+        seen.add(id(dev))
+        out.append(dev)
+    return out
+
+
 def filter_eligible_block_devices(devices, include_names=None, exclude_names=None,
                                   include_serials=None, force_format=False):
     """Eligibility filter for the lblk cluster mode (pure — unit-testable).
@@ -1804,12 +1881,17 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     add-node); a partition only needs to be idle — its siblings may be in
     use by the OS or other software.
 
-    Selection is one of: ``include_names`` (explicitly requested names must
+    Selection is one of: ``include_names`` (explicitly requested devices must
     exist AND be eligible — a busy requested device is a hard error),
     ``exclude_names`` (all eligible minus these), ``include_serials``
     (matched against the serial/WWN identity). Without a selection, every
     eligible whole disk is taken (partitions are never auto-selected — they
     must be requested explicitly by name or serial).
+
+    The two name channels take a persistent /dev/disk name and refuse a kernel
+    name or kernel path, because the selection is re-resolved at every node
+    restart and a kernel name does not survive one. ``device_selectors`` is
+    where that set is built and says why the kernel spellings are gone.
 
     Returns ``(eligible_devices, rejected)`` where rejected is a list of
     ``(device_dict, reason)``. Raises ValueError on a requested-but-
@@ -1847,14 +1929,21 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
         else:
             eligible.append(dev)
 
-    by_name = {d["name"]: d for d in eligible}
-    rejected_by_name = {d["name"]: r for d, r in rejected}
+    _refuse_impersistent_names(include_names, devices, "--blk-names")
+    _refuse_impersistent_names(exclude_names, devices, "--blk-names-exclude")
+
+    by_selector = _index_by_selector(eligible)
+    rejected_by_selector = {
+        selector: reason
+        for dev, reason in rejected
+        for selector in device_selectors(dev)
+    }
     if include_names:
-        missing = include_names - set(by_name)
+        missing = sorted(include_names - set(by_selector))
         if missing:
-            details = {n: rejected_by_name.get(n, "not present") for n in sorted(missing)}
+            details = {n: rejected_by_selector.get(n, "not present") for n in missing}
             raise ValueError(f"requested block devices are not eligible: {details}")
-        selected = [by_name[n] for n in sorted(include_names)]
+        selected = _unique_devices(by_selector[n] for n in sorted(include_names))
     elif include_serials:
         by_serial = {d["serial"]: d for d in eligible}
         missing_serials = include_serials - set(by_serial)
@@ -1866,7 +1955,8 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
         # Auto-selection takes whole disks only: silently absorbing idle
         # partitions of otherwise-used disks would be a data-loss trap.
         selected = [d for d in eligible
-                    if d["name"] not in exclude_names and d.get("type") == "disk"]
+                    if not (device_selectors(d) & exclude_names)
+                    and d.get("type") == "disk"]
 
     serials = [d["serial"] for d in selected]
     dupes = {s for s in serials if serials.count(s) > 1}

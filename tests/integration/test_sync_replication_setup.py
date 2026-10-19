@@ -353,7 +353,7 @@ class _AddNodeWorld:
             patch.object(storage_node_ops.utils, "get_storage_node_api_log_type", return_value=None),
             patch.object(storage_node_ops.time, "sleep"),
             patch("simplyblock_core.models.storage_node.RPCClient"),
-            patch.object(storage_node_ops, "addNvmeDevices", return_value=[]),
+            patch.object(storage_node_ops.utils, "addNvmeDevices", return_value=[]),
             patch.object(storage_node_ops, "_connect_to_remote_devs", return_value=[]),
             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]),
             patch.object(storage_node_ops, "distr_controller"),

@@ -30,6 +30,7 @@ from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import ReleaseUpgradeError, UpgradePlugin
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -86,20 +87,30 @@ class JCCompressionUpgrade(UpgradePlugin):
         suspended = []
         try:
             for member, jm_vuid in pairs:
-                ret, err = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=True)
-                if ret:
-                    suspended.append((member, jm_vuid))
-                elif err:
-                    logger.info(f"JC compression suspend not applicable on node "
-                                f"{member.get_id()}, JM: {jm_vuid}: {err}")
-                else:
+                try:
+                    ret = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=True)
+                except RPCException:
                     raise ReleaseUpgradeError(
                         f"failed to suspend JC compression on node {member.get_id()}, JM: {jm_vuid}")
+                if not ret:
+                    logger.info(f"JC compression suspend not applicable on node "
+                                f"{member.get_id()}, JM: {jm_vuid}")
+                else:
+                    suspended.append((member, jm_vuid))
+
+            def _still_running(member, jm_vuid):
+                try:
+                    return member.rpc_client().jc_compression_get_status(jm_vuid)
+                except RPCException as e:
+                    logger.info(f"JC compression status check failed on node "
+                                f"{member.get_id()}, JM: {jm_vuid} (treating as still "
+                                f"running): {e}")
+                    return True
 
             pending = list(suspended)
             for _ in range(DRAIN_MAX_POLLS):
                 pending = [(member, jm_vuid) for member, jm_vuid in pending
-                           if member.rpc_client().jc_compression_get_status(jm_vuid)]
+                           if _still_running(member, jm_vuid)]
                 if not pending:
                     break
                 logger.info("JC compression still running on: "
@@ -160,16 +171,15 @@ class JCCompressionUpgrade(UpgradePlugin):
                                 f"resume task queued")
                 continue
             try:
-                ret, err = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
+                ret = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
             except Exception as e:
                 logger.error(e)
-                ret, err = False, None
-            if ret:
-                messages.append(f"node {member_id} JM:{jm_vuid}: compression resumed")
-            elif err:
-                messages.append(f"node {member_id} JM:{jm_vuid}: resume not applicable: {err}")
-            else:
                 if not tasks_controller.get_jc_comp_task(cluster_id, member_id, jm_vuid=jm_vuid):
                     tasks_controller.add_jc_comp_resume_task(cluster_id, member_id, jm_vuid=jm_vuid)
                 messages.append(f"node {member_id} JM:{jm_vuid}: resume failed, resume task queued")
+            else:
+                if ret:
+                    messages.append(f"node {member_id} JM:{jm_vuid}: compression resumed")
+                else:
+                    messages.append(f"node {member_id} JM:{jm_vuid}: resume not applicable")
         return messages

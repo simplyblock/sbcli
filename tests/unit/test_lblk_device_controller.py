@@ -12,7 +12,7 @@ Covered:
   - restart_device: aio path recreates the missing AIO bdev (with qd
     sampling re-armed) instead of the PCIe attach sequence.
   - late-event gate: for aio devices the "controller gone?" probe is
-    get_bdevs_2 on the base bdev; a present bdev skips the late event.
+    bdev_get on the base bdev; a present bdev skips the late event.
 """
 
 import json
@@ -46,7 +46,7 @@ class TestResetStorageDeviceAio(unittest.TestCase):
         snode = MagicMock()
         snode.cluster_id = "cluster-1"
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": "aio_S1"}] if bdev_present else None
+        rpc.bdev_get.return_value = {"name": "aio_S1"} if bdev_present else None
         snode.rpc_client.return_value = rpc
 
         db = MagicMock()
@@ -107,8 +107,8 @@ class TestNewDeviceFromFailedAio(unittest.TestCase):
         rpc = MagicMock()
         state = {"present": bdev_present_initially}
 
-        def _get_bdevs(name):
-            return [{"name": name}] if state["present"] else None
+        def _bdev_get(name):
+            return {"name": name} if state["present"] else None
 
         def _aio_create(name, filename, block_size=0):
             if create_ok:
@@ -116,7 +116,7 @@ class TestNewDeviceFromFailedAio(unittest.TestCase):
                 return name
             return None
 
-        rpc.get_bdevs.side_effect = _get_bdevs
+        rpc.bdev_get.side_effect = _bdev_get
         rpc.bdev_aio_create.side_effect = _aio_create
         node.rpc_client.return_value = rpc
 
@@ -171,8 +171,8 @@ class TestRestartDeviceAio(unittest.TestCase):
 
         rpc = MagicMock()
         state = {"present": bdev_present}
-        rpc.get_bdevs.side_effect = (
-            lambda name: [{"name": name}] if state["present"] else None)
+        rpc.bdev_get.side_effect = (
+            lambda name: {"name": name} if state["present"] else None)
 
         def _aio_create(name, filename, block_size=0):
             state["present"] = True
@@ -234,7 +234,7 @@ class TestLateEventGateAio(unittest.TestCase):
         event_node = MagicMock()
         event_node.get_id.return_value = "node-2"
         rpc = MagicMock()
-        rpc.get_bdevs_2.return_value = ([{"name": "aio_S1"}], None)
+        rpc.bdev_get.return_value = {"name": "aio_S1"}
         event_node.rpc_client.return_value = rpc
 
         event = MagicMock()
@@ -253,7 +253,7 @@ class TestLateEventGateAio(unittest.TestCase):
                           return_value=False):
             collector.process_device_event(event, collector.logger)
 
-        rpc.get_bdevs_2.assert_called_once_with("aio_S1")
+        rpc.bdev_get.assert_called_once_with("aio_S1")
         rpc.bdev_nvme_controller_list_2.assert_not_called()
         self.assertIn("skipping", event.status)
 

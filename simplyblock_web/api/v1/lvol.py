@@ -6,6 +6,7 @@ from flask import Blueprint, request
 from simplyblock_core import db_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_web import utils
 
@@ -293,10 +294,12 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
+    if backup_controller.is_reserved_snapshot_name(cl_data['snapshot_name']):
+        return utils.get_response(None, backup_controller.RESERVED_SNAPSHOT_NAME_ERROR, 400)
+
     snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
-        cl_data['snapshot_name'],
-        backup=cl_data.get('backup', False))
+        cl_data['snapshot_name'])
     return utils.get_response(snapID, err, http_code=400)
 
 
@@ -339,6 +342,8 @@ def clone():
     cl_data = request.get_json()
     lvol_id = cl_data['lvol_id']
     clone_name = cl_data['clone_name']
+    if backup_controller.is_reserved_snapshot_name(clone_name):
+        return utils.get_response(None, backup_controller.RESERVED_SNAPSHOT_NAME_ERROR, 400)
     pvc_name = cl_data.get('pvc_name', None)
     new_size = 0
     if 'new_size' in cl_data:

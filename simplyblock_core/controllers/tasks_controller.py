@@ -15,6 +15,7 @@ from simplyblock_core.controllers import (
 )
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -364,8 +365,15 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             return False
 
     elif function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+        # One task per snapshot, whatever its direction flag: a forward task
+        # and a replicate_to_source task of the same snapshot resolve to the
+        # same destination once the volume's replication_node_id points at
+        # the fail-back site, and the second one transferred into the
+        # landing volume the first had already converted -- a write into a
+        # snapshot, which dropped the target LVS's leadership (2026-10-02,
+        # LVS_1 on site A, snapshot 06f40e39).
         task_id = get_snapshot_replication_task(
-            cluster_id, function_params['snapshot_id'], function_params['replicate_to_source'])
+            cluster_id, function_params['snapshot_id'], None)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -413,6 +421,40 @@ def add_device_mig_task_for_node(node_id):
     sub_tasks = []
     node = db.get_storage_node_by_id(node_id)
     cluster_id = node.cluster_id
+
+    # A rebalance spreads data across the CURRENT placement, and a removal is in
+    # the middle of changing it: the departing node's slots are already dead
+    # (storage_ID=-1) in every peer's cluster map, so these migrations run
+    # against them and fail -- "mig error: 576" -- with max_retry=-1, i.e. for
+    # ever.
+    #
+    # That is not merely wasted work, because it deadlocks the removal that
+    # made it pointless. An unfinished balancing master keeps the cluster in
+    # REBALANCING, and migration_controller.create_migration refuses to run
+    # there ("Cluster ... is rebalancing; wait for it to finish before
+    # migrating") -- so the removal's own volume drain can never start, the
+    # node can never finish leaving, and the placement the rebalance is
+    # waiting on can never settle. Observed live on cluster a6e7569d
+    # (2026-09-15): two subtasks, 182 retries in ~20 minutes, progress
+    # restarting from zero each lap.
+    #
+    # Cluster-wide, not per-node: skipping only the departing node still queues
+    # tasks for its healthy peers, which is the same rebalance against the same
+    # moving placement.
+    #
+    # Skipping is safe: the node whose recovery triggered this is ONLINE and
+    # serving either way, and the removal re-balances what it moves as it goes.
+    # The next legitimate trigger after the removal settles rebalances against
+    # a topology that has stopped moving.
+    departing = [n.get_id() for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+                 if n.status in StorageNode.DEPARTING_STATUSES]
+    if departing:
+        logger.info(
+            f"Skipping cluster rebalance for {node_id}: node removal in "
+            f"progress ({', '.join(departing)}); the placement it would "
+            f"balance against is still changing")
+        return False
+
     master_task = None
     for task in  db.get_job_tasks(cluster_id):
         if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
@@ -422,7 +464,14 @@ def add_device_mig_task_for_node(node_id):
                 break
 
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Every departing status, not just REMOVED. A device-migration task runs
+        # ON the node it is queued for, and the runner will not run one whose
+        # node is not ONLINE -- so a task queued against a node that is on its
+        # way out waits for a recovery that is never coming. Testing only
+        # REMOVED left the whole of a removal's drain, where the node is still
+        # present but no longer returning, inside the gap. The sibling queuing
+        # functions above read the same set for the same reason.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
 
         for bdev in node.lvstore_stack:
@@ -883,23 +932,53 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        # IN_REMOVAL nodes have a dead SPDK (shut down by the removal flow);
-        # a migration task targeting their distribs can never run and would
-        # stall the node-removal completion check forever. Skip them like
-        # already-REMOVED nodes.
-        if node.status == StorageNode.STATUS_REMOVED:
+        # A departing node cannot run a migration task: its SPDK is stopped, or
+        # about to be, and the runner refuses any task whose node is not ONLINE.
+        # Queued anyway, such a task retries forever and the removal's own
+        # completion check waits on it -- the device never reaches
+        # failed_and_migrated, so the drain sits in its device phase for good.
+        #
+        # This used to name only STATUS_REMOVED while the comment claimed it
+        # covered IN_REMOVAL too, which held while removal failed devices last:
+        # by then the node's lvstore was already torn down, so it had no distrib
+        # left to queue against. A drain that fails devices FIRST still has one,
+        # and deadlocked on exactly this (7-node cluster, 2026-09-25: six tasks
+        # stuck on the suspended node, "node is not online, retrying").
+        #
+        # The departing node's distribs still have to be migrated; the block
+        # below queues them onto its secondary or tertiary, which can run them.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
                           max_retry=-1, function_params={'distr_name': bdev['name']})
+
+    # add device migration tasks for device host distribs on other nodes (secondary) in case the host is in removal process
+    device_node = db.get_storage_node_by_id(device.node_id)
+    if device_node.status in StorageNode.DEPARTING_STATUSES and device_node.status != StorageNode.STATUS_REMOVED:
+        secondary_node = db.get_storage_node_by_id(device_node.secondary_node_id)
+        if secondary_node and secondary_node.status not in StorageNode.DEPARTING_STATUSES:
+            for bdev in device_node.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, secondary_node.get_id(), device.get_id(),
+                              max_retry=-1, function_params={'distr_name': bdev['name']})
+        else:
+            tertiary_node = db.get_storage_node_by_id(device_node.tertiary_node_id)
+            if tertiary_node and tertiary_node.status not in StorageNode.DEPARTING_STATUSES:
+                for bdev in device_node.lvstore_stack:
+                    if bdev['type'] == "bdev_distr":
+                        _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, tertiary_node.get_id(), device.get_id(),
+                                  max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
 
 
 def add_new_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Same reason as add_device_failed_mig_task: a departing node cannot
+        # run the task, so queueing it strands work nothing will ever do.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
@@ -921,21 +1000,56 @@ def add_node_add_task(cluster_id, function_params):
 
     A task that already exists is the answer to "add this host", so it is
     returned, which is what `ensure_node_restart_task` does with its own repeat.
+
+    But the dedup check is itself a plain read-then-write, so two concurrent
+    posts for the same host can both pass it before either commits, and both
+    go on to create a task (the create-time twin of the cluster_add mesh race
+    -- see constants.py). Serialize check-then-create per (cluster, node_addr)
+    behind a DbLock so only one of them writes.
     """
-    existing = _validate_new_task_node_add(
-        cluster_id, (function_params or {}).get("node_addr"))
-    if existing:
-        return existing
-    return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
-                     function_params=function_params, max_retry=11)
+    node_addr = (function_params or {}).get("node_addr")
+    if not node_addr:
+        # No host identity to dedup or serialize on; unchanged from before.
+        return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
+                         function_params=function_params, max_retry=11)
+
+    lock = DbLock(f"node_add_task/{cluster_id}/{node_addr}",
+                  timeout=constants.NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC)
+    try:
+        with lock:
+            existing = _validate_new_task_node_add(cluster_id, node_addr)
+            if existing:
+                return existing
+            return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
+                             function_params=function_params, max_retry=11)
+    except DbLockBusyError as busy:
+        # The holder is inside this same read-then-write, not the add_node
+        # mesh section -- a couple of FDB round trips, done well within the
+        # wait above. If it is somehow still not done, its write has already
+        # landed or is about to: look for what it left rather than failing an
+        # otherwise-valid request. DbLockBusyError only ever comes from
+        # entering the lock (the block above can't raise it), so this except
+        # can't accidentally swallow one from `_add_task`.
+        existing = _validate_new_task_node_add(cluster_id, node_addr)
+        if existing:
+            return existing
+        raise ValueError(
+            f"An add-node task for '{node_addr}' is already being created "
+            f"(held by {busy.owner or 'unknown'})") from busy
 
 
 def add_node_removal_task(cluster_id, node_id, function_params=None):
-    # max_retry=-1: the removal runner drives a multi-step, possibly multi-hour
-    # orchestration (shutdown -> LVS rewire -> device fail+migrate). Migration
-    # waits legitimately suspend-and-retry many times; do not cap retries.
+    # Bounded, at the ceiling the runner enforces (NODE_REMOVAL_MAX_RETRY, one
+    # retry per TASK_EXEC_INTERVAL_SEC across NODE_REMOVAL_MAX_WAIT_SEC). The
+    # orchestration is multi-step and its migration waits legitimately
+    # suspend-and-retry many times, which is why the ceiling is hours, not
+    # minutes -- but it has to exist: this was queued with max_retry=-1 while
+    # the runner's check reads `0 < max_retry <= retry`, so the ceiling the
+    # runner and its test both described could never fire, and a removal that
+    # could not finish retried every 10s for ever (2026-09-28 review).
     return _add_task(JobSchedule.FN_NODE_REMOVAL, cluster_id, node_id, "",
-                     function_params=function_params or {}, max_retry=-1)
+                     function_params=function_params or {},
+                     max_retry=constants.NODE_REMOVAL_MAX_RETRY)
 
 
 def get_active_node_removal_task(cluster_id, node_id):
@@ -1197,11 +1311,13 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     return False
 
 def get_snapshot_replication_task(cluster_id, snapshot_id, replicate_to_source):
+    """The unfinished replication task of *snapshot_id*, or False.
+    ``replicate_to_source`` None matches either direction."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.function_params["snapshot_id"] == snapshot_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                if task.function_params["replicate_to_source"] == replicate_to_source:
+                if replicate_to_source is None or task.function_params.get("replicate_to_source") == replicate_to_source:
                     return task.uuid
     return False
 
@@ -1213,7 +1329,7 @@ def add_backup_task(backup):
         backup.cluster_id,
         backup.node_id,
         "",
-        max_retry=constants.BACKUP_MAX_RETRIES,
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
         function_params={
             "backup_id": backup.uuid,
         },

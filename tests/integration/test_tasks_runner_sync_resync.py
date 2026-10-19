@@ -21,7 +21,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.sync_replication import SyncReplicationEvent
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCConnectionError, RPCException, RPCRemoteError
 from simplyblock_core.services import tasks_runner_sync_resync as runner
 from simplyblock_core.utils import ttl_cache
 from tests.integration import test_sync_replication_lvs_stack as stack
@@ -183,9 +183,7 @@ class TestConvergence:
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
         catchup.migration["distrib_11"] = {"name": "distrib_11", "status": "running", "error": 0}
-        rpc = rpcs[a[0].get_id()]
-        rpc.distr_migration_expansion_start.side_effect = \
-            lambda name, *args, **kwargs: None if name == "distrib_11" else catchup._start(name)
+        _refused(rpcs[a[0].get_id()], catchup, RPCRemoteError(message=IN_PROGRESS, code=-16))
         _desync(a[0])
         task = _task(db, cluster)
         _pass(task)
@@ -193,6 +191,66 @@ class TestConvergence:
         assert _fresh_task(db, task).retry == 0
         catchup.complete()
         assert _pass(task) is True
+
+
+IN_PROGRESS = "Migration is already in progress"
+
+
+def _refused(rpc, catchup, error):
+    """The start of distrib_11 raises ``error``, the others start."""
+    def _start(name, *args, **kwargs):
+        if name == "distrib_11":
+            raise error
+        return catchup._start(name)
+    rpc.distr_migration_expansion_start.side_effect = _start
+
+
+class TestRefusedStart:
+    """A start the leader refuses: a remote error is followed by the status
+    probe (an "already in progress" run is adopted), a transport error fails
+    the run without a probe."""
+
+    def _failed(self, db, task):
+        fresh = _fresh_task(db, task)
+        assert (fresh.status, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, 1)
+        assert "distrib_11: start" in fresh.function_result
+        return fresh
+
+    def test_a_refusal_without_a_run_in_progress_fails_the_run(self, db, rpcs, clock):
+        cluster, a, _, _ = _layout(db)
+        rpcs.lead(a[0])
+        rpc = rpcs[a[0].get_id()]
+        catchup = _Catchup(rpc)
+        _refused(rpc, catchup, RPCRemoteError(message="busy", code=-16))
+        _desync(a[0])
+        task = _task(db, cluster)
+        assert _pass(task) is False
+        assert "refused" in self._failed(db, task).function_result
+        rpc.distr_migration_status.assert_called_with("distrib_11")
+
+    def test_a_failed_status_probe_fails_the_run(self, db, rpcs, clock):
+        cluster, a, _, _ = _layout(db)
+        rpcs.lead(a[0])
+        rpc = rpcs[a[0].get_id()]
+        catchup = _Catchup(rpc)
+        _refused(rpc, catchup, RPCRemoteError(message=IN_PROGRESS, code=-16))
+        rpc.distr_migration_status.side_effect = RPCConnectionError("down")
+        _desync(a[0])
+        task = _task(db, cluster)
+        assert _pass(task) is False
+        assert "start failed" in self._failed(db, task).function_result
+
+    def test_a_transport_error_fails_the_run_without_a_probe(self, db, rpcs, clock):
+        cluster, a, _, _ = _layout(db)
+        rpcs.lead(a[0])
+        rpc = rpcs[a[0].get_id()]
+        catchup = _Catchup(rpc)
+        _refused(rpc, catchup, RPCConnectionError("down"))
+        _desync(a[0])
+        task = _task(db, cluster)
+        assert _pass(task) is False
+        assert "start failed" in self._failed(db, task).function_result
+        rpc.distr_migration_status.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +368,7 @@ class TestRerun:
 
     def test_a_leadership_change_re_runs_the_catch_up(self, db, rpcs, clock):
         cluster, a, _, _, catchup, task = _started(db, rpcs, clock)
-        rpcs[a[0].get_id()].bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        rpcs[a[0].get_id()].get_lvstore.return_value = {"lvs leadership": False}
         rpcs.lead(a[1])
         ttl_cache.leader_cache.invalidate()
         assert _pass(task) is False

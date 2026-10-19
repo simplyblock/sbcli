@@ -64,7 +64,6 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
           scanners: vuln,secret
-          trivyignores: .trivyignore.yaml
 
       - name: Generate SBOM (CycloneDX)
         uses: aquasecurity/trivy-action@v0.35.0
@@ -84,7 +83,7 @@ jobs:
         if: failure()
         uses: slackapi/slack-github-action@v2
         with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
           webhook-type: incoming-webhook
           payload: |
             {

@@ -26,7 +26,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCConnectionError
 from simplyblock_core.services import storage_node_monitor as monitor
 from simplyblock_core.services import tasks_runner_restart
 from simplyblock_core.services import tasks_runner_sync_promote as runner
@@ -46,7 +46,7 @@ _fresh, _update = stack._fresh, stack._update
 #: The RPCs that build or ask an LVS instance: the stack of _create_bdev_stack /
 #: recreate_lvstore* and the leadership probe.
 LVS_RPCS = ("bdev_distrib_create", "bdev_raid_create", "bdev_examine", "bdev_lvol_set_lvs_opts",
-            "bdev_lvol_set_leader", "bdev_lvol_create_lvstore", "bdev_lvol_get_lvstores")
+            "bdev_lvol_set_leader", "create_lvstore", "get_lvstore")
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ def _layout(db, state=DOWN, *, a_status=ONLINE, **kwargs):
 def _empty(rpcs, nodes):
     """``nodes`` hold no instance: the leadership probe gets no lvstore."""
     for node in nodes:
-        rpcs[node.get_id()].bdev_lvol_get_lvstores.return_value = None
+        rpcs[node.get_id()].get_lvstore.return_value = None
 
 
 def _restartable(db, node, status=OFFLINE):
@@ -134,7 +134,7 @@ class _Restart:
                                    side_effect=lambda node, *args, **kwargs: self.api),
             "stop": patch.object(ops, "ensure_spdk_stopped"),
             "sleep": patch.object(ops.time, "sleep"),
-            "discover": patch.object(ops, "addNvmeDevices", side_effect=self._found),
+            "discover": patch.object(ops.utils, "addNvmeDevices", side_effect=self._found),
             "prepare": patch.object(ops, "_prepare_cluster_devices_on_restart", return_value=True),
             "connect": patch.object(ops, "_connect_to_remote_devs", return_value=[]),
             "connect_jm": patch.object(ops, "_connect_to_remote_jm_devs", return_value=[]),
@@ -311,7 +311,7 @@ class TestAbsentMembers:
 
         a_ids = {n.get_id() for n in a}
         for node in a:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_not_called()
+            rpcs[node.get_id()].get_lvstore.assert_not_called()
         assert not a_ids & set(links.blocked())
         # Hublvol work only for LVS_3, led on B: none for an LVS led from A.
         for name, mock in hub.items():
@@ -340,7 +340,7 @@ class TestAbsentMembers:
         anchor = ops._rebuild_anchor(owner, _fresh(db, a[index]), db)
         assert anchor.get_id() == b[leader or 0].get_id()
         for node in a:
-            rpcs[node.get_id()].bdev_lvol_get_lvstores.assert_not_called()
+            rpcs[node.get_id()].get_lvstore.assert_not_called()
 
     @pytest.mark.parametrize("state", [DOWN, FENCING, DONE])
     def test_an_online_node_of_the_site_is_disconnected(self, db, links, state):
@@ -374,7 +374,7 @@ class TestAbsentMembers:
             _update(db, node, status=OFFLINE)
         _update(db, a[1], jm_vuid=7)
         voter = rpcs[a[1].get_id()]
-        voter.get_bdevs.side_effect = lambda name=None, **kwargs: [{"name": name}]
+        voter.bdev_get.side_effect = lambda name: {"name": name}
         voter.bdev_nvme_controller_list.return_value = [{"ctrlrs": [{"state": "enabled"}]}]
         assert _REAL_VOTES(_fresh(db, b[1])) == (0, 1)
 
@@ -463,7 +463,7 @@ class TestPromoteHandOff:
         with patch.object(StorageNode, "client", autospec=True, side_effect=lambda node, *a, **k: api):
             yield api
 
-    @pytest.mark.parametrize("answer", [None, RPCException("No such device")])
+    @pytest.mark.parametrize("answer", [None, RPCConnectionError("no answer")])
     def test_an_empty_member_does_not_stop_it(self, db, rpcs, spdk_up, answer):
         cluster, a, b = _layout(db, DONE)
         for node in a:

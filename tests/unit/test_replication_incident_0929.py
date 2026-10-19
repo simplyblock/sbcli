@@ -67,17 +67,23 @@ class TestTaskRunnerLeaderAndBackoff(unittest.TestCase):
             self.assertFalse(snapshot_replication.task_runner(task))
         leader.assert_not_called()
 
-    def test_no_source_leader_waits_without_spending_retries(self):
+    def test_no_source_member_waits_without_spending_retries(self):
+        """No online member holds the snapshot: wait, do not spend retries
+        (leadership no longer matters on the source, see _select_source_node)."""
         task = _task(retry=7)
         task.retry = 7
+        snap = self._snapshot()
+        snap.snap_bdev = "LVS_1/SNAP_1"
         db = MagicMock()
-        db.get_snapshot_by_id.return_value = self._snapshot()
+        db.get_snapshot_by_id.return_value = snap
         with patch.object(snapshot_replication, "db", db), \
-                patch.object(snapshot_replication, "_source_leader_node", return_value=None), \
+                patch.object(snapshot_replication, "_lvs_transfer_hold", return_value=None), \
+                patch.object(snapshot_replication, "_select_source_node",
+                             return_value=(None, "primary n-1 offline")), \
                 self.assertLogs(snapshot_replication.logger, "WARNING") as logs:
             self.assertFalse(snapshot_replication.task_runner(task))
         self.assertEqual(task.retry, 7)
-        self.assertIn("no online source LVS leader for LVS_1", logs.output[0])
+        self.assertIn("no online member of LVS_1 holds LVS_1/SNAP_1", logs.output[0])
 
     def test_max_retry_keeps_the_last_reason(self):
         task = _task(last_error="transfer failed at offset 0, retrying")
@@ -139,8 +145,8 @@ class TestFinishSkipsConvertedNodes(unittest.TestCase):
         db.get_lvol_by_id.return_value = remote_lv
         db.get_storage_node_by_id.return_value = secondary
         with patch.object(snapshot_replication, "db", db), \
-                patch.object(snapshot_replication, "_receiving_leader_node", return_value=primary), \
-                patch.object(snapshot_replication, "_source_leader_node", return_value=MagicMock()), \
+                patch.object(snapshot_replication, "_stable_target_leader", return_value=(primary, "")), \
+                patch.object(snapshot_replication, "_transfer_source_node", return_value=MagicMock()), \
                 patch.object(snapshot_replication, "_resolve_chain_target", return_value=(None, None, True)), \
                 patch.object(snapshot_replication, "_require_lvs_leader", return_value=True), \
                 patch.object(snapshot_replication, "_prechained_nodes_for", return_value=set()):
@@ -167,12 +173,18 @@ class TestReplicationStatusCountsOnlyShippedSnapshots(unittest.TestCase):
     def _info(self, snaps, tasks):
         lvol = SimpleNamespace(node_id="n-1", replication_interval_min=5, get_id=lambda: "lv-1",
                                replication_policy_id="", do_replicate=True)
-        by_id = {s.uuid: s for s in snaps}
+        tasks_by_snap: dict = {}
+        for task in tasks:
+            tasks_by_snap.setdefault(task.function_params["snapshot_id"], []).append(task)
         db = MagicMock()
         db.get_lvol_by_id.return_value = lvol
         db.get_storage_node_by_id.return_value = SimpleNamespace(cluster_id="c-1")
-        db.get_job_tasks.return_value = tasks
-        db.get_snapshot_by_id.side_effect = lambda sid: by_id[sid]
+        # get_replication_info resolves the lvol's own snapshots (lvol_uuid index)
+        # and each snapshot's shipping task (repl_snapshot_id index) -- no
+        # whole-table task scan, so the mock serves those two reads.
+        db.get_snapshots_by_lvol_id.return_value = snaps
+        db.get_replication_tasks_for_snapshot.side_effect = lambda sid: tasks_by_snap.get(sid, [])
+        db.get_job_tasks_by_function.return_value = []
         db.get_lvol_replication_objects.return_value = []
         for s in snaps:
             s.lvol = lvol
@@ -237,6 +249,58 @@ class TestBackupRunnerOwnsOnlyBackupTasks(unittest.TestCase):
             set(tasks_runner_backup.SPEC.function_names),
             {JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE, JobSchedule.FN_BACKUP_MERGE},
         )
+
+
+class TestNeverTransferIntoASnapshot(unittest.TestCase):
+
+    def test_members_that_hold_the_landing_volume_as_snapshot(self):
+        def node(nid, status, is_snap):
+            n = MagicMock(status=status)
+            n.get_id.return_value = nid
+            n.rpc_client.return_value.bdev_get.return_value = \
+                {"driver_specific": {"lvol": {"snapshot": is_snap}}}
+            return n
+        nodes = {"n-p": node("n-p", "online", True), "n-s": node("n-s", "online", False),
+                 "n-t": node("n-t", "offline", True)}
+        db = MagicMock()
+        db.get_storage_node_by_id.side_effect = lambda nid: nodes[nid]
+        remote_lv = SimpleNamespace(nodes=["n-p", "n-s", "n-t"], node_id="n-p", top_bdev="LVS_1/LVOL_92")
+        with patch.object(snapshot_replication, "db", db):
+            self.assertEqual(snapshot_replication._landing_volume_snapshot_members(remote_lv), ["n-p"])
+
+
+class TestRelocatedChainIsLinkedNotReshipped(unittest.TestCase):
+
+    @staticmethod
+    def _snap(sid, data, lvs, status="online", created=0, node="n-a1", cluster="c-a"):
+        return SimpleNamespace(uuid=sid, data_uuid=data, status=status, created_at=created,
+                               cluster_id=cluster, get_id=lambda: sid,
+                               lvol=SimpleNamespace(lvs_name=lvs, node_id=node))
+
+    def test_counterpart_on_the_destination_lvstore(self):
+        mine = self._snap("s-b", "d-1", "LVS_10", cluster="c-b")
+        other_lvs = self._snap("s-a2", "d-1", "LVS_7")
+        same_lvs = self._snap("s-a1", "d-1", "LVS_1")
+        deleting = self._snap("s-a3", "d-1", "LVS_1", status="in_deletion")
+        db = MagicMock()
+        db.get_snapshots.return_value = [other_lvs, deleting, same_lvs]
+        remote = SimpleNamespace(cluster_id="c-a", lvstore="LVS_1")
+        with patch.object(snapshot_replication, "db", db):
+            self.assertIs(snapshot_replication._counterpart_on_destination(mine, remote), same_lvs)
+            remote.lvstore = "LVS_9"
+            self.assertIsNone(snapshot_replication._counterpart_on_destination(mine, remote))
+
+    def test_replication_node_follows_the_chain(self):
+        base = self._snap("s-b1", "d-1", "LVS_10", cluster="c-b")
+        old_copy = self._snap("s-a0", "d-0", "LVS_7", created=1, node="n-a2")
+        new_copy = self._snap("s-a1", "d-1", "LVS_1", created=5, node="n-a1")
+        db = MagicMock()
+        db.get_snapshots.return_value = [base, old_copy, new_copy]
+        db.get_storage_node_by_id.side_effect = lambda nid: SimpleNamespace(
+            status="online", get_id=lambda: nid)
+        with patch.object(lvol_controller, "replication_backlog",
+                          return_value=[base, SimpleNamespace(data_uuid="d-0")]):
+            self.assertEqual(lvol_controller._chain_counterpart_node(db, MagicMock(), "c-a"), "n-a1")
 
 
 if __name__ == "__main__":

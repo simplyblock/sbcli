@@ -57,6 +57,7 @@ from simplyblock_core.models.cluster import (
 )
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -70,6 +71,7 @@ from simplyblock_core.models.stats import (
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils import port_block, pull_docker_image_with_retry
 
@@ -651,7 +653,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 sync_replication=False,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
-    for the same name behind a ClusterCreateLock.
+    for the same name behind a DbLock.
 
     The duplicate-name check inside _add_cluster_impl is a plain
     read-then-write with no atomicity: concurrent/retried create calls for the
@@ -683,15 +685,17 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if not name:
         return _add_cluster_impl(**kwargs)
 
-    owner = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4()}"
-    acquired, holder = db_controller.acquire_cluster_create_lock(name, owner)
-    if not acquired:
-        raise ValueError(f"A cluster with the name '{name}' already exists or is currently being created "
-                          f"(held by {holder})")
+    # timeout=0: a create for a name someone else is already creating is
+    # answered, not queued — the queued one would only reach the duplicate-name
+    # check and fail there. DbLockUnavailableError deliberately propagates: an
+    # unreachable database is not a name collision.
+    lock = DbLock(f"cluster_create/{name}", timeout=0)
     try:
-        return _add_cluster_impl(**kwargs)
-    finally:
-        db_controller.release_cluster_create_lock(name, owner)
+        with lock:
+            return _add_cluster_impl(**kwargs)
+    except DbLockBusyError as busy:
+        raise ValueError(f"A cluster with the name '{name}' already exists or is currently being created "
+                          f"(held by {busy.owner or 'unknown'})") from busy
 
 
 def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
@@ -2407,7 +2411,10 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 logger.info(f"Setting Alcemls QOS weights on node {node.get_id()}")
-                ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                try:
+                    ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                except RPCException:
+                    ret = False
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
@@ -2417,8 +2424,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
     if is_fresh_activation and not jc_compression_upgrade.resume_is_held(cluster):
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
-                ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                if not ret:
+                if not node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False):
                     logger.info("Failed to resume JC compression adding task...")
                     tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
 
@@ -2793,6 +2799,14 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
             "the cluster is %s",
             cl_id, cluster.status, Cluster.STATUS_ACTIVE)
         return False
+    # A node removal used to hold IN_SHRINK, which the check above refused;
+    # it is now a flag beside an ACTIVE status, so it is checked by name.
+    if any(n.status in StorageNode.REMOVAL_IN_PROGRESS_STATUSES
+           for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)):
+        logger.error(
+            "Cluster %s has a node removal in progress; shared_placement can "
+            "not be toggled until it finishes", cl_id)
+        return False
     if cluster.is_re_balancing and not force:
         logger.error(
             "Cluster %s is rebalancing; wait for rebalance to finish "
@@ -2998,9 +3012,7 @@ def list() -> builtins.list[dict]:
     data = []
     for cl in cls:
         st = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
-        status = cl.status
-        if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-            status = f"{status} - ReBalancing"
+        status = display_status(cl)
         data.append({
             "UUID": cl.get_id(),
             "Name": cl.cluster_name if cl.cluster_name is not None else "-",
@@ -3059,9 +3071,7 @@ def list_all_info(cluster_id) -> str:
         elif task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
             task_pending += 1
 
-    status = cl.status
-    if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-        status = f"{status} - ReBalancing"
+    status = display_status(cl)
     data.append({
         "Cluster UUID": cl.get_id(),
         "Type": cl.ha_type.upper(),
@@ -4036,12 +4046,23 @@ def check_indices(repair=False) -> bool:
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
     get_cluster = db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
+    # Nodes a removal has shut down are left alone, as cluster_grace_shutdown
+    # leaves them: restarting one would bring it back into service in the
+    # middle of its removal (restart_storage_node refuses it anyway, and the
+    # online check below would then fail the whole start over a node that was
+    # never meant to come back).
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        if _grace_shutdown_skipped(node):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        if _grace_shutdown_skipped(node):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Restarting node: {node.get_id()}")
         storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True, spdk_image=spdk_image)
         # time.sleep(5)
@@ -4068,8 +4089,19 @@ def _grace_shutdown_skipped(node) -> bool:
 
     See the rationale in cluster_grace_shutdown's loop.
     """
-    return node.status in (StorageNode.STATUS_REMOVED,
-                           StorageNode.STATUS_IN_REMOVAL)
+    return node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES
+
+
+def display_status(cl) -> str:
+    """The cluster status as the CLI shows it: the status, then what is
+    running beside it -- "active - ReBalancing - Shrinking". Shrinking (a node
+    removal in progress) used to be a status of its own, in_shrink."""
+    status = cl.status
+    if cl.is_re_balancing and status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        status = f"{status} - ReBalancing"
+    if cl.is_shrinking:
+        status = f"{status} - Shrinking"
+    return status
 
 
 def cluster_grace_shutdown(cl_id) -> None:
@@ -4088,11 +4120,14 @@ def cluster_grace_shutdown(cl_id) -> None:
         # activation or startup acts on nodes whose devices are already
         # failed_and_migrated and which own no lvstore.
         #
-        # IN_REMOVAL is skipped because node_removal_orchestrate has already
-        # shut that node down and owns the rest of its lifecycle.
-        # PENDING_REMOVAL is deliberately NOT skipped -- the node is still up
-        # and serving at that point, so a full-cluster shutdown must stop it
-        # like any other member.
+        # IN_REMOVAL, MIGRATING_LVOLS and REMOVED_FAILED are skipped because
+        # node_removal_orchestrate has already shut those nodes down and owns
+        # the rest of their lifecycle -- that is exactly the
+        # REMOVAL_SHUT_DOWN_STATUSES set. PENDING_REMOVAL is deliberately NOT
+        # skipped, and is the one departing status left out of that set: it is
+        # stamped when the removal is requested, before the shutdown step runs,
+        # so the node may still be up and serving and a full-cluster shutdown
+        # must stop it like any other member.
         if _grace_shutdown_skipped(node):
             logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
             continue
