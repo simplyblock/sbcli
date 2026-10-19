@@ -72,9 +72,24 @@ class SNodeClient:
                     data = json.dumps(wire_payload)
 
             response = self.session.request(method, self.url+path, data=data,
-                                            timeout=self.timeout, params=params)
+                                            timeout=self.timeout, params=params,
+                                            stream=True)
         except Exception as e:
             raise SNodeClientException(str(e))
+
+        # The storage-node agent (simplyblock_web /snode/* routes) only ever
+        # returns materialized flask_openapi3 JSON responses -- Content-Length
+        # is always computable, none of these routes stream. A chunked
+        # response can therefore only come from a hostile/compromised peer,
+        # and accepting it would route the body through urllib3's
+        # read_chunked()/DeflateDecoder, which versions <2.8.0 cannot parse
+        # safely (GHSA-vxq7-64xx-v4gw, GHSA-gh4c-6fx4-qh6g). Reject before
+        # either is ever invoked, rather than depend on the dependency
+        # version -- this branch is pinned to Python 3.9 (sbctl on Rocky 9),
+        # which urllib3 >=2.7.0 does not support.
+        if "chunked" in response.headers.get("Transfer-Encoding", "").lower():
+            response.close()
+            raise SNodeClientException("refusing chunked transfer-encoding from storage node agent")
 
         log_body = Settings().log_response_bodies
         if log_body:
