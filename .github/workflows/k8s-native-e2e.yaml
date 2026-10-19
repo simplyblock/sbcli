@@ -1322,6 +1322,76 @@ jobs:
           kubectl rollout status deploy/openbao-unsealer -n vault --timeout=120s || true
           echo "KMS setup complete (auto-unseal watcher running)."
 
+      # ── Return stranded NVMe devices to the kernel driver ──────────────────
+
+      - name: Rebind unbound NVMe devices before discovery
+        if: >-
+          ${{
+            github.event.inputs.use_existing_cluster != 'true' &&
+            (github.event.inputs.cluster_environment == 'aws-openshift' ||
+             github.event.inputs.cluster_environment == 'openshift-local' ||
+             github.event.inputs.cluster_environment == 'openshift-baremetal')
+          }}
+        run: |
+          set -uo pipefail
+          # A run that ends badly can leave an NVMe bound to no driver at all
+          # -- not vfio, not nvme. The PCI function is still there, so the
+          # operator can name it, but it exposes no block device, so its size
+          # reads 0B, every size rule declines it, and the worker drops out of
+          # the draft with "no device of it survived the device rules".
+          #
+          # The node stays Ready throughout, because kubelet is healthy and
+          # kubelet has no opinion about what the disks are bound to. On
+          # 2026-10-19 that left 2 workers out of 6 and the 2+2 stripe was
+          # refused at approval, 40 minutes into the run. Eight devices across
+          # worker-0, -2, -4 and -5 were all driver=NONE.
+          #
+          # Nothing in this lane put them back. monitoring-suite-docker does
+          # the equivalent for docker nodes and there was no k8s counterpart,
+          # so the state persisted across every subsequent run.
+          #
+          # Only devices bound to NOTHING are touched. A device already on
+          # nvme is left alone, and one held by vfio-pci is left alone too --
+          # that is a live SPDK, and taking it would be the destructive
+          # version of this fix.
+          for node in $(kubectl get nodes -l node-role.kubernetes.io/worker \
+                          -o jsonpath='{.items[*].metadata.name}'); do
+            out="$(oc debug node/"${node}" --quiet -- chroot /host sh -c '
+              n=0
+              for d in /sys/bus/pci/devices/*/; do
+                [ "$(cat "$d/class" 2>/dev/null)" = "0x010802" ] || continue
+                [ -e "$d/driver" ] && continue
+                p=$(basename "$d")
+                if echo "$p" > /sys/bus/pci/drivers/nvme/bind 2>/dev/null; then
+                  echo "  bound $p"
+                  n=$((n+1))
+                else
+                  echo "  FAILED to bind $p"
+                fi
+              done
+              [ "$n" = 0 ] && echo "  nothing to rebind"
+              exit 0' 2>/dev/null)" || out="  (debug pod failed on ${node})"
+            echo "${node}:"
+            echo "${out}"
+          done
+
+          # Not fatal on its own. Discovery is what decides whether the lab
+          # has enough devices, and the bring-up refuses the draft with the
+          # per-device verdicts if it does not -- a clearer failure than this
+          # step guessing.
+          echo "=== NVMe driver binding after rebind ==="
+          for node in $(kubectl get nodes -l node-role.kubernetes.io/worker \
+                          -o jsonpath='{.items[*].metadata.name}'); do
+            printf '  %s: ' "${node}"
+            oc debug node/"${node}" --quiet -- chroot /host sh -c '
+              for d in /sys/bus/pci/devices/*/; do
+                [ "$(cat "$d/class" 2>/dev/null)" = "0x010802" ] || continue
+                drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
+                printf "%s=%s " "$(basename "$d")" "${drv:-NONE}"
+              done
+              echo' 2>/dev/null || echo "(unreadable)"
+          done
+
       - name: Apply operator custom resources
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
