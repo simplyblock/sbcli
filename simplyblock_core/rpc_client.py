@@ -269,9 +269,22 @@ class RPCClient:
             wire_payload = unwrap_secrets_for_send(payload)
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
-                headers={"X-RPC-Timeout": str(effective_timeout)})
+                headers={"X-RPC-Timeout": str(effective_timeout)}, stream=True)
         except Exception:
             raise RPCException("connection error")
+
+        # The SPDK proxy (spdk_http_proxy_server.py) never sends chunked
+        # responses -- it has no Content-Length/Transfer-Encoding framing at
+        # all, relying on connection-close. A chunked response can therefore
+        # only come from a hostile/compromised peer, and accepting it would
+        # route the body through urllib3's read_chunked()/DeflateDecoder,
+        # which versions <2.8.0 cannot parse safely (GHSA-vxq7-64xx-v4gw,
+        # GHSA-gh4c-6fx4-qh6g). Reject before either is ever invoked, rather
+        # than depend on the dependency version -- this branch is pinned to
+        # Python 3.9 (sbctl on Rocky 9), which urllib3 >=2.7.0 does not support.
+        if "chunked" in response.headers.get("Transfer-Encoding", "").lower():
+            response.close()
+            raise RPCProtocolError("refusing chunked transfer-encoding from RPC proxy")
 
         ret_code = response.status_code
         ret_content = response.content
@@ -313,7 +326,11 @@ class RPCClient:
         try:
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=self.timeout,
-                headers={"X-RPC-Timeout": str(self.timeout)})
+                headers={"X-RPC-Timeout": str(self.timeout)}, stream=True)
+            # See the matching check in _request2 for why chunked is refused.
+            if "chunked" in response.headers.get("Transfer-Encoding", "").lower():
+                response.close()
+                raise RPCProtocolError("refusing chunked transfer-encoding from RPC proxy")
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
