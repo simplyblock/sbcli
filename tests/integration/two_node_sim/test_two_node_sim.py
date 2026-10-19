@@ -54,8 +54,9 @@ def test_bed_scenario(make_world, sc):
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
 @pytest.mark.parametrize("finding", sorted(REGRESSIONS, key=lambda f: int(f[1:])))
 def test_finding_is_fixed(make_world, finding):
+    from .simnode import DEPLOYED_CAPS
     sc, _bugs, _sig = REGRESSIONS[finding]
-    world = make_world(conditions=sc.conditions)
+    world = make_world(conditions=sc.conditions, caps=DEPLOYED_CAPS | sc.caps)
     out = run(world, sc)
     assert out.passed, out.report()
     exercised = EXERCISED.get(finding)
@@ -68,8 +69,9 @@ def test_finding_is_fixed(make_world, finding):
 @pytest.mark.parametrize("finding", [pytest.param(f, marks=_fast("detect:" + f))
                                      for f in sorted(REGRESSIONS, key=lambda f: int(f[1:]))])
 def test_finding_is_detected(make_world, finding):
+    from .simnode import DEPLOYED_CAPS
     sc, bugs, signature = REGRESSIONS[finding]
-    world = make_world(bugs=bugs, conditions=sc.conditions)
+    world = make_world(bugs=bugs, conditions=sc.conditions, caps=DEPLOYED_CAPS | sc.caps)
     # a buggy run only has to be caught: on main every scenario heals well
     # within 60 s after its observation window (measured)
     out = run(world, sc, stop_on_failure=True, heal_s=60.0)
@@ -96,13 +98,33 @@ def test_pending_fix_passes(make_world, sc):
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
 def test_f21_needs_its_own_fix(make_world):
     """F21 is a separate defect: with only F19's capability (the redirect stops at
-    the grant) the takeover reader still waits on the frozen peer's JM (c8 02c)."""
-    from .simnode import CAP_GRANT_STOPS_REDIRECT, DEPLOYED_CAPS
+    the grant) the takeover reader still waits on the frozen peer's JM (c8 02c).
+    F23's capability isolates it from the survivor's own writes."""
+    from .simnode import CAP_GRANT_STOPS_REDIRECT, CAP_STOPLIST_PEER_DEVICES, DEPLOYED_CAPS
     sc = next(s for s in EXTRA if s.name == "F21-takeover-reader-frozen-peer-jm")
-    world = make_world(conditions=sc.conditions, caps=DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT})
+    caps = DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT, CAP_STOPLIST_PEER_DEVICES}
+    world = make_world(conditions=sc.conditions, caps=caps)
     out = run(world, sc)
     assert not out.passed, out.report()
     assert any("F21" in f for f in out.failures), out.report()
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+def test_f23_needs_its_own_fix(make_world):
+    """F23 is a separate defect: with the F19 and F21 capabilities (redirect stop,
+    reader skips the dead peer JM) the survivor's writes still wait on a frozen
+    secondary's data devices after the grant (bed c9/02a)."""
+    from .simnode import (
+        CAP_GRANT_STOPS_REDIRECT,
+        CAP_READER_SKIPS_DEAD_PEER_JM,
+        DEPLOYED_CAPS,
+    )
+    sc = next(s for s in EXTRA if s.name == "F23-frozen-secondary-data-io")
+    caps = DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM}
+    world = make_world(conditions=sc.conditions, caps=caps)
+    out = run(world, sc)
+    assert not out.passed, out.report()
+    assert any("F23" in f for f in out.failures), out.report()
 
 
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
