@@ -100,7 +100,11 @@ def test_f21_needs_its_own_fix(make_world):
     """F21 is a separate defect: with only F19's capability (the redirect stops at
     the grant) the takeover reader still waits on the frozen peer's JM (c8 02c).
     F23's capability isolates it from the survivor's own writes."""
-    from .simnode import CAP_GRANT_STOPS_REDIRECT, CAP_STOPLIST_PEER_DEVICES, DEPLOYED_CAPS
+    from .simnode import (
+        CAP_GRANT_STOPS_REDIRECT,
+        CAP_STOPLIST_PEER_DEVICES,
+        DEPLOYED_CAPS,
+    )
     sc = next(s for s in EXTRA if s.name == "F21-takeover-reader-frozen-peer-jm")
     caps = DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT, CAP_STOPLIST_PEER_DEVICES}
     world = make_world(conditions=sc.conditions, caps=caps)
