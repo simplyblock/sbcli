@@ -398,7 +398,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
             patch.object(sno.device_controller, "set_jm_device_state", _set_jm),
             patch.object(sno, "trigger_ana_failover_for_node",
                          lambda *_a, **_kw: None),
-            patch("simplyblock_core.services.storage_node_monitor.update_cluster_status",
+            patch("simplyblock_core.services.storage_node_monitor.apply_node_loss_status",
                   _refresh),
         ]
         for p in patches:
@@ -457,7 +457,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
     def test_failed_status_refresh_does_not_fail_the_shutdown(self):
         from simplyblock_core import storage_node_ops as sno
         env = self._patch()
-        with patch("simplyblock_core.services.storage_node_monitor.update_cluster_status",
+        with patch("simplyblock_core.services.storage_node_monitor.apply_node_loss_status",
                    side_effect=RuntimeError("fdb gone")):
             self.assertTrue(sno.shutdown_storage_node(env["snode"].get_id(), force=True))
 
