@@ -1350,23 +1350,39 @@ jobs:
           # the equivalent for docker nodes and there was no k8s counterpart,
           # so the state persisted across every subsequent run.
           #
-          # Only devices bound to NOTHING are touched. A device already on
-          # nvme is left alone, and one held by vfio-pci is left alone too --
-          # that is a live SPDK, and taking it would be the destructive
-          # version of this fix.
+          # Two states are reclaimed: bound to nothing, and bound to
+          # vfio-pci. The second is SPDK's, and taking it from a LIVE node
+          # would be the destructive version of this fix -- so the whole
+          # step is skipped if any storage-node pod is running. This step
+          # only runs for a fresh deploy (use_existing_cluster != true), and
+          # a vfio binding with no SPDK behind it is a leftover: after the
+          # 2026-10-19 cleanup, worker-0 and worker-1 still held four
+          # devices on vfio-pci with the namespace already deleted.
+          #
+          # driver_override has to be cleared before the nvme bind. SPDK
+          # sets it to vfio-pci, and while it is set the kernel refuses the
+          # bind -- quietly, so a rebind that skips this looks like it
+          # worked and changes nothing.
+          if kubectl get pods -A -o name 2>/dev/null | grep -q 'snode-spdk'; then
+            echo "::warning::storage-node pods are running; leaving every device alone"
+            exit 0
+          fi
           for node in $(kubectl get nodes -l node-role.kubernetes.io/worker \
                           -o jsonpath='{.items[*].metadata.name}'); do
             out="$(oc debug node/"${node}" --quiet -- chroot /host sh -c '
               n=0
               for d in /sys/bus/pci/devices/*/; do
                 [ "$(cat "$d/class" 2>/dev/null)" = "0x010802" ] || continue
-                [ -e "$d/driver" ] && continue
                 p=$(basename "$d")
+                drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
+                [ "$drv" = "nvme" ] && continue
+                [ -n "$drv" ] && echo "$p" > "/sys/bus/pci/drivers/$drv/unbind" 2>/dev/null
+                echo "" > "$d/driver_override" 2>/dev/null
                 if echo "$p" > /sys/bus/pci/drivers/nvme/bind 2>/dev/null; then
-                  echo "  bound $p"
+                  echo "  reclaimed $p (was ${drv:-NONE})"
                   n=$((n+1))
                 else
-                  echo "  FAILED to bind $p"
+                  echo "  FAILED $p (was ${drv:-NONE})"
                 fi
               done
               [ "$n" = 0 ] && echo "  nothing to rebind"
