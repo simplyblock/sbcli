@@ -380,6 +380,11 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
             status_changes.append((nid, status))
             return True
 
+        status_refreshes = []
+        def _refresh(cluster_id):
+            # Record where in the flow the refresh happened.
+            status_refreshes.append((cluster_id, list(status_changes)))
+
         patches = [
             patch.object(sno, "DBController", return_value=db),
             # _check_ftt_allows_node_removal is no longer called from
@@ -395,6 +400,8 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
             patch.object(sno.device_controller, "set_jm_device_state", _set_jm),
             patch.object(sno, "trigger_ana_failover_for_node",
                          lambda *_a, **_kw: None),
+            patch("simplyblock_core.services.storage_node_monitor.apply_node_loss_status",
+                  _refresh),
         ]
         for p in patches:
             p.start()
@@ -407,7 +414,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
             "detach_calls": detach_calls, "kill_calls": kill_calls,
             "dev_unavail": device_unavailable_calls,
             "set_jm": set_jm_calls, "status_changes": status_changes,
-            "fw_mock": fw_mock,
+            "status_refreshes": status_refreshes, "fw_mock": fw_mock,
         }
 
     def test_graceful_runs_both_loops_then_kills(self):
@@ -434,6 +441,27 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         self.assertIn(StorageNode.STATUS_OFFLINE, statuses)
         self.assertEqual(statuses[0], StorageNode.STATUS_IN_SHUTDOWN)
         self.assertEqual(statuses[-1], StorageNode.STATUS_OFFLINE)
+
+    def test_cluster_status_is_refreshed_once_offline(self):
+        """2026-10-19: two nodes shut down at 15:42:46 and the cluster read
+        ACTIVE until 15:49:47. The shutdown must refresh the cluster status
+        itself, after the OFFLINE flip, on both the graceful and the forced
+        path."""
+        from simplyblock_core import storage_node_ops as sno
+        for force in (False, True):
+            env = self._patch()
+            self.assertTrue(sno.shutdown_storage_node(env["snode"].get_id(), force=force))
+            self.assertEqual(len(env["status_refreshes"]), 1, force)
+            cluster_id, statuses_then = env["status_refreshes"][0]
+            self.assertEqual(cluster_id, "cluster-1")
+            self.assertEqual(statuses_then[-1], ("dying", StorageNode.STATUS_OFFLINE))
+
+    def test_failed_status_refresh_does_not_fail_the_shutdown(self):
+        from simplyblock_core import storage_node_ops as sno
+        env = self._patch()
+        with patch("simplyblock_core.services.storage_node_monitor.apply_node_loss_status",
+                   side_effect=RuntimeError("fdb gone")):
+            self.assertTrue(sno.shutdown_storage_node(env["snode"].get_id(), force=True))
 
     def test_graceful_never_invokes_firewall(self):
         """The suspension phase is removed; no FirewallClient call must
