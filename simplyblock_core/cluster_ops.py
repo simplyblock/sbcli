@@ -2982,6 +2982,34 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
 
+        if "app_TasksRunnerBatchMigration" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerBatchMigration",
+                service_file="python3 simplyblock_core/services/tasks_runner_batch_migration.py",
+                service_image=service_image)
+
+        if "app_TasksNodeRemovalRunner" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksNodeRemovalRunner",
+                service_file="python3 simplyblock_core/services/tasks_runner_node_removal.py",
+                service_image=service_image)
+
+        if "app_TasksRunnerClusterExpand" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerClusterExpand",
+                service_file="python3 simplyblock_core/services/tasks_runner_cluster_expand.py",
+                service_image=service_image)
+
+        if "app_TasksRunnerReplicationFinal" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerReplicationFinal",
+                service_file="python3 simplyblock_core/services/tasks_runner_replication_final.py",
+                service_image=service_image)
+
         if not cluster.disable_monitoring:
             try:
                 _reconcile_monitoring_args(cluster_docker)
