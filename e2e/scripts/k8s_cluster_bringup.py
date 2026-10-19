@@ -128,9 +128,18 @@ _TRANSIENT = (
     "webhook",            # the conversion webhook may not be serving yet
 )
 
+#: ...but a webhook that ANSWERED and said no is not transient, and retrying
+#: it three times buries the one sentence that explains the run. The
+#: approval denial on 2026-10-19 ("spec.cluster.stripe is 2+2, which needs at
+#: least 6 storage nodes ... and this document produces 2") was reported as a
+#: "transient kubectl failure" four times over 30s before the reason showed.
+_DENIED = ("denied the request",)
+
 
 def _transient(stderr: str) -> bool:
     low = (stderr or "").lower()
+    if any(m in low for m in _DENIED):
+        return False
     return any(m in low for m in _TRANSIENT)
 
 
@@ -992,9 +1001,80 @@ def dump_stall_state(name: str) -> None:
     log("")
 
 
+def check_stripe_fits(name: str) -> None:
+    """Refuse a draft that cannot satisfy its own stripe, and say why.
+
+    Mirrors the admission rule in vclusterdeploymentconfig: a d+p stripe
+    needs d+p nodes to place it across plus 2 spares to rebuild onto. The
+    webhook enforces this and the message is a good one -- but it arrives
+    at approval, which is the LAST step, after discovery, the control-plane
+    wait and every edit. Reading it here turns the same refusal into a
+    diagnosis, and names what is missing while the draft is still readable.
+
+    The usual cause is not the stripe. It is the lab: a worker whose NVMe
+    devices are no longer bound to the kernel driver reports them as 0B,
+    every device rule declines them on size, and the worker silently drops
+    out of the draft. The node stays Ready in kubectl the whole time --
+    kubelet is healthy, which says nothing about what the disks are bound
+    to -- so the cluster looks fine and only the device count shows it is
+    not. That is how 2026-10-19 produced 2 slots out of 6 workers.
+    """
+    raw = kubectl("get", "clusterdeploymentconfig", name, "-o", "json")
+    if not raw.strip():
+        return
+    spec = (json.loads(raw).get("spec") or {})
+    cluster = spec.get("cluster") or {}
+    stripe = cluster.get("stripe") or {}
+    ndcs, npcs = stripe.get("dataChunks"), stripe.get("parityChunks")
+    if ndcs is None or npcs is None:
+        return
+
+    workers, devices = [], 0
+    for node_set in spec.get("nodeSets") or []:
+        for group in node_set.get("groups") or []:
+            ws = group.get("workers") or []
+            workers += ws
+            devs = group.get("devices") or {}
+            devices += len(devs.get("nvme") or devs.get("block") or []) * len(ws)
+
+    needed = ndcs + npcs + 2
+    if len(workers) >= needed:
+        return
+
+    log("")
+    log(f"REFUSING to approve {name}: the stripe does not fit the draft.")
+    log(f"  stripe            {ndcs}+{npcs}, which needs {needed} storage "
+        f"nodes ({ndcs + npcs} to place it across, 2 spares to rebuild onto)")
+    log(f"  draft produces    {len(workers)} ({devices} device(s))")
+    log(f"  workers in draft  {', '.join(sorted(set(workers))) or 'none'}")
+    log("")
+    log("  Every worker the filter accepted is listed above; the rest were")
+    log("  dropped by discovery, NOT by this script. A node being Ready says")
+    log("  nothing about its disks. To see the verdict per device:")
+    log("")
+    log(f"    kubectl -n {NS} logs deploy/simplyblock-operator "
+        "| grep -E 'declined by|survived'")
+    log("")
+    log("  'declined by size range because it is 0B' on a disk that is not")
+    log("  0B means the device is not bound to the kernel nvme driver any")
+    log("  more, so it exposes no block device. Rebind it on that worker:")
+    log("")
+    log("    echo <pci-addr> > /sys/bus/pci/drivers/vfio-pci/unbind")
+    log("    echo <pci-addr> > /sys/bus/pci/drivers/nvme/bind")
+    log("")
+    raise SystemExit(
+        f"draft {name} produces {len(workers)} storage node(s) and the "
+        f"{ndcs}+{npcs} stripe needs {needed}")
+
+
 def approve_and_wait(name: str, timeout: int) -> None:
     # The gate the manual deploy waits on before it edits the draft.
     wait_control_plane_ready(int(os.environ.get("TIMEOUT_CP_READY", "1800")))
+
+    # Before the gate, not after: approval is irreversible and the document
+    # becomes immutable, so a draft that cannot work is worth catching while
+    # it can still be rebuilt.
+    check_stripe_fits(name)
 
     log(f"approving {name}")
     kubectl("patch", "clusterdeploymentconfig", name, "--type=merge",
