@@ -266,6 +266,31 @@ def get_next_cluster_status(cluster_id):
     return _cluster_status_verdicts(cluster_id)[0]
 
 
+#: The status changes a node going down can cause, by current status.
+_NODE_LOSS_TRANSITIONS = {
+    Cluster.STATUS_ACTIVE: (Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED),
+    Cluster.STATUS_DEGRADED: (Cluster.STATUS_SUSPENDED,),
+}
+
+
+def apply_node_loss_status(cluster_id):
+    """Record a node loss in the cluster status now, for callers outside
+    the monitor that take a node down themselves (shutdown_storage_node).
+
+    Only the downgrades in _NODE_LOSS_TRANSITIONS are applied, the same
+    plain set_cluster_status the monitor makes for them. Everything else --
+    recovery, re-activation of a suspended cluster, the rebalancing flags --
+    stays with update_cluster_status in the monitor: a CLI shutdown must not
+    start a cluster activation or wait on one."""
+    cluster = db.get_cluster_by_id(cluster_id)
+    allowed = _NODE_LOSS_TRANSITIONS.get(cluster.status)
+    if not allowed:
+        return
+    next_status = get_next_cluster_status(cluster_id)
+    if next_status in allowed:
+        cluster_ops.set_cluster_status(cluster_id, next_status)
+
+
 def _cluster_status_verdicts(cluster_id):
     """``(status, status_without_removal)`` for the cluster.
 
