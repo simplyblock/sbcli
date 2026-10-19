@@ -4,14 +4,13 @@ from typing import Union
 from fastapi import APIRouter
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 
 from .._dependencies import Cluster, Task
 from .._dtos import TaskDTO
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
-
 
 api = APIRouter()
 db = DBController()

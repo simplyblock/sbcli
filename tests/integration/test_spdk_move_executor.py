@@ -18,8 +18,8 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     RoleMove,
 )
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
 from tests._mocks import unique_ip
 

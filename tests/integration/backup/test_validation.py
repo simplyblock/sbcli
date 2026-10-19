@@ -11,8 +11,8 @@ import pytest
 
 from simplyblock_core import constants
 from simplyblock_core.controllers.backup import controller as backup_controller
-from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup import manifest as backup_manifest
+from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup.manifest import BackupManifest
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
@@ -23,7 +23,6 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-
 
 # Every id a manifest carries is a UUID, so the objects these tests build are
 # given real ones rather than readable stand-ins.

@@ -13,11 +13,10 @@ Tests cover all FTT scenarios:
 import unittest
 from unittest.mock import MagicMock
 
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
 from tests._mocks import unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Helpers

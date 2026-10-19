@@ -1,7 +1,8 @@
 # utils/supabase_test_runs.py
 import os
+from datetime import UTC, datetime
+
 import requests
-from datetime import datetime, UTC
 
 SUPABASE_TOKEN = os.getenv("SUPABASE_ANON_KEY")
 if not SUPABASE_TOKEN:

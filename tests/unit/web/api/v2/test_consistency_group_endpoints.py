@@ -3,8 +3,9 @@
 unit through its policy, and its replication status is the roll-up of its members.
 """
 import simplyblock_core.controllers.consistency_group_controller as cgc
-from simplyblock_core.controllers.consistency_group_controller import ConsistencyGroupError
-
+from simplyblock_core.controllers.consistency_group_controller import (
+    ConsistencyGroupError,
+)
 from tests.unit.web.api.v2 import _factories as factories
 
 BASE = (f'/api/v2/clusters/{factories.CLUSTER_ID}'

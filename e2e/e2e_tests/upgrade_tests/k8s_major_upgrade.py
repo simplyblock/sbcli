@@ -129,7 +129,6 @@ from utils.common_utils import sleep_n_sec
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
 
-
 # Selects every node that is NOT a control-plane node.
 #
 # Do not use ``-l node-role.kubernetes.io/worker`` here: Talos does not put a

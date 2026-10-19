@@ -9,7 +9,6 @@ whether the resolved id is an LVolMigration or LVolMigrationGroup.
 
 from simplyblock_core import constants
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-
 from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
     MIGRATION_ID,

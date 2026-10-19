@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
 
-from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError, _session_pool
+from simplyblock_core.rpc_client import (
+    RPCClient,
+    RPCException,
+    RPCRemoteError,
+    _session_pool,
+)
 
 
 def _make_client(**kwargs):

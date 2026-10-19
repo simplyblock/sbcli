@@ -7,12 +7,12 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel
 
-from simplyblock_core.watch import ChangeEvent, WatchUnavailable
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.watch import ChangeEvent, WatchUnavailable
 from simplyblock_web.api.v2 import _sse
-from simplyblock_web.api.v2._sse import _build_events, _build_snapshot, sse_response
 from simplyblock_web.api.v2._dtos import ClusterDTO, TaskDTO
+from simplyblock_web.api.v2._sse import _build_events, _build_snapshot, sse_response
 
 
 class FakeModel:

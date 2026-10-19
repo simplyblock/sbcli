@@ -13,8 +13,13 @@ import pytest
 
 from simplyblock_core import cluster_ops, storage_node_ops
 from simplyblock_core.controllers.cluster_expansion import preconditions
-from simplyblock_core.controllers.cluster_expansion.executor import integrate_new_node_into_cluster
-from simplyblock_core.controllers.cluster_expansion.orchestrator import MoveExecutor, NoopMoveExecutor
+from simplyblock_core.controllers.cluster_expansion.executor import (
+    integrate_new_node_into_cluster,
+)
+from simplyblock_core.controllers.cluster_expansion.orchestrator import (
+    MoveExecutor,
+    NoopMoveExecutor,
+)
 from simplyblock_core.controllers.cluster_expansion.planner import (
     EXPAND_PHASE_ABORTED,
     EXPAND_PHASE_COMPLETED,

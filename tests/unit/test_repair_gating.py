@@ -119,8 +119,9 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
         complete, secondary half-attached) must count as a missing path — on
         the 2026-08-24 deploy both tertiaries sat at 3/4 forever because
         expected_ips was built from the primary alone."""
-        from simplyblock_core.controllers import health_controller as hc
         from unittest.mock import MagicMock, patch
+
+        from simplyblock_core.controllers import health_controller as hc
 
         def nic(ip):
             iface = MagicMock()

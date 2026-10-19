@@ -1,8 +1,10 @@
-import re
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
 import os
+import re
+
+import matplotlib.pyplot as plt
+import numpy as np
+
 
 def plot_memory_growth(file_path, total_time_hours, parameter_name):
     """

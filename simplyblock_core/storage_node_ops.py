@@ -6,61 +6,96 @@ import enum
 import json
 import logging
 import math
+import os
 import platform
 import re
 import socket
 import subprocess
-
-import psutil
+import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
-import threading
-
-import time
-import uuid
-
-import docker
+import psutil
 from docker.types import LogConfig
 from kubernetes.client import ApiException
 from pydantic import SecretStr
-from tenacity import RetryError, Retrying, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import (
+    RetryError,
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_fixed,
+)
 
-from simplyblock_core import constants, scripts, distr_controller, cluster_ops
-from simplyblock_core.distr_controller import DistribHomeSiteError
-from simplyblock_core import utils
-from simplyblock_core import jm_raid
-from simplyblock_core.utils import port_block
-from simplyblock_core.utils import rpc_budget
-from simplyblock_core.utils import hublvol_reconnect
-from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
-from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller, activation_gate
-from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
-from simplyblock_core.controllers.cluster_expansion import planner as role_planner
+import docker
+from simplyblock_core import (
+    cluster_ops,
+    constants,
+    distr_controller,
+    jm_raid,
+    scripts,
+    utils,
+)
 from simplyblock_core import db_controller as db_module
+from simplyblock_core import rpc_client as rpc_client_module
+from simplyblock_core.constants import (
+    LINUX_DRV_MASS_STORAGE_ID,
+    LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID,
+)
+from simplyblock_core.controllers import (
+    activation_gate,
+    device_controller,
+    device_events,
+    health_controller,
+    lvol_controller,
+    qos_controller,
+    snapshot_controller,
+    storage_events,
+    tasks_controller,
+    tcp_ports_events,
+)
+from simplyblock_core.controllers.cluster_expansion import planner as role_planner
+from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.distr_controller import DistribHomeSiteError
 from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
+from simplyblock_core.models.nvme_device import (
+    JMDevice,
+    NVMeDevice,
+    RemoteDevice,
+    RemoteJMDevice,
+)
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.release_upgrades import jc_compression_upgrade
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.rpc_client import (
-    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCErrorCode,
-    RPCException, RPCRemoteError, namespace_matches, evict_cached_session)
-from simplyblock_core import rpc_client as rpc_client_module
+    JC_REMOVE_JM_NOT_USED,
+    JC_REMOVE_JM_STILL_IN_USE,
+    RPC_UNSUPPORTED,
+    RPCErrorCode,
+    RPCException,
+    RPCRemoteError,
+    evict_cached_session,
+    namespace_matches,
+)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
-from simplyblock_core.utils import dial_backoff
+from simplyblock_core.utils import (
+    addNvmeDevices,
+    dial_backoff,
+    hublvol_reconnect,
+    port_block,
+    pull_docker_image_with_retry,
+    rpc_budget,
+)
 from simplyblock_web import node_utils
-from simplyblock_core.utils import addNvmeDevices
-from simplyblock_core.utils import pull_docker_image_with_retry
-import os
-
 
 logger = utils.get_logger(__name__)
 
@@ -3956,7 +3991,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # permanently block its own retry (2026-07-17, node f6308adb).
         if expansion:
             from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions, check_fd_admission_for_add)
+                check_expansion_preconditions,
+                check_fd_admission_for_add,
+            )
             ok, reason = check_expansion_preconditions(cluster, db_controller)
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
@@ -4854,7 +4891,8 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     # stay within the +/-1 balance rule and keep >=2 hosts per domain.
     # Enforced only once the cluster has an HA layout to protect.
     from simplyblock_core.controllers.cluster_expansion.preconditions import (
-        check_fd_admission_for_remove)
+        check_fd_admission_for_remove,
+    )
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
     if not ok:
@@ -10381,7 +10419,7 @@ def find_leader_with_failover(all_nodes, lvs_name, *, recover: bool = True):
     not a full pass, so it is not recorded as a no-leader verdict; a verdict
     another lookup recorded is still honoured.
     """
-    from simplyblock_core.utils.ttl_cache import no_leader_cache, NO_LEADER_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import NO_LEADER_TTL_SEC, no_leader_cache
 
     # Sync replication: probe and grant only within the active triplet
     # (_lvs_leader_candidates) - resolved BEFORE the negative cache so an
@@ -10441,7 +10479,7 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name, *, grants_allowed=True,
         (leader_node, non_leader_nodes) or (None, []) if no confirmable leader.
     """
     from simplyblock_core.controllers.lvol_controller import is_node_leader
-    from simplyblock_core.utils.ttl_cache import leader_cache, LEADER_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import LEADER_TTL_SEC, leader_cache
 
     leader = None
     leader_confirmed = False
@@ -10909,7 +10947,9 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None, *, fresh
          isn't — the quorum reads NVMe controller state on surviving
          peers (see storage_node_monitor::_count_data_plane_votes).
     """
-    from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
+    from simplyblock_core.services.storage_node_monitor import (
+        is_node_data_plane_disconnected_quorum,
+    )
 
     # Refresh from FDB before reading peer_node.status. Callers commonly
     # build a sec_nodes list at the top of recreate_lvstore (line ~5223)
@@ -10949,7 +10989,10 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None, *, fresh
     # "connected" is bounded by the TTL and by the operation itself failing
     # and re-checking; a stale "disconnected" only delays inclusion of a
     # just-recovered peer by the same window.
-    from simplyblock_core.utils.ttl_cache import quorum_verdict_cache, QUORUM_VERDICT_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import (
+        QUORUM_VERDICT_TTL_SEC,
+        quorum_verdict_cache,
+    )
     verdict_key = (peer_node.get_id(), tuple(lvs_peer_ids or ()))
     if fresh:
         verdict = is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids, fresh=True)

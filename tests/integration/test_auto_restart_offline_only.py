@@ -29,8 +29,8 @@ plane links without a destructive restart.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.storage_node import StorageNode
 
 
 def _make_cluster(status=Cluster.STATUS_ACTIVE, distr_npcs=2,

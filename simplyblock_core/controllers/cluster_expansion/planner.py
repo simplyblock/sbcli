@@ -44,7 +44,6 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
-
 # Role names match the wire protocol used by bdev_lvol_set_lvs_opts.
 ROLE_PRIMARY = "primary"
 ROLE_SECONDARY = "secondary"

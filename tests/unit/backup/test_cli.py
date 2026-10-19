@@ -14,8 +14,14 @@ import pytest
 from simplyblock_cli import clibase
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup.manifest import (
-    BackupExport, BackupManifest, ManifestDataPlane, FDBKeyDescriptor,
-    LocatedManifests, ManifestSource, ManifestVolume)
+    BackupExport,
+    BackupManifest,
+    FDBKeyDescriptor,
+    LocatedManifests,
+    ManifestDataPlane,
+    ManifestSource,
+    ManifestVolume,
+)
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 
 

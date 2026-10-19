@@ -11,8 +11,8 @@ producing internal snapshots for its two replicated volumes, which read as
 Every delete therefore ends with a reset, which keeps the gate only while
 sync-del tasks are genuinely pending.
 """
-from simplyblock_core.services import snapshot_monitor as sm
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services import snapshot_monitor as sm
 
 
 class _RPC:

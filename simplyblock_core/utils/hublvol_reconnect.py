@@ -40,7 +40,6 @@ import uuid
 
 import fdb  # type: ignore[import-not-found]
 
-
 logger = logging.getLogger(__name__)
 
 # Per-key in-process lock used when no FDB kv_store is available (tests,

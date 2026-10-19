@@ -1,6 +1,5 @@
 from simplyblock_core.db_controller import DBController
 
-
 CLUSTER_ID = "10293de0-b91c-4618-b17a-5c3e688686f4"
 
 

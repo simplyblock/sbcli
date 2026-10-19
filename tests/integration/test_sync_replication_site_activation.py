@@ -25,7 +25,11 @@ import pytest
 
 from simplyblock_core import cluster_ops
 from simplyblock_core import storage_node_ops as ops
-from simplyblock_core.controllers import activation_gate, storage_events, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    storage_events,
+    tasks_controller,
+)
 from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule

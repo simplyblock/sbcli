@@ -3,10 +3,9 @@ import logging
 
 from flask import Blueprint, request
 
+from simplyblock_core import db_controller
 from simplyblock_core.controllers import device_controller
 from simplyblock_web import utils
-
-from simplyblock_core import db_controller
 
 logger = logging.getLogger(__name__)
 

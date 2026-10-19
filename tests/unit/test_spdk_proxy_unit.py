@@ -20,7 +20,6 @@ from pydantic import ValidationError
 from simplyblock_core.services import spdk_http_proxy_server as proxy_mod
 from simplyblock_core.utils.secrets import MASK
 
-
 REQUIRED_ENV = {
     "SERVER_IP": "127.0.0.1",
     "RPC_PORT": "19999",

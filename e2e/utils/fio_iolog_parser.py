@@ -1,8 +1,8 @@
-import os
-import sys
 import argparse
 import logging
+import os
 import re
+import sys
 
 LOG_DIR = "iolog-debug"
 FULL_LOG_FILE = os.path.join(LOG_DIR, "fio_iolog_debug.log")

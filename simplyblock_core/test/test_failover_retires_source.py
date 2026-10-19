@@ -11,9 +11,9 @@ filesystems mid-IO).
 import inspect
 from unittest.mock import MagicMock
 
+from simplyblock_core.controllers import lvol_controller as lc
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.controllers import lvol_controller as lc
 
 
 def _lvol():

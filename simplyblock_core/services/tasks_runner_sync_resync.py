@@ -26,7 +26,12 @@ import time
 from datetime import UTC, datetime
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import activation_gate, events_controller, sync_replication_controller, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    events_controller,
+    sync_replication_controller,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode

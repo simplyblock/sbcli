@@ -36,7 +36,6 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import device_monitor
 
-
 CLUSTER_ID = "11111111-1111-1111-1111-111111111111"
 
 

@@ -9,7 +9,6 @@ from simplyblock_core.models.pool import Pool
 
 from .helpers import CLUSTER, POOL, make_lvol, ready, seed_raw
 
-
 # --- uniqueness -------------------------------------------------------------
 
 def test_duplicate_unique_value_is_refused(db):

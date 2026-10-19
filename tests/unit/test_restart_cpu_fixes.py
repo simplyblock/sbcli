@@ -15,8 +15,8 @@ import time
 import types
 
 from simplyblock_core import storage_node_ops, utils
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 
 # ---------------------------------------------------------------------------

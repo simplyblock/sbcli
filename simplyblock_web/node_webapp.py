@@ -1,8 +1,8 @@
-from simplyblock_core import utils as core_utils
 import argparse
 
 from flask_openapi3 import OpenAPI
 
+from simplyblock_core import utils as core_utils
 from simplyblock_core.settings import Settings
 from simplyblock_web import utils
 from simplyblock_web.api import internal as internal_api

@@ -26,8 +26,8 @@ from simplyblock_core.watch import get_scope_watch
 
 @pytest.fixture(scope='module')
 def base_url():
-    from simplyblock_web.app import app
     from simplyblock_web.api.v2._auth import verify_api_token
+    from simplyblock_web.app import app
 
     app.dependency_overrides[verify_api_token] = lambda: None
     config = uvicorn.Config(app, host='127.0.0.1', port=0, log_level='warning')

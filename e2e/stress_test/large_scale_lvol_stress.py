@@ -30,10 +30,10 @@ import string
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
-from datetime import UTC
 
 logger = setup_logger(__name__)
 
@@ -1276,7 +1276,9 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
 #  K8s variant — PVC + FIO K8s Jobs or Client SSH FIO
 # ─────────────────────────────────────────────────────────────────────────────
 
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest  # noqa: E402
+from stress_test.continuous_k8s_native_failover import (
+    K8sNativeFailoverTest,  # noqa: E402
+)
 
 
 class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):

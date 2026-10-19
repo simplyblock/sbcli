@@ -13,17 +13,14 @@ check and data plane functions are tested indirectly.
 """
 
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call, patch
 
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.hublvol import HubLVol
+from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.hublvol import HubLVol
 from tests._mocks import unique_ip
-
-
-
 
 # ---------------------------------------------------------------------------
 # Helpers

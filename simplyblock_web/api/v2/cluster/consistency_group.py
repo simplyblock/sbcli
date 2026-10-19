@@ -16,14 +16,16 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from simplyblock_core import constants
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import (
     consistency_group_controller,
     lvol_controller,
     replication_policy_controller,
     sync_replication_controller,
 )
-from simplyblock_core.controllers.consistency_group_controller import ConsistencyGroupError
+from simplyblock_core.controllers.consistency_group_controller import (
+    ConsistencyGroupError,
+)
+from simplyblock_core.db_controller import DBController
 
 from .. import util
 from .._dependencies import Cluster, ConsistencyGroupResource

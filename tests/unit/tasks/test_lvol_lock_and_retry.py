@@ -27,9 +27,9 @@ import pytest
 
 from simplyblock_core import constants
 from simplyblock_core.controllers import snapshot_controller, tasks_controller
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.services import tasks_runner_sync_lvol_del as runner
 from simplyblock_core.services.task_runner_base import (
     TaskAbort,

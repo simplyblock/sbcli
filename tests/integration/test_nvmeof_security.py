@@ -17,21 +17,18 @@ Tests cover:
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core import constants
 import simplyblock_core.storage_node_ops as snode_ops
+from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import (
-
-
-    generate_psk_key,
     generate_dhchap_key,
-    validate_tls_config,
+    generate_psk_key,
     validate_sec_options,
+    validate_tls_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -298,6 +295,7 @@ class TestRpcClientSignatures(unittest.TestCase):
 
     def test_subsystem_create_allow_any_host_param(self):
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.subsystem_create)
         self.assertIn("allow_any_host", sig.parameters)
@@ -305,6 +303,7 @@ class TestRpcClientSignatures(unittest.TestCase):
 
     def test_subsystem_add_host_security_params(self):
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.subsystem_add_host)
         for p in ["psk", "dhchap_key", "dhchap_ctrlr_key"]:
@@ -318,6 +317,7 @@ class TestRpcClientSignatures(unittest.TestCase):
     def test_bdev_nvme_set_options_no_dhchap_params(self):
         """DHCHAP moved to nvmf_set_config – bdev_nvme_set_options must not accept them."""
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.bdev_nvme_set_options)
         self.assertNotIn("dhchap_digests", sig.parameters)
@@ -326,6 +326,7 @@ class TestRpcClientSignatures(unittest.TestCase):
     def test_nvmf_set_config_dhchap_params(self):
         """nvmf_set_config must accept dhchap_digests and dhchap_dhgroups."""
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.nvmf_set_config)
         self.assertIn("dhchap_digests", sig.parameters)

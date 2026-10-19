@@ -27,7 +27,6 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 
-
 # ---------------------------------------------------------------------------
 # Property A: ana_state selection is inaccessible during activation
 # ---------------------------------------------------------------------------
@@ -55,6 +54,7 @@ class TestActivationAnaStateSelection(unittest.TestCase):
         # Guard against the lines being reverted to an unconditional accessible
         # state: the source must gate on activation_mode and use 'inaccessible'.
         import inspect
+
         from simplyblock_core import storage_node_ops
         src = inspect.getsource(storage_node_ops)
         self.assertIn('"inaccessible" if activation_mode else "optimized"', src)

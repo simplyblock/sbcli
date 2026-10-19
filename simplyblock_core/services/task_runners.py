@@ -31,7 +31,6 @@ import pkgutil
 
 from simplyblock_core.services.task_runner_base import RunnerSpec, serve
 
-
 _PACKAGE = "simplyblock_core.services"
 _MODULE_PREFIX = "tasks_runner_"
 

@@ -16,7 +16,7 @@ moment its condition does. The tests assert that absence directly.
 """
 
 import unittest
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from simplyblock_core.controllers import alerts_controller as ac
@@ -25,7 +25,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 NOW = datetime(2026, 9, 12, 12, 0, 0, tzinfo=UTC)
 CLUSTER_ID = "cl-1"

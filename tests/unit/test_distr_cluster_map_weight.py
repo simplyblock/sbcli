@@ -23,7 +23,6 @@ from simplyblock_core import distr_controller, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
-
 _GIB = 1024 ** 3
 
 

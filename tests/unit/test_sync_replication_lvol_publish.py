@@ -18,7 +18,9 @@ from simplyblock_cli import clibase
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.exceptions import (
-    PreconditionError, SyncReplicationUnsupportedError, reject_on_sync_replication,
+    PreconditionError,
+    SyncReplicationUnsupportedError,
+    reject_on_sync_replication,
 )
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace

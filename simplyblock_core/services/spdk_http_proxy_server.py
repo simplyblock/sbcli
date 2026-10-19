@@ -21,9 +21,9 @@ import math
 import ssl
 import sys
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, ClassVar
-from collections.abc import AsyncGenerator
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -36,7 +36,6 @@ from starlette.requests import ClientDisconnect
 
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.secrets import redact_rpc_params
-
 
 logger = logging.getLogger(__name__)
 #: Handler and format are installed by ``_configure_logging``.

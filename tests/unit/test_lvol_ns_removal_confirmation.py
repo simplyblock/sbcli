@@ -22,7 +22,6 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.lvol_model import LVol
 
-
 NQN = "nqn.2023-02.io.simplyblock:cl:lvol:shared"
 
 

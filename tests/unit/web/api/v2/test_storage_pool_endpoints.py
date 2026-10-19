@@ -1,7 +1,6 @@
 """Unit tests for /api/v2/clusters/{id}/storage-pools endpoints (pool_controller mocked)."""
 
 from simplyblock_core.models.pool import Pool
-
 from tests.unit.web.api.v2._factories import CLUSTER_ID, POOL_ID
 
 BASE = f'/api/v2/clusters/{CLUSTER_ID}/storage-pools'

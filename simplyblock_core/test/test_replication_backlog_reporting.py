@@ -25,7 +25,6 @@ import pytest
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
-
 LVOL_ID = "LV1"
 
 

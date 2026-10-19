@@ -9,10 +9,10 @@ All command output is streamed directly to stdout.
 """
 import json as _json
 import os
+import re
 import subprocess
 import sys
 import time
-import re
 
 BRANCH = "feature-lvol-migration"
 MGMT = "192.168.10.111"

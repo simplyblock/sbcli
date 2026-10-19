@@ -23,12 +23,22 @@ import fdb
 import pytest
 
 from simplyblock_core import storage_node_ops as ops
-from simplyblock_core.controllers import lvol_controller, snapshot_controller, tasks_controller
+from simplyblock_core.controllers import (
+    lvol_controller,
+    snapshot_controller,
+    tasks_controller,
+)
 from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
-    SyncAnaError, SyncGateError, SyncGroupMemberError, SyncLeadershipMovingError, SyncPromoteFailedError,
-    SyncPromoteRefusedError, SyncReplicationSiteError, SyncSiteOfflineError,
+    SyncAnaError,
+    SyncGateError,
+    SyncGroupMemberError,
+    SyncLeadershipMovingError,
+    SyncPromoteFailedError,
+    SyncPromoteRefusedError,
+    SyncReplicationSiteError,
+    SyncSiteOfflineError,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol

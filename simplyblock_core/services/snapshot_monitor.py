@@ -3,11 +3,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.controllers import (
-    snapshot_events, snapshot_controller, lvol_controller)
+    lvol_controller,
+    snapshot_controller,
+    snapshot_events,
+)
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
@@ -624,7 +626,10 @@ def _cadence_waits_for_leader(node_id, lvs_name, leaderless):
     fresh for every snapshot, and never while the leadership is being moved.
     A leader found is not remembered at all: a promote can complete between
     two volumes of one tick."""
-    from simplyblock_core.storage_node_ops import LVS_MOVING_PREFIX, find_leader_with_failover
+    from simplyblock_core.storage_node_ops import (
+        LVS_MOVING_PREFIX,
+        find_leader_with_failover,
+    )
     owner = db.get_storage_node_by_id(node_id)
     active_site = owner.lvs_active_site
     key = None if active_site.startswith(LVS_MOVING_PREFIX) else (node_id, active_site)

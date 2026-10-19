@@ -31,7 +31,7 @@ Everything here is pure apart from :func:`get_active_alerts`, which is the one
 function that touches the DB: the rules take already-fetched records so they
 can be unit-tested against hand-built states.
 """
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 from simplyblock_core import constants, utils
 from simplyblock_core.models.alert_state import AlertState

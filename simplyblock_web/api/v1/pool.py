@@ -3,11 +3,11 @@ import logging
 
 from flask import Blueprint, request
 
-from simplyblock_web import utils
+from simplyblock_core import db_controller
+from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import pool_controller
-
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import db_controller, utils as core_utils
+from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
 

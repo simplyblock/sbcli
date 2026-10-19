@@ -22,9 +22,15 @@ from simplyblock_cli import cli as cli_module
 from simplyblock_core import cluster_ops
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import (
-    health_controller, lvol_controller, migration_controller, snapshot_controller,
+    health_controller,
+    lvol_controller,
+    migration_controller,
+    snapshot_controller,
 )
-from simplyblock_core.exceptions import SyncReplicationSiteError, SyncReplicationUnsupportedError
+from simplyblock_core.exceptions import (
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+)
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -34,7 +40,11 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
-from simplyblock_core.services import tasks_runner_batch_migration, tasks_runner_lvol_migration, tasks_runner_sync_lvol_del
+from simplyblock_core.services import (
+    tasks_runner_batch_migration,
+    tasks_runner_lvol_migration,
+    tasks_runner_sync_lvol_del,
+)
 from simplyblock_core.utils import ttl_cache
 from tests.integration import test_sync_replication_lvs_stack as stack
 from tests.integration.task_driver import drive
@@ -1254,8 +1264,8 @@ def no_rpc():
 
 @pytest.fixture()
 def web_client():
-    from simplyblock_web.app import app
     from simplyblock_web.api.v2._auth import verify_api_token
+    from simplyblock_web.app import app
     app.dependency_overrides[verify_api_token] = lambda: None
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.pop(verify_api_token, None)

@@ -25,21 +25,35 @@ import pytest
 from simplyblock_core import cluster_ops
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import (
-    consistency_group_controller, lvol_controller, snapshot_controller, tasks_controller)
+    consistency_group_controller,
+    lvol_controller,
+    snapshot_controller,
+    tasks_controller,
+)
 from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import (
-    backup_merge_service, tasks_runner_backup, tasks_runner_batch_migration, tasks_runner_failed_migration,
-    tasks_runner_jc_comp, tasks_runner_lvol_migration, tasks_runner_migration, tasks_runner_new_dev_migration,
-    tasks_runner_node_add, tasks_runner_node_removal, tasks_runner_sync_lvol_del, tasks_runner_sync_resync)
+    backup_merge_service,
+    tasks_runner_backup,
+    tasks_runner_batch_migration,
+    tasks_runner_failed_migration,
+    tasks_runner_jc_comp,
+    tasks_runner_lvol_migration,
+    tasks_runner_migration,
+    tasks_runner_new_dev_migration,
+    tasks_runner_node_add,
+    tasks_runner_node_removal,
+    tasks_runner_sync_lvol_del,
+    tasks_runner_sync_resync,
+)
 from simplyblock_core.services import tasks_runner_sync_promote as promote
 from simplyblock_core.utils import ttl_cache
 from tests.integration import test_sync_replication_lvol_publish as publish

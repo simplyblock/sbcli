@@ -24,8 +24,8 @@ is what makes it testable without a cluster: see test_snapshot_retention.py.
 from __future__ import annotations
 
 import re
-from typing import NamedTuple
 from collections.abc import Iterable, Sequence
+from typing import NamedTuple
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _TOKEN = re.compile(r"^(\d+)([smhd])$")

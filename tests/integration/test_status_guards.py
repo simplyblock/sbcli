@@ -23,8 +23,8 @@ must not write to FDB.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 
 def _node(uuid="node-1", status=StorageNode.STATUS_ONLINE):

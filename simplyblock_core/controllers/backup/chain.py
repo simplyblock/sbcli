@@ -28,10 +28,9 @@ below, which are also where a manifest's id (a ``UUID``) and a record's (a
 
 Nothing here reads the database. Callers supply the population to walk over.
 """
-from dataclasses import dataclass
-from typing import (
-    TypeVar, Union)
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import TypeVar, Union
 from uuid import UUID
 
 from simplyblock_core import constants
@@ -39,7 +38,6 @@ from simplyblock_core.controllers.backup.manifest import BackupManifest
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import BackupLocation
-
 
 #: What a chain can be made of. ``Backup`` records and ``BackupManifest``
 #: documents describe the same backup in two shapes; see the note on

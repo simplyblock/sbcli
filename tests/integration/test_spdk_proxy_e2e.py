@@ -22,7 +22,14 @@ import unittest
 
 import requests
 import uvicorn
-from tenacity import Retrying, stop_after_delay, wait_fixed, retry_if_exception_type, retry_if_result, RetryError
+from tenacity import (
+    RetryError,
+    Retrying,
+    retry_if_exception_type,
+    retry_if_result,
+    stop_after_delay,
+    wait_fixed,
+)
 
 if sys.platform == "win32":
     raise unittest.SkipTest("AF_UNIX not available on Windows")

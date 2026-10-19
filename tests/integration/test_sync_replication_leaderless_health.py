@@ -22,7 +22,12 @@ from simplyblock_core import utils
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteDevice, RemoteJMDevice
+from simplyblock_core.models.nvme_device import (
+    JMDevice,
+    NVMeDevice,
+    RemoteDevice,
+    RemoteJMDevice,
+)
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import health_check_service, storage_node_monitor
 from simplyblock_core.utils import port_block

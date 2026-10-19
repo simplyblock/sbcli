@@ -1,18 +1,17 @@
 import builtins
-from typing import Union
 from collections.abc import Callable
+from typing import Union
 
 from fastapi import APIRouter, Response
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import device_controller
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
 
-from ..._dependencies import Cluster, StorageNode, Device
+from ..._dependencies import Cluster, Device, StorageNode
 from ..._dtos import DeviceDTO, DeviceHealthInfoDTO
 from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
-
 
 api = APIRouter()
 db = DBController()

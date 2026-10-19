@@ -125,6 +125,7 @@ class TestWaitForNamespace(unittest.TestCase):
 
     def test_polls_until_namespace_surfaces(self):
         from unittest.mock import patch
+
         from simplyblock_core import storage_node_ops
 
         rpc = MagicMock()
@@ -141,6 +142,7 @@ class TestWaitForNamespace(unittest.TestCase):
 
     def test_gives_up_after_bounded_tries(self):
         from unittest.mock import patch
+
         from simplyblock_core import storage_node_ops
 
         rpc = MagicMock()
@@ -165,6 +167,7 @@ class TestAddNsFailureDoesNotCostAListener(unittest.TestCase):
 
     def test_present_namespace_survives_a_failed_add(self):
         from unittest.mock import patch
+
         from simplyblock_core import storage_node_ops
 
         rpc = MagicMock()
@@ -185,6 +188,7 @@ class TestAddNsFailureDoesNotCostAListener(unittest.TestCase):
     def test_genuinely_absent_namespace_still_fails(self):
         """The guard must still fail closed: no namespace means no listener."""
         from unittest.mock import patch
+
         from simplyblock_core import storage_node_ops
 
         rpc = MagicMock()

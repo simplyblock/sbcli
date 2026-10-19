@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from simplyblock_core import utils, storage_node_ops
+from simplyblock_core import storage_node_ops, utils
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import JMDevice, RemoteJMDevice
 from simplyblock_core.models.storage_node import StorageNode

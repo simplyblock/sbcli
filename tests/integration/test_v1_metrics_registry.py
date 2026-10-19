@@ -28,7 +28,11 @@ from simplyblock_core import db_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.stats import ClusterStatObject, LVolStatObject, PoolStatObject
+from simplyblock_core.models.stats import (
+    ClusterStatObject,
+    LVolStatObject,
+    PoolStatObject,
+)
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_web.api.v1 import metrics
 

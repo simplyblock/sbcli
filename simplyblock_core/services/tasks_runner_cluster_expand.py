@@ -18,7 +18,6 @@ from simplyblock_core.services.task_runner_base import (
     set_result,
 )
 
-
 logger = utils.get_logger(__name__)
 
 # get DB controller

@@ -1,6 +1,5 @@
 from simplyblock_core.db_controller import DBController
 
-
 TARGET_NODE = "7934a434-382e-4f09-be26-42057e7d885c"
 CTRLS = [
     "remote_alceml_b398e52f-6bc9-467a-818d-10ab09ec75c4",

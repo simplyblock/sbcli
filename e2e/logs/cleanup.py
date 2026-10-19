@@ -6,8 +6,9 @@
 # ]
 # ///
 import os
-import paramiko
 import time
+
+import paramiko
 
 # SSH Configuration
 BASTION_IP = os.getenv("BASTION_IP")

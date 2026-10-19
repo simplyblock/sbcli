@@ -1,6 +1,6 @@
 import os.path
-from typing import Any, ClassVar
 from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from pydantic import SecretStr
 

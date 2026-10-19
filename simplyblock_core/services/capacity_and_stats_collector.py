@@ -4,7 +4,6 @@ import time
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import (
     ClusterStatObject,
     CpuStats,
@@ -13,6 +12,7 @@ from simplyblock_core.models.stats import (
     ReactorStats,
     ThreadStats,
 )
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.utils import capacity
 

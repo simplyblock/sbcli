@@ -16,7 +16,10 @@ import pytest
 from simplyblock_cli import cli as cli_module
 from simplyblock_cli import clibase
 from simplyblock_core.controllers.sync_replication_controller import (
-    ClusterSyncStatus, LvsSyncStatus, SyncPromoteResult, VolumeSyncStatus,
+    ClusterSyncStatus,
+    LvsSyncStatus,
+    SyncPromoteResult,
+    VolumeSyncStatus,
 )
 from simplyblock_core.exceptions import SyncGateError, SyncReplicationUnsupportedError
 from simplyblock_core.utils.nvme import NvmeConnectEntry

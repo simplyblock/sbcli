@@ -23,11 +23,17 @@ import time
 import pytest
 
 from simplyblock_core.controllers import lvol_controller, replication_policy_controller
-from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
-from simplyblock_core.models.replication import ConsistencyGroup, ReplicationPolicy, ReplicationTarget
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 

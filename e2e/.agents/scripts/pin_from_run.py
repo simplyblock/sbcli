@@ -44,7 +44,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENTS_DIR = os.path.dirname(HERE)

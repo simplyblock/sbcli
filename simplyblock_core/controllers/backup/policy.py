@@ -12,7 +12,9 @@ import uuid
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.controllers.backup.chain import BackupChain
 from simplyblock_core.controllers.backup.controller import (
-    create_single_backup, get_latest_backup_for_lvol)
+    create_single_backup,
+    get_latest_backup_for_lvol,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment

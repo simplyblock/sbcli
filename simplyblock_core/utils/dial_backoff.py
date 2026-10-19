@@ -30,7 +30,6 @@ store.
 import threading
 import time
 
-
 #: Failures against one address before dials to it start being held.
 FAILURES_BEFORE_HOLD = 3
 #: First hold, seconds. Doubles per further failure.

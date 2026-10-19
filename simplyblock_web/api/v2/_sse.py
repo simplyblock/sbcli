@@ -15,13 +15,12 @@ in :mod:`simplyblock_core.watch` and the controllers.
 import asyncio
 import logging
 import time
-from typing import Any
 from collections.abc import Callable
+from typing import Annotated, Any
 
 from fastapi import HTTPException, Query
 from sse_starlette import EventSourceResponse, ServerSentEvent
 from starlette.concurrency import run_in_threadpool
-from typing import Annotated
 
 from simplyblock_core.watch import ChangeEvent, WatchUnavailable, backend_available
 

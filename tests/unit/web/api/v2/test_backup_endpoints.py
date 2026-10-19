@@ -114,6 +114,7 @@ class TestRestoreBackup:
         exception surfaces here instead of reaching that handler.)
         """
         import pytest
+
         from simplyblock_core.exceptions import PreconditionError
         backup_controller.restore_backup.side_effect = PreconditionError('node offline')
 
@@ -247,6 +248,7 @@ class TestImportBackups:
         exception surfaces here instead of reaching that handler.)
         """
         import pytest
+
         from simplyblock_core.exceptions import PreconditionError
         backup_controller.import_backups.side_effect = PreconditionError('already exists')
 

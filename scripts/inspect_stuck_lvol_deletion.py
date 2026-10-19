@@ -1,6 +1,5 @@
 from simplyblock_core.db_controller import DBController
 
-
 LVIDS = [
     "a5fd8d4e-764c-462e-9729-925b6b12fcf5",
     "05114aac-fbe8-49bd-856d-28a3db579c9e",

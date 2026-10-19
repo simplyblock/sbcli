@@ -3,8 +3,8 @@ import logging
 import random
 import re
 import string
-from typing import Literal
 import traceback
+from typing import Literal
 
 from flask import jsonify
 from pydantic import BaseModel, Field, SecretBytes, SecretStr, model_validator
@@ -12,7 +12,6 @@ from werkzeug.exceptions import HTTPException
 
 from simplyblock_core import constants
 from simplyblock_core.utils.pci import PCIAddress
-
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
 IFNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\\.]{1,15}$')

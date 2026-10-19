@@ -60,7 +60,12 @@ import time
 from datetime import UTC, datetime
 
 from simplyblock_core import db_controller, distr_controller, storage_node_ops, utils
-from simplyblock_core.controllers import activation_gate, device_controller, health_controller, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    device_controller,
+    health_controller,
+    tasks_controller,
+)
 from simplyblock_core.controllers import sync_replication_controller as sync_ctl
 from simplyblock_core.exceptions import PreconditionError, SyncAnaError, SyncGateError
 from simplyblock_core.models.cluster import Cluster

@@ -12,9 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from simplyblock_core.controllers import events_controller
+from simplyblock_core.controllers import events_controller, tasks_controller
 from simplyblock_core.controllers import sync_replication_controller as src
-from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.sync_replication import SyncReplicationEvent

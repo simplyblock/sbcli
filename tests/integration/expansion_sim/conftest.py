@@ -16,7 +16,9 @@ matter.
 
 import os
 import sys
+
 import pytest
+
 
 def _fdb_cluster_file():
     """Resolve the cluster file LAZILY, never at import time.
@@ -136,9 +138,13 @@ def patched_rpc_router():
     import site for the duration of the test. Yields the
     :class:`ClusterSim` the test should populate."""
     from tests.integration.expansion_sim._rpc_sim import (
-        ClusterSim, RpcRouter, FirewallClientSim,
-        install_rpc_router, restore_rpc_router,
-        install_firewall_stub, restore_firewall_stub,
+        ClusterSim,
+        FirewallClientSim,
+        RpcRouter,
+        install_firewall_stub,
+        install_rpc_router,
+        restore_firewall_stub,
+        restore_rpc_router,
     )
 
     cluster_sim = ClusterSim()

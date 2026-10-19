@@ -155,11 +155,13 @@ FIO Corruption Analysis Script
 - Copies all results to local machine
 """
 
+import os
+import posixpath
+from pathlib import Path
+
 import paramiko
 from scp import SCPClient
-import os
-from pathlib import Path
-import posixpath
+
 
 def create_ssh_client(host, key_path):
     k = paramiko.Ed25519Key.from_private_key_file(key_path)

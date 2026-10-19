@@ -25,17 +25,30 @@ import simplyblock_web.api.v2.cluster.replication as replication_module
 import simplyblock_web.api.v2.cluster.storage_pool.volume as volume_module
 import simplyblock_web.api.v2.cluster.storage_pool.volume.replication as volume_replication_module
 from simplyblock_core.controllers.sync_replication_controller import (
-    ClusterSyncStatus, GroupSyncStatus, SyncPromoteResult, VolumeSyncStatus,
+    ClusterSyncStatus,
+    GroupSyncStatus,
+    SyncPromoteResult,
+    VolumeSyncStatus,
 )
 from simplyblock_core.exceptions import (
-    SyncAnaError, SyncGateError, SyncGroupMemberError, SyncPromoteFailedError, SyncPromoteRefusedError,
-    SyncReplicationSiteError, SyncReplicationUnsupportedError, SyncSiteOfflineError,
+    SyncAnaError,
+    SyncGateError,
+    SyncGroupMemberError,
+    SyncPromoteFailedError,
+    SyncPromoteRefusedError,
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+    SyncSiteOfflineError,
 )
 from simplyblock_core.utils.nvme import NvmeConnectEntry
-
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
-    CLUSTER_ID, CONSISTENCY_GROUP_ID, POOL_ID, REPLICATION_POLICY_ID, TASK_ID, VOLUME_ID,
+    CLUSTER_ID,
+    CONSISTENCY_GROUP_ID,
+    POOL_ID,
+    REPLICATION_POLICY_ID,
+    TASK_ID,
+    VOLUME_ID,
 )
 
 SITE = 'site-b'

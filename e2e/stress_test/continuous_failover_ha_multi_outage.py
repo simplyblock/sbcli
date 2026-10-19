@@ -1,16 +1,18 @@
-from utils.common_utils import sleep_n_sec
-from datetime import datetime
-from collections import defaultdict
-from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
-from exceptions.custom_exception import LvolNotConnectException, NodeUnreachableTimeout
-import threading
-import string
-import random
 import os
+import random
 import re
+import string
+import threading
 import time
-from utils.ssh_utils import get_parent_device
+from collections import defaultdict
+from datetime import datetime
 
+from exceptions.custom_exception import LvolNotConnectException, NodeUnreachableTimeout
+from stress_test.continuous_failover_ha_multi_client import (
+    RandomMultiClientFailoverTest,
+)
+from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 generated_sequences = set()
 

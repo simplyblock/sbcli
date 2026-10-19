@@ -16,7 +16,10 @@ import pytest
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.services import tasks_runner_sync_promote, tasks_runner_sync_resync
+from simplyblock_core.services import (
+    tasks_runner_sync_promote,
+    tasks_runner_sync_resync,
+)
 
 
 class _StopLoop(BaseException):

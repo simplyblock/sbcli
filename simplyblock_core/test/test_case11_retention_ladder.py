@@ -14,7 +14,9 @@ ladder survives.
 import unittest
 
 from simplyblock_core.snapshot_retention import (
-    horizon_sec, parse_schedule, select_retained,
+    horizon_sec,
+    parse_schedule,
+    select_retained,
 )
 
 CASE11_SCHEDULE = "5m:15m,7m:30m,10m:1h"

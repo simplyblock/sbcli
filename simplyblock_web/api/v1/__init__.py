@@ -1,24 +1,23 @@
 import logging
+
 import fdb
+from flask import Flask, jsonify
 
-from flask import jsonify
-from flask import Flask
-
-from simplyblock_web.auth_middleware import token_required
-from simplyblock_web import utils
 from simplyblock_core import constants
+from simplyblock_web import utils
+from simplyblock_web.auth_middleware import token_required
 
-
-from . import cluster
-from . import mgmt_node
-from . import device
-from . import lvol
-from . import snapshot
-from . import storage_node
-from . import pool
-from . import swagger_ui
-from . import metrics
-
+from . import (
+    cluster,
+    device,
+    lvol,
+    metrics,
+    mgmt_node,
+    pool,
+    snapshot,
+    storage_node,
+    swagger_ui,
+)
 
 api = Flask('API v1')
 api.url_map.strict_slashes = False

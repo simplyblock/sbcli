@@ -16,7 +16,12 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.controllers.backup.chain import BackupChain, location_of
 from simplyblock_core.controllers.backup.manifest import (
-    BackupManifest, ManifestDataPlane, FDBKeyDescriptor, ManifestSource, ManifestVolume)
+    BackupManifest,
+    FDBKeyDescriptor,
+    ManifestDataPlane,
+    ManifestSource,
+    ManifestVolume,
+)
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import BackupLocation

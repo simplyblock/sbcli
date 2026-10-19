@@ -1,6 +1,7 @@
 import os
-import time
 import re
+import time
+
 import requests
 import urllib3
 from logger_config import setup_logger

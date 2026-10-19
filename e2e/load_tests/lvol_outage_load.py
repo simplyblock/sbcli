@@ -1,10 +1,11 @@
+import csv
 import random
 import threading
-import csv
-from logger_config import setup_logger
-import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+from logger_config import setup_logger
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from utils.common_utils import sleep_n_sec
 

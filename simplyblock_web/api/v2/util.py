@@ -1,6 +1,6 @@
-from typing import Annotated, Any, Literal
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -11,10 +11,14 @@ from pydantic import BaseModel, BeforeValidator, Field
 
 from simplyblock_core import utils as core_utils
 from simplyblock_core.exceptions import (
-    SyncGateError, SyncGroupMemberError, SyncPromoteFailedError, SyncPromoteRefusedError,
-    SyncReplicationSiteError, SyncReplicationUnsupportedError, SyncSiteOfflineError,
+    SyncGateError,
+    SyncGroupMemberError,
+    SyncPromoteFailedError,
+    SyncPromoteRefusedError,
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+    SyncSiteOfflineError,
 )
-
 
 Unsigned = Annotated[int, Field(ge=0)]
 OptionalUnsigned = Annotated[int | None, Field(ge=0)]

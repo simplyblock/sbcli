@@ -1,9 +1,10 @@
 import os
-from datetime import datetime
 import threading
+from datetime import datetime
+
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
-from utils.common_utils import sleep_n_sec
 from utils import proxmox
+from utils.common_utils import sleep_n_sec
 
 
 class TestRebootNodeHost(TestClusterBase):

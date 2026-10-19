@@ -20,13 +20,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.job_schedule import JobSchedule
 from tests._mocks import unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Helpers

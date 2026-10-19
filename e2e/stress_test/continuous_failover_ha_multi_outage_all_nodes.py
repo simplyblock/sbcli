@@ -8,9 +8,10 @@ from datetime import datetime
 from exceptions.custom_exception import LvolNotConnectException
 from logger_config import setup_logger
 from stress_test.continuous_failover_ha import generate_random_sequence
-from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
+from stress_test.continuous_failover_ha_multi_outage import (
+    RandomMultiClientMultiFailoverTest,
+)
 from utils.common_utils import sleep_n_sec
-
 
 # Volume security types cycled in equal thirds
 _SEC_TYPES = ["plain", "crypto", "dhchap"]

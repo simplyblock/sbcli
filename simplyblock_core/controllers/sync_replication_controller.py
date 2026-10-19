@@ -27,8 +27,15 @@ from simplyblock_core import constants, distr_controller, storage_node_ops, util
 from simplyblock_core.controllers import activation_gate, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
-    PreconditionError, SyncAnaError, SyncGateError, SyncGroupMemberError, SyncPromoteFailedError, SyncPromoteRefusedError,
-    SyncReplicationSiteError, SyncReplicationUnsupportedError, SyncSiteOfflineError,
+    PreconditionError,
+    SyncAnaError,
+    SyncGateError,
+    SyncGroupMemberError,
+    SyncPromoteFailedError,
+    SyncPromoteRefusedError,
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+    SyncSiteOfflineError,
 )
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj

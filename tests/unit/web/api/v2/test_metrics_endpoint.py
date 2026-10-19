@@ -15,7 +15,6 @@ from simplyblock_core.models.stats import (
 )
 from simplyblock_core.models.storage_node import StorageNode
 
-
 METRICS_URL = '/api/v2/metrics'
 
 

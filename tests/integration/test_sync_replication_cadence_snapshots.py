@@ -23,7 +23,10 @@ from unittest.mock import ANY, patch
 import pytest
 
 from simplyblock_core import storage_node_ops as ops
-from simplyblock_core.controllers import consistency_group_controller, snapshot_controller
+from simplyblock_core.controllers import (
+    consistency_group_controller,
+    snapshot_controller,
+)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot

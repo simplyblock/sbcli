@@ -1,13 +1,11 @@
 
-import time
 import os
+import time
 from datetime import datetime
 
-
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import mgmt_events, health_controller
+from simplyblock_core.controllers import health_controller, mgmt_events
 from simplyblock_core.models.mgmt_node import MgmtNode
-
 
 logger = utils.get_logger(__name__)
 

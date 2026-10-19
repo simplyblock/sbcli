@@ -1,7 +1,6 @@
 from simplyblock_core import db_controller
 from simplyblock_core.models.storage_node import StorageNode
 
-
 db = db_controller.DBController()
 clusters = db.get_clusters()
 changed = []

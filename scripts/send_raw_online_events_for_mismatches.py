@@ -2,7 +2,6 @@ import datetime
 
 from simplyblock_core.db_controller import DBController
 
-
 MISMATCHES = [
     ("dbdda8a9-040a-4415-9f83-6236d3d7e552", "376d710d-de8a-4817-ba8d-cb87be45c933"),
     ("b2ec7653-1fc3-4cdb-a0b6-75fe1ed9b0bf", "c1fe8ce4-455d-45bc-b26d-0d3f8a266827"),

@@ -28,13 +28,19 @@ import time
 import uuid as uuid_module
 from datetime import datetime
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils
 from simplyblock_core import db_controller as db_mod
-from simplyblock_core import utils
-from simplyblock_core.controllers import activation_gate, snapshot_events, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    snapshot_events,
+    tasks_controller,
+)
 from simplyblock_core.controllers.snapshot_controller import (
-    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock,
-    object_mutation_lock)
+    _find_lvs_leader,
+    _rollback_snapshot_bdev,
+    lvstore_op_lock,
+    object_mutation_lock,
+)
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
@@ -647,9 +653,12 @@ def demote_group(group):
         reuse demote_lvol's per-member wait, whose retrigger branch would take a
         fresh single-volume snapshot and break the group cut.
     """
-    from simplyblock_core.controllers import lvol_controller, replication_policy_controller
-    from simplyblock_core.services import replication_final_step
+    from simplyblock_core.controllers import (
+        lvol_controller,
+        replication_policy_controller,
+    )
     from simplyblock_core.models.lvol_model import LVolReplication
+    from simplyblock_core.services import replication_final_step
 
     group = db.get_consistency_group_by_id(group.get_id())
     members = []
@@ -884,7 +893,9 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                       f"rejecting the group snapshot until leadership is "
                       f"re-established")
     from simplyblock_core.storage_node_ops import (
-        check_non_leader_for_operation, member_absent_on_recorded_site)
+        check_non_leader_for_operation,
+        member_absent_on_recorded_site,
+    )
     secondary_nodes = []
     for n in all_nodes:
         if n.get_id() == primary_node.get_id() or n.status != StorageNode.STATUS_ONLINE:
@@ -969,7 +980,9 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 
             for sec in secondary_nodes:
                 from simplyblock_core.storage_node_ops import (
-                    wait_or_delay_for_restart_gate, queue_for_restart_drain)
+                    queue_for_restart_drain,
+                    wait_or_delay_for_restart_gate,
+                )
                 gate = wait_or_delay_for_restart_gate(sec.get_id(), group.lvs_name)
                 if gate == "delay":
                     queue_for_restart_drain(

@@ -1,9 +1,13 @@
 
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
-from simplyblock_core import db_controller, constants, cluster_ops, utils
-from simplyblock_core.controllers import cluster_events, fdb_backup_controller, mgmt_events
+from simplyblock_core import cluster_ops, constants, db_controller, utils
+from simplyblock_core.controllers import (
+    cluster_events,
+    fdb_backup_controller,
+    mgmt_events,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.prom_client import PromClient

@@ -27,7 +27,6 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import CpuStats, ReactorStats, ThreadStats
 
-
 api = APIRouter()
 db = DBController()
 

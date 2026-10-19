@@ -20,12 +20,11 @@ apart again.
 import ast
 import inspect
 import unittest
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 
 import simplyblock_core.services.migration_task_common as settle_check
-
 
 ONLINE_SINCE_STAMP_IS_AWARE = True  # storage_node_ops stamps datetime.now(timezone.utc)
 

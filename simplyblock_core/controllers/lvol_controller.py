@@ -6,29 +6,47 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import utils, constants
-from simplyblock_core.controllers import activation_gate, object_limits, ops_gate
-from simplyblock_core.controllers import events_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
-    snapshot_events
+from simplyblock_core import constants, utils
+from simplyblock_core.controllers import (
+    activation_gate,
+    events_controller,
+    lvol_events,
+    object_limits,
+    ops_gate,
+    pool_controller,
+    snapshot_controller,
+    snapshot_events,
+    tasks_controller,
+)
+from simplyblock_core.controllers.host_auth import (
+    _get_dhchap_group,
+    _register_dhchap_keys_on_node,
+    _register_pool_dhchap_keys_on_node,
+)
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import (
-    PreconditionError, SyncLeadershipMovingError, SyncReplicationSiteError, reject_on_sync_replication,
+    PreconditionError,
+    SyncLeadershipMovingError,
+    SyncReplicationSiteError,
+    reject_on_sync_replication,
 )
-from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
-from simplyblock_core.rpc_client import RPCException
-from simplyblock_core.controllers.host_auth import (
-    _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
+from simplyblock_core.kms import (
+    KMSException,
+    create_kms_connection,
+    lvol_dek_path,
+    pool_kek_name,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.utils import capacity
-from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
+from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import replication_final_step
+from simplyblock_core.utils import capacity
+from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 
 logger = utils.get_logger(__name__)
 
@@ -592,13 +610,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # group's node BEFORE placement runs (requirement: pin to host before
         # creation). An explicit conflicting --host is an error, not a
         # preference fight.
-        from simplyblock_core.controllers import replication_policy_controller as _rpc
         # Local import: consistency_group_controller from-imports
         # snapshot_controller internals, and snapshot_controller imports this
         # module — a top-level import here breaks any process that loads
         # snapshot_controller first (every tasks-runner service; see
         # tests/unit/test_controller_import_order.py).
         from simplyblock_core.controllers import consistency_group_controller as _cgc
+        from simplyblock_core.controllers import replication_policy_controller as _rpc
         try:
             _policy = _rpc._resolve_policy(replication_policy)
         except KeyError:
@@ -718,7 +736,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # admit a duplicate name (the pool's capacity is likewise read fresh there).
     # Uncached, these two full-DB reads cost seconds per create at a few
     # thousand objects and dominate mass-create runs.
-    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
+    from simplyblock_core.utils.ttl_cache import (
+        cached_mini_lvols,
+        cached_mini_snapshots,
+    )
     all_lvols = cached_mini_lvols(db_controller)
     all_snaps = cached_mini_snapshots(db_controller)
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
@@ -1058,8 +1079,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # snapshot_controller, which already locks the parent chain).
         with snapshot_controller.object_mutation_lock(cl.get_id(), lvol.uuid):
             from simplyblock_core.storage_node_ops import (
-                find_leader_with_failover, check_non_leader_for_operation,
+                check_non_leader_for_operation,
                 execute_on_leader_with_failover,
+                find_leader_with_failover,
             )
 
             # Build nodes list (every instance of the LVS: role_secondary_ids)
@@ -3764,7 +3786,9 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
                 pass
 
         from simplyblock_core.storage_node_ops import (
-            check_non_leader_for_operation, _lvs_leader_candidates)
+            _lvs_leader_candidates,
+            check_non_leader_for_operation,
+        )
 
         # Detect current leader via RPC (no status checks), among the members
         # that may lead: on a sync-replication cluster the active triplet.
@@ -5539,8 +5563,8 @@ def _resume_replication_after_failback(db_controller, lvol, new_lvol):
     if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
         return
     try:
-        from simplyblock_core.models.replication import ReplicationPolicy
         from simplyblock_core.controllers import replication_policy_controller
+        from simplyblock_core.models.replication import ReplicationPolicy
         node = db_controller.get_storage_node_by_id(new_lvol.node_id)
         active = [p for p in db_controller.get_replication_policies(node.cluster_id)
                   if p.status == ReplicationPolicy.STATUS_ACTIVE]
@@ -5678,7 +5702,9 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
         if already_failed_over:
             if getattr(lvol, "group_id", ""):
                 try:
-                    from simplyblock_core.controllers import consistency_group_controller
+                    from simplyblock_core.controllers import (
+                        consistency_group_controller,
+                    )
                     consistency_group_controller.reconstitute_group_after_handoff(
                         lvol, existing_clone, target_cluster.get_id())
                 except Exception as e:

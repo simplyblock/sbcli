@@ -1,11 +1,10 @@
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import StringConstraints
 
 from .helpers import single
-
 
 PCI = Path('/sys/bus/pci')
 PCI_DEVICES = PCI / 'devices'

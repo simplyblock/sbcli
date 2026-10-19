@@ -57,9 +57,9 @@ def _make_node_record(uuid: str, cluster_id: str,
                       lvstore_stack_secondary: str = "",
                       lvstore_stack_tertiary: str = "",
                       jm_vuid: int = 0):
-    from simplyblock_core.models.storage_node import StorageNode
-    from simplyblock_core.models.iface import IFace
     from simplyblock_core.models.hublvol import HubLVol
+    from simplyblock_core.models.iface import IFace
+    from simplyblock_core.models.storage_node import StorageNode
 
     n = StorageNode()
     n.uuid = uuid

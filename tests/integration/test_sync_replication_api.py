@@ -17,7 +17,9 @@ from simplyblock_core import constants
 from simplyblock_core.controllers import lvol_controller, replication_policy_controller
 from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.exceptions import (
-    SyncGroupMemberError, SyncReplicationSiteError, SyncReplicationUnsupportedError,
+    SyncGroupMemberError,
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
 )
 from simplyblock_core.models.replication import ConsistencyGroup
 from tests.integration import test_sync_replication_lvol_publish as publish

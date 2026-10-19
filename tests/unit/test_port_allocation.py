@@ -19,11 +19,10 @@ All external dependencies (FDB, RPC, Docker) are mocked.
 import unittest
 from unittest.mock import patch
 
-from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core import constants
-
+from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.hublvol import HubLVol
+from simplyblock_core.models.storage_node import StorageNode
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -572,6 +571,7 @@ class TestClusterOpsPortConfig(unittest.TestCase):
     def test_create_cluster_default_ports(self):
         """Verify create_cluster accepts default port params."""
         import inspect
+
         from simplyblock_core.cluster_ops import create_cluster
         sig = inspect.signature(create_cluster)
         self.assertEqual(sig.parameters["nvmf_base_port"].default, 4420)
@@ -581,6 +581,7 @@ class TestClusterOpsPortConfig(unittest.TestCase):
     def test_add_cluster_default_ports(self):
         """Verify add_cluster accepts default port params."""
         import inspect
+
         from simplyblock_core.cluster_ops import add_cluster
         sig = inspect.signature(add_cluster)
         self.assertEqual(sig.parameters["nvmf_base_port"].default, 4420)
@@ -708,7 +709,11 @@ class TestPortCollisionPrevention(unittest.TestCase):
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_sequential_type_allocations_are_unique(self, mock_ports, mock_config):
         """Simulate: allocate device port, then lvol port, then hublvol port."""
-        from simplyblock_core.utils import get_next_dev_port, get_next_port, next_free_hublvol_port
+        from simplyblock_core.utils import (
+            get_next_dev_port,
+            get_next_port,
+            next_free_hublvol_port,
+        )
 
         # All three functions now call get_next_nvmf_port
         mock_ports.return_value = set()

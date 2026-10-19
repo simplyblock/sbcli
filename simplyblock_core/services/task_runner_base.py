@@ -58,10 +58,10 @@ Task writes are compare-and-set, never full-object writes: see
 import datetime
 import threading
 import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
-from collections.abc import Callable, Sequence
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_controller

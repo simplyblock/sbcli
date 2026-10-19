@@ -1,7 +1,8 @@
 import time
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
+
+import requests
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 

@@ -1,15 +1,13 @@
 
 import logging
 
-from flask import Blueprint
-from flask import request
+from flask import Blueprint, request
 
+from simplyblock_core import db_controller
+from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.exceptions import PreconditionError
-
 from simplyblock_web import utils
-
-from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
 

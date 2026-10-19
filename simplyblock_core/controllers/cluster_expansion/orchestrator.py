@@ -49,7 +49,6 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
 )
 from simplyblock_core.exceptions import PreconditionError
 
-
 logger = utils.get_logger(__name__)
 
 

@@ -21,7 +21,6 @@ import pytest
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_model import LVol
 
-
 LIVE_POOL = 'pool-1'
 TOMB_POOL = 'pool-2'
 SHARED_NAME = 'vol-a'
