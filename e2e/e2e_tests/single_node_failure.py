@@ -73,9 +73,16 @@ class TestSingleNodeFailure(TestClusterBase):
             self.lvol_name, mount_path=self.mount_path
         )
 
+        # run_fio_test only redirects output when it is GIVEN a log file
+        # ("if log_file: fio_cmd = f'{fio_cmd} > {log_file} 2>&1'"), so
+        # omitting it ran fio into a tmux session and kept nothing. The
+        # validation below then read the ClientLogs directory and reported it
+        # empty, which it was.
+        fio_log = f"{self.log_path}/fio_run_1.log"
         fio_handle = self._run_fio_dual(
             lvol_name=self.lvol_name,
             mount_path=mount if not self.k8s_test else None,
+            log_path=fio_log if not self.k8s_test else None,
             name="fio_run_1",
             runtime=500,
             time_based=False,
@@ -194,7 +201,7 @@ class TestSingleNodeFailure(TestClusterBase):
             if isinstance(fio_handle, threading.Thread):
                 fio_handle.join()
 
-        self._validate_fio_dual(fio_handle, log_path=self.log_path)
+        self._validate_fio_dual(fio_handle, log_path=fio_log)
         self._cleanup_fio_k8s(fio_handle)
 
         self.logger.info("Taking snapshot 2")
@@ -393,8 +400,12 @@ class TestHASingleNodeFailure(TestClusterBase):
             lvol_name = f"LVOL_{i}"
             handle = self.fio_handles[i] if i < len(self.fio_handles) else None
             if handle:
+                # ".log" matters: add_lvol_and_run_fio writes to
+                # self.log_path + f"_{lvol_name}.log", and validating the name
+                # WITHOUT the suffix reads a path that was never created --
+                # reported as "ClientLogs_LVOL_0 is missing or empty".
                 self._validate_fio_dual(handle,
-                                        log_path=self.log_path + f"_{lvol_name}")
+                                        log_path=self.log_path + f"_{lvol_name}.log")
 
         self.logger.info("TEST CASE PASSED !!!")
 
