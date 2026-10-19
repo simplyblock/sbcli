@@ -132,6 +132,26 @@ def test_f23_needs_its_own_fix(make_world):
 
 
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+def test_f24_needs_its_own_fix(make_world):
+    """F24 is a separate defect: with #219 as run in c11 (redirect stop, reader skips
+    the dead peer JM, the peer's devices isolated by closing them) the follower's
+    takeover read of a frozen primary's LVS fails on a closed device and the
+    survivor aborts (bed c11/02c: 160 IO errors)."""
+    from .simnode import (
+        CAP_GRANT_STOPS_REDIRECT,
+        CAP_READER_SKIPS_DEAD_PEER_JM,
+        CAP_STOPLIST_PEER_DEVICES,
+        DEPLOYED_CAPS,
+    )
+    sc = next(s for s in EXTRA if s.name == "F24-frozen-primary-takeover-read")
+    caps = DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM, CAP_STOPLIST_PEER_DEVICES}
+    world = make_world(conditions=sc.conditions, caps=caps)
+    out = run(world, sc)
+    assert not out.passed, out.report()
+    assert any("F24" in f for f in out.failures), out.report()
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
 def test_f20_client_kato4_detected(make_world):
     """F20: with F19's fix in place, the old client keep-alive (4 s) still
     stalls a frozen primary's volume past the limit; KATO 2 (main) does not

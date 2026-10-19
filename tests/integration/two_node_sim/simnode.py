@@ -51,9 +51,16 @@ NORMAL, HOLDING, SOLO, FENCED = "normal", "holding", "solo", "fenced"
 CAP_ANA_RESTORE_ALL = "ana_restore_all_groups"
 CAP_GRANT_STOPS_REDIRECT = "grant_stops_redirect"
 CAP_READER_SKIPS_DEAD_PEER_JM = "reader_skips_dead_peer_jm"
+#: * ``isolate_marks_devices_unavailable`` -- F24, ultra #219 (c11 follow-up): the
+#:   isolation marks the peer's devices unavailable for every IO path before it
+#:   resets them, so a follower's takeover read of the lvstore metadata goes
+#:   degraded to the survivor's own copies. Without it (#219 as run in c11) the
+#:   devices were only closed, still read as online, and the takeover read failed:
+#:   the survivor aborted.
 CAP_STOPLIST_PEER_DEVICES = "stoplist_peer_devices_on_grant"
+CAP_ISOLATE_MARKS_UNAVAILABLE = "isolate_marks_devices_unavailable"
 ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM,
-                      CAP_STOPLIST_PEER_DEVICES})
+                      CAP_STOPLIST_PEER_DEVICES, CAP_ISOLATE_MARKS_UNAVAILABLE})
 DEPLOYED_CAPS: frozenset = frozenset()
 
 

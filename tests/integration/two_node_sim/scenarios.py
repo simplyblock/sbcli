@@ -428,6 +428,11 @@ KNOWN_FAILING = {
     "F18-ana-groups-restored": ("F18: the fence restore puts back only the namespaces' ANA "
                                 "groups (fix: restore every group the fence changed)",
                                 "ANA 44"),
+    "F24-frozen-primary-takeover-read": ("F23 on what main deploys: the follower survivor's takeover "
+                                         "metadata read waits on the frozen primary's data devices "
+                                         "until it aborts on wake (bed c9/c10 02c: 9 s; fix: ultra "
+                                         "#219 with F24, isolate by marking the devices unavailable)",
+                                         "F23"),
     "F21-takeover-reader-frozen-peer-jm": ("F21: the survivor's takeover reader picks the frozen "
                                            "peer's JM and waits for the 8 s NVMe IO timeout "
                                            "(fix: a solo LVS skips the peer JM the HA layer knows "
@@ -445,13 +450,21 @@ PENDING_FIX = {
     # and the survivor's writes of its own LVS wait on the frozen peer's data
     # devices (c9 02a, F23)
     "F19-long-freeze-primary": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
-                                          "stoplist_peer_devices_on_grant"}),
+                                          "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable"}),
     "F21-takeover-reader-frozen-peer-jm": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
-                                                     "stoplist_peer_devices_on_grant"}),
+                                                     "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable"}),
     "F18-ana-groups-restored": frozenset({"ana_restore_all_groups"}),
     "F20-frozen-leader-client-kato": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
-                                                "stoplist_peer_devices_on_grant"}),
-    "F23-frozen-secondary-data-io": frozenset({"stoplist_peer_devices_on_grant"}),
+                                                "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable"}),
+    # the survivor also takes the frozen primary's other LVS (vol0's LVS_1) over;
+    # its takeover read needs F24's capability (the bed's fio wrote vol1 only)
+    "F23-frozen-secondary-data-io": frozenset({"stoplist_peer_devices_on_grant",
+                                               "isolate_marks_devices_unavailable"}),
+    # c11 02c: the frozen primary's LVS is taken over by the follower survivor;
+    # its metadata read must go degraded around the isolated peer devices
+    "F24-frozen-primary-takeover-read": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                                   "stoplist_peer_devices_on_grant",
+                                                   "isolate_marks_devices_unavailable"}),
 }
 
 EXTRA = [
@@ -471,11 +484,17 @@ EXTRA = [
     # c9 02a: the secondary sn1 frozen 4 s. vol1's leader sn2 is granted at about
     # +2 s, but its writes (each stripe has a chunk on sn1) wait on sn1's data
     # devices until sn1 aborts on wake and its connections close (+5.1 s).
-    # A frozen primary (c9 02c) is not modelled for F23: on the bed (c9/02b) the
-    # survivor's takeover served IO before the frozen primary aborted, so a
-    # takeover read hanging on the frozen devices is not established.
+    # A frozen primary (02c) is F24-frozen-primary-takeover-read below.
     Scenario("F23-frozen-secondary-data-io", ("F23",), hang("sn1"), aborts_ok=("sn1",),
              grant_within_s=2.6),
+    # c9/c10/c11 02c: the vol1 primary sn2 frozen 8 s; the follower sn1 takes LVS_6
+    # over after its grant. Its lvstore metadata read waits on sn2's data devices
+    # until sn2 aborts on wake and its connections close (F23, c9/c10: 9 s), or,
+    # with #219 as run in c11 (devices closed but still online), fails and aborts
+    # the survivor (F24: 160 IO errors). Judged on the takeover itself; the
+    # client-side detection (F20) is not part of it.
+    Scenario("F24-frozen-primary-takeover-read", ("F23", "F24"), hang("sn2", 8.0), aborts_ok=("sn2",),
+             grant_within_s=2.6, stall_limit_s=None),
 ]
 
 #: Findings the simulator cannot express, and why.
