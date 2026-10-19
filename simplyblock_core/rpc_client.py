@@ -232,6 +232,11 @@ class RPCClient:
         self.password = password
         self.timeout = timeout
         self.session = requests.session()
+        # Never honor HTTP(S)_PROXY/NO_PROXY from the process environment (CVE-2026-97687,
+        # urllib3 GHSA-8988-9cw3-xx77): an operator-set proxy env var could otherwise route
+        # this client through an HTTPS forward proxy whose TLS verification urllib3 < 2.8
+        # can silently bypass. We never proxy here, so there is nothing to opt into.
+        self.session.trust_env = False
         if settings.tls_connect != "disabled":
             self.session.verify = str(settings.tls_certificate_authority)
         self.session.auth = (self.username, self.password.get_secret_value())

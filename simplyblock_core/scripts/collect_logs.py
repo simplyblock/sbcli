@@ -1096,10 +1096,14 @@ def main():
         print("    Using provided --monitoring-secret for Graylog auth.")
 
     gl_session = requests.Session()
+    # See CVE-2026-97687 (urllib3 GHSA-8988-9cw3-xx77): don't let a proxy env var
+    # route this through an HTTPS forward proxy with bypassed TLS verification.
+    gl_session.trust_env = False
     gl_session.auth = ("admin", graylog_password)
     gl_session.headers.update({"X-Requested-By": "sb-log-collector"})
 
     os_session = requests.Session()
+    os_session.trust_env = False
 
     # Verify Graylog reachability (informational only)
     if not args.use_opensearch:

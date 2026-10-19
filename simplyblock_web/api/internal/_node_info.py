@@ -92,6 +92,9 @@ def _amazon_info() -> Optional[dict]:
     try:
         import ec2_metadata
         session = requests.session()
+        # See CVE-2026-97687 (urllib3 GHSA-8988-9cw3-xx77): don't let a proxy env var
+        # route this through an HTTPS forward proxy with bypassed TLS verification.
+        session.trust_env = False
         data = ec2_metadata.EC2Metadata(session=session).instance_identity_document  # type: ignore[call-arg]
         return {
             "id": data["instanceId"],
