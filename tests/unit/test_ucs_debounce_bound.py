@@ -21,6 +21,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.services import storage_node_monitor as monitor
 
@@ -143,6 +144,46 @@ class TestHousekeepingCadence(unittest.TestCase):
             with self.assertRaises(_Stop):
                 monitor._housekeeping_loop()
         self.assertEqual([c.args[0] for c in sweep.call_args_list], ["cl-1", "cl-2"])
+
+
+class TestApplyNodeLossStatus(unittest.TestCase):
+    """The shutdown's own status update applies node-loss downgrades only."""
+
+    def _run(self, current, computed):
+        cluster = MagicMock()
+        cluster.status = current
+        with patch.object(monitor, "db") as db, \
+                patch.object(monitor, "get_next_cluster_status",
+                             return_value=computed) as verdict, \
+                patch.object(monitor.cluster_ops, "set_cluster_status") as set_status:
+            db.get_cluster_by_id.return_value = cluster
+            monitor.apply_node_loss_status("cl-1")
+        return verdict, set_status
+
+    def test_active_cluster_is_degraded(self):
+        _, set_status = self._run(Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED)
+        set_status.assert_called_once_with("cl-1", Cluster.STATUS_DEGRADED)
+
+    def test_active_or_degraded_cluster_is_suspended(self):
+        for current in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
+            _, set_status = self._run(current, Cluster.STATUS_SUSPENDED)
+            set_status.assert_called_once_with("cl-1", Cluster.STATUS_SUSPENDED)
+
+    def test_never_moves_toward_recovery(self):
+        for current, computed in [(Cluster.STATUS_DEGRADED, Cluster.STATUS_ACTIVE),
+                                  (Cluster.STATUS_ACTIVE, Cluster.STATUS_ACTIVE)]:
+            _, set_status = self._run(current, computed)
+            set_status.assert_not_called()
+
+    def test_leaves_other_statuses_to_the_monitor(self):
+        """No verdict at all for a suspended, activating, read-only, ...
+        cluster: re-activation is the monitor's, never a CLI shutdown's."""
+        for current in (Cluster.STATUS_SUSPENDED, Cluster.STATUS_IN_ACTIVATION,
+                        Cluster.STATUS_READONLY, Cluster.STATUS_IN_EXPANSION,
+                        Cluster.STATUS_UNREADY):
+            verdict, set_status = self._run(current, Cluster.STATUS_ACTIVE)
+            verdict.assert_not_called()
+            set_status.assert_not_called()
 
 
 class _RangeStore:
