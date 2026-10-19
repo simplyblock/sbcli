@@ -869,13 +869,20 @@ def _delete_old_tasks(tasks: list[JobSchedule]):
             task.remove(db.kv_store)
 
 
-def _delete_old_logs(events: list[EventObj], cluster_id: str):
-    now_in_seconds = int(time.time())
-    for event in events:
-        if event.cluster_uuid != cluster_id:
-            continue
-        if now_in_seconds - int(event.date/1000) > constants.TASKS_RETENTION_PERIOD_SEC:
-            event.remove(db.kv_store)
+def _delete_old_logs(cluster_id: str):
+    """Drop the cluster's events older than the retention period.
+
+    Event keys are ``<cluster_uuid>/<date ms>/<uuid>``, so the expired events
+    of one cluster are one contiguous key range and a single range clear
+    removes them, however many there are. This used to read the whole events
+    table (every cluster) and clear one key per event: the first sweep after
+    an upgrade from a release that never pruned events deleted months of
+    them while the cluster status went unrefreshed (2026-10-19, 7 min).
+    The date is a 13-digit millisecond count, so key order is date order."""
+    cutoff_ms = (int(time.time()) - constants.TASKS_RETENTION_PERIOD_SEC) * 1000
+    begin = EventObj().get_db_id(f"{cluster_id}/").encode()
+    end = EventObj().get_db_id(f"{cluster_id}/{cutoff_ms}").encode()
+    db.kv_store.clear_range(begin, end)
 
 
 def _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status):
@@ -1050,8 +1057,8 @@ def _update_cluster_status_impl(cluster_id):
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
 
-    # Retention housekeeping happens in _run_periodic_housekeeping (main
-    # loop, every few minutes), NOT here. It used to run on every pass: the
+    # Retention housekeeping happens in _run_periodic_housekeeping (its own
+    # thread, every few minutes), NOT here. It used to run on every pass: the
     # event sweep is an unbounded full read of the events table, and at 12k
     # entities it alone pushed a pass past the callers' 3s re-arm period --
     # the capture described in update_cluster_status. On an hours-old
@@ -2307,18 +2314,18 @@ def readmit_devices_after_node_online(node_id):
         logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
 
 
-#: Retention housekeeping cadence. The scans are unbounded full-table reads
-#: (events especially), so they run from the MAIN loop on a period, never
-#: inside the per-status-change recompute path.
+#: Retention housekeeping cadence. Housekeeping runs on its own thread
+#: (_housekeeping_loop), never in the main loop or the per-status-change
+#: recompute path: however long a sweep takes, it must not delay the cluster
+#: status refresh.
 HOUSEKEEPING_INTERVAL_SEC = 300
 _housekeeping_last_run: dict = {}
 
 
 def _run_periodic_housekeeping(cluster_id):
     """Delete expired tasks and events for one cluster, at most once per
-    HOUSEKEEPING_INTERVAL_SEC. Runs in the main loop thread; a slow sweep
-    here delays only the next main-loop tick, never a node's liveness
-    monitoring."""
+    HOUSEKEEPING_INTERVAL_SEC. Runs on the housekeeping thread; a slow sweep
+    here delays only the next sweep."""
     now = time.time()
     last = _housekeeping_last_run.get(cluster_id, 0)
     if now - last < HOUSEKEEPING_INTERVAL_SEC:
@@ -2326,9 +2333,32 @@ def _run_periodic_housekeeping(cluster_id):
     _housekeeping_last_run[cluster_id] = now
     try:
         _delete_old_tasks(db.get_job_tasks(cluster_id))
-        _delete_old_logs(db.get_events(), cluster_id)
+        _delete_old_logs(cluster_id)
     except Exception as e:
         logger.error(f"Retention housekeeping failed for {cluster_id}: {e}")
+
+
+def _housekeeping_loop():
+    """Retention housekeeping for every cluster, off the main loop.
+
+    It used to run in the main loop between update_cluster_status calls, so
+    a long sweep stopped the cluster status from being refreshed: a node
+    shutdown on 2026-10-19 took 7 minutes to turn the cluster DEGRADED."""
+    while True:
+        try:
+            clusters = db.get_clusters()
+        except Exception as e:
+            logger.error(f"Housekeeping: failed to get clusters: {e}")
+            clusters = []
+        for cluster in clusters:
+            _run_periodic_housekeeping(cluster.get_id())
+        time.sleep(HOUSEKEEPING_INTERVAL_SEC)
+
+
+def _start_housekeeping():
+    """Start _housekeeping_loop. A daemon, like the per-node workers: it must
+    not keep the process alive once main() has failed."""
+    threading.Thread(target=_housekeeping_loop, name="housekeeping", daemon=True).start()
 
 
 def loop_for_node(snode):
@@ -2368,6 +2398,7 @@ def _record_thread_respawn(node_id) -> int:
 def main():
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
+    _start_housekeeping()
 
     while True:
         clusters = db.get_clusters()
@@ -2407,7 +2438,6 @@ def main():
                 # with 100+ identical "Error while updating cluster status"
                 # lines and no reason (incident 2026-10-08 run 62).
                 logger.exception("Error while updating cluster status for %s", cluster_id)
-            _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
