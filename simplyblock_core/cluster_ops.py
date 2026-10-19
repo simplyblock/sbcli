@@ -59,6 +59,9 @@ SUPPORTED_ERASURE_CODING_SCHEMES = {
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
+    # See CVE-2026-97687 (urllib3 GHSA-8988-9cw3-xx77): don't let a proxy env var
+    # route this through an HTTPS forward proxy with bypassed TLS verification.
+    session.trust_env = False
     session.auth = ("admin", grafana_secret.get_secret_value())
     headers = {
         'X-Requested-By': '',
@@ -111,6 +114,9 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
     retries = 30
     reachable = False
     session = requests.session()
+    # See CVE-2026-97687 (urllib3 GHSA-8988-9cw3-xx77): don't let a proxy env var
+    # route this through an HTTPS forward proxy with bypassed TLS verification.
+    session.trust_env = False
     session.auth = ("admin", password.get_secret_value())
     headers = {
         'X-Requested-By': 'setup-script',

@@ -1,0 +1,48 @@
+# Suppressions here are for urllib3 advisories we assessed and are NOT exposed
+# to, given how this codebase actually uses the library. Each entry's `reason`
+# field states the assessment. Re-check this file whenever urllib3 is bumped —
+# once we move to >=2.8.0 these findings stop appearing on their own and the
+# suppressions can be deleted.
+#
+# Two related urllib3 advisories are deliberately NOT listed here and must
+# keep failing the scan: GHSA-vxq7-64xx-v4gw (unbounded chunk-size line) and
+# GHSA-gh4c-6fx4-qh6g (chunked-Deflate infinite loop). Both are reachable via
+# ordinary `requests` calls (chunked-response handling happens below the
+# `stream=` kwarg) from a server we do not fully trust — the storage-node SPDK
+# RPC proxy (rpc_client.py, snode_client.py). A compromised storage node can
+# use either to memory-bomb or hang the control-plane process reading the
+# response. This is a real gap pending the urllib3 upgrade; do not suppress it.
+ignore:
+  - vulnerability: GHSA-mf9v-mfxr-j63j # CVE-2026-44432
+    reason: >-
+      Decompression-bomb safeguards bypassed for Brotli-encoded streaming
+      reads. Requires the optional brotli/brotlicffi package to be
+      importable; urllib3 only registers a brotli decoder (and only then
+      decodes Content-Encoding: br) if one of those is present. Verified via
+      a clean venv built from requirements.txt alone: neither package is in
+      our dependency closure, direct or transitive. Not reachable.
+
+  - vulnerability: GHSA-qccp-gfcp-xxvc # CVE-2026-44431
+    reason: >-
+      Sensitive headers (Authorization, Cookie, Proxy-Authorization)
+      forwarded across origins on a redirect followed via urllib3's
+      low-level API (ProxyManager.connection_from_url().urlopen(...,
+      assert_same_host=False)). We only ever talk to urllib3 through
+      requests, which disables urllib3's own redirect-following
+      (redirect=False on every HTTPAdapter.send() call) and follows
+      redirects itself in Session.resolve_redirects(), stripping these
+      headers on cross-origin redirects before this bug's code path is ever
+      reached. Not reachable.
+
+  - vulnerability: GHSA-8988-9cw3-xx77 # CVE-2026-97687
+    reason: >-
+      HTTPS forward-proxy TLS verification can be ignored/overridden by
+      target-server TLS settings (proxy impersonation / credential
+      disclosure risk), reachable only when a request actually goes through
+      an HTTPS CONNECT proxy. We never pass proxies=, never construct a
+      urllib3 ProxyManager, and every requests.Session we own now sets
+      trust_env = False so an operator-set HTTP(S)_PROXY/NO_PROXY
+      environment variable cannot opt us into one either (see
+      rpc_client.py, snode_client.py, cluster_ops.py, collect_logs.py,
+      _node_info.py). No proxy is ever used, so this bug has no code path
+      to trigger. Not reachable.
