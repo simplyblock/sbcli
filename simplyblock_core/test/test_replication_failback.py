@@ -122,3 +122,39 @@ def _node_offline():
     n.uuid = "N_src_orig"
     n.status = StorageNode.STATUS_OFFLINE
     return n
+
+
+def _node(uuid, cluster_id):
+    n = StorageNode()
+    n.uuid = uuid
+    n.cluster_id = cluster_id
+    n.status = StorageNode.STATUS_ONLINE
+    return n
+
+
+def test_own_cluster_as_source_recovers_to_the_relationships_source(monkeypatch, patched):
+    """#34: the CSI driver's group resync passed the class's sourceClusterID
+    through, and on the resyncing site that names the PEER -- the cluster the
+    failed-over clone itself sits on. Taken as a fresh source it configured the
+    clone to replicate to its own cluster (own node, every transfer beside the
+    live clone, status healthy, nothing shipped home). The volume's own cluster
+    can only mean "recover to where I came from": the delta branch."""
+    nodes = {"N_src_orig": _node("N_src_orig", "CL_src"), "N_tgt": _node("N_tgt", "CL_tgt")}
+    _install(monkeypatch, nodes)
+
+    lvol_controller.replication_failback("LV_TGT", source_cluster_id="CL_tgt")
+
+    assert patched["cluster"] == "CL_src", "must NOT replicate to its own cluster CL_tgt"
+    assert "N_src_orig" in patched["node_writes"], "delta fail-back to the original node"
+
+
+def test_own_cluster_as_source_without_a_relationship_is_refused(monkeypatch, patched):
+    nodes = {"N_tgt": _node("N_tgt", "CL_tgt")}
+    db = _FakeDB([], nodes)
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+
+    result = lvol_controller.replication_failback("LV_TGT", source_cluster_id="CL_tgt")
+
+    assert result[0] is False
+    assert "own cluster" in result[1]
+    assert "cluster" not in patched, "replication_start must not be invoked"

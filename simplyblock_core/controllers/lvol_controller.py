@@ -4388,6 +4388,18 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                      lvol_id, lvol.replication_policy_id)
         return False
 
+    # A volume never replicates to its own cluster. Nothing below refuses it:
+    # the chain picker, scoped to the "destination" cluster, then finds the
+    # volume's OWN snapshots and aims replication at its own node, every
+    # transfer lands beside the live volume, and status reads healthy while the
+    # peer receives nothing (#34: a group re-protect handed the live clone's own
+    # cluster as the fail-back target; the relocate back then failed on a copy
+    # that was never shipped).
+    if replication_cluster_id and _own_cluster_id(db_controller, lvol) == replication_cluster_id:
+        logger.error("LVol %s cannot replicate to its own cluster %s",
+                     lvol.get_id(), replication_cluster_id)
+        return False
+
     lvol.do_replicate = True
     if mode in ("failover", "migration"):
         lvol.replication_mode = mode
@@ -4530,6 +4542,14 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                 if task:
                     snapshot_events.replication_task_created(snap)
     return True
+
+
+def _own_cluster_id(db_controller, lvol):
+    """The cluster *lvol* lives on, via its node; "" when the node is unknown."""
+    try:
+        return db_controller.get_storage_node_by_id(lvol.node_id).cluster_id
+    except KeyError:
+        return ""
 
 
 def _chain_counterpart_node(db_controller, lvol, replication_cluster_id):
@@ -6083,6 +6103,24 @@ def replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None):
         if r.target_lvol and r.target_lvol.get_id() == lvol_id:
             rep = r
             break
+
+    # The caller's "source cluster" is the cluster to fail back TO. The volume's
+    # own cluster can never be that: taken at face value it configured
+    # replication to itself (#34: the CSI driver's group resync passed the
+    # class's sourceClusterID through, and on the resyncing site that names the
+    # peer -- the cluster the live clone sits on). The only sane reading is a
+    # recovery to the relationship's source, so take that branch; without a
+    # relationship there is nothing to fail back to.
+    if source_cluster_id and source_cluster_id == _own_cluster_id(db_controller, lvol):
+        if rep is None:
+            logger.error("Fail-back of %s refused: source_cluster_id %s is the volume's own "
+                         "cluster and it has no fail-over relationship to recover to",
+                         lvol_id, source_cluster_id)
+            return False, "source_cluster_id names the volume's own cluster"
+        logger.warning("Fail-back of %s names its own cluster %s as the cluster to recover "
+                       "to; recovering to the relationship's source cluster %s instead",
+                       lvol_id, source_cluster_id, rep.source_cluster_id)
+        source_cluster_id = None
 
     if rep is not None and (not source_cluster_id or source_cluster_id == rep.source_cluster_id):
         orig_node_id = rep.source_lvol.node_id
