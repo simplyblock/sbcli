@@ -31,6 +31,7 @@ from simplyblock_core import constants
 from .simnode import (
     CAP_APPENDER_LOCK_SKIPS_PEER_JM,
     CAP_ISOLATE_MARKS_UNAVAILABLE,
+    CAP_READER_RESETS_PEER_JM_READ,
     CAP_READER_SKIPS_DEAD_PEER_JM,
     CAP_STOPLIST_PEER_DEVICES,
     FENCED,
@@ -586,6 +587,20 @@ class Client:
                     delay = max(delay, peer.frozen_until - now)
                     w.violate("F25: %s's takeover of %s waits for its append lock on %s's JM "
                               "(until +%.1f s)" % (node.name, lvs_name, peer.name, peer.frozen_until - w.t0))
+        if (peer.proc == "frozen" and lv.state == SOLO and CAP_READER_SKIPS_DEAD_PEER_JM in node.caps
+                and "reader_read_inflight_on_peer_jm" in w.conditions
+                and CAP_READER_RESETS_PEER_JM_READ not in node.caps):
+            # campaign c12b 02c-r1, F26: the survivor's JC reader had a history read
+            # in flight on the peer's JM when the peer froze. F21 only keeps that JM
+            # from being chosen again; the read itself neither completes nor fails
+            # until the NVMe IO timeout or the peer's abort on wake, and the
+            # takeover's reader restart waits for it.
+            now = w.vt.time()
+            done = min(peer.frozen_since + NVME_TIMEOUT_S, peer.frozen_until)
+            if done > now:
+                delay = max(delay, done - now)
+                w.violate("F26: %s's takeover of %s waits for a history read in flight on %s's JM "
+                          "(until +%.1f s)" % (node.name, lvs_name, peer.name, done - w.t0))
         lvs.takeover_until = w.vt.time() + delay
         w.log("%s: takes over %s on new IO (%.0f ms)" % (node.name, lvs_name, delay * 1000))
         return "wait"

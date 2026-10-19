@@ -64,10 +64,17 @@ CAP_READER_SKIPS_DEAD_PEER_JM = "reader_skips_dead_peer_jm"
 #:   wake and the lock request failed (bed c12/02c: 6-8 s stall, 0 IO errors).
 CAP_STOPLIST_PEER_DEVICES = "stoplist_peer_devices_on_grant"
 CAP_ISOLATE_MARKS_UNAVAILABLE = "isolate_marks_devices_unavailable"
+#: * ``reader_resets_peer_jm_read`` -- F26, ultra #219 (c12b follow-up): a solo
+#:   LVS whose JC reader has a history read in flight on the dead peer's JM resets
+#:   that JM's bdev once, so the read fails at once and the reader restarts on the
+#:   local JM. Without it (#219 as run in c12b) the read neither completed nor
+#:   failed until the 8 s NVMe IO timeout or the peer's abort on wake, and the
+#:   takeover's reader restart waited for it (bed c12b/02c-r1: 7 s stall).
 CAP_APPENDER_LOCK_SKIPS_PEER_JM = "appender_lock_skips_peer_jm"
+CAP_READER_RESETS_PEER_JM_READ = "reader_resets_peer_jm_read"
 ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM,
                       CAP_STOPLIST_PEER_DEVICES, CAP_ISOLATE_MARKS_UNAVAILABLE,
-                      CAP_APPENDER_LOCK_SKIPS_PEER_JM})
+                      CAP_APPENDER_LOCK_SKIPS_PEER_JM, CAP_READER_RESETS_PEER_JM_READ})
 DEPLOYED_CAPS: frozenset = frozenset()
 
 
