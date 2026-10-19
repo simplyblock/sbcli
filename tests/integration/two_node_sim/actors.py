@@ -29,6 +29,7 @@ import logging
 from simplyblock_core import constants
 
 from .simnode import (
+    CAP_APPENDER_LOCK_SKIPS_PEER_JM,
     CAP_ISOLATE_MARKS_UNAVAILABLE,
     CAP_READER_SKIPS_DEAD_PEER_JM,
     CAP_STOPLIST_PEER_DEVICES,
@@ -574,6 +575,17 @@ class Client:
                           "device; the survivor aborted" % (node.name, lvs_name, peer.name))
                 node.abort("F24 takeover read on a closed peer device")
                 return "error"
+            elif CAP_APPENDER_LOCK_SKIPS_PEER_JM not in node.caps and lv.state == SOLO:
+                # campaign c12 02c, F25: the new leader re-locks the appender on
+                # every JM and waits for all lock requests; the one on the frozen
+                # peer's JM neither completes nor fails until the peer aborts on
+                # wake (the process exit fails it at once: bed "Update lvolstore
+                # done" at the abort's millisecond). The takeover's first write,
+                # and with it the LVS's client IO, waits until then.
+                if peer.frozen_until > now:
+                    delay = max(delay, peer.frozen_until - now)
+                    w.violate("F25: %s's takeover of %s waits for its append lock on %s's JM "
+                              "(until +%.1f s)" % (node.name, lvs_name, peer.name, peer.frozen_until - w.t0))
         lvs.takeover_until = w.vt.time() + delay
         w.log("%s: takes over %s on new IO (%.0f ms)" % (node.name, lvs_name, delay * 1000))
         return "wait"
