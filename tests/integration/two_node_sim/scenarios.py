@@ -437,6 +437,10 @@ KNOWN_FAILING = {
                                                 "takeover waits on the frozen primary's data devices "
                                                 "(fix: ultra #219 with F24 and F25)",
                                                 "F23"),
+    "F26-takeover-read-inflight-on-peer-jm": ("F23 on what main deploys: the follower survivor's "
+                                              "takeover waits on the frozen primary's data devices "
+                                              "(fix: ultra #219 with F24, F25 and F26)",
+                                              "F23"),
     "F21-takeover-reader-frozen-peer-jm": ("F21: the survivor's takeover reader picks the frozen "
                                            "peer's JM and waits for the 8 s NVMe IO timeout "
                                            "(fix: a solo LVS skips the peer JM the HA layer knows "
@@ -455,19 +459,19 @@ PENDING_FIX = {
     # devices (c9 02a, F23)
     "F19-long-freeze-primary": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
                                           "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable",
-                                                   "appender_lock_skips_peer_jm"}),
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
     "F21-takeover-reader-frozen-peer-jm": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
                                                      "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable",
-                                                   "appender_lock_skips_peer_jm"}),
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
     "F18-ana-groups-restored": frozenset({"ana_restore_all_groups"}),
     "F20-frozen-leader-client-kato": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
                                                 "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable",
-                                                   "appender_lock_skips_peer_jm"}),
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
     # the survivor also takes the frozen primary's other LVS (vol0's LVS_1) over;
     # its takeover read needs F24's capability (the bed's fio wrote vol1 only)
     "F23-frozen-secondary-data-io": frozenset({"stoplist_peer_devices_on_grant",
                                                "isolate_marks_devices_unavailable",
-                                                   "appender_lock_skips_peer_jm"}),
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
     # c11 02c: the frozen primary's LVS is taken over by the follower survivor;
     # its metadata read must go degraded around the isolated peer devices
     # c12 02c: with F24 the takeover read goes degraded, but the new leader's first
@@ -476,11 +480,18 @@ PENDING_FIX = {
     "F25-frozen-primary-takeover-append-lock": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
                                                           "stoplist_peer_devices_on_grant",
                                                           "isolate_marks_devices_unavailable",
-                                                          "appender_lock_skips_peer_jm"}),
+                                                          "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
+    # c12b 02c-r1: the survivor's reader had a history read in flight on the frozen
+    # peer's JM; the takeover's reader restart waited for it (F26)
+    "F26-takeover-read-inflight-on-peer-jm": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                                        "stoplist_peer_devices_on_grant",
+                                                        "isolate_marks_devices_unavailable",
+                                                        "appender_lock_skips_peer_jm",
+                                                        "reader_resets_peer_jm_read"}),
     "F24-frozen-primary-takeover-read": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
                                                    "stoplist_peer_devices_on_grant",
                                                    "isolate_marks_devices_unavailable",
-                                                   "appender_lock_skips_peer_jm"}),
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
 }
 
 EXTRA = [
@@ -516,6 +527,11 @@ EXTRA = [
     # client stall, 0 IO errors). Judged on the client stall, as the bed's 02c.
     Scenario("F25-frozen-primary-takeover-append-lock", ("F23", "F25"), hang("sn2", 8.0), aborts_ok=("sn2",),
              grant_within_s=2.6),
+    # c12b 02c-r1 (intermittent): the same freeze while the survivor's JC reader has
+    # a history read in flight on sn2's JM. With F21 and F25 fixed the takeover's
+    # reader restart still waits for that read (F26: 7 s client stall, 0 IO errors).
+    Scenario("F26-takeover-read-inflight-on-peer-jm", ("F23", "F26"), hang("sn2", 8.0), aborts_ok=("sn2",),
+             grant_within_s=2.6, conditions=("reader_read_inflight_on_peer_jm",)),
 ]
 
 #: Findings the simulator cannot express, and why.

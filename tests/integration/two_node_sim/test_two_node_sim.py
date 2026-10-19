@@ -175,6 +175,31 @@ def test_f25_needs_its_own_fix(make_world):
 
 
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+def test_f26_needs_its_own_fix(make_world):
+    """F26 is a separate defect: with #219 as run in c12b (F19, F21, F23, F24 and
+    F25 fixed) a history read that the survivor's reader has in flight on the
+    frozen peer's JM still holds the takeover until the 8 s NVMe IO timeout or the
+    peer's abort on wake (bed c12b/02c-r1: 7 s client stall, 0 IO errors)."""
+    from .simnode import (
+        CAP_APPENDER_LOCK_SKIPS_PEER_JM,
+        CAP_GRANT_STOPS_REDIRECT,
+        CAP_ISOLATE_MARKS_UNAVAILABLE,
+        CAP_READER_SKIPS_DEAD_PEER_JM,
+        CAP_STOPLIST_PEER_DEVICES,
+        DEPLOYED_CAPS,
+    )
+    sc = next(s for s in EXTRA if s.name == "F26-takeover-read-inflight-on-peer-jm")
+    caps = DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM,
+                            CAP_STOPLIST_PEER_DEVICES, CAP_ISOLATE_MARKS_UNAVAILABLE,
+                            CAP_APPENDER_LOCK_SKIPS_PEER_JM}
+    world = make_world(conditions=sc.conditions, caps=caps)
+    out = run(world, sc)
+    assert not out.passed, out.report()
+    assert any("F26" in f for f in out.failures), out.report()
+    assert not any("F25" in f or "F24" in f or "F21" in f for f in out.failures), out.report()
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
 def test_f20_client_kato4_detected(make_world):
     """F20: with F19's fix in place, the old client keep-alive (4 s) still
     stalls a frozen primary's volume past the limit; KATO 2 (main) does not
