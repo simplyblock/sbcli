@@ -15,10 +15,15 @@ these tests enforce it, along with the housekeeping cadence that made the
 passes slow in the first place.
 """
 
+import inspect
+import pathlib
 import threading
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from simplyblock_core import constants
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.services import storage_node_monitor as monitor
 
 
@@ -90,7 +95,6 @@ class TestHousekeepingCadence(unittest.TestCase):
 
     def test_recompute_pass_does_no_housekeeping(self):
         """The full-table scans must be gone from the per-pass path."""
-        import inspect
         src = inspect.getsource(monitor._update_cluster_status_impl)
         self.assertNotIn("_delete_old_tasks(", src)
         self.assertNotIn("_delete_old_logs(", src)
@@ -100,7 +104,6 @@ class TestHousekeepingCadence(unittest.TestCase):
                 patch.object(monitor, "_delete_old_logs") as logs, \
                 patch.object(monitor, "db") as db:
             db.get_job_tasks.return_value = []
-            db.get_events.return_value = []
             monitor._run_periodic_housekeeping("cl-1")
             monitor._run_periodic_housekeeping("cl-1")
         tasks.assert_called_once()
@@ -111,6 +114,78 @@ class TestHousekeepingCadence(unittest.TestCase):
                 patch.object(monitor, "logger"):
             db.get_job_tasks.side_effect = RuntimeError("fdb gone")
             monitor._run_periodic_housekeeping("cl-1")   # must not raise
+
+    def test_main_loop_does_no_housekeeping(self):
+        """2026-10-19: a sweep in the main loop held the cluster status at
+        ACTIVE for 7 minutes after two nodes went offline. Housekeeping runs
+        on its own thread; the main loop only refreshes the status."""
+        src = pathlib.Path(monitor.__file__).read_text(encoding="utf-8")
+        main = src[src.index('if __name__ == "__main__":'):]
+        self.assertNotIn("_run_periodic_housekeeping(", main)
+        self.assertIn("target=_housekeeping_loop", main)
+
+    def test_housekeeping_loop_sweeps_every_cluster(self):
+        clusters = [MagicMock(), MagicMock()]
+        clusters[0].get_id.return_value = "cl-1"
+        clusters[1].get_id.return_value = "cl-2"
+
+        class _Stop(Exception):
+            pass
+
+        with patch.object(monitor, "db") as db, \
+                patch.object(monitor, "_run_periodic_housekeeping") as sweep, \
+                patch.object(monitor.time, "sleep", side_effect=_Stop):
+            db.get_clusters.return_value = clusters
+            with self.assertRaises(_Stop):
+                monitor._housekeeping_loop()
+        self.assertEqual([c.args[0] for c in sweep.call_args_list], ["cl-1", "cl-2"])
+
+
+class _RangeStore:
+    """Sorted byte-key store with FDB's clear_range semantics."""
+
+    def __init__(self):
+        self.data = {}
+
+    def clear_range(self, begin, end):
+        for k in [k for k in self.data if begin <= k < end]:
+            del self.data[k]
+
+
+class TestDeleteOldLogs(unittest.TestCase):
+
+    def _event(self, store, cluster_id, age_sec):
+        ev = EventObj()
+        ev.uuid = f"{cluster_id}-{age_sec}"
+        ev.cluster_uuid = cluster_id
+        ev.date = round((time.time() - age_sec) * 1000)
+        key = ev.get_db_id().encode()
+        store.data[key] = b"{}"
+        return key
+
+    def test_clears_only_this_clusters_expired_events(self):
+        store = _RangeStore()
+        old = constants.TASKS_RETENTION_PERIOD_SEC + 3600
+        expired = self._event(store, "cl-1", old)
+        recent = self._event(store, "cl-1", 60)
+        other_cluster = self._event(store, "cl-2", old)
+        with patch.object(monitor, "db") as db:
+            db.kv_store = store
+            monitor._delete_old_logs("cl-1")
+            db.get_events.assert_not_called()   # no full-table read
+        self.assertNotIn(expired, store.data)
+        self.assertIn(recent, store.data)
+        self.assertIn(other_cluster, store.data)
+
+    def test_cluster_id_prefix_does_not_leak(self):
+        """'cl-1' must not match the events of 'cl-10'."""
+        store = _RangeStore()
+        old = constants.TASKS_RETENTION_PERIOD_SEC + 3600
+        neighbour = self._event(store, "cl-10", old)
+        with patch.object(monitor, "db") as db:
+            db.kv_store = store
+            monitor._delete_old_logs("cl-1")
+        self.assertIn(neighbour, store.data)
 
 
 if __name__ == "__main__":

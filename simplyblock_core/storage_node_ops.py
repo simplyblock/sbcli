@@ -9600,6 +9600,17 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     except Exception as ana_e:
         logger.error("ANA failover during shutdown of %s failed: %s", node_id, ana_e)
 
+    # Refresh the cluster status now. The node was already OFFLINE when the
+    # monitor next looked at it, so its offline path (set_node_offline, which
+    # refreshes the status) never runs, and the cluster read ACTIVE with
+    # reduced redundancy until the monitor's next main-loop tick (7 minutes
+    # on 2026-10-19). Best effort: the shutdown itself has completed.
+    from simplyblock_core.services.storage_node_monitor import update_cluster_status
+    try:
+        update_cluster_status(snode.cluster_id)
+    except Exception:
+        logger.exception("Cluster status refresh after shutdown of %s failed", node_id)
+
     logger.info("Done")
     return True
 
