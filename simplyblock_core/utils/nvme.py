@@ -102,6 +102,13 @@ def build_nvme_connect_entry(
     """
     keep_alive_tmo = (constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
                       if transport == "tcp" else constants.LVOL_NVME_KEEP_ALIVE_TO)
+    if getattr(cluster, "two_node_arbitration", False):
+        # Two-node arbitration: a frozen node keeps its TCP connections open,
+        # so the host notices the dead path only via keep-alive (campaign c8,
+        # F20). Keep-alive 2 s with fast_io_fail 8 s, ctrl_loss 3600 s and
+        # reconnect 2 s (docs/design/two-node-arbitration.md, client
+        # requirements). Clusters without arbitration keep the defaults.
+        keep_alive_tmo = constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO
     client_data_nic_str = f"--host-iface={cluster.client_data_nic}" if cluster.client_data_nic else ""
     tls_str = host_auth_str = ""
     if host_entry:

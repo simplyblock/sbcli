@@ -67,17 +67,23 @@ class TestTaskRunnerLeaderAndBackoff(unittest.TestCase):
             self.assertFalse(snapshot_replication.task_runner(task))
         leader.assert_not_called()
 
-    def test_no_source_leader_waits_without_spending_retries(self):
+    def test_no_source_member_waits_without_spending_retries(self):
+        """No online member holds the snapshot: wait, do not spend retries
+        (leadership no longer matters on the source, see _select_source_node)."""
         task = _task(retry=7)
         task.retry = 7
+        snap = self._snapshot()
+        snap.snap_bdev = "LVS_1/SNAP_1"
         db = MagicMock()
-        db.get_snapshot_by_id.return_value = self._snapshot()
+        db.get_snapshot_by_id.return_value = snap
         with patch.object(snapshot_replication, "db", db), \
-                patch.object(snapshot_replication, "_source_leader_node", return_value=None), \
+                patch.object(snapshot_replication, "_lvs_transfer_hold", return_value=None), \
+                patch.object(snapshot_replication, "_select_source_node",
+                             return_value=(None, "primary n-1 offline")), \
                 self.assertLogs(snapshot_replication.logger, "WARNING") as logs:
             self.assertFalse(snapshot_replication.task_runner(task))
         self.assertEqual(task.retry, 7)
-        self.assertIn("no online source LVS leader for LVS_1", logs.output[0])
+        self.assertIn("no online member of LVS_1 holds LVS_1/SNAP_1", logs.output[0])
 
     def test_max_retry_keeps_the_last_reason(self):
         task = _task(last_error="transfer failed at offset 0, retrying")
@@ -139,8 +145,8 @@ class TestFinishSkipsConvertedNodes(unittest.TestCase):
         db.get_lvol_by_id.return_value = remote_lv
         db.get_storage_node_by_id.return_value = secondary
         with patch.object(snapshot_replication, "db", db), \
-                patch.object(snapshot_replication, "_receiving_leader_node", return_value=primary), \
-                patch.object(snapshot_replication, "_source_leader_node", return_value=MagicMock()), \
+                patch.object(snapshot_replication, "_stable_target_leader", return_value=(primary, "")), \
+                patch.object(snapshot_replication, "_transfer_source_node", return_value=MagicMock()), \
                 patch.object(snapshot_replication, "_resolve_chain_target", return_value=(None, None, True)), \
                 patch.object(snapshot_replication, "_require_lvs_leader", return_value=True), \
                 patch.object(snapshot_replication, "_prechained_nodes_for", return_value=set()):

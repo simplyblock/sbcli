@@ -979,7 +979,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
         # 3. Validate FIO log contents for errors
         validated = 0
         failed = 0
-        for device, dinfo in self._device_registry.items():
+        for dinfo in self._device_registry.values():
             log_file = dinfo.get("log")
             client = dinfo.get("client")
             name = dinfo.get("name")
@@ -1002,7 +1002,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
     def _save_all_fio_logs_docker(self):
         """Collect FIO log files from all clients to the local log dir."""
         saved = 0
-        for device, dinfo in self._device_registry.items():
+        for dinfo in self._device_registry.values():
             log_file = dinfo.get("log")
             client = dinfo.get("client")
             name = dinfo.get("name")
@@ -1093,7 +1093,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
                 self.logger.info("[cleanup] All FIO threads completed")
 
         # 2. Unmount all filesystems
-        for device, dinfo in self._device_registry.items():
+        for dinfo in self._device_registry.values():
             try:
                 self.ssh_obj.exec_command(
                     node=dinfo["client"],
@@ -1942,7 +1942,7 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             fio_timeout = self.FIO_RUNTIME + 300
             validated = 0
             failed = 0
-            for pvc_name, pvc_info in self.pvc_details.items():
+            for pvc_info in self.pvc_details.values():
                 job_name = pvc_info.get("job_name")
                 if not job_name:
                     continue

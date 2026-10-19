@@ -239,7 +239,12 @@ class TestSplitPartitionForJournal(unittest.TestCase):
 
         def fake_run(cmd):
             commands.append(cmd)
-            if cmd.startswith("lsblk -ndo PTTYPE"):
+            # Regression: the storage-node init container has no /run/udev, so
+            # lsblk, which reads PTTYPE from the udev database, prints nothing
+            # for a GPT disk. Only a probe of the device itself reports it.
+            if cmd.startswith("lsblk") and "PTTYPE" in cmd:
+                return "", "", 0
+            if cmd.startswith("blkid -p"):
                 return pttype, "", 0
             if cmd.startswith("sgdisk"):
                 return "", "", sgdisk_rc

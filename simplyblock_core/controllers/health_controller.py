@@ -251,23 +251,18 @@ def _log_port_check_failure(db_controller, snode, port, exc):
 
 
 def check_port_on_node(snode, port_id):
-    from simplyblock_core.utils import port_block
-    return not port_block.is_port_blocked(snode, port_id)
+    return int(port_id) not in snode.rpc_client(timeout=5, retry=5).nvmf_get_blocked_ports()
 
 
 def check_ports_on_node(snode, port_ids):
     """Batch variant of :func:`check_port_on_node`: ONE
     ``nvmf_get_blocked_ports`` fetch answers every port in ``port_ids``.
-    Returns ``{port: bool}`` (True = open). Falls back to per-port checks on
-    legacy nodes without the RPC. Raises on fetch failure — callers treat it
-    like the single-port failure path."""
-    from simplyblock_core.utils import port_block
+    Returns ``{port: bool}`` (True = open). Raises on fetch failure — callers
+    treat it like the single-port failure path."""
     port_ids = list(port_ids)
     if not port_ids:
         return {}
-    blocked = port_block.get_blocked_ports_set(snode)
-    if blocked is None:
-        return {p: check_port_on_node(snode, p) for p in port_ids}
+    blocked = snode.rpc_client(timeout=5, retry=5).nvmf_get_blocked_ports()
     return {p: int(p) not in blocked for p in port_ids}
 
 
@@ -324,10 +319,9 @@ def _check_node_hublvol(node: StorageNode) -> bool:
             logger.error(f"Cluster with id {node.cluster_id} not found")
             return False
 
-        ret = rpc_client.bdev_lvol_get_lvstores(node.lvstore)
-        if ret:
+        lvs_info = rpc_client.get_lvstore(node.lvstore)
+        if lvs_info:
             logger.info(f"Checking lvstore: {node.lvstore} ... ok")
-            lvs_info = ret[0]
             logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict[str, Any] = {}
@@ -708,10 +702,9 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
         except KeyError:
             logger.error(f"Cluster with id {node.cluster_id} not found")
             return False
-        ret = rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore)
-        if ret:
+        lvs_info = rpc_client.get_lvstore(primary_node.lvstore)
+        if lvs_info:
             logger.info(f"Checking lvstore: {primary_node.lvstore} ... ok")
-            lvs_info = ret[0]
             logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict [str, Any] = {}
@@ -887,7 +880,7 @@ def _check_node_lvstore(
             return False
     if bdev_lvstore:
         try:
-            ret = node.rpc_client().bdev_lvol_get_lvstores(bdev_lvstore)
+            ret = node.rpc_client().get_lvstore(bdev_lvstore)
         except Exception as e:
             logger.error(e)
             return False

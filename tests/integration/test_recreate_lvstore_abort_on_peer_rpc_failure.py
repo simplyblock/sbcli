@@ -22,7 +22,7 @@ These tests verify that:
   - replication-wait raise         -> abort
   - jc_compression check raise     -> abort
 
-External dependencies (FDB, RPC, SPDK, FirewallClient) are mocked.
+External dependencies (FDB, RPC, SPDK) are mocked.
 """
 
 import unittest
@@ -32,7 +32,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
-from tests._mocks import unique_ip
+from tests._mocks import route_fences, unique_ip
 
 # --------------------------------------------------------------------------
 # Helpers (kept aligned with tests/test_dual_ft_secondary_fixes.py)
@@ -160,7 +160,6 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             patch("simplyblock_core.storage_node_ops.health_controller"),
             patch("simplyblock_core.storage_node_ops.tcp_ports_events"),
             patch("simplyblock_core.storage_node_ops.storage_events"),
-            patch("simplyblock_core.utils.port_block.set_port"),
             patch("simplyblock_core.models.storage_node.RPCClient"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_devs"),
@@ -181,13 +180,15 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             "health": mocks[4],
             "tcp_events": mocks[5],
             "storage_events": mocks[6],
-            "fw_cls": mocks[7],
-            "rpc_cls": mocks[8],
-            "connect_jm": mocks[9],
-            "connect_devs": mocks[10],
-            "create_bdev": mocks[11],
-            "failback_ana": mocks[12],
-            "db_cls": mocks[13],
+            "rpc_cls": mocks[7],
+            "connect_jm": mocks[8],
+            "connect_devs": mocks[9],
+            "create_bdev": mocks[10],
+            "failback_ana": mocks[11],
+            "db_cls": mocks[12],
+            # Fence spy: route_fences() in _setup_common sends every node's
+            # nvmf_port_block / nvmf_port_unblock here.
+            "fw_cls": MagicMock(),
         }
 
     def _setup_common(self, m):
@@ -210,11 +211,11 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
 
         rpc = MagicMock()
         # On snode: leader=False (snode just restarted, has not promoted yet)
-        rpc.bdev_lvol_get_lvstores.return_value = [{
+        rpc.get_lvstore.return_value = {
             "lvs leadership": True,  # default: peer reports as leader
             "lvs_primary": False,
             "uuid": "lvs-uuid",
-        }]
+        }
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -226,6 +227,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         rpc.bdev_distrib_check_inflight_io.return_value = False
         m["rpc_cls"].return_value = rpc
         _attach_node_helpers(nodes, rpc)
+        route_fences(nodes.values(), m["fw_cls"])
 
         # snode.client() returns the SnodeAPI used by _kill_app
         snode_api = _make_snode_api()
@@ -238,7 +240,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
     # Bug repro: leader port-block FW timeout → abort, no leader promotion
     # ----------------------------------------------------------------------
     def test_leader_port_block_fw_failure_aborts_and_does_not_promote(self):
-        """LVS_6609 incident: FirewallClient.firewall_set_port raises on the
+        """LVS_6609 incident: the port block raises on the
         leader. recreate_lvstore must abort (not silent-skip), so snode is
         NOT promoted and SPDK on snode is killed."""
         from simplyblock_core import storage_node_ops
@@ -247,7 +249,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         m = self._enter_patches(patches)
         nodes, rpc, snode_api = self._setup_common(m)
 
-        # FirewallClient: raises only when called against the secondary (leader)
+        # Fence: raises only when called against the secondary (leader)
         fw_calls = []
 
         def make_fw(node, port, block, is_reject=False, timeout=5, retry=2):
@@ -353,7 +355,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
     # Leader-detection RPC raises → abort (early, before _create_bdev_stack)
     # ----------------------------------------------------------------------
     def test_leader_detection_rpc_failure_aborts_before_bdev_stack(self):
-        """get_lvstores on the only peer raises (mgmt slow). Must abort
+        """get_lvstore on the only peer raises (mgmt slow). Must abort
         without creating the bdev stack on snode."""
         from simplyblock_core import storage_node_ops
 
@@ -361,8 +363,8 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         m = self._enter_patches(patches)
         nodes, rpc, snode_api = self._setup_common(m)
 
-        # rpc returned by RPCClient(sec_node...) raises on get_lvstores
-        rpc.bdev_lvol_get_lvstores.side_effect = Exception("simulated peer mgmt timeout")
+        # rpc returned by RPCClient(sec_node...) raises on get_lvstore
+        rpc.get_lvstore.side_effect = Exception("simulated peer mgmt timeout")
 
         snode = nodes["snode"]
         with self.assertRaises(Exception) as ctx:
@@ -418,11 +420,11 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         # bound rpc_client mock instead. Mirror the leader-detection
         # response on leader_rpc so sec is still selected as leader.
         leader_rpc = MagicMock()
-        leader_rpc.bdev_lvol_get_lvstores.return_value = [{
+        leader_rpc.get_lvstore.return_value = {
             "lvs leadership": True,
             "lvs_primary": False,
             "uuid": "lvs-uuid",
-        }]
+        }
         leader_rpc.jc_compression_get_status.side_effect = Exception(
             "simulated jc_compression timeout")
         nodes["sec"].rpc_client = MagicMock(return_value=leader_rpc)

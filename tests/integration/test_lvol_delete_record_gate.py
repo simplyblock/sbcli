@@ -403,7 +403,7 @@ class TestOrphanSweepIsDetectOnly:
         lvol.write_to_db(db.kv_store)
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"uuid": "lvs-uuid"}]
+        rpc.get_lvstore.return_value = {"uuid": "lvs-uuid"}
         rpc.bdev_lvs_dump_tree.return_value = {"lvols": [
             {"blobid": 11, "name": "LVOL_1", "uuid": "u1", "ref": 1},   # claimed
             {"blobid": 99, "name": "LVOL_GHOST", "uuid": "u2", "ref": 1},  # orphan

@@ -85,7 +85,7 @@ other processes agreeing).
 ## Coding Conventions
 
 - **Error handling**: Raise specific exceptions — never return `None`/booleans for errors, never bare `except Exception`. See `CONTRIBUTING.md`.
-- **Retries**: Use `tenacity` (`@retry` decorator, or `Retrying`/`AsyncRetrying` for a single call site) instead of hand-written attempt loops with `time.sleep()`. Always set an explicit `stop=` and `wait=`, and log attempts via `before_sleep=before_sleep_log(logger, logging.WARNING)`. Refactor hand-rolled retry loops you touch.
+- **Retries**: Use `tenacity` (`@retry` decorator, or `Retrying`/`AsyncRetrying` for a single call site) instead of hand-written attempt loops with `time.sleep()`. Always set an explicit `stop=` and `wait=`; log attempts via `before_sleep=before_sleep_log(logger, logging.WARNING)` where that visibility is useful. Refactor hand-rolled retry loops you touch.
 - **Locking**: Use `DbLock` (`simplyblock_core/models/lock/__init__.py`) for mutual exclusion that must hold across processes/hosts — it is an FDB-backed distributed lock, safe from the CLI, the Web API, and background services alike. Do not reach for `threading.Lock`/`multiprocessing.Lock` for anything that also needs to exclude another process; see the module docstring for what `DbLock` is not for (a short critical section that fits in one FDB transaction needs no lock at all — use the transaction). Always take it with `with DbLock(...):`. Never call `.acquire()`/`.release()` by hand in a try/except/finally — that is the pattern `DbLock` exists to replace, and `__exit__` does more than `release()` (it also raises `DbLockLostError` if the lease died mid-section).
 - **Pydantic fields**: Use the [annotated pattern](https://pydantic.dev/docs/validation/latest/concepts/fields/#the-annotated-pattern) for field metadata, not the assignment form. See below.
 - **Ruff** and **mypy** are enforced in CI. `simplyblock_cli/cli.py` is excluded from ruff (auto-generated).
@@ -209,6 +209,8 @@ simplyblock_cli/AGENTS.md         ← CLI-specific instructions
 simplyblock_cli/CLAUDE.md          ← `@AGENTS.md`
 simplyblock_core/AGENTS.md        ← Core-specific instructions
 simplyblock_core/CLAUDE.md         ← `@AGENTS.md`
+simplyblock_core/services/AGENTS.md ← Background services: task-runner retry/abort/defer contract
+simplyblock_core/services/CLAUDE.md  ← `@AGENTS.md`
 simplyblock_web/AGENTS.md         ← Web API-specific instructions
 simplyblock_web/CLAUDE.md          ← `@AGENTS.md`
 tests/AGENTS.md                   ← Test-suite layout, tiers, fixtures

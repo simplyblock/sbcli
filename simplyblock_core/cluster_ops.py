@@ -64,8 +64,9 @@ from simplyblock_core.models.stats import (
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.settings import Settings
-from simplyblock_core.utils import port_block, pull_docker_image_with_retry
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -1172,6 +1173,7 @@ def activation_minimum_devices(cluster, single_node_cluster) -> int:
 
 def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
+    storage_node_ops._remember_cluster_arbitration(cluster)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")
@@ -1643,7 +1645,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
                     try:
                         leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                        port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
+                        primary_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_port)
                         tcp_ports_events.port_deny(primary_node, leader_port)
                         leader_blocked = True
                         time.sleep(0.5)
@@ -1666,7 +1668,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 finally:
                     if leader_blocked:
                         try:
-                            port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
+                            primary_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_port)
                             tcp_ports_events.port_allowed(primary_node, leader_port)
                         except Exception as ue:
                             logger.error(
@@ -1813,7 +1815,10 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 logger.info(f"Setting Alcemls QOS weights on node {node.get_id()}")
-                ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                try:
+                    ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                except RPCException:
+                    ret = False
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
@@ -1823,8 +1828,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     if ols_status == Cluster.STATUS_UNREADY and not jc_compression_upgrade.resume_is_held(cluster):
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
-                ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                if not ret:
+                if not node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False):
                     logger.info("Failed to resume JC compression adding task...")
                     tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
 

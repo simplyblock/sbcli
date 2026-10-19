@@ -129,7 +129,7 @@ class SNodeClient:
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection: SecretStr | None = None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password: SecretStr | None = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, firewall_port=0, cluster_id=None,
+                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, cluster_id=None,
                            spdk_proxy_image=None, mcp_max_unavailable=None):
         params = {
             "cluster_ip": cluster_ip,
@@ -162,8 +162,6 @@ class SNodeClient:
             params["system_mem"] = system_mem
         if cluster_mode:
             params["cluster_mode"] = cluster_mode
-        if firewall_port:
-            params["firewall_port"] = firewall_port
         params["socket"] = socket
         if cluster_id:
             params["cluster_id"] = cluster_id

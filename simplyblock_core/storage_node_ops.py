@@ -23,6 +23,7 @@ from tenacity import (
     Retrying,
     before_sleep_log,
     retry_if_exception_type,
+    retry_if_result,
     stop_after_attempt,
     wait_fixed,
 )
@@ -86,7 +87,7 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
-    port_block,
+    nvmf_listener,
     pull_docker_image_with_retry,
     rpc_budget,
 )
@@ -236,6 +237,62 @@ def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
         return False
 
 
+def _presumed_acting_leader(lvs_node, sec_nodes, disconnected_peers, snode):
+    """The peer to quiesce when no connected peer reports lvs leadership.
+
+    ``get_lvstore``'s "lvs leadership" is not a reliable signal for
+    a secondary that took over: in the lblk_rapid_outage run (2026-09-26
+    22:23:21, LVS_1) c8a7e64d had been the acting leader since 22:22:39 --
+    every distrib of jm_vuid 1 "state changed to leader", its JC writing the
+    journal -- yet the probe found no leader. The recreate then skipped the
+    whole quiesce on it (no jc_disable_replication, no in-flight drain, no
+    leadership drop), examined the lvstore on the restarting primary and
+    made it leader at 22:23:24.9; at 22:23:25.2 the secondary's JC, still
+    the writer, started replicating into the primary's just-recovered JM
+    and the primary hit a writer conflict at 22:23:25.28.
+
+    Every step of that quiesce is harmless on a peer that is not leading
+    (no replication to suspend, nothing in flight, leadership already
+    False), so when the probe is inconclusive and ``snode`` is recreating
+    its own primary LVS, the connected peer that would have taken over --
+    the secondary, else the tertiary -- is quiesced as if it were the
+    leader. Returns None when no such peer is connected."""
+    if lvs_node is None or lvs_node.get_id() != snode.get_id():
+        return None
+    connected = {p.get_id(): p for p in sec_nodes
+                 if p.get_id() not in disconnected_peers}
+    for peer_id in (lvs_node.secondary_node_id, lvs_node.tertiary_node_id):
+        if peer_id and peer_id in connected:
+            return connected[peer_id]
+    return None
+
+
+def demote_old_leader_listeners(sec_node, lvol_list, ana_state="non_optimized"):
+    """Put the old leader's lvol listeners into ``ana_state`` after a
+    failback, per volume ANA group.
+
+    Existing listeners get nvmf_subsystem_listener_set_ana_state; only a
+    missing listener is created, directly in ``ana_state``. Raises on the
+    first failure (the caller logs it and moves on to the next peer)."""
+    sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
+    seen = set()
+    for lvol in lvol_list:
+        listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
+        for iface in sec_node.data_nics:
+            if not iface.ip4_address:
+                continue
+            tr_type = "RDMA" if sec_node.active_rdma and iface.trtype == "RDMA" else "TCP"
+            key = (lvol.nqn, tr_type, iface.ip4_address, listener_port,
+                   lvol.ns_id or None)
+            if key in seen:
+                continue
+            seen.add(key)
+            nvmf_listener.ensure_listener(
+                sec_rpc, lvol.nqn, tr_type, iface.ip4_address, listener_port,
+                ana_state=ana_state, anagrpid=lvol.ns_id or None,
+                set_existing_ana=True)
+
+
 def _rpc_bdev_exists(rpc_client, name):
     """True iff a bdev with the given name is visible to SPDK."""
     try:
@@ -246,10 +303,9 @@ def _rpc_bdev_exists(rpc_client, name):
 
 
 def _rpc_lvstore_exists(rpc_client, lvs_name):
-    """True iff bdev_lvol_get_lvstores(lvs_name) returns a live lvstore."""
+    """True iff get_lvstore(lvs_name) returns a live lvstore."""
     try:
-        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
-        return bool(ret)
+        return bool(rpc_client.get_lvstore(lvs_name))
     except Exception:
         return False
 
@@ -279,6 +335,7 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
     whatever comes next; the node should still be marked OFFLINE so it stops
     being treated as in_restart.
     """
+    _note_planned_loss(snode, "spdk kill")
     snode_api = snode.client(timeout=5, retry=5)
     # Each attempt is bounded BOTH ways, and needs both. The wall-clock deadline
     # is what keeps the documented ``max_attempts * poll_per_attempt_sec`` cap
@@ -390,20 +447,32 @@ def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
             # Scope the flip to this volume's ANA group (group id == namespace
             # id): a subsystem can carry several namespaces whose volumes are
             # migrated, suspended or failed over independently.
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
-                anagrpid=lvol.ns_id)
-            if not ret:
-                logger.warning("Failed to set ANA state %s for %s on %s", ana_state, lvol.nqn, node.get_id())
+            try:
+                rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
+                    anagrpid=lvol.ns_id)
+            except RPCException as e:
+                logger.warning("Failed to set ANA state %s for %s on %s: %s",
+                               ana_state, lvol.nqn, node.get_id(), e)
             else:
                 logger.info("ANA: %s ns %s on %s (%s) → %s", lvol.nqn, lvol.ns_id,
                             node.get_id(), iface.ip4_address, ana_state)
 
 
-def _failover_primary_ana(primary_node: StorageNode):
+def _failover_primary_ana(primary_node: StorageNode) -> bool:
     """Primary failed: promote first_sec→optimized.
 
     The second_sec stays at non_optimized (its permanent state).
+
+    Returns whether the promotion was attempted (True once the flips were
+    issued, whatever each one answered; _set_lvol_ana_on_node logs a failed
+    flip and moves on). It is skipped entirely while first_sec is not ONLINE
+    -- there is nothing to promote onto -- and a caller that records "done"
+    on a skipped call loses the failover for good
+    (2026-10-14 run 63: the secondary was itself restarting while its primary
+    was shut down for removal, the monitor's one-shot marker was consumed by
+    the skip, and the primary's volumes stayed unserved until the promotion
+    was triggered by hand).
     """
     db_ctrl = DBController()
     lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
@@ -412,6 +481,11 @@ def _failover_primary_ana(primary_node: StorageNode):
     first_sec = None
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
+    if not (first_sec and first_sec.status == StorageNode.STATUS_ONLINE):
+        logger.info("ANA failover for %s skipped: first secondary %s is %s, not online",
+                    primary_node.get_id(), primary_node.secondary_node_id,
+                    first_sec.status if first_sec else "absent")
+        return False
 
     # Dedupe per NAMESPACE, not per subsystem. The old per-(nqn, lvs) dedupe was
     # correct only while the flip was subsystem-wide: now that each volume's
@@ -424,8 +498,8 @@ def _failover_primary_ana(primary_node: StorageNode):
         if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
         seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
-        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-            _set_lvol_ana_on_node(lvol, first_sec, "optimized")
+        _set_lvol_ana_on_node(lvol, first_sec, "optimized")
+    return True
 
 
 def _failback_primary_ana(primary_node: StorageNode):
@@ -451,21 +525,31 @@ def _failback_primary_ana(primary_node: StorageNode):
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
 
-def trigger_ana_failover_for_node(offline_node: StorageNode):
+def trigger_ana_failover_for_node(offline_node: StorageNode) -> bool:
     """Trigger ANA failover when a node goes offline.
 
     Only action needed: if the offline node is a primary, promote its
     first_sec to optimized.  The second_sec is always non_optimized and
     never needs ANA state changes.
+
+    Returns True when a promotion was attempted, whether or not every flip
+    succeeded; False when nothing was attempted because the node is not a
+    primary or its first secondary is not online yet. The monitor's one-shot
+    marker keys off this: a SKIPPED failover is retried on a later cycle
+    instead of being recorded as done, while an attempt that failed counts as
+    the episode's one shot exactly as before, so a peer that cannot take the
+    flips is not hammered every cycle (the 2026-08-09 pause storm).
     """
     node_id = offline_node.get_id()
 
-    if offline_node.secondary_node_id:
-        logger.info("ANA failover: node %s is primary, promoting first_sec", node_id)
-        try:
-            _failover_primary_ana(offline_node)
-        except Exception as e:
-            logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
+    if not offline_node.secondary_node_id:
+        return False
+    logger.info("ANA failover: node %s is primary, promoting first_sec", node_id)
+    try:
+        return _failover_primary_ana(offline_node)
+    except Exception as e:
+        logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
+        return True
 
 
 def trigger_ana_failback_for_node(restarting_node: StorageNode):
@@ -1230,21 +1314,160 @@ def apply_jc_dual_node(cluster_id):
     Keyed on MEMBERSHIP, not on how many nodes are online: a 3-node cluster
     with one node down must keep requiring 2 journals. Only a cluster whose
     whole membership is 2 is a dual-node cluster.
+
+    Two-node arbitration (campaign c1, B2): a ``jc_set_dual_node`` call that
+    carries only ``enable`` resets the node to its defaults and so switches
+    arbitration OFF on every restarted node. On a cluster with
+    ``two_node_arbitration`` every call therefore carries the full arbitration
+    config (``arbitration.dual_node_params``). A node that rejects the fields
+    (built without the protocol) still gets the plain dual-node flag: that one
+    keeps the survivor from aborting and must never be lost.
     """
     db_controller = DBController()
     members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
                if n.status != StorageNode.STATUS_REMOVED]
     enable = len(members) == 2
+    # Arbitration exists only on a 2-member cluster: every other cluster (and a
+    # 2-member cluster without arbitration) takes the original path below,
+    # unchanged, with no cluster read.
+    arbitrated = enable and _cluster_two_node_arbitrated(cluster_id)
+    if not arbitrated:
+        for node in members:
+            if node.status != StorageNode.STATUS_ONLINE:
+                continue
+            try:
+                node.rpc_client().jc_set_dual_node(enable)
+                logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
+                            enable, node.get_id(), len(members))
+            except Exception as e:                  # noqa: BLE001 - best effort
+                logger.warning("Could not set JC dual-node=%s on %s: %s",
+                               enable, node.get_id(), e)
+        return
+
+    from simplyblock_core.arbitration import dual_node_params, set_dual_node
+
     for node in members:
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            node.rpc_client().jc_set_dual_node(enable)
-            logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
-                        enable, node.get_id(), len(members))
+            err, level = set_dual_node(node.rpc_client(), enable, arbitrated)
+            if err:
+                logger.warning("Could not set JC dual-node=%s on %s: %s",
+                               enable, node.get_id(), err)
+                continue
+            if arbitrated and level != "full":
+                logger.warning("Node %s rejected part of the arbitration fields of "
+                               "jc_set_dual_node; applied %s", node.get_id(), level)
+            logger.info("JC dual-node=%s applied on %s (cluster membership %d, arbitration %s)",
+                        enable, node.get_id(), len(members),
+                        dual_node_params(enable)["arbitration"] if arbitrated else "not managed")
         except Exception as e:                  # noqa: BLE001 - best effort
             logger.warning("Could not set JC dual-node=%s on %s: %s",
                            enable, node.get_id(), e)
+
+
+def _note_planned_loss(snode, reason):
+    """Two-node arbitration (campaign c2, F3): announce that the control plane
+    is about to stop this node's SPDK, so the arbiter grants its peer at once
+    instead of letting it fence itself at the hold deadline. Never raises.
+
+    Non-arbitrated clusters return at once, without a DB read when the flow
+    remembered its cluster (``_remember_cluster_arbitration``)."""
+    try:
+        if not _cluster_two_node_arbitrated(snode.cluster_id):
+            return
+    except Exception:                           # noqa: BLE001 - best effort
+        return
+    from simplyblock_core.arbitration.planned import note_planned_loss
+    try:
+        db = DBController()
+    except Exception as e:                      # noqa: BLE001 - best effort
+        logger.debug("No DB for the planned-loss marker of %s: %s", snode.get_id(), e)
+        return
+    note_planned_loss(snode, reason, db=db)
+
+
+# Two-node arbitration flag per cluster, remembered from the cluster object the
+# restart and shutdown flows already read (``_remember_cluster_arbitration``),
+# so their two-node gates cost regular clusters no extra FDB read.
+_ARBITRATION_FLAG: dict = {}                    # cluster id -> (flag, monotonic time)
+_ARBITRATION_FLAG_TTL_S = 120.0
+
+
+def _remember_cluster_arbitration(cluster) -> bool:
+    """Record ``cluster.two_node_arbitration`` from a cluster object a flow
+    already holds; returns the flag."""
+    flag = getattr(cluster, "two_node_arbitration", False) is True
+    try:
+        _ARBITRATION_FLAG[cluster.get_id()] = (flag, time.monotonic())
+    except Exception:                               # noqa: BLE001 - a cache only
+        pass
+    return flag
+
+
+def _cluster_two_node_arbitrated(cluster_id, cluster=None, db=None) -> bool:
+    """True only for a cluster with ``two_node_arbitration`` on.
+
+    Uses the given cluster object, else the flag the current flow remembered
+    (fresh for ``_ARBITRATION_FLAG_TTL_S``), else reads the cluster. Unreadable
+    cluster: False, i.e. the regular-cluster behaviour."""
+    if cluster is not None:
+        return _remember_cluster_arbitration(cluster)
+    hit = _ARBITRATION_FLAG.get(cluster_id)
+    if hit is not None and time.monotonic() - hit[1] < _ARBITRATION_FLAG_TTL_S:
+        return hit[0]
+    try:
+        cluster = (db or DBController()).get_cluster_by_id(cluster_id)
+    except Exception:                               # noqa: BLE001 - regular behaviour then
+        return False
+    return _remember_cluster_arbitration(cluster)
+
+
+def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
+                                      interval_s=2.0, sleep=None, clock=None, arbitrated=None):
+    """``jc_compression get_status`` on the LVS leader, retried while it fails.
+
+    Campaign c2, F1: right after the returning node's SPDK is up, the leader
+    re-levels the returning journal on its own (the B1 auto-resync). While it
+    does, ``jc_compression`` answers "Compression request failed"; the restart
+    used to abort on that one answer and kill the new SPDK. The failure is
+    transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
+    failure that outlasts that aborts the restart (the caller raises).
+
+    Two-node arbitration only: on every other cluster this is exactly the
+    previous single call, and a failure is re-raised at once (the restart
+    aborts immediately, as before). The arbitration flag is read only after a
+    failed first call, so the success path does no extra work.
+
+    Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
+    number of rounds (timeout / interval), so a patched-out ``time.sleep``
+    cannot turn the retry into a busy loop.
+    """
+    try:
+        return leader.rpc_client().jc_compression_get_status(jm_vuid)
+    except Exception as e:                      # noqa: BLE001 - re-raised unless arbitrated
+        if arbitrated is None:
+            arbitrated = _cluster_two_node_arbitrated(leader.cluster_id)
+        if not arbitrated:
+            raise
+        logger.warning("jc_compression status on leader %s failed (%s); retrying "
+                       "(journal re-level in progress?)", leader.get_id(), e)
+    if timeout_s is None:
+        timeout_s = constants.RESTART_JC_COMPRESSION_RETRY_S
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + timeout_s
+    rounds = max(1, int(timeout_s // interval_s)) - 1  # the first call above was one
+    while True:
+        sleep(interval_s)
+        try:
+            return leader.rpc_client().jc_compression_get_status(jm_vuid)
+        except Exception as e:                  # noqa: BLE001 - retried, then re-raised
+            rounds -= 1
+            if rounds <= 0 or clock() + interval_s > deadline:
+                raise
+            logger.warning("jc_compression status on leader %s failed (%s); retrying "
+                           "(journal re-level in progress?)", leader.get_id(), e)
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
@@ -1600,10 +1823,14 @@ def _create_device_partitions(rpc_client, nvme, snode: StorageNode, num_partitio
         return False
     time.sleep(3)
     rpc_client.nbd_stop_disk(nbd_device)
-    for i in range(10):
-        if not rpc_client.nbd_get_disks(nbd_device):
-            break
-        time.sleep(1)
+    try:
+        Retrying(
+            stop=stop_after_attempt(10),
+            wait=wait_fixed(1),
+            retry=retry_if_result(lambda disk: disk is not None),
+        )(rpc_client.nbd_get_disk, nbd_device)
+    except RetryError:
+        logger.warning(f"nbd device {nbd_device} still present 10s after nbd_stop_disk")
     rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
     for i in range(10):
         if not rpc_client.bdev_nvme_controller_list(nvme.nvme_controller):
@@ -3396,6 +3623,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
     # re-activation used to accept because a suspended cluster is not ACTIVE.
     try:
         _cluster = db_controller.get_cluster_by_id(cluster_id)
+        _remember_cluster_arbitration(_cluster)
     except KeyError:
         logger.error("Cluster not found: %s", cluster_id)
         return False
@@ -4051,7 +4279,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
         snode.spdk_proxy_image = spdk_proxy_image
-        snode.spdk_version = spdk_proxy_image.split(":")[1]
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -4149,9 +4376,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         snode.write_to_db(kv_store)
 
-        ret = rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
-        if not ret:
-            logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
+        try:
+            rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
+        except RPCException as e:
+            logger.warning("Failed to set nvmf max subsystems %s: %s", constants.NVMF_MAX_SUBSYSTEMS, e)
 
         # 2- set socket implementation options
         bind_to_device = None
@@ -4188,19 +4416,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # mask (the old create_s3_bdev path did this with app_thread_mask)
         # either fails or lands the pollers on the wrong core.
         #
-        # lvol_poller_mask is the single source of truth for which core this
-        # runs on: calculate_core_allocations() already colocates
-        # lvol_poller_core with jc_singleton_core unless the config gives it
-        # its own dedicated core (>=32 vCPU, compression-thread layout), so
-        # using it directly honors both cases correctly. Do NOT override it
-        # with jc_singleton_mask unconditionally here — that was tried
-        # (e3e8fd08) before lvol_poller_core was aligned with jc_singleton_core
-        # at the source, and it silently clobbered the dedicated-core case,
-        # forcing the poller group onto JC's core even when the config
-        # deliberately gave it a separate one. jc_singleton_mask is only a
-        # last-resort fallback for the pathological case where
-        # lvol_poller_core's own reservation came up empty (cores exhausted)
-        # while a JC core still exists — this RPC must still run on some core.
+        # lvol_poller_mask is the single source of truth for which cores this
+        # runs on: calculate_core_allocations() places the lvol poller group
+        # on the nvmf poller core set (utils._lvol_poller_cores), falling back
+        # to the JC singleton core only when the layout has no poller core.
+        # Do NOT override it with jc_singleton_mask unconditionally here —
+        # that was tried (e3e8fd08) and silently pinned the whole group to
+        # JC's single core. jc_singleton_mask is only a last-resort fallback
+        # for a persisted node whose lvol_poller_mask is empty — this RPC must
+        # still run on some core.
         poller_group_mask = snode.lvol_poller_mask or snode.jc_singleton_mask
         if poller_group_mask:
             try:
@@ -5880,8 +6104,10 @@ def _verify_replica_stacks(cluster_id, db_controller, context=""):
         key = (node.get_id(), lvstore)
         if key not in probed:
             try:
-                ret = node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore)
-                probed[key] = ret[0] if isinstance(ret, list) and ret else (ret or {})
+                # get_lvstore() -> None means "confirmed absent" (RPC succeeded,
+                # SPDK reports no such lvstore); normalized to {} here so it stays
+                # distinguishable below from a failed probe (None, RPCException).
+                probed[key] = node.rpc_client(timeout=10, retry=1).get_lvstore(lvstore) or {}
             except RPCException as e:
                 logger.warning(
                     f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
@@ -6038,7 +6264,7 @@ def _prune_stale_lvstore_ports(node_id, lvstore, db_controller):
     callers of this helper -- node removal, splice eviction -- know the
     replica isn't coming back to this node. A stale entry there only
     misrepresents `sn list`'s "LVS Ports" column (2026-08-12: found live via
-    bdev_lvol_get_lvstores disagreeing with the DB after a node removal).
+    get_lvstore disagreeing with the DB after a node removal).
     Re-fetches fresh to avoid clobbering unrelated concurrent edits."""
     if not lvstore:
         return
@@ -6196,11 +6422,10 @@ def _replica_role_held(node, lvstore):
     "tertiary", or None when it cannot be told -- the lvstore is absent or
     unreachable, or it is the leader after a failover."""
     try:
-        ret = node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore)
+        info = node.rpc_client(timeout=10, retry=1).get_lvstore(lvstore)
     except RPCException as e:
         logger.warning(f"[REMOVAL] could not read {lvstore} on {node.get_id()} ({e})")
         return None
-    info = ret[0] if isinstance(ret, list) and ret else ret
     if not isinstance(info, dict) or "lvs_tertiary" not in info or info.get("lvs leadership"):
         return None
     return "tertiary" if info["lvs_tertiary"] else "secondary"
@@ -8081,6 +8306,7 @@ def _restart_storage_node_impl(
         if force is False:
             return False
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    _remember_cluster_arbitration(cluster)
     if cluster.status == Cluster.STATUS_IN_ACTIVATION:
         logger.error("Cluster is in activation status, can not restart node")
         return False
@@ -8351,7 +8577,6 @@ def _restart_storage_node_impl(
 
     if spdk_proxy_image:
         snode.spdk_proxy_image = spdk_proxy_image
-        snode.spdk_version = spdk_proxy_image.split(":")[1]
 
     if not snode.spdk_proxy_image:
         snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
@@ -8394,6 +8619,7 @@ def _restart_storage_node_impl(
         # A restart must actually bounce SPDK: see ensure_spdk_stopped.
         # snode.api_endpoint is already rewritten to node_address above when
         # restarting onto a new host, so snode.client() targets the right one.
+        _note_planned_loss(snode, "restart")
         ensure_spdk_stopped(
             snode.client, snode.rpc_port, snode.cluster_id)
         results, err = snode_api.spdk_process_start(
@@ -8487,9 +8713,10 @@ def _restart_storage_node_impl(
         logger.error("Failed socket implement set options")
         return False
 
-    ret = rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
-    if not ret:
-        logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
+    try:
+        rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
+    except RPCException as e:
+        logger.warning("Failed to set nvmf max subsystems %s: %s", constants.NVMF_MAX_SUBSYSTEMS, e)
 
     # 3- set nvme config
     if snode.pollers_mask:
@@ -8511,11 +8738,10 @@ def _restart_storage_node_impl(
     rpc_client.log_set_print_level("DEBUG")
 
     # ONCE per SPDK process lifetime. lvol_poller_mask is the single source
-    # of truth for which core this runs on (already colocated with
-    # jc_singleton_core unless the config gave it its own dedicated core);
-    # jc_singleton_mask is only a last-resort fallback if that reservation
-    # came up empty. See the add-node twin of this call for the full
-    # rationale.
+    # of truth for which cores this runs on (the nvmf poller core set, see
+    # utils._lvol_poller_cores); jc_singleton_mask is only a last-resort
+    # fallback for a persisted node whose mask is empty. See the add-node
+    # twin of this call for the full rationale.
     poller_group_mask = snode.lvol_poller_mask or snode.jc_singleton_mask
     if poller_group_mask:
         try:
@@ -8837,6 +9063,7 @@ def _restart_storage_node_impl(
             logger.info(f"Starting migration task for node {snode.get_id()}")
             tasks_controller.add_device_mig_task_for_node(snode.get_id())
 
+        _resync_solo_lvs_after_restart(snode, cluster)
         return True
 
     else:
@@ -8981,6 +9208,7 @@ def _restart_storage_node_impl(
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
         logger.info(f"Found {len(lvol_list)} lvols")
 
+        _resync_solo_lvs_after_restart(snode, cluster)
         return True
 
 
@@ -9133,6 +9361,32 @@ def list_storage_devices(node_id):
     return data
 
 
+def _fenced_secondary_of(snode: StorageNode, not_online_nodes):
+    """The (secondary, port) of ``snode`` whose client port for ``snode``'s
+    lvstore SPDK has fenced, or ``None``.
+
+    Only ``snode``'s own secondary and tertiary are looked at: a fence on a
+    node that is not serving ``snode``'s lvstore has nothing to do with this
+    removal. A secondary whose blocked-port list cannot be read is treated as
+    not fenced -- the generic not-online refusal still covers it, and that
+    one is the right answer for a node that merely cannot be reached.
+    """
+    own_secondaries = {snode.secondary_node_id, snode.tertiary_node_id} - {"", None}
+    for sec in not_online_nodes:
+        if sec.get_id() not in own_secondaries:
+            continue
+        port = sec.get_lvol_subsys_port(snode.lvstore)
+        try:
+            blocked = sec.rpc_client(timeout=5, retry=1).nvmf_get_blocked_ports()
+        except (RPCException, SNodeClientException, OSError) as e:
+            logger.warning("Cannot read blocked ports of secondary %s of %s: %s",
+                           sec.get_id(), snode.get_id(), e)
+            continue
+        if blocked and port in blocked:
+            return sec, port
+    return None
+
+
 def _check_ftt_allows_node_removal(node_id, db_controller):
     """Check whether FTT constraints allow removing (suspend/shutdown) a node.
 
@@ -9203,8 +9457,8 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            lvstores = node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(node.lvstore)
-            if lvstores:
+            lvstore = node.rpc_client(timeout=5, retry=1).get_lvstore(node.lvstore)
+            if lvstore:
                 ret = node.rpc_client(timeout=5, retry=1).jc_get_jm_status(node.jm_vuid)
                 for jm in ret:
                     if ret[jm] is False:
@@ -9218,6 +9472,29 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     not_online_count = len(not_online_nodes)
     if jm_replication_active:
         not_online_count += 1
+
+    # A secondary of the node being removed that SPDK fenced AFTER the node
+    # went down is a terminal refusal, not a passing one. The generic
+    # "not-online node" refusals below describe a moment the operator waits
+    # out, and the operator does wait: it re-asks prepare-removal until the
+    # count clears. This one never clears by itself -- the fence is released
+    # only once the secondary's hublvol to the primary is healthy again, and
+    # the primary is the node we are removing (run 57 removal 3, 2026-10-06:
+    # dhxfw fenced 4440 at 14:58:47, "NOT unblocking" every 6s for 3h, the
+    # removal re-asked for 3h). Name it so the operator fails the operation
+    # and leaves the node offline; a Restart of the removed node brings the
+    # primary back and lets the monitors release the fence.
+    if snode.status != StorageNode.STATUS_ONLINE:
+        fenced = _fenced_secondary_of(snode, not_online_nodes)
+        if fenced is not None:
+            sec, port = fenced
+            storage_events.snode_removal_aborted_fenced_secondary(snode, sec, port)
+            return False, (
+                f"removal of node {node_id} aborted: its secondary {sec.get_id()} "
+                f"({sec.status}) has port {port} for {snode.lvstore} fenced by SPDK since "
+                f"the shutdown and nothing can release it while the primary is gone; "
+                f"restart node {node_id} to bring the primary back, then retry the removal"
+            )
 
     fd_on = cluster.enable_failure_domain and snode.failure_domain >= 0
     blocked_by_capacity = False
@@ -9650,6 +9927,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         _cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     except KeyError:
         _cluster = None
+    if _cluster is not None:
+        _remember_cluster_arbitration(_cluster)
     if _cluster is not None and _cluster.status == Cluster.STATUS_IN_EXPANSION:
         logger.error(
             f"Cluster {snode.cluster_id} is in expansion; node shutdown is "
@@ -9819,6 +10098,7 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     # that's also true for --force today and is the design contract for
     # kill.
     logger.info("Stopping SPDK")
+    _note_planned_loss(snode, "shutdown")
     try:
         snode.client(**kill_client_kwargs(force)).spdk_process_kill(
             snode.rpc_port, snode.cluster_id)
@@ -10809,8 +11089,10 @@ def _is_node_rpc_responsive(node: StorageNode, lvs_name, timeout=5, retry=2):
     """
     try:
         rpc = node.rpc_client(timeout=timeout, retry=retry)
-        ret = rpc.bdev_lvol_get_lvstores(lvs_name)
-        return ret is not None
+        # get_lvstore() answering at all -- present or confirmed-absent alike --
+        # is the signal: it means the RPC round-trip to SPDK completed.
+        rpc.get_lvstore(lvs_name)
+        return True
     except Exception:
         return False
 
@@ -10996,6 +11278,154 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     return None
 
 
+def _lvs_leader_probe(nodes, lvs_name, timeout=5, retry=1):
+    """``(leaders, unknown)`` for ``lvs_name`` over ``nodes``: the nodes that
+    report "lvs leadership", and whether any node could not be asked (then
+    "no leader" cannot be concluded)."""
+    leaders, unknown = [], False
+    for node in nodes:
+        try:
+            info = node.rpc_client(timeout=timeout, retry=retry).get_lvstore(lvs_name)
+        except Exception as e:                      # noqa: BLE001 - unknown, not "no"
+            logger.debug("get_lvstore %s on %s failed: %s", lvs_name, node.get_id()[:8], e)
+            unknown = True
+            continue
+        if info and info.get("lvs leadership"):
+            leaders.append(node)
+    return leaders, unknown
+
+
+def reconcile_lvs_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=(),
+                             probe_timeout=5, probe_retry=1):
+    """Restore leadership of an LVS that lost it while its primary is healthy.
+
+    Two-node campaign c1, B6: after fence -> resync -> unfence an LVS can be
+    left without a leader on either node. Leadership is otherwise restored
+    only by the restart, creation and activation flows, so the LVS stays
+    leaderless (and the rebuild stalls on "not the leader") until someone
+    restarts the primary by hand.
+
+    For each node's primary LVS: when the primary is ONLINE and healthy, every
+    member is ONLINE and answers, and none reports leadership, the LVS is
+    leaderless. One seen leaderless on the previous pass too (``confirmed``)
+    is handed to ``_recover_leaderless_lvs`` with the primary as taker: the
+    existing guarded path (single-flight lock with cooldown, no restart or
+    port-allow task active, JM quorum on the taker, blob-md reload before the
+    grant, grant verified). No ad-hoc leadership RPC is sent from here.
+
+    ``skip_jm_vuids``: LVS the caller knows to be fenced, holding or solo on a
+    node (arbitration owns them). ``probe_timeout``/``probe_retry``: the
+    ``get_lvstore`` probe of each member (the arbiter asks with 1 s, no retry;
+    campaign c7, F16). Returns ``(restored, leaderless)`` LVS names.
+    """
+    restored: list[str] = []
+    leaderless: list[str] = []
+    db = DBController()
+    members = []
+    for node in nodes:
+        fresh = db.get_storage_node_by_id(node.get_id())
+        if fresh.status != StorageNode.STATUS_REMOVED:
+            members.append(fresh)
+    if not members or any(m.status != StorageNode.STATUS_ONLINE for m in members):
+        return restored, leaderless
+    skip = {int(v) for v in skip_jm_vuids}
+    for primary in members:
+        lvs_name = primary.lvstore
+        if not lvs_name or primary.is_secondary_node or not primary.jm_vuid:
+            continue
+        if int(primary.jm_vuid) in skip or primary.health_check is False:
+            continue
+        leaders, unknown = _lvs_leader_probe(members, lvs_name, timeout=probe_timeout,
+                                             retry=probe_retry)
+        if leaders or unknown:
+            continue
+        leaderless.append(lvs_name)
+        if lvs_name not in set(confirmed):
+            logger.warning("LVS %s has no leader on any member while its primary %s is "
+                           "online and healthy; restoring it on the next pass if it stays so",
+                           lvs_name, primary.get_id())
+            continue
+        logger.warning("LVS %s still has no leader; restoring leadership on its primary %s "
+                       "through the leaderless-recovery path", lvs_name, primary.get_id())
+        taker = _recover_leaderless_lvs(cluster_id, members, lvs_name, primary)
+        if taker is not None:
+            restored.append(lvs_name)
+    return restored, leaderless
+
+
+def resync_solo_lvs_on_leaders(snode):
+    """After a peer returns: start the journal resync of every LVS its
+    surviving peer ran alone, on that LVS's LEADER only.
+
+    Two-node campaign c1, B1: the survivor's HA state stays ``solo`` after its
+    peer returns until the JC re-levels the recovered remote JM, which it does
+    not start by itself; ``jc_explicit_synchronization`` on the leader cleared
+    it within 5 s. The restart flow only ever synced on the restarting node.
+
+    Never on a follower: explicit synchronization makes the calling node's JC
+    the journal writer, so on a follower it raises a writer_conflict on the
+    real leader, which drops LVS leadership and blocks its ports (B6). The
+    leader is confirmed by its own "lvs leadership" right before the call; an
+    LVS without a confirmed leader is skipped (leadership reconciliation owns
+    it). Idempotent and harmless when the node already resynced on its own:
+    only LVS still reported ``solo`` are synced, once each.
+    Returns the ``(node_id, jm_vuid)`` pairs synced.
+    """
+    from simplyblock_core.controllers.lvol_controller import is_node_leader
+
+    db = DBController()
+    members = [n for n in db.get_storage_nodes_by_cluster_id(snode.cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    if len(members) != 2:
+        return []
+    lvs_of_vuid = {int(n.jm_vuid): n.lvstore for n in members if n.jm_vuid and n.lvstore}
+    online = [n for n in members if n.status == StorageNode.STATUS_ONLINE]
+    synced = []
+    for survivor in online:
+        if survivor.get_id() == snode.get_id():
+            continue
+        try:
+            status = survivor.rpc_client(timeout=5, retry=1).jc_ha_status() or {}
+        except Exception as e:                      # noqa: BLE001 - no HA protocol / unreachable
+            logger.debug("jc_ha_status on %s: %s; no solo resync", survivor.get_id()[:8], e)
+            continue
+        solo = sorted(int(x["jm_vuid"]) for x in status.get("lvs", [])
+                      if x.get("state") == "solo" and "jm_vuid" in x)
+        for vuid in solo:
+            lvs_name = lvs_of_vuid.get(vuid)
+            if not lvs_name:
+                continue
+            leader = next((n for n in online if is_node_leader(n, lvs_name)), None)
+            if leader is None:
+                logger.warning("LVS %s (jm_vuid %s) is solo on %s but has no confirmed leader; "
+                               "not syncing (never on a follower)", lvs_name, vuid,
+                               survivor.get_id()[:8])
+                continue
+            try:
+                leader.rpc_client(timeout=10, retry=0).jc_explicit_synchronization(vuid)
+                synced.append((leader.get_id(), vuid))
+                logger.info("Journal resync of %s (jm_vuid %s) started on its leader %s after "
+                            "the peer returned", lvs_name, vuid, leader.get_id())
+            except Exception as e:                  # noqa: BLE001 - best effort
+                logger.warning("jc_explicit_synchronization %s on leader %s failed: %s",
+                               vuid, leader.get_id()[:8], e)
+    return synced
+
+
+def _resync_solo_lvs_after_restart(snode, cluster=None):
+    """Two-node arbitration only (campaign c1, B1); a no-op on every other
+    cluster, decided from the restart flow's own cluster object."""
+    try:
+        if not _cluster_two_node_arbitrated(snode.cluster_id, cluster=cluster):
+            return
+    except Exception:                               # noqa: BLE001 - never fails a restart
+        return
+    try:
+        resync_solo_lvs_on_leaders(snode)
+    except Exception as e:                          # noqa: BLE001 - never fails a restart
+        logger.warning("Solo-LVS resync after restart of %s failed: %s", snode.get_id(), e)
+
+
 def find_leader_with_failover(all_nodes, lvs_name):
     """Detect the current leader and failover if needed — with a no-leader
     fail-fast gate.
@@ -11006,7 +11436,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     caps the probe/recovery machinery at one full pass per TTL window per
     process — under a mass-create workload against a leaderless LVS, running
     the pass per request stormed every LVS member with several
-    bdev_lvol_get_lvstores per second for hours (run 20260712-231123).
+    get_lvstore per second for hours (run 20260712-231123).
     """
     from simplyblock_core.utils.ttl_cache import NO_LEADER_TTL_SEC, no_leader_cache
 
@@ -11035,7 +11465,7 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
        so this replaces the 3-node scan on the hot create paths; the probe
        itself is a fresh confirmation, so a moved leadership simply misses and
        falls through to the full scan below.
-    1. Try each node as leader via bdev_lvol_get_lvstores (leadership field).
+    1. Try each node as leader via get_lvstore (leadership field).
        A node that answers leadership=True is CONFIRMED (the query is itself a
        successful RPC to that node) → return it directly. A confirmed leader is
        never failed over for being slow, only for genuinely not answering.
@@ -12096,8 +12526,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(snode.cluster_id)):
         logger.info("JC compression resume held: cluster upgrade in progress")
     else:
-        ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
-        if not ret:
+        if not snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False):
             logger.info("Failed to resume JC compression adding task...")
             tasks_controller.add_jc_comp_resume_task(
                 snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
@@ -12282,15 +12711,18 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         _release_hub_lock()
         try:
             storage_events.snode_restart_failed(snode)
+            _note_planned_loss(snode, "restart abort")
             snode_api = snode.client(timeout=5, retry=5)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         except Exception as ke:
             logger.error("Failed to kill SPDK during abort: %s", ke)
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
                         caused_by="restart_cleanup")
-        if leader_port_blocked:
+        if leader_port_blocked and _may_unblock_peer_port(
+                leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                "Restart abort"):
             try:
-                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=0.5, retry=2)
+                leader_node.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(leader_lvs_port)
                 _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                 _mark_leader_unblocked()
             except Exception as ue:
@@ -12342,7 +12774,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             attempts = 3
             for attempt in range(1, attempts + 1):
                 try:
-                    port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
+                    leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_lvs_port)
                     _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                     leader_port_blocked = True
                     _mark_leader_blocked()
@@ -12432,9 +12864,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             snode_rpc_client.bdev_examine(primary_node.raid)
 
             ### 5- wait for examine
-            ret = snode_rpc_client.bdev_wait_for_examine()
-            if not ret:
-                logger.warning("Failed to examine bdevs on non-leader node")
+            try:
+                snode_rpc_client.bdev_wait_for_examine()
+            except RPCException as e:
+                logger.warning("Failed to examine bdevs on non-leader node: %s", e)
 
             # After examine, the lvstore MUST be present. If it isn't, SPDK
             # failed to rediscover the lvstore from its persisted metadata
@@ -12458,7 +12891,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # primary/tertiary, missing here — and the divergence would never be
         # reconciled because there is no FDB↔SPDK lvol-set reconcile loop.
         if not activation_mode:
-            if not snode_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore):
+            if not snode_rpc_client.get_lvstore(primary_node.lvstore):
                 logger.error(
                     "Failed to recover lvstore %s on %s after examine",
                     primary_node.lvstore, snode.get_id())
@@ -12646,9 +13079,11 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                         "unblock leader, wait %ds, re-block and retry",
                         attempt, ATTACH_MAX_ATTEMPTS, snode.get_id(),
                         primary_node.lvstore, ATTACH_RETRY_GAP_SEC)
-                    if leader_port_blocked:
+                    if leader_port_blocked and _may_unblock_peer_port(
+                            leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                            "Attach-retry gap"):
                         try:
-                            port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                            leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_lvs_port)
                             _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                             leader_port_blocked = False
                             _mark_leader_unblocked()
@@ -12658,7 +13093,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                                 "failed: %s", leader_node.get_id(), ue)
                     time.sleep(ATTACH_RETRY_GAP_SEC)
                     try:
-                        port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_lvs_port)
                         _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                         leader_port_blocked = True
                         _mark_leader_blocked()
@@ -12678,12 +13113,19 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             # serve client IO on that LVS. Retry until it lands; schedule a
             # port_allow task as a fallback if we still can't reach the leader
             # after our attempts so another retry loop keeps trying.
+            if leader_port_blocked and not _may_unblock_peer_port(
+                    leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                    "Restart done", rebuild_too=False):
+                # The leader's LVS is fenced: the fence owns the block and the
+                # unfence lifts it (two-node, F8); no port_allow task either.
+                leader_port_blocked = False
+                _mark_leader_unblocked()
             if leader_port_blocked:
                 unblocked = False
                 attempts = 3
                 for attempt in range(1, attempts + 1):
                     try:
-                        port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_lvs_port)
                         _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                         unblocked = True
                         _mark_leader_unblocked()
@@ -12788,6 +13230,55 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             pass
 
 
+def _two_node_peer_port_must_stay_blocked(peer, jm_vuid, db_controller, rebuild_too=True):
+    """Why a defensive unblock must not open ``peer``'s LVS port, or "".
+
+    Two-node arbitration only (campaign c3, 03: the restart flow's defensive
+    unblock opened the stale node's port 4426; 70 ms later it took over LVS_6
+    on new IO, could not read an md stripe and aborted, and the client got
+    EIO). The port stays blocked while:
+
+    - the arbiter has the peer marked for a data rebuild (``rebuild``): it
+      lacks writes its partner took alone and must not serve them;
+    - the peer's own HA state for the LVS is fenced or holding: the block
+      belongs to the fence (``spdk_lvs_ha_unfence`` lifts it), not to the
+      restart flow.
+
+    Unknown state (no record, the status call fails) leaves the port blocked on
+    an arbitrated cluster: opening it is what is unsafe.
+
+    ``rebuild_too=False`` (a restart that succeeded, so the up-to-date node is
+    back): only the fence check applies. A block the restart flow set while the
+    LVS was already fenced is lifted by ``spdk_lvs_ha_unfence`` (SPDK #76, F8),
+    so skipping the unblock here never strands it."""
+    # Regular clusters: the remembered flag answers, no DB read (restart flow).
+    if not _cluster_two_node_arbitrated(peer.cluster_id, db=db_controller):
+        return ""
+    try:
+        rec = db_controller.get_cluster_arbitration(peer.cluster_id)
+    except Exception as e:                          # noqa: BLE001
+        return "arbitration record unreadable (%s)" % (e,)
+    if rebuild_too and rec is not None and peer.get_id() in (rec.rebuild or {}):
+        return "data rebuild after re-admission pending"
+    try:
+        status = peer.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
+    except Exception as e:                          # noqa: BLE001
+        return "HA state unknown (%s)" % (e,)
+    for entry in status.get("lvs") or []:
+        if jm_vuid and int(entry.get("jm_vuid", -1)) == int(jm_vuid)                 and entry.get("state") in ("fenced", "holding"):
+            return "LVS %s is %s on the peer" % (jm_vuid, entry.get("state"))
+    return ""
+
+
+def _may_unblock_peer_port(peer, port, jm_vuid, db_controller, why, rebuild_too=True):
+    """False (and a warning) when a two-node peer's port must stay blocked."""
+    keep = _two_node_peer_port_must_stay_blocked(peer, jm_vuid, db_controller, rebuild_too)
+    if keep:
+        logger.warning("%s: port %s on %s left blocked: %s", why, port, peer.get_id(), keep)
+        return False
+    return True
+
+
 def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
     """Best-effort release of an LVS subsystem port on every replica peer.
 
@@ -12817,7 +13308,11 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
             peer = db_controller.get_storage_node_by_id(pid)
             if not peer or peer.status != StorageNode.STATUS_ONLINE:
                 continue
-            port_block.set_port(peer, port, block=False, timeout=0.5, retry=2)
+            if not _may_unblock_peer_port(peer, port, lvs_node.jm_vuid, db_controller,
+                                          "Defensive unblock after failed recreate of %s"
+                                          % lvs_node.lvstore):
+                continue
+            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(port)
             tcp_ports_events.port_allowed(peer, port)
             logger.info("Defensive unblock: allowed LVS port %s on peer %s after "
                         "failed recreate of %s", port, pid, lvs_node.lvstore)
@@ -13000,6 +13495,55 @@ def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activati
             snode, force=force, lvs_primary=lvs_primary, activation_mode=False)
 
 
+#: The removal statuses a node passes through while a removal is still being
+#: worked: REMOVAL_STATUS_ORDER without its terminal REMOVED. The terminal
+#: states (REMOVED, REMOVED_FAILED) are not "in flight": a node keeps them for
+#: as long as its record exists.
+REMOVAL_IN_FLIGHT_STATUSES: tuple = tuple(
+    s for s in StorageNode.REMOVAL_STATUS_ORDER if s != StorageNode.STATUS_REMOVED)
+
+
+def _fence_rpc_bounds(fence_held: bool, fence_elapsed: float,
+                      budget: float | None = None,
+                      removal_in_progress: bool = False) -> tuple[float | None, int | None]:
+    """``(timeout, retry)`` for one RPC of the lvstore restart flow.
+
+    While a peer's client port is fenced every call is bounded to ``budget``
+    (``FENCE_RPC_TIMEOUT_SEC`` unless the call asks for more), clamped to the
+    time left before ``FENCE_DEADLINE_SEC``: the fence has to be lifted by us
+    before SPDK converts the block to reject (ack_timeout * 4 = 8s) and
+    quiesces every client qpair on the port. Overrunning the budget there
+    aborts the restart, which the task runner re-queues. The window is tuned
+    and is not touched here, whatever else is going on.
+
+    A plain restart keeps the same bound even when no port happens to be
+    fenced: a healthy node answers far inside it, and a node that does not is
+    better re-queued than left to hold a half-built lvstore.
+
+    A restart while a removal is in flight is the exception. A survivor of a
+    removal may be holding the departing node's orphaned replica, and its own
+    leader set is then slow for as long as the removal lasts: 2026-10-14 run
+    63, after removal 4 left a survivor's SPDK aborted, every auto-restart
+    cycle discarded the whole cluster activation because
+    ``bdev_lvol_set_leader`` on that node took 669ms against the 0.5s budget
+    with ``fence 0.000s`` (the other survivors: 74ms and 153ms) -- eight
+    cycles, each one draining the cluster back to all-offline. With no fence
+    held there is nothing the budget protects, so an unfenced call during a
+    removal gets the ordinary client (``None``, ``None``), the same bounds
+    every other restart step outside the window runs with. The fenced case
+    of that same call is covered separately: the leader set carries its own
+    ``FENCE_SET_LEADER_TIMEOUT_SEC`` budget, since the journal replay it
+    performs is slow for the same reason whether or not a port is fenced.
+    """
+    budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
+    if fence_held:
+        remaining = constants.FENCE_DEADLINE_SEC - fence_elapsed
+        return min(budget, remaining), constants.FENCE_RPC_RETRY
+    if removal_in_progress:
+        return None, None
+    return budget, constants.FENCE_RPC_RETRY
+
+
 def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
     """Recreate LVStore as leader.
 
@@ -13049,6 +13593,16 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.write_to_db()
 
+    # A removal in flight anywhere in the cluster relaxes the UNFENCED RPC
+    # bound in _fenced() (see _fence_rpc_bounds); the fenced bound is never
+    # relaxed. Decided once here so every call in this restart agrees. Only
+    # the in-flight removal statuses count: a REMOVED node stays in the
+    # cluster's node list for good, and counting it would relax every restart
+    # that follows the first removal ever made.
+    removal_in_progress = any(
+        n.status in REMOVAL_IN_FLIGHT_STATUSES
+        for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id))
+
     # Gather peer nodes for this LVS, EXCLUDING snode itself
     sec_nodes = []
     lvs_all_peer_ids = [sid for sid in [lvs_node.secondary_node_id, lvs_node.tertiary_node_id] if sid]
@@ -13073,7 +13627,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 disconnected_peers.add(sec_node.get_id())
 
         # Identify the current leader among connected peers.
-        # Uses bdev_lvol_get_lvstores which returns "lvs leadership" field.
+        # Uses get_lvstore which returns the "lvs leadership" field.
         # Compression and replication checks run only against the current leader.
         current_leader = None
         for sec_node in sec_nodes:
@@ -13081,11 +13635,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 continue
             try:
                 sec_rpc = sec_node.rpc_client(timeout=5, retry=2)
-                ret = sec_rpc.bdev_lvol_get_lvstores(lvs_name)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                lvs = sec_rpc.get_lvstore(lvs_name)
+                if lvs and lvs.get("lvs leadership"):
                     current_leader = sec_node
                     logger.info("Current leader for %s is %s", lvs_name, sec_node.get_id())
                     break
+                logger.info(
+                    "Peer %s does not report lvs leadership for %s (lvstore: %s)",
+                    sec_node.get_id(), lvs_name, lvs)
             except Exception as e:
                 # Cannot tell "peer down" from "peer mgmt slow" at this stage:
                 # snode has no peer-hublvol controller bdevs yet, so any
@@ -13096,10 +13653,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 raise Exception(
                     f"Abort restart: leader detection RPC to peer {sec_node.get_id()} failed: {e}")
 
+        if current_leader is None:
+            current_leader = _presumed_acting_leader(
+                lvs_node, sec_nodes, disconnected_peers, snode)
+            if current_leader is not None:
+                logger.warning(
+                    "No connected peer reports lvs leadership for %s; treating "
+                    "%s as the presumed acting leader and quiescing it (journal "
+                    "replication suspended, in-flight IO drained, leadership "
+                    "dropped) before %s examines the lvstore",
+                    lvs_name, current_leader.get_id(), snode.get_id())
+
         # Check compression and replication only on the current leader
         if current_leader:
             try:
-                jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(lvs_jm_vuid)
+                jc_compression_is_active = _jc_compression_status_with_retry(current_leader, lvs_jm_vuid)
                 retries = 10
                 while jc_compression_is_active:
                     if retries <= 0:
@@ -13119,8 +13687,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     # be compressing. Incident 2026-05-06: 70850783 was
                     # acting leader of LVS_4450 *and* configured primary of
                     # LVS_5676; jm_vuid=5676 stayed active → 5 min hang.
-                    jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
-                        lvs_jm_vuid)
+                    jc_compression_is_active = _jc_compression_status_with_retry(
+                        current_leader, lvs_jm_vuid)
             except Exception as e:
                 raise Exception(
                     f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
@@ -13192,9 +13760,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, snode, rpc_client)
 
-    # ANA failback only when the original primary is coming back (not takeover)
+    # ANA failback only when the original primary is coming back (not takeover).
+    # Housekeeping, never a reason to abort the recreate: the listener flips
+    # themselves tolerate a peer that cannot serve a volume (_set_lvol_ana_on_node),
+    # and anything else that goes wrong here -- a DB lookup, the peer's RPC
+    # client, a port derivation -- is logged with its traceback and left to the
+    # registration repair, which is how the restart path
+    # (trigger_ana_failback_for_node) has always treated it. Incident
+    # 2026-10-08 run 62: this call aborting the recreate thread made
+    # cluster_activate fail 100+ times in a row and the cluster could not
+    # leave suspended.
     if not is_takeover and lvs_node.secondary_node_id and lvol_list:
-        _failback_primary_ana(snode)
+        try:
+            _failback_primary_ana(snode)
+        except Exception:
+            logger.exception("ANA failback for primary %s skipped", snode.get_id())
 
     snode_lvs_port = lvs_node.get_lvol_subsys_port(lvs_name)
 
@@ -13254,10 +13834,10 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         keeping the fence short enough that leadership does not move inside it.
         """
         try:
-            ret = peer.rpc_client().bdev_lvol_get_lvstores(lvs_name)
+            lvs = peer.rpc_client().get_lvstore(lvs_name)
         except Exception:
             return                      # never let a probe delay the release
-        if not ret or ret[0].get("lvs leadership"):
+        if not lvs or lvs.get("lvs leadership"):
             return
         logger.error(
             "[RESTART] Unblocking %s for %s while it is NO LONGER leader -- "
@@ -13273,8 +13853,15 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         other peers can still be unblocked."""
         if peer in blocked_peers:
             _warn_if_unblocking_a_non_leader(peer)
+        if not _may_unblock_peer_port(peer, snode_lvs_port, snode.jm_vuid, db_controller,
+                                      "Recreate LVS", rebuild_too=False):
+            try:
+                blocked_peers.remove(peer)
+            except ValueError:
+                pass
+            return
         try:
-            port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
+            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(snode_lvs_port)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))
             _t0 = _block_started.pop(peer.get_id(), None)
             if _t0 is not None:
@@ -13388,7 +13975,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         # (2026-08-31: unblock landed at 13:33:29.13, one second after the
         # client had already failed IO at 13:33:28). Killing our own SPDK
         # can wait; a fenced healthy peer cannot.
-        for peer in list(blocked_peers):
+        for peer in blocked_peers:
             _unblock_peer_port(peer)
         _persist_deferred_node_fields()
         _release_hub_locks()
@@ -13420,29 +14007,36 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 f"{constants.FENCE_DEADLINE_SEC}s deadline (reject threshold 8s)")
 
     def _fenced(method, *args, budget=None, **kwargs):
-        """Run one RPC while a peer's client port is fenced.
+        """Run one RPC of the restart flow, bounded while a peer port is fenced.
 
         ``method`` is the RPCClient method name. The client is built per call
         so its timeout can be clamped to the time left on the fence -- a fixed
         per-call timeout is not enough on its own, since a 6s call started late
         in the window would still overrun the deadline.
 
+        With no peer port fenced (every peer skipped as disconnected or
+        offline) the call runs on the ordinary client: see
+        ``_fence_rpc_bounds`` for why the fence budget must not apply there.
+
         Any failure, a timeout above all, releases the fence and aborts the
         restart. The task runner re-queues an aborted restart; a quiesced
         client path is not recoverable.
         """
-        budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
-        timeout = budget
-        if _block_started:
-            remaining = constants.FENCE_DEADLINE_SEC - _fence_elapsed()
-            if remaining <= 0:
-                _check_fence_deadline(method)
-            timeout = min(budget, remaining)
+        timeout, retry = _fence_rpc_bounds(bool(_block_started), _fence_elapsed(), budget,
+                                           removal_in_progress=removal_in_progress)
+        if timeout is not None and timeout <= 0:
+            _check_fence_deadline(method)
         try:
-            client = snode.rpc_client(timeout=timeout,
-                                      retry=constants.FENCE_RPC_RETRY)
+            if timeout is None:
+                client = snode.rpc_client()
+            else:
+                client = snode.rpc_client(timeout=timeout, retry=retry)
             return getattr(client, method)(*args, **kwargs)
         except Exception as e:
+            if timeout is None:
+                _abort_restart_and_unblock(
+                    f"{method} failed with no port fenced during a removal "
+                    f"(client defaults): {e}")
             _abort_restart_and_unblock(
                 f"{method} failed inside the port-fence window "
                 f"(budget {timeout:.2f}s, fence {_fence_elapsed():.3f}s): {e}")
@@ -13632,7 +14226,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 if sec_node in blocked_peers:
                     continue
                 try:
-                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                    sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
                     _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                     blocked_peers.append(sec_node)
                     _block_started[sec_node.get_id()] = time.monotonic()
@@ -13710,7 +14304,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         db_controller.atomic_update(
                             current_leader,
                             lambda x: setattr(x, "lvstore_status", "in_creation"))
-                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                        current_leader.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
                         _block_started[current_leader.get_id()] = time.monotonic()
@@ -13930,7 +14524,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # previous "raid_already → skip examine" shortcut broke the normal
             # restart path: _create_bdev_stack leaves the raid in place but does
             # not examine it, so the lvstore never surfaces and the subsequent
-            # bdev_lvol_get_lvstores validation fails every time.
+            # get_lvstore validation fails every time.
             _fenced("bdev_examine", lvs_raid)
 
             ### 6- wait for examine
@@ -13938,7 +14532,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC)
 
         # Validate lvstore recovery
-        ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
+        ret = _fenced("get_lvstore", lvs_name)
         if not ret:
             logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
             if activation_mode:
@@ -13996,15 +14590,19 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             hublvol_port=lvs_node.get_hublvol_port(lvs_name),
             role=snode_lvs_role,
         )
-        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True)
+        # Journal replay and blobstore re-level happen inside this call, so it
+        # gets its own budget (see FENCE_SET_LEADER_TIMEOUT_SEC) -- the 0.5s
+        # norm is sized for calls that only schedule work.
+        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True,
+                      budget=constants.FENCE_SET_LEADER_TIMEOUT_SEC)
         leader_restored = False
         for _ in range(10):
             # 10 x 0.2s of sleep plus 10 RPCs is a large slice of the fence
             # budget on its own; give up the fence rather than the deadline.
             _check_fence_deadline("leader-restore poll")
             try:
-                ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                ret = _fenced("get_lvstore", lvs_name)
+                if ret and ret.get("lvs leadership"):
                     leader_restored = True
                     break
             except Exception:
@@ -14199,19 +14797,20 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             ### 11- demote old leader's subsystems to non_optimized (async)
             # Per design: after restarting node takes leadership, the old leader must
             # start demoting all its lvol subsystems to non_optimized.
+            #
+            # The listeners already exist on the old leader: change their ANA
+            # state, never add them again. This step used to call
+            # nvmf_subsystem_add_listener(ana_state=non_optimized) on every
+            # one of them; SPDK refused each with "Listener already exists"
+            # and the state did not change (lblk_rapid_outage, 2026-09-26
+            # 22:23:27, 15 refusals on c8a7e64d; 3,000 in the whole run).
+            # Only a listener that is really missing is created, and then
+            # directly as non_optimized.
             for sec_node in sec_nodes:
                 if sec_node.get_id() in disconnected_peers:
                     continue
                 try:
-                    sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
-                    for lvol in lvol_list:
-                        listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
-                        for iface in sec_node.data_nics:
-                            if iface.ip4_address:
-                                tr_type = "RDMA" if sec_node.active_rdma and iface.trtype == "RDMA" else "TCP"
-                                sec_rpc.listeners_create(
-                                    lvol.nqn, tr_type, iface.ip4_address, listener_port,
-                                    ana_state="non_optimized")
+                    demote_old_leader_listeners(sec_node, lvol_list)
                     logger.info("Demoted subsystems to non_optimized on old leader %s", sec_node.get_id())
                 except Exception as e:
                     logger.warning("Failed to demote subsystems on %s: %s", sec_node.get_id(), e)
@@ -14301,10 +14900,10 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
                         tr, iface.ip4_address, listener_port, lvol.nqn)
             continue
         logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
-        # listeners_create returns the RPC result and answers None on an RPC
-        # error without raising, so an unchecked call reports a listener this
-        # subsystem does not have -- and the caller then records the lvol as
-        # serving.
+        # listeners_create raises on an RPC error; this guards only the
+        # (unlikely) case of a falsy-but-non-error SPDK response, so a
+        # listener this subsystem does not have is never mistaken for one
+        # it does.
         if not rpc_client.listeners_create(
                 lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state):
             msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "
@@ -14508,6 +15107,27 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
             allow_any_host=allow_any)
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, sec_node, rpc_client)
+
+    # The registration below (add_lvol_thread -> nvmf_subsystem_add_ns) needs
+    # this lvol's bdev to exist on the node. The node's own lvstore activation
+    # rebuilds the bdev on RESTART, after which this repair only re-exposes it on
+    # the fabric. But a non-leader that was merely RPC-unresponsive while
+    # fabric-connected (FTT-tolerated during the create, not restarting) never
+    # re-activates, so an lvol created while it was in that state has no bdev here
+    # and the add_ns loops forever on "No such device" -- its replication, and any
+    # later snapshot of it, is stuck for good (finding #30: a landing volume whose
+    # secondary create was deferred as a bare register). Register the replica blob
+    # when it is missing: _create_bdev_stack(is_primary=False) issues
+    # bdev_lvol_register against the leader's blobid -- a true mirror, never a
+    # fresh blob -- so the subsequent registration has a bdev to add.
+    if rpc_client.bdev_get(lvol.top_bdev) is None:
+        logger.warning(
+            "Repairing missing bdev %s on non-leader %s (lvol %s) before registration",
+            lvol.top_bdev, sec_node.get_id(), lvol.get_id())
+        ok, err = lvol_controller._create_bdev_stack(lvol, sec_node, is_primary=False)
+        if not ok:
+            return False, (f"replica bdev create for {lvol.get_id()} on "
+                           f"{sec_node.get_id()} failed: {err}")
 
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
@@ -15207,8 +15827,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(sec_node.cluster_id)):
             logger.info("JC compression resume held: cluster upgrade in progress")
         else:
-            ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
-            if not ret:
+            if not sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False):
                 logger.info("Failed to resume JC compression adding task...")
                 tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
 
@@ -15463,7 +16082,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
         type = bdev['type']
         name = bdev['name']
         if type == "bdev_distr":
-            ret = rpc_client.bdev_distrib_delete(name)
+            try:
+                ret = rpc_client.bdev_distrib_delete(name)
+            except RPCRemoteError:
+                ret = None
         elif type == "bdev_raid":
             ret = rpc_client.bdev_raid_delete(name)
         elif type == "bdev_lvstore":
@@ -15473,7 +16095,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
                 # for every replica. Deleting the raid below hot-removes the
                 # examined lvstore bdev from this node without touching disk.
                 continue
-            ret = rpc_client.bdev_lvol_delete_lvstore(name)
+            try:
+                ret = rpc_client.bdev_lvol_delete_lvstore(name)
+            except RPCRemoteError:
+                ret = None
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_delete(name)
         else:
@@ -15874,9 +16499,10 @@ def dump_lvstore(node_id):
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
     file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{datetime.datetime.now().isoformat()!s}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
-    ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
-    if not ret:
-        logger.warning("faild to dump lvstore data")
+    try:
+        rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
+    except RPCException as e:
+        logger.warning("Failed to dump lvstore data: %s", e)
     #     return False
 
     logger.info(f"LVS dump file will be here: {file_path}")
@@ -15941,9 +16567,10 @@ def safe_delete_bdev(name, node_id):
                            f"has no record; skipping its delete leg")
     bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
-    ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
-    if not ret:
-        logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}")
+    try:
+        primary_node.rpc_client().delete_lvol(bdev_name)
+    except RPCRemoteError as e:
+        logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}: {e}")
         return False
 
     time.sleep(1)
@@ -15960,9 +16587,10 @@ def safe_delete_bdev(name, node_id):
             time.sleep(1)
 
         elif ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-            ret, _ = primary_node.rpc_client().delete_lvol(bdev_name, sync=True)
-            if not ret:
-                logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}")
+            try:
+                primary_node.rpc_client().delete_lvol(bdev_name, sync=True)
+            except RPCRemoteError as e:
+                logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}: {e}")
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
@@ -15980,9 +16608,10 @@ def safe_delete_bdev(name, node_id):
             all_deleted = True
             for peer in peer_nodes:
                 logger.info(f"deleting from peer {peer.get_id()}: {bdev_name}")
-                ret, _ = peer.rpc_client().delete_lvol(bdev_name, sync=True)
-                if not ret:
-                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}")
+                try:
+                    peer.rpc_client().delete_lvol(bdev_name, sync=True)
+                except RPCRemoteError as e:
+                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}: {e}")
                     all_deleted = False
                 else:
                     logger.info(f"deletion completed on peer {peer.get_id()}: {bdev_name}")
@@ -16024,10 +16653,10 @@ def find_orphan_lvstore_blobs(node_id):
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
 
-    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-    if not ret:
+    lvs = snode.rpc_client().get_lvstore(snode.lvstore)
+    if not lvs:
         raise RPCException(f"Failed to get lvstore info for {snode.lvstore}")
-    lvs_uuid = ret[0].get("uuid")
+    lvs_uuid = lvs.get("uuid")
     if not lvs_uuid:
         raise RPCException(f"Failed to get lvstore uuid for {snode.lvstore}")
 
@@ -16070,11 +16699,10 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         logger.error("Cluster is not in degraded or active state")
         return False
 
-    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-    if not ret:
+    lvs_info = snode.rpc_client().get_lvstore(snode.lvstore)
+    if not lvs_info:
         logger.error("Failed to get LVol info")
         return False
-    lvs_info = ret[0]
     if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
@@ -16252,11 +16880,10 @@ def lvs_dump_tree(node_id):
         logger.error("Storage node is not online")
         return False
 
-    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-    if not ret:
+    lvs_info = snode.rpc_client().get_lvstore(snode.lvstore)
+    if not lvs_info:
         logger.error("Failed to get LVol info")
         return False
-    lvs_info = ret[0]
     if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:

@@ -550,9 +550,8 @@ def check_node(snode):
                                 repair_paths=True)
                             if not sec_node_check:
                                 if snode.status == StorageNode.STATUS_ONLINE:
-                                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                                    if ret:
-                                        lvs_info = ret[0]
+                                    lvs_info = sec_node.rpc_client().get_lvstore(snode.lvstore)
+                                    if lvs_info:
                                         if lvs_info.get('lvs leadership'):
                                             jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
                                                 snode.jm_vuid)

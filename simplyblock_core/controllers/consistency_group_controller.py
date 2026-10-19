@@ -41,6 +41,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -734,6 +735,41 @@ def _members_are_superseded_source(members):
     return True
 
 
+def _peer_group_is_being_served(members):
+    """True when any member's NVMe subsystem has a connected host controller --
+    the workload is live on this (peer) side right now.
+
+    This is the one signal that separates a relocate fail-back from a re-protect
+    after an UNPLANNED failover, because the replication state is identical in
+    both: either way the peer holds settled failed-over TARGET clones and this
+    group's own members are superseded sources (#31).
+
+      * Relocate back: Ramen has already stopped the workload on the peer (source
+        cleanup deletes the pods before the demote), so the clones have no
+        connected host -- the demote may safely resolve here and ship the cut
+        home.
+      * Re-protect: the peer is the serving primary with the app writing to it, so
+        resolving the demote here would fence the live volumes and cut the
+        survivor off the instant the recovered site rejoins.
+
+    Fails safe: a member whose node cannot be reached, or whose connection state
+    cannot be read, is treated as still being served. The worst case of that
+    choice is a relocate that stalls and retries (recoverable); the worst case of
+    the opposite default is fencing a live app (an outage)."""
+    for m in members:
+        try:
+            node = db.get_storage_node_by_id(m.node_id)
+            controllers = node.rpc_client().nvmf_subsystem_get_controllers(m.nqn)
+        except Exception as e:
+            logger.warning("Peer serving-check for %s could not reach its node "
+                           "(%s); treating it as still served so a demote never "
+                           "fences a live volume", m.get_id(), e)
+            return True
+        if controllers:
+            return True
+    return False
+
+
 def demote_group(group):
     """Demote the whole consistency group as ONE crash-consistent unit
     (design-csi-addons-replication.md §14.4).
@@ -797,12 +833,28 @@ def demote_group(group):
                     except KeyError:
                         continue
                 if peer_members and not _members_are_superseded_source(peer_members):
-                    logger.info("Group demote of %s resolved to peer group %s on "
-                                "cluster %s: demoting its %d live member(s) so the "
-                                "demote cut ships home",
-                                group.group_name, peer.uuid[:8], peer.cluster_id,
-                                len(peer_members))
-                    group, members = peer, peer_members
+                    # The peer holds settled failed-over clones in BOTH a relocate
+                    # fail-back and a re-protect after an unplanned failover -- the
+                    # replication state is the same. Resolve the demote here ONLY
+                    # when the peer is no longer being served (relocate: Ramen has
+                    # stopped the app first). If it is still the serving primary,
+                    # this is a re-protect: leave it untouched and fall through to
+                    # fence this group's own superseded sources, or fencing the
+                    # peer would cut off the survivor (#31).
+                    if _peer_group_is_being_served(peer_members):
+                        logger.info("Group demote of %s left on the origin: peer "
+                                    "group %s on cluster %s is the serving primary "
+                                    "(host still attached), so this is a re-protect "
+                                    "after an unplanned failover, not a relocate -- "
+                                    "fencing the peer would cut off the survivor (#31)",
+                                    group.group_name, peer.uuid[:8], peer.cluster_id)
+                    else:
+                        logger.info("Group demote of %s resolved to peer group %s on "
+                                    "cluster %s: demoting its %d live member(s) so the "
+                                    "demote cut ships home",
+                                    group.group_name, peer.uuid[:8], peer.cluster_id,
+                                    len(peer_members))
+                        group, members = peer, peer_members
 
     if not members:
         return {"demoted": True, "members": []}
@@ -890,6 +942,28 @@ def failback_group(group, source_cluster_id=None):
     False`` with per-member detail if any member could not be configured.
     """
     from simplyblock_core.controllers import lvol_controller
+
+    # A resync must land on the group that holds the live data. A group with no
+    # live members -- empty, or holding only superseded failed-over sources whose
+    # writes already moved to the peer -- is the retired end of a move. Failing it
+    # back configures nothing, and reporting success there masks a mis-resolution
+    # (the driver resolves a resync to the group's active end, so a retired group
+    # arriving here means it resolved wrong) as a healthy re-protect -- which is
+    # exactly how #33 stayed invisible: the survivor ran unprotected while Ramen
+    # saw PeerReady. Refuse loudly instead. resolve_group no longer names a retired
+    # group as active (#33), so this is defense in depth.
+    member_lvols = []
+    for member in list_members(group):
+        try:
+            member_lvols.append(db.get_lvol_by_id(member["lvol_id"]))
+        except KeyError:
+            continue
+    if not member_lvols or _members_are_superseded_source(member_lvols):
+        return {"configured": False, "members": [],
+                "error": (f"consistency group {group.group_name} holds no live members "
+                          "to fail back: the resync was addressed to the retired group, "
+                          "resolve to the live peer group first")}
+
     members = []
     configured = True
     for member in list_members(group):
@@ -1024,12 +1098,17 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                     primary_node.get_id()[:8], group.lvs_name)
 
         # ONE lvstore mutation: the whole frozen window is a single RPC.
-        with lvstore_op_lock(pool.cluster_id, group.lvs_name,
-                             node_id=primary_node.get_id(), enabled=lock):
-            ret = rpc_client.bdev_lvol_snapshot_group(
-                group.lvs_name,
-                [{"lvol_name": f"{p['lvol'].lvs_name}/{p['lvol'].lvol_bdev}",
-                  "snapshot_name": p["snap_bdev_name"]} for p in plan])
+        try:
+            with lvstore_op_lock(pool.cluster_id, group.lvs_name,
+                                 node_id=primary_node.get_id(), enabled=lock):
+                ret = rpc_client.bdev_lvol_snapshot_group(
+                    group.lvs_name,
+                    [{"lvol_name": f"{p['lvol'].lvs_name}/{p['lvol'].lvol_bdev}",
+                      "snapshot_name": p["snap_bdev_name"]} for p in plan])
+        except RPCRemoteError as e:
+            # SPDK unfroze first and garbage-collected the partial snapshots.
+            return None, (f"Group snapshot RPC failed on {primary_node.get_id()}: {e}; "
+                          f"SPDK rolled the partial group back")
         if not ret:
             # SPDK unfroze first and garbage-collected the partial snapshots.
             return None, (f"Group snapshot RPC failed on {primary_node.get_id()}; "
@@ -1076,9 +1155,12 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                     continue
                 with lvstore_op_lock(pool.cluster_id, group.lvs_name,
                                      node_id=sec.get_id(), enabled=lock):
-                    reg = sec.rpc_client().bdev_lvol_snapshot_register(
-                        f"{group.lvs_name}/{lvol.lvol_bdev}", p["snap_bdev_name"],
-                        p["snap_uuid"], p["blobid"])
+                    try:
+                        reg = sec.rpc_client().bdev_lvol_snapshot_register(
+                            f"{group.lvs_name}/{lvol.lvol_bdev}", p["snap_bdev_name"],
+                            p["snap_uuid"], p["blobid"])
+                    except RPCException:
+                        reg = None
                 if not reg:
                     logger.error("Group snapshot register of %s failed on %s; "
                                  "rolling the WHOLE generation back",

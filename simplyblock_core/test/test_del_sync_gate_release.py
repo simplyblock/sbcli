@@ -17,7 +17,7 @@ from simplyblock_core.services import snapshot_monitor as sm
 
 class _RPC:
     def delete_lvol(self, name, sync=False, special_delete=False):
-        return True, None
+        return True
 
     def bdev_lvol_get_lvol_delete_status(self, name):
         return 0

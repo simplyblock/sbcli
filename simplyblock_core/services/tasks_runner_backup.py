@@ -138,22 +138,28 @@ def _run_backup(task):
         set_result(task, "Backup completed")
         return
 
-    if state == "Failed":
-        raise TaskAbort("Backup transfer failed on data plane")
-
-    if state == "No process" and backup.status == Backup.STATUS_IN_PROGRESS:
-        # "No process" means no transfer is running for this bdev — the backup
-        # died (e.g. an SPDK crash wiped the in-flight transfer). Re-issue by
-        # resetting to PENDING, but COUNT it as a retry so the max_retry ceiling
-        # can stop a backup that keeps failing. Without that, re-issuing an RPC
-        # that crashes the data plane just re-crashes it, forever.
-        # NOTE: this treats "No process" as a failure. It relies on a healthy
-        # in-progress backup NOT sitting in "No process"; if the data plane ever
-        # reports "No process" for a running backup, this would fail it
+    if state in ("Failed", "No process") and backup.status == Backup.STATUS_IN_PROGRESS:
+        # Both mean no transfer is running for this bdev and it did not finish:
+        # "No process" because the backup died outright (e.g. an SPDK crash
+        # wiped the in-flight transfer); "Failed" because the data plane gave
+        # up after an I/O error (e.g. the S3 endpoint was briefly unreachable --
+        # an OOM-killed MinIO pod is back in a couple of seconds). A plain
+        # backup upload is additive, so re-issuing it onto the same s3_id is
+        # safe: it just re-uploads and overwrites.
+        #
+        # Re-issue by resetting to PENDING, and COUNT it as a retry so the
+        # task's own max_retry ceiling (BACKUP_TASK_MAX_RETRIES) can stop a
+        # backup that keeps failing -- the driver already owns that count,
+        # shared across every retryable cause for this task; nothing here
+        # keeps one of its own.
+        #
+        # NOTE: this treats both as a failure. It relies on a healthy
+        # in-progress backup NOT sitting in either state; if the data plane
+        # ever reports one for a running backup, this would fail it
         # prematurely and completion needs another signal.
         backup.status = Backup.STATUS_PENDING
         backup.write_to_db()
-        raise TaskRetry("No process, retrying backup start")
+        raise TaskRetry(f"{state}, retrying backup start")
 
     raise TaskDefer("Backup in progress")
 

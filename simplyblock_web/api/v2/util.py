@@ -6,9 +6,10 @@ from uuid import UUID
 from fastapi import Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import AfterValidator, BaseModel, BeforeValidator, Field
 
 from simplyblock_core import utils as core_utils
+from simplyblock_core.controllers.backup import controller as backup_controller
 
 Unsigned = Annotated[int, Field(ge=0)]
 OptionalUnsigned = Annotated[int | None, Field(ge=0)]
@@ -41,6 +42,20 @@ def _validate_url_path(value: Any) -> str:
     return value
 
 UrlPath = Annotated[str, _validate_url_path]
+
+
+def _validate_snapshot_name(value: str) -> str:
+    if backup_controller.is_reserved_snapshot_name(value):
+        raise ValueError(backup_controller.RESERVED_SNAPSHOT_NAME_ERROR)
+    return value
+
+#: A user-supplied name that will become a `SnapShot.snap_name` -- directly
+#: (creating a snapshot) or as a side effect (a clone's name is also the
+#: snapshot `lvol_controller.clone_lvol` takes to produce it). Rejects a
+#: reserved prefix at the request-validation layer rather than inside the
+#: controller, which also creates snapshots under those same prefixes for
+#: its own internal, trusted reasons.
+SnapshotName = Annotated[str, AfterValidator(_validate_snapshot_name)]
 
 CreationResponseFormat = Literal["empty", "full", "identifier"]
 CreationResponseFormatParameter = Annotated[CreationResponseFormat, Query(alias="response-format")]

@@ -488,8 +488,8 @@ class TestBdevNvmeSetOptionsRetries(unittest.TestCase):
         client = RPCClient.__new__(RPCClient)
         captured = {}
 
-        def _fake_request(method, params=None):
-            captured[method] = params
+        def _fake_request(method, **kwargs):
+            captured[method] = kwargs
             return True
 
         client._request = _fake_request

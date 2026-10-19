@@ -169,6 +169,11 @@ class StorageNode(BaseNodeObject):
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
+    # Two-node arbitration: positive fencing evidence for this node from the
+    # edge operator (BMC fence done, or the out-of-service taint present).
+    # Lets the arbiter grant the peer solo operation even when THIS node is the
+    # preferred one (docs/design/two-node-arbitration.md, invariant 3).
+    remediation_fenced: bool = False
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: list[str] = default_factory(list)
@@ -202,12 +207,9 @@ class StorageNode(BaseNodeObject):
     active_tcp: bool = True
     active_rdma: bool = False
     socket: int = 0
-    firewall_port: int = 5001
     lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
     transfer_hublvol: HubLVol = None  # type: ignore[assignment]
-    # spdk image tag
-    spdk_version: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.
@@ -581,7 +583,11 @@ class StorageNode(BaseNodeObject):
         if rpc_client.bdev_get(bdev_name):
             logger.info(f'Secondary hublvol already exists: {bdev_name}')
         else:
-            ret = rpc_client.bdev_lvol_create_hublvol(lvstore_name)
+            try:
+                ret = rpc_client.bdev_lvol_create_hublvol(lvstore_name)
+            except RPCException as e:
+                logger.error(f'Failed to create secondary hublvol for {lvstore_name}: {e}')
+                return None
             if not ret:
                 logger.error(f'Failed to create secondary hublvol for {lvstore_name}')
                 return None
@@ -833,18 +839,30 @@ class StorageNode(BaseNodeObject):
                     "proceeding — connect_hublvol will verify",
                     remote_bdev, self.get_id())
 
-        if not rpc_client.bdev_lvol_set_lvs_opts(
-                lvs_node.lvstore,
-                groupid=lvs_node.jm_vuid,
-                subsystem_port=lvs_node.get_lvol_subsys_port(lvs_node.lvstore),
-                hublvol_port=lvs_node.get_hublvol_port(lvs_node.lvstore),
-                role=role,
-        ):
+        try:
+            lvs_opts_ok = rpc_client.bdev_lvol_set_lvs_opts(
+                    lvs_node.lvstore,
+                    groupid=lvs_node.jm_vuid,
+                    subsystem_port=lvs_node.get_lvol_subsys_port(lvs_node.lvstore),
+                    hublvol_port=lvs_node.get_hublvol_port(lvs_node.lvstore),
+                    role=role,
+            )
+        except RPCException as e:
+            logger.error("bdev_lvol_set_lvs_opts failed for %s on %s: %s",
+                         lvs_node.lvstore, self.get_id(), e)
+            return False
+        if not lvs_opts_ok:
             logger.error("bdev_lvol_set_lvs_opts failed for %s on %s",
                          lvs_node.lvstore, self.get_id())
             return False
 
-        if not rpc_client.bdev_lvol_connect_hublvol(lvs_node.lvstore, remote_bdev):
+        try:
+            connected = rpc_client.bdev_lvol_connect_hublvol(lvs_node.lvstore, remote_bdev)
+        except RPCException as e:
+            logger.error("bdev_lvol_connect_hublvol failed for %s on %s: %s",
+                         lvs_node.lvstore, self.get_id(), e)
+            return False
+        if not connected:
             logger.error("bdev_lvol_connect_hublvol failed for %s on %s",
                          lvs_node.lvstore, self.get_id())
             return False
@@ -939,7 +957,7 @@ class StorageNode(BaseNodeObject):
         deadline = time.time() + retry * delay
         while retry > 0:
             try:
-                if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+                if not self.rpc_client().get_lvstore(self.lvstore):
                     return True  # no lvstore means no need to wait
                 jm_replication_tasks = False
                 ret = self.rpc_client().jc_get_jm_status(jm_vuid)

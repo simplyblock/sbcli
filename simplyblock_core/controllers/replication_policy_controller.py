@@ -572,6 +572,20 @@ def failover_policy(policy_id):
     return results
 
 
+def _members_reachable(members):
+    """True when every member's storage node answers. This is the reachability
+    test BOTH promote early-exits depend on: a member whose source is down or gone
+    is an UNPLANNED fail-over, which the live-primary exit must decline and the
+    failed-home exit must NOT mistake for a Ramen re-drive (finding #29)."""
+    for m in members:
+        try:
+            if not lvol_controller.replication_source_online(m):
+                return False                   # source down -> unplanned fail-over
+        except KeyError:
+            return False                       # source gone -> unplanned fail-over
+    return True
+
+
 def _members_are_live_primary(members):
     """True when every member is still the UNTOUCHED serving primary on its own
     cluster: not demoted, not failed over, and its storage node online.
@@ -601,12 +615,7 @@ def _members_are_live_primary(members):
             return False                       # a planned hand-off (relocate), source stays up
         if _settled_relationship(m.get_id()) is not None:
             return False                       # already failed over -> a resume
-        try:
-            if not lvol_controller.replication_source_online(m):
-                return False                   # source down -> unplanned fail-over
-        except KeyError:
-            return False                       # source gone -> unplanned fail-over
-    return True
+    return _members_reachable(members)         # source down/gone -> unplanned fail-over
 
 
 def failover_group(group):
@@ -651,7 +660,16 @@ def failover_group(group):
         # so it reads these target-side members as pending, finds no generation that
         # qualifies for them, and refuses with "mixed-generation fail-over" -- leaving
         # the relocate stuck although the data is already home (live 2026-09-28).
-        if all(_failed_home_relationship(m.get_id()) is not None for m in members):
+        #
+        # Only when the members are REACHABLE here, exactly as the live-primary exit
+        # requires. The "failed home" mark is permanent, so after a fail-back it stays
+        # on the member forever; a later UNPLANNED fail-over away from home -- home
+        # partitioned, these nodes down -- is a real fail-over, not a re-drive, and
+        # must fall through to _failover_group_members. Without the reachability gate
+        # it returned success without promoting and the target attached the disk from
+        # the dead home site (finding #29, WordPress stuck 77 min, 2026-10-10).
+        if (all(_failed_home_relationship(m.get_id()) is not None for m in members)
+                and _members_reachable(members)):
             logger.info("Promote of consistency group %s is a no-op: its %d "
                         "member(s) already failed home to this cluster",
                         group.group_name, len(members))
@@ -802,6 +820,30 @@ def _lineage_origin(lvol_id, reps):
     return origin, cluster
 
 
+def _is_superseded_failed_over_source(lvol_id, reps):
+    """True when *lvol_id* is the SOURCE of a failed-over relationship: a former
+    primary whose writes already moved to the peer's clone after an unplanned
+    failover.
+
+    Its volume still exists -- a re-protect deletes it only once the demote
+    completes, unlike a relocate, which deletes the demoted members up front -- so
+    it is still an open member of its group. But it no longer holds the group's
+    live data, so resolve_group must not let it keep the group marked active (#33):
+    counting it names the retired group for the window before deletion, and the
+    driver resolves a re-protect resync to the group's active end, so that resync
+    lands on the retired group instead of the live peer.
+
+    The discriminator is the relationship state, the same one
+    consistency_group_controller._members_are_superseded_source keys on for the
+    demote; *reps* is db.get_lvol_replication_objects()."""
+    for rep in reps:
+        if (rep.state == LVolReplication.STATE_FAILED_OVER
+                and rep.source_lvol is not None
+                and rep.source_lvol.get_id() == lvol_id):
+            return True
+    return False
+
+
 def resolve_group(group):
     """Where the data of consistency group *group* lives NOW, keyed the way
     PersistentVolumes keep it.
@@ -841,9 +883,17 @@ def resolve_group(group):
                 and v.status != LVol.STATUS_IN_DELETION]
 
     own, peer_own = open_members(group), open_members(peer)
-    active = group if own else (peer if peer_own else None)
-
     reps = db.get_lvol_replication_objects()
+    # The active group is the one holding LIVE data. A superseded failed-over
+    # source is still an open member until the demote deletes it, but its data has
+    # moved to the peer's clone, so it must not count toward "active" -- otherwise
+    # a re-protected old primary names itself active for the window before its
+    # members are deleted, and the driver's resync resolves to the retired group
+    # (#33). The full open sets still seed the member lineages below.
+    own_live = [v for v in own if not _is_superseded_failed_over_source(v.get_id(), reps)]
+    peer_live = [v for v in peer_own if not _is_superseded_failed_over_source(v.get_id(), reps)]
+    active = group if own_live else (peer if peer_live else None)
+
     candidates = {v.get_id(): v for v in own + peer_own}
     for rep in reps:
         for side in (rep.source_lvol, rep.target_lvol):

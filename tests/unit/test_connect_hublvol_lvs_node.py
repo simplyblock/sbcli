@@ -429,9 +429,9 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
         cluster.nqn = "nqn.cluster.c1"
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [
-            {"lvs leadership": True, "uuid": "u", "lvs_primary": False}
-        ]
+        rpc.get_lvstore.return_value = {
+            "lvs leadership": True, "uuid": "u", "lvs_primary": False
+        }
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -462,8 +462,6 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
              patch("simplyblock_core.storage_node_ops.health_controller"), \
              patch("simplyblock_core.storage_node_ops.tcp_ports_events"), \
              patch("simplyblock_core.storage_node_ops.storage_events"), \
-             patch("simplyblock_core.utils.port_block.set_port",
-                   return_value=MagicMock()), \
              patch("simplyblock_core.rpc_client.RPCClient", return_value=rpc), \
              patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
                    return_value=[]), \

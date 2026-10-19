@@ -91,7 +91,8 @@ def task_runner(task):
         # tell how much of the cluster the migration was sized against.
         started = mig.start_migration(task, lambda: rpc_client.distr_migration_expansion_start(
             task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
-            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS),
+            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
+            relaxed_mode=mig.migration_relaxed(snode.cluster_id)),
             migration_devices=_online_device_count(task.cluster_id))
         if started is None:
             raise TaskAbort("canceled while starting migration")
@@ -198,9 +199,9 @@ def resume_jc_compression(task):
         if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             logger.warning("Not all nodes are online, can not resume JC compression")
     try:
-        _, err = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
+        ret = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
             jm_vuid=node.jm_vuid, suspend=False)
-        if err:
+        if not ret:
             logger.info("Failed to resume JC compression adding task...")
             tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
     except Exception as e:
@@ -215,6 +216,7 @@ SPEC = RunnerSpec(
     on_cycle=lambda cluster: update_master_tasks(cluster.get_id()),
     is_eligible=_is_eligible,
     interval=3,
+    backoff_reset_key=mig.backoff_reset_key,
 )
 
 

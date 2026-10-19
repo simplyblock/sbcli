@@ -15,7 +15,6 @@ Tests cover:
   - RPC client bdev_s3_create / bdev_lvol_s3_bdev methods
   - CLI argument registration
   - Cluster model backup_config field
-  - snapshot_controller.add with backup=True
   - Task runner dispatch
 
 All external dependencies (FDB, RPC) are mocked.
@@ -1108,25 +1107,7 @@ class TestJobScheduleBackupConstants(unittest.TestCase):
 
 
 # ===========================================================================
-# 16. snapshot_controller.add with backup=True
-# ===========================================================================
-
-class TestSnapshotAddWithBackup(unittest.TestCase):
-
-    @patch("simplyblock_core.controllers.snapshot_controller.snapshot_events")
-    @patch("simplyblock_core.controllers.snapshot_controller.db_controller")
-    def test_add_signature_accepts_backup(self, mock_db, mock_events):
-        """Verify snapshot_controller.add accepts backup parameter."""
-        import inspect
-
-        from simplyblock_core.controllers.snapshot_controller import add
-        sig = inspect.signature(add)
-        self.assertIn("backup", sig.parameters)
-        self.assertEqual(sig.parameters["backup"].default, False)
-
-
-# ===========================================================================
-# 17. RPC client methods
+# 16. RPC client methods
 # ===========================================================================
 
 class TestRPCClientBackupMethods(unittest.TestCase):
@@ -1178,7 +1159,7 @@ class TestRPCClientBackupMethods(unittest.TestCase):
 
 
 # ===========================================================================
-# 18. CLI argument registration
+# 17. CLI argument registration
 # ===========================================================================
 
 class TestCLIBackupArgs(unittest.TestCase):
@@ -1221,7 +1202,7 @@ class TestCLIBackupArgs(unittest.TestCase):
 
 
 # ===========================================================================
-# 19. CLIBase handler methods exist
+# 18. CLIBase handler methods exist
 # ===========================================================================
 
 class TestCLIBaseHandlers(unittest.TestCase):
@@ -1241,7 +1222,7 @@ class TestCLIBaseHandlers(unittest.TestCase):
 
 
 # ===========================================================================
-# 20. Backup.get_location
+# 19. Backup.get_location
 # ===========================================================================
 
 class TestBackupLocationAccessor(unittest.TestCase):
@@ -1280,7 +1261,7 @@ class TestBackupLocationAccessor(unittest.TestCase):
 
 
 # ===========================================================================
-# 21. _trigger_merge
+# 20. _trigger_merge
 # ===========================================================================
 
 class TestTriggerMerge(unittest.TestCase):

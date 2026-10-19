@@ -294,7 +294,7 @@ class TestNvmfSetConfigDhchap(unittest.TestCase):
     def test_no_dhchap_only_pollers_mask(self):
         c = self._rpc()
         c.nvmf_set_config("0x1")
-        params = c._request.call_args[0][1]
+        params = c._request.call_args.kwargs
         self.assertEqual(params["poll_groups_mask"], "0x1")
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
@@ -307,7 +307,7 @@ class TestNvmfSetConfigDhchap(unittest.TestCase):
             dhchap_digests=constants.DHCHAP_DIGESTS,
             dhchap_dhgroups=[constants.DHCHAP_DHGROUP],
         )
-        params = c._request.call_args[0][1]
+        params = c._request.call_args.kwargs
         self.assertEqual(params["dhchap_digests"], constants.DHCHAP_DIGESTS)
         self.assertEqual(params["dhchap_dhgroups"], [constants.DHCHAP_DHGROUP])
 
@@ -315,7 +315,7 @@ class TestNvmfSetConfigDhchap(unittest.TestCase):
         """Passing None for dhchap params must not include them in the RPC call."""
         c = self._rpc()
         c.nvmf_set_config("0x1", dhchap_digests=None, dhchap_dhgroups=None)
-        params = c._request.call_args[0][1]
+        params = c._request.call_args.kwargs
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
 
@@ -333,7 +333,7 @@ class TestBdevNvmeSetOptionsNoDhchap(unittest.TestCase):
         c = RPCClient.__new__(RPCClient)
         c._request = MagicMock(return_value=True)
         c.bdev_nvme_set_options()
-        params = c._request.call_args[0][1]
+        params = c._request.call_args.kwargs
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
 

@@ -398,10 +398,23 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         logger.info("Holding replication of %s: %s", snapshot.get_id(), hold)
         return False
-    # Drive the transfer from whichever member of the SOURCE lvstore leads it
-    # now — the snapshot exists on every member, so an outage of the recorded
-    # primary must not stop replication (see _source_leader_node).
-    snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
+    # Drive the transfer from the first online member of the SOURCE lvstore
+    # that holds the snapshot -- primary, else secondary, else tertiary. The
+    # snapshot exists on every member and leadership does not matter for a
+    # read, so an outage of the primary (or of primary and secondary) must not
+    # stop replication and let the RPO grow with the outage
+    # (see _select_source_node).
+    snode, why = _select_source_node(snapshot)
+    if snode is None:
+        _suspend_for_retry(task, f"no online member of {snapshot.lvol.lvs_name} holds "
+                                 f"{snapshot.snap_bdev} ({why}), retrying",
+                           backoff=True, count=_switches_exhausted(task))
+        return False
+    _note_switch(task, "source_node_id", snode.get_id(), "source member")
+    task.function_params["source_fallback"] = why
+    if snode.get_id() != getattr(snapshot.lvol, "node_id", ""):
+        logger.info("Replication task %s: snapshot %s is sent from %s",
+                    getattr(task, "uuid", ""), snapshot.get_id(), why)
     replicate_to_source = task.function_params["replicate_to_source"]
 
     # Once ONLY: snapshots form a TREE through clones, so several descendants
@@ -607,24 +620,30 @@ def process_snap_replicate_start(task, snapshot):
             return
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    # Send to whichever member of the target lvstore currently leads it — the
-    # hub only accepts receive IO on the leader, and leadership does not
-    # return to the recorded node on its own after an outage.
-    remote_lv_node = _receiving_leader_node(remote_lv)
-    if remote_lv_node is None:
+    # Send to the member of the target lvstore that leads it NOW, once that
+    # leadership is settled -- the hub only accepts receive IO on the leader,
+    # leadership does not return to the recorded node on its own after an
+    # outage, and a move in progress must not get the transfer (see
+    # _stable_target_leader). Checked before every transfer, so a move in the
+    # idle window between two runs is followed too.
+    remote_lv_node, lead_why = _stable_target_leader(remote_lv)
+    if remote_lv_node is None and not _leaders_of(remote_lv):
         # Leadership does not come back on its own: SPDK drops it on a
         # failed write and the control plane grants it only on restart,
         # activation or its leaderless-LVS recovery -- which nothing ran
         # while this task waited (2026-10-02, LVS_1 on site A leaderless
-        # for 20 minutes, every convert refused). Run that recovery now.
-        remote_lv_node = _recover_target_leader(remote_lv)
+        # for 20 minutes, every convert refused). Run that recovery now, then
+        # require the recovered leadership to be settled like any other.
+        if _recover_target_leader(remote_lv) is not None:
+            remote_lv_node, lead_why = _stable_target_leader(remote_lv)
     if remote_lv_node is None:
         # Waiting, not failing: the target's leadership is not this transfer's
         # fault, and counting it let a leaderless window kill the task.
-        _suspend_for_retry(task, f"No online LVS leader on the target "
-                                 f"({remote_lv.lvs_name}), retrying",
-                           backoff=True, count=False)
+        _suspend_for_retry(task, f"target leadership not established "
+                                 f"({lead_why}), retrying",
+                           backoff=True, count=_switches_exhausted(task))
         return
+    _note_switch(task, "target_node_id", remote_lv_node.get_id(), "target leader")
 
     # 2 attach the TARGET NODE'S TRANSFER HUBLVOL on the source. Transfers must
     # go over a hublvol: the fork demuxes each write by the map id carried in
@@ -901,6 +920,199 @@ def _source_leader_node(snapshot):
     """
     lv = snapshot.lvol
     return _lvs_leader_among(getattr(lv, "nodes", None), lv.node_id, lv.lvs_name)
+
+
+def _source_members(lvol):
+    """Members of *lvol*'s lvstore in role order: primary, secondary, tertiary.
+
+    ``lvol.node_id`` is the primary; ``lvol.nodes`` lists the members with the
+    primary first. Members of one consistency group share the lvstore, so they
+    get the same order -- and, with the same node states, the same choice.
+    """
+    order = []
+    for node_id in [lvol.node_id] + list(getattr(lvol, "nodes", None) or []):
+        if node_id and node_id not in order:
+            order.append(node_id)
+    return order
+
+
+def _select_source_node(snapshot, exclude=()):
+    """The member that drives the transfer of *snapshot*, and why; (None, why).
+
+    The first ONLINE member of the source lvstore, in role order, that holds
+    the snapshot. Leadership does not matter: every member keeps the whole
+    snapshot stack, and a transfer only READS the snapshot. Waiting for the
+    leader instead stalled replication through every leaderless window and
+    through outages the leadership probe did not see (an acting secondary does
+    not always report "lvs leadership", sbcli #1439), and the RPO grew with
+    the outage. Re-selected on every attempt, so a member that went down in
+    the idle interval between two runs is skipped.
+    """
+    lvol = snapshot.lvol
+    skipped = []
+    for idx, node_id in enumerate(_source_members(lvol)):
+        role = ("primary", "secondary", "tertiary")[idx] if idx < 3 else f"member {idx}"
+        if node_id in exclude:
+            skipped.append(f"{role} {node_id[:8]} excluded")
+            continue
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            skipped.append(f"{role} {node_id[:8]} unknown")
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            skipped.append(f"{role} {node_id[:8]} {node.status}")
+            continue
+        try:
+            has_snapshot = node.rpc_client(timeout=10).bdev_get(snapshot.snap_bdev) is not None
+        except Exception as e:                            # noqa: BLE001
+            skipped.append(f"{role} {node_id[:8]} unreachable ({e})")
+            continue
+        if not has_snapshot:
+            skipped.append(f"{role} {node_id[:8]} lacks {snapshot.snap_bdev}")
+            continue
+        why = (f"{role} {node_id[:8]}" + (f" (skipped: {'; '.join(skipped)})" if skipped else ""))
+        return node, why
+    return None, "; ".join(skipped) or "no member"
+
+
+def _leaders_of(lvol_like):
+    """Ids of the online members of *lvol_like*'s lvstore reporting leadership."""
+    from simplyblock_core.controllers import lvol_controller
+    leaders = []
+    for node_id in _source_members(lvol_like):
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            if lvol_controller.is_node_leader(node, lvol_like.lvs_name):
+                leaders.append(node)
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("Leadership probe failed on %s: %s", node.get_id(), e)
+    return leaders
+
+
+# (cluster id, lvstore) -> (leader id, time it was last confirmed settled)
+_SETTLED_LEADER: dict = {}
+
+
+def _stable_target_leader(remote_lv):
+    """The member that leads the TARGET lvstore once leadership is settled; or
+    (None, why).
+
+    Leadership is "re-established" when exactly one online member reports it,
+    and the same member again REPL_LEADER_SETTLE_SEC later. A move in progress
+    shows the old member, then none or two, then the new one; a transfer or
+    convert sent in that window lands on a member that is about to stop being
+    the leader (the hub refuses receive IO in non-leader mode, a convert on a
+    non-leader silently persists nothing). The probe is SPDK's own "lvs
+    leadership" -- the very flag the hub and convert check -- so a member it
+    does not show as leader cannot take the transfer, whatever else is known.
+    """
+    first = _leaders_of(remote_lv)
+    key = (getattr(remote_lv, "cluster_id", ""), remote_lv.lvs_name)
+    if len(first) != 1:
+        _SETTLED_LEADER.pop(key, None)
+        return None, (f"{len(first)} members of {remote_lv.lvs_name} report leadership"
+                      + (f" ({', '.join(n.get_id()[:8] for n in first)})" if first else ""))
+    # The runner is single-threaded and sends many volumes' snapshots into one
+    # lvstore: settling every one of them would add the settle time per
+    # transfer. A leader confirmed settled moments ago and seen alone again
+    # now is still settled.
+    cached = _SETTLED_LEADER.get(key)
+    if (cached and cached[0] == first[0].get_id()
+            and time.time() - cached[1] < constants.REPL_LEADER_SETTLED_FOR_SEC):
+        return first[0], ""
+    time.sleep(constants.REPL_LEADER_SETTLE_SEC)
+    second = _leaders_of(remote_lv)
+    if len(second) != 1 or second[0].get_id() != first[0].get_id():
+        _SETTLED_LEADER.pop(key, None)
+        return None, (f"leadership of {remote_lv.lvs_name} is moving "
+                      f"({first[0].get_id()[:8]} -> "
+                      f"{', '.join(n.get_id()[:8] for n in second) or 'none'})")
+    _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
+    return second[0], ""
+
+
+def _note_switch(task, key, new_id, label):
+    """Record which node a task uses; True when it changed from the last attempt.
+
+    A change restarts the snapshot's transfer from offset 0 on the new node:
+    the landing volume may hold writes the old path never acknowledged, and a
+    full resend is always correct.
+    """
+    old = task.function_params.get(key)
+    task.function_params[key] = new_id
+    if old and old != new_id:
+        # Counted where the move was forced (_restart_elsewhere); a member
+        # that came back in the idle window is not a fault.
+        task.function_params.pop("offset", None)
+        logger.warning("Replication task %s: %s moved %s -> %s; restarting the "
+                       "transfer of snapshot %s from the start there",
+                       getattr(task, "uuid", ""), label, old, new_id,
+                       task.function_params.get("snapshot_id"))
+        return True
+    return False
+
+
+def _transfer_source_node(task, snapshot):
+    """The member that runs (or ran) this task's transfer, when online; else
+    whichever member would drive it now; else None."""
+    src_id = task.function_params.get("source_node_id")
+    if src_id:
+        try:
+            node = db.get_storage_node_by_id(src_id)
+            if node.status == StorageNode.STATUS_ONLINE:
+                return node
+        except KeyError:
+            pass
+    node, _ = _select_source_node(snapshot)
+    return node
+
+
+def _target_leadership_moved(task):
+    """Why the target's leadership is no longer where this transfer went, or "".
+
+    Compares the member the transfer was sent to with what the target lvstore
+    reports now: no leader, several, or a different one all mean the receive
+    side moved and the transfer has to be redone on the new leader.
+    """
+    target_id = task.function_params.get("target_node_id")
+    remote_id = task.function_params.get("remote_lvol_id")
+    if not target_id or not remote_id:
+        return ""
+    try:
+        remote_lv = db.get_lvol_by_id(remote_id)
+    except KeyError:
+        return ""
+    leaders = [n.get_id() for n in _leaders_of(remote_lv)]
+    if leaders == [target_id]:
+        return ""
+    return (f"target leadership of {remote_lv.lvs_name} moved from {target_id} to "
+            f"{', '.join(leaders) or 'no leader'}")
+
+
+def _restart_elsewhere(task, msg):
+    """Suspend a transfer whose source member or target leader went away, so
+    the next attempt starts it over on whichever member drives it then.
+
+    Not counted as a retry (an outage is not the transfer's fault) until the
+    task has switched nodes more than REPL_MAX_NODE_SWITCHES times, so a
+    flapping node cannot keep a task alive for ever.
+    """
+    task.function_params["node_switches"] = int(task.function_params.get("node_switches") or 0) + 1
+    task.function_params.pop("offset", None)
+    _suspend_for_retry(task, f"{msg}; restarting the transfer on the next "
+                             f"available member", backoff=True,
+                       count=_switches_exhausted(task))
+
+
+def _switches_exhausted(task):
+    """True when node switches must start counting as retries (see constants)."""
+    return int(task.function_params.get("node_switches") or 0) > constants.REPL_MAX_NODE_SWITCHES
 
 
 def _require_lvs_leader(node, lvs_name, what):
@@ -1451,19 +1663,41 @@ def process_snap_replicate_finish(task, snapshot):
     # add_clone/convert must run on the leader too — a convert on a non-leader
     # reports success and persists nothing. Follow leadership, not the node the
     # receiving lvol was created on (see _receiving_leader_node).
-    remote_snode = (_receiving_leader_node(remote_lv)
-                    or db.get_storage_node_by_id(remote_lv.node_id))
-    _src_node = (_source_leader_node(snapshot)
+    # The convert goes to the target's leader once its leadership is settled
+    # (see _stable_target_leader): leadership may have moved since the
+    # transfer -- the data the old leader acknowledged is in the HA landing
+    # volume on every member, so the finish follows the move instead of
+    # resending.
+    remote_snode, lead_why = _stable_target_leader(remote_lv)
+    if remote_snode is None:
+        logger.warning("Replication task %s: not finishing %s yet -- target "
+                       "leadership not established (%s)", task.uuid,
+                       snapshot.get_id(), lead_why)
+        return False
+    if task.function_params.get("target_node_id") not in (None, remote_snode.get_id()):
+        logger.warning("Replication task %s: target leadership moved %s -> %s "
+                       "after the transfer; finishing on the new leader",
+                       task.uuid, task.function_params.get("target_node_id"),
+                       remote_snode.get_id())
+    # The hub session belongs to the member the transfer was SENT to.
+    hub_node = remote_snode
+    sent_to = task.function_params.get("target_node_id")
+    if sent_to and sent_to != remote_snode.get_id():
+        try:
+            hub_node = db.get_storage_node_by_id(sent_to)
+        except KeyError:
+            hub_node = remote_snode
+    _src_node = (_transfer_source_node(task, snapshot)
                  or db.get_storage_node_by_id(snapshot.lvol.node_id))
-    if remote_snode.transfer_hublvol and remote_snode.transfer_hublvol.bdev_name:
-        if not _other_active_transfers_to_node(task, remote_snode.get_id()):
+    if hub_node.transfer_hublvol and hub_node.transfer_hublvol.bdev_name:
+        if not _other_active_transfers_to_node(task, hub_node.get_id()):
             xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
                               lvol=snapshot.lvol.get_id())
             # Non-fatal: a resumed finish (see _resume_finish) finds the hub
             # already detached by the first attempt.
             try:
                 _src_node.rpc_client().bdev_nvme_detach_controller(
-                    remote_snode.transfer_hublvol.bdev_name)
+                    hub_node.transfer_hublvol.bdev_name)
             except Exception as e:                        # noqa: BLE001
                 logger.warning("Transfer hub detach on %s failed (non-fatal): %s",
                                _src_node.get_id(), e)
@@ -1706,18 +1940,9 @@ def task_runner(task: JobSchedule):
         task.write_to_db(db.kv_store)
         return True
 
-    # Any online member of the source lvstore that holds leadership can drive
-    # this; waiting for the recorded primary stalls replication for the whole
-    # duration of its outage even though the promoted peer holds the snapshot.
-    snode = _source_leader_node(snapshot)
-    if snode is None:
-        # Waiting, not failing (see _suspend_for_retry): on 2026-09-29 this
-        # path spent every retry of vm-a's tasks within seconds while LVS_1 on
-        # the source flapped, silently, and the volume stopped replicating.
-        _suspend_for_retry(task, f"no online source LVS leader for "
-                                 f"{snapshot.lvol.lvs_name}, retrying",
-                           backoff=True, count=False)
-        return False
+    # Which member drives the transfer is decided per attempt by
+    # _select_source_node (any online member holding the snapshot, primary
+    # first); a running transfer is polled where it was started.
 
     if task.retry >= task.max_retry or task.canceled is True:
         # Carry the last real reason: "max retry reached" alone names none.
@@ -1749,10 +1974,14 @@ def task_runner(task: JobSchedule):
             remote_lv = db.get_lvol_by_id(remote_lv_id)
         except KeyError:
             return True
-        # abort path: close the transfer session here too (last user only)
+        # abort path: close the transfer session here too (last user only),
+        # on the member that attached it
         try:
-            _rl_node = db.get_storage_node_by_id(remote_lv.node_id)
-            if (_rl_node.transfer_hublvol and _rl_node.transfer_hublvol.bdev_name
+            _rl_node = db.get_storage_node_by_id(
+                task.function_params.get("target_node_id") or remote_lv.node_id)
+            snode = _transfer_source_node(task, snapshot)
+            if (snode is not None and _rl_node.transfer_hublvol
+                    and _rl_node.transfer_hublvol.bdev_name
                     and not _other_active_transfers_to_node(task, _rl_node.get_id())):
                 snode.rpc_client().bdev_nvme_detach_controller(
                     _rl_node.transfer_hublvol.bdev_name)
@@ -1772,8 +2001,24 @@ def task_runner(task: JobSchedule):
             process_snap_replicate_start(task, snapshot)
 
     elif task.status == JobSchedule.STATUS_RUNNING:
-        snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
-        ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
+        # Poll the member the transfer runs on. If that member went down or
+        # cannot be asked, the transfer is lost with it: start the snapshot
+        # over on the next online member (see _select_source_node).
+        src_id = task.function_params.get("source_node_id") or snapshot.lvol.node_id
+        try:
+            snode = db.get_storage_node_by_id(src_id)
+        except KeyError:
+            snode = None
+        if snode is None or snode.status != StorageNode.STATUS_ONLINE:
+            _restart_elsewhere(task, f"source member {src_id} is "
+                                     f"{snode.status if snode else 'gone'} mid-transfer")
+            return False
+        try:
+            ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
+        except Exception as e:                            # noqa: BLE001
+            _restart_elsewhere(task, f"source member {src_id} cannot be asked "
+                                     f"about the transfer ({e})")
+            return False
         if ret:
             # offset is the bytes moved so far: the ONLY direct read on actual
             # transfer throughput, as distinct from round duration.
@@ -1795,6 +2040,13 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return True
         if status == "Failed":
+            moved = _target_leadership_moved(task)
+            if moved:
+                # Not the transfer's fault: the target's leadership moved
+                # (primary -> secondary, secondary -> tertiary) under it.
+                # Restart on the new leader once it is settled.
+                _restart_elsewhere(task, f"transfer failed at offset {offset}: {moved}")
+                return False
             _suspend_for_retry(task, f"transfer failed at offset {offset}, retrying",
                                backoff=True)
             return False

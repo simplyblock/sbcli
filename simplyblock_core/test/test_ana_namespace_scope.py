@@ -22,7 +22,7 @@ class _Recorder:
     def __init__(self):
         self.requests = []
 
-    def __call__(self, method, params):
+    def __call__(self, method, **params):
         self.requests.append((method, params))
         return ["ok"]
 

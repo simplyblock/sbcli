@@ -170,7 +170,7 @@ class TestBdevAlcemlCreateRPC(unittest.TestCase):
         mock_req.return_value = True
         client = _make_rpc_client()
         client.bdev_alceml_create("alc_x", "nvme0", "uuid-1")
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertNotIn("checksum_validation_method", params)
         self.assertNotIn("cache_size", params)
         self.assertNotIn("cache_eviction_threshold", params)
@@ -180,7 +180,7 @@ class TestBdevAlcemlCreateRPC(unittest.TestCase):
         mock_req.return_value = True
         client = _make_rpc_client()
         client.bdev_alceml_create("alc_x", "nvme0", "uuid-1", checksum_method=1)
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(params["checksum_validation_method"], 1)
         # Defaults of 0 must not be sent so the data plane uses its own defaults.
         self.assertNotIn("cache_size", params)
@@ -194,7 +194,7 @@ class TestBdevAlcemlCreateRPC(unittest.TestCase):
             "alc_x", "nvme0", "uuid-1",
             checksum_method=2, cache_size=1500, cache_eviction_threshold=85,
         )
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(params["checksum_validation_method"], 2)
         self.assertEqual(params["cache_size"], 1500)
         self.assertEqual(params["cache_eviction_threshold"], 85)
@@ -210,7 +210,7 @@ class TestBdevAlcemlCreateRPC(unittest.TestCase):
             pba_init_mode=2, pba_page_size=2 * 1024 * 1024,
             write_protection=True, full_page_unmap=True, checksum_method=1,
         )
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(params["name"], "alc_x")
         self.assertEqual(params["cntr_path"], "nvme0")
         self.assertEqual(params["uuid"], "uuid-1")

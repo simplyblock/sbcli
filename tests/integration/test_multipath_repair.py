@@ -701,7 +701,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         # bdev_get returns something so node_bdev is populated
         rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
-        rpc.bdev_lvol_get_lvstores.return_value = [{
+        rpc.get_lvstore.return_value = {
             "name": "lvs_primary",
             "lvs leadership": False,
             "lvs_secondary": True,
@@ -712,7 +712,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
             "base_bdev": "raid0",
             "block_size": 4096,
             "cluster_size": 1024,
-        }]
+        }
         rpc.bdev_nvme_attach_controller.return_value = True
         mock_check_bdev.return_value = True
 
@@ -769,7 +769,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         rpc.bdev_nvme_controller_list.return_value = controller_resp
         rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
-        rpc.bdev_lvol_get_lvstores.return_value = [{
+        rpc.get_lvstore.return_value = {
             "name": "lvs_primary",
             "lvs leadership": False,
             "lvs_secondary": True,
@@ -780,7 +780,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
             "base_bdev": "raid0",
             "block_size": 4096,
             "cluster_size": 1024,
-        }]
+        }
         mock_check_bdev.return_value = True
 
         result = _check_sec_node_hublvol(sec_node, auto_fix=True)
@@ -838,7 +838,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         rpc.bdev_nvme_controller_list.return_value = controller_resp
         rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
-        rpc.bdev_lvol_get_lvstores.return_value = [{
+        rpc.get_lvstore.return_value = {
             "name": "lvs_primary",
             "lvs leadership": False,
             "lvs_secondary": True,
@@ -849,7 +849,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
             "base_bdev": "raid0",
             "block_size": 4096,
             "cluster_size": 1024,
-        }]
+        }
         rpc.bdev_nvme_attach_controller.return_value = True
         mock_check_bdev.return_value = True
 

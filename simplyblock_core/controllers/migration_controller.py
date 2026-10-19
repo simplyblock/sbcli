@@ -62,6 +62,7 @@ from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.utils import convert_size, lvol_tgt_bdev_name
 from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 
@@ -1095,12 +1096,11 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
     Returns (ok: bool, error: str) — error is empty when ok is True.
     """
     try:
-        ret = rpc.bdev_lvol_get_lvstores(lvs_name)
+        lvs = rpc.get_lvstore(lvs_name)
     except Exception as e:
         return False, f"Could not query lvstore {lvs_name}{f' on {node_id}' if node_id else ''}: {e}"
-    if not ret or not isinstance(ret, list) or len(ret) == 0:
+    if lvs is None:
         return False, f"Lvstore {lvs_name} not found{f' on {node_id}' if node_id else ''}"
-    lvs = ret[0]
     is_primary = bool(lvs.get("lvs_primary"))
     is_leader = bool(lvs.get("lvs leadership"))
     if not is_primary or not is_leader:
@@ -1306,7 +1306,11 @@ def create_migration(lvol_id, target_node_id,
         _tgt_uuid   = _bdev_info.get('uuid')
 
     # ── 1c. Set migration flag on TGT-prim ────────────────────────────────────
-    if not tgt_rpc.bdev_lvol_set_migration_flag(composite):
+    try:
+        flag_ok = tgt_rpc.bdev_lvol_set_migration_flag(composite)
+    except RPCException:
+        flag_ok = False
+    if not flag_ok:
         logger.warning(f"create_migration: bdev_lvol_set_migration_flag on primary "
                        f"failed for {composite} (may already be flagged)")
 

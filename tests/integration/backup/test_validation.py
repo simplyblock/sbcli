@@ -402,7 +402,35 @@ class TestScheduledBackupPreconditions:
             yield add
 
     def _chain(self, db, length, **overrides):
+        """``length`` completed backups, each for its own real, linked
+        snapshot of the volume already in the database.
+
+        Mirrors what a run of healthy scheduled backups actually leaves
+        behind -- one real `SnapShot` per `Backup`, chained by
+        `prev_snap_uuid` -- since that real ancestry, not `Backup.prev_backup_id`,
+        is what `chain_would_be_restorable` now walks. Reads the volume rather
+        than rebuilding it, so a caller that set it up encrypted (or any other
+        way) keeps that.
+        """
+        volume = db.get_lvol_by_id(LVOL_ID)
+        prev_snap = None
         for index in range(1, length + 1):
+            snap = SnapShot()
+            snap.uuid = _snapshot_id(index)
+            snap.snap_uuid = _snapshot_id(index)
+            snap.snap_name = f"snap-{index}"
+            snap.snap_bdev = f"lvs_test/snap-{index}"
+            snap.size = 4096
+            snap.status = SnapShot.STATUS_ONLINE
+            snap.lvol = volume
+            if prev_snap is not None:
+                snap.prev_snap_uuid = prev_snap.get_id()
+            snap.write_to_db(db.kv_store)
+            if prev_snap is not None:
+                prev_snap.next_snap_uuid = snap.get_id()
+                prev_snap.write_to_db(db.kv_store)
+            prev_snap = snap
+
             backup = _backup(db, index, prev=index - 1 if index > 1 else None,
                              **overrides)
             backup.node_id = NODE_ID

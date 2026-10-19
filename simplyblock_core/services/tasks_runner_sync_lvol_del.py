@@ -9,6 +9,7 @@ inline on the owning node at the time it was requested:
 - ``FN_LVOL_SYNC_DEL`` — delete a replica bdev on a secondary node, holding the
   primary's del-sync lock until the task ends.
 """
+import errno
 import time
 from typing import NoReturn
 
@@ -18,6 +19,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
     TaskAbort,
@@ -233,20 +235,19 @@ def _run_sync_del(task):
                 node.cluster_id,
                 lvol_bdev_name.split("/")[0],
                 node_id=node.get_id()):
-            ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
+            node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
+    except RPCRemoteError as e:
+        if e.code != -errno.ENODEV:
+            # ENODEV never reaches here: it is handled below as success (the
+            # peer is already clean), so it is never counted.
+            _fail_sync_del(
+                task, node, lvol_bdev_name,
+                f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
+        logger.error(f"Sync delete completed with error: {e}")
     except Exception as e:
         _fail_sync_del(
             task, node, lvol_bdev_name,
             f"Sync delete of {lvol_bdev_name} on {node.get_id()} failed: {e}; will retry")
-
-    if not ret:
-        if "code" not in err or err["code"] != -19:
-            # -19 never reaches here: it is handled below as success (the peer
-            # is already clean), so it is never counted.
-            _fail_sync_del(
-                task, node, lvol_bdev_name,
-                f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
-        logger.error(f"Sync delete completed with error: {err}")
 
     set_result(task, f"bdev {lvol_bdev_name} deleted")
 

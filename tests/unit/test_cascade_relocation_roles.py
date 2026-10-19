@@ -168,7 +168,7 @@ class TestPhase3cReportsAReplicaHoldingTheWrongRole(unittest.TestCase):
                    "htthx": {"name": "LVS_2", "lvs_tertiary": False, "lvs leadership": False}}
         for n in nodes:
             rpc = MagicMock()
-            rpc.bdev_lvol_get_lvstores.return_value = [answers.get(n.get_id(), {"name": "x"})]
+            rpc.get_lvstore.return_value = answers.get(n.get_id(), {"name": "x"})
             n.rpc_client = MagicMock(return_value=rpc)
         db = MagicMock()
         db.get_storage_nodes_by_cluster_id.return_value = nodes
