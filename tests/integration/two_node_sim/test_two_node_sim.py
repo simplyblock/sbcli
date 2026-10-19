@@ -152,6 +152,29 @@ def test_f24_needs_its_own_fix(make_world):
 
 
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+def test_f25_needs_its_own_fix(make_world):
+    """F25 is a separate defect: with #219 as run in c12 (F19, F21, F23 and F24
+    fixed) the follower's takeover of a frozen primary's LVS no longer aborts, but
+    its first write waits for the append lock on the frozen peer's JM until the
+    peer aborts on wake (bed c12/02c: 6-8 s client stall, 0 IO errors)."""
+    from .simnode import (
+        CAP_GRANT_STOPS_REDIRECT,
+        CAP_ISOLATE_MARKS_UNAVAILABLE,
+        CAP_READER_SKIPS_DEAD_PEER_JM,
+        CAP_STOPLIST_PEER_DEVICES,
+        DEPLOYED_CAPS,
+    )
+    sc = next(s for s in EXTRA if s.name == "F25-frozen-primary-takeover-append-lock")
+    caps = DEPLOYED_CAPS | {CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM,
+                            CAP_STOPLIST_PEER_DEVICES, CAP_ISOLATE_MARKS_UNAVAILABLE}
+    world = make_world(conditions=sc.conditions, caps=caps)
+    out = run(world, sc)
+    assert not out.passed, out.report()
+    assert any("F25" in f for f in out.failures), out.report()
+    assert not any("F24" in f for f in out.failures), out.report()
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
 def test_f20_client_kato4_detected(make_world):
     """F20: with F19's fix in place, the old client keep-alive (4 s) still
     stalls a frozen primary's volume past the limit; KATO 2 (main) does not

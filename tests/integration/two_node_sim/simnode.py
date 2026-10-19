@@ -57,10 +57,17 @@ CAP_READER_SKIPS_DEAD_PEER_JM = "reader_skips_dead_peer_jm"
 #:   degraded to the survivor's own copies. Without it (#219 as run in c11) the
 #:   devices were only closed, still read as online, and the takeover read failed:
 #:   the survivor aborted.
+#: * ``appender_lock_skips_peer_jm`` -- F25, ultra #219 (c12 follow-up): a solo
+#:   LVS's new leader does not wait for its append-lock request on the frozen
+#:   peer's JM. Without it (#219 as run in c12) the takeover's first write, and
+#:   with it all client IO of the LVS, waited until the frozen peer aborted on
+#:   wake and the lock request failed (bed c12/02c: 6-8 s stall, 0 IO errors).
 CAP_STOPLIST_PEER_DEVICES = "stoplist_peer_devices_on_grant"
 CAP_ISOLATE_MARKS_UNAVAILABLE = "isolate_marks_devices_unavailable"
+CAP_APPENDER_LOCK_SKIPS_PEER_JM = "appender_lock_skips_peer_jm"
 ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM,
-                      CAP_STOPLIST_PEER_DEVICES, CAP_ISOLATE_MARKS_UNAVAILABLE})
+                      CAP_STOPLIST_PEER_DEVICES, CAP_ISOLATE_MARKS_UNAVAILABLE,
+                      CAP_APPENDER_LOCK_SKIPS_PEER_JM})
 DEPLOYED_CAPS: frozenset = frozenset()
 
 
