@@ -131,6 +131,9 @@ class Scenario:
     ana_all_groups: bool = False
     conditions: tuple = ()
     grant_within_s: float | None = None
+    # node capabilities on top of DEPLOYED_CAPS: isolates a finding's proof
+    # from another open finding the same fault also hits
+    caps: frozenset = frozenset()
     notes: str = ""
     extra: dict = field(default_factory=dict)
 
@@ -364,7 +367,10 @@ REGRESSIONS = {
     "F10": (Scenario("F10-stale-node-takeover", ("F10",), stale_takeover("sn2"), io_errors_ok=True,
                      stall_limit_s=None, aborts_ok=("sn1", "sn2"), heal_s=0, observe_s=60.0),
             {"no_rebuild_mark"}, 'only up-to-date copy'),
-    "F12": (Scenario("F12-freeze-devices", ("F12",), hang("sn1"), aborts_ok=("sn1",)),
+    # judged on the devices and the heal; the stall of a frozen secondary and
+    # the survivor's writes waiting on its devices are F23's (its fix's cap)
+    "F12": (Scenario("F12-freeze-devices", ("F12",), hang("sn1"), aborts_ok=("sn1",), stall_limit_s=None,
+                     caps=frozenset({"stoplist_peer_devices_on_grant"})),
             {"stall_fence", "alceml_stall", "no_device_check", "no_stuck_rebuild_recovery"}, 'not healthy'),
     "F13": (Scenario("F13-frozen-primary-takeover", ("F13",), hang("sn2"), aborts_ok=("sn2",)),
             {"stall_fence"}, ("client stall", "not healthy")),
@@ -402,6 +408,15 @@ FAST = {"01b-crash-sn2", "02b-hang-sn2", "07-partition", "detect:F16", "detect:F
 #: Known failing on main: scenario -> (reason with the fix that flips it, a
 #: text the failure must contain, so it fails for that reason and no other).
 KNOWN_FAILING = {
+    "02a-hang-sn1": ("F23: after its solo grant sn2 still writes vol1's stripes to the frozen "
+                     "sn1's data devices and waits until sn1 aborts on wake and its connections "
+                     "close (bed run c9/02a: 4 s stall; fix: a solo grant isolates the lost "
+                     "peer's devices, ultra, stacked on #217)",
+                     "F23"),
+    "F23-frozen-secondary-data-io": ("F23: the survivor's writes wait on the frozen peer's data "
+                                     "devices after the grant (fix: a solo grant isolates the "
+                                     "lost peer's devices)",
+                                     "F23"),
     "F19-long-freeze-primary": ("F19: after #1485 (no promote-at-grant) the survivor does not take "
                                 "a frozen primary's LVS over; its volume stalls until the hublvol "
                                 "keep-alive (5 s) expires or the frozen node aborts on wake "
@@ -426,12 +441,17 @@ KNOWN_FAILING = {
 #: SPDK #80 + #81 on new_md_journal, ultra #214 + #215).
 PENDING_FIX = {
     # F19 alone is not enough: with the redirect stopped at the grant, the
-    # takeover's reader still waits 8 s on the frozen peer's JM (c8 02c, F21)
-    "F19-long-freeze-primary": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm"}),
-    "F21-takeover-reader-frozen-peer-jm": frozenset({"grant_stops_redirect",
-                                                     "reader_skips_dead_peer_jm"}),
+    # takeover's reader still waits 8 s on the frozen peer's JM (c8 02c, F21),
+    # and the survivor's writes of its own LVS wait on the frozen peer's data
+    # devices (c9 02a, F23)
+    "F19-long-freeze-primary": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                          "stoplist_peer_devices_on_grant"}),
+    "F21-takeover-reader-frozen-peer-jm": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                                     "stoplist_peer_devices_on_grant"}),
     "F18-ana-groups-restored": frozenset({"ana_restore_all_groups"}),
-    "F20-frozen-leader-client-kato": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm"}),
+    "F20-frozen-leader-client-kato": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                                "stoplist_peer_devices_on_grant"}),
+    "F23-frozen-secondary-data-io": frozenset({"stoplist_peer_devices_on_grant"}),
 }
 
 EXTRA = [
@@ -448,6 +468,14 @@ EXTRA = [
     # waits on the frozen peer's JM); the client-side detection (F20) is not part of it.
     Scenario("F21-takeover-reader-frozen-peer-jm", ("F21",), hang("sn2", 8.0), aborts_ok=("sn2",),
              grant_within_s=2.6, stall_limit_s=None),
+    # c9 02a: the secondary sn1 frozen 4 s. vol1's leader sn2 is granted at about
+    # +2 s, but its writes (each stripe has a chunk on sn1) wait on sn1's data
+    # devices until sn1 aborts on wake and its connections close (+5.1 s).
+    # A frozen primary (c9 02c) is not modelled for F23: on the bed (c9/02b) the
+    # survivor's takeover served IO before the frozen primary aborted, so a
+    # takeover read hanging on the frozen devices is not established.
+    Scenario("F23-frozen-secondary-data-io", ("F23",), hang("sn1"), aborts_ok=("sn1",),
+             grant_within_s=2.6),
 ]
 
 #: Findings the simulator cannot express, and why.

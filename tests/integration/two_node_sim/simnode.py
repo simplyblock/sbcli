@@ -44,10 +44,16 @@ NORMAL, HOLDING, SOLO, FENCED = "normal", "holding", "solo", "fenced"
 #: * ``reader_skips_dead_peer_jm`` -- F21, ultra (stacked on #215): on a solo LVS
 #:   the takeover's JC reader does not use the peer's JM that the HA layer knows
 #:   to be dead, instead of waiting for the 8 s NVMe IO timeout on a frozen peer.
+#: * ``stoplist_peer_devices_on_grant`` -- F23, ultra (stacked on #217): a solo
+#:   grant isolates the lost peer's data devices on the survivor (aborts their
+#:   outstanding IO, closes them), so the survivor's writes no longer wait on a
+#:   frozen peer's devices until it aborts on wake and its connections close.
 CAP_ANA_RESTORE_ALL = "ana_restore_all_groups"
 CAP_GRANT_STOPS_REDIRECT = "grant_stops_redirect"
 CAP_READER_SKIPS_DEAD_PEER_JM = "reader_skips_dead_peer_jm"
-ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM})
+CAP_STOPLIST_PEER_DEVICES = "stoplist_peer_devices_on_grant"
+ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM,
+                      CAP_STOPLIST_PEER_DEVICES})
 DEPLOYED_CAPS: frozenset = frozenset()
 
 
@@ -78,6 +84,7 @@ class Lvstore:
     fence_port_owned: bool = False
     takeover_until: float = 0.0
     redirect_stopped: bool = False   # F19: hublvol redirect stopped by a grant
+    leader_since: float = 0.0        # F23: when this node last became the LVS's leader
     ana_restore_pending: bool = False
     ana_saved: dict = field(default_factory=dict)
 
@@ -105,6 +112,10 @@ class SimNode:
         self.proc = "up"
         self.frozen_until = 0.0
         self.frozen_since = 0.0
+        # F23: when SPDK last died, and whether that was its abort on wake from a
+        # freeze (its TCP connections then close about 1 s later, not at once)
+        self.died_at = 0.0
+        self.died_after_freeze = False
         self.started_at = 0.0
         self.aborts: list[tuple[float, str]] = []
         self.shutting_down = False       # planned stop in progress (CP flow)
@@ -145,7 +156,10 @@ class SimNode:
         if self.proc in ("dead", "down"):
             return
         self.world.log(f"{self.name}: SPDK abort ({why})")
-        self.aborts.append((self.world.vt.time(), why))
+        now = self.world.vt.time()
+        self.aborts.append((now, why))
+        self.died_at = now
+        self.died_after_freeze = bool(self.frozen_until) and 0.0 <= now - self.frozen_until < 0.5
         self.proc = "dead"
         for lvs in self.lvstores.values():
             lvs.leader = False
@@ -510,6 +524,8 @@ class SimNode:
         if lvs is None:
             self._err(errno.ENODEV)
         if lvs_leadership:
+            if not lvs.leader:
+                lvs.leader_since = self.world.vt.time()
             lvs.leader = True
             lvs.takeover_blocked = False
             lvs.redirect_stopped = False

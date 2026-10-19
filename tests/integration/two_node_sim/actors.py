@@ -28,7 +28,14 @@ import logging
 
 from simplyblock_core import constants
 
-from .simnode import CAP_READER_SKIPS_DEAD_PEER_JM, FENCED, HOLDING, SOLO, SimNode
+from .simnode import (
+    CAP_READER_SKIPS_DEAD_PEER_JM,
+    CAP_STOPLIST_PEER_DEVICES,
+    FENCED,
+    HOLDING,
+    SOLO,
+    SimNode,
+)
 
 logger = logging.getLogger("two_node_sim")
 
@@ -50,6 +57,11 @@ HUBLVOL_KATO_S = float(constants.KATO) / 1000.0
 #: IO timeout of the node-to-node NVMe controllers (journal, hublvol): a request
 #: on a frozen peer completes with an error only after it (campaign c8, F21)
 NVME_TIMEOUT_S = float(constants.NVME_TIMEOUT_US) / 1e6
+#: A node that aborts on wake from a freeze closes its TCP connections about
+#: 1.1 s later; until then IO to its data devices neither completes nor fails
+#: (bed run c9/02a: abort at +4.00 s, sn1's connections closed at +5.11 s, when
+#: 192 data IOs stuck on its remote_alceml devices failed; campaign c9, F23).
+DEVICE_TEARDOWN_S = 1.1
 
 
 class ControlPlane:
@@ -377,6 +389,7 @@ class Client:
         self.io_errors: dict = {}
         self.acks_by: dict = {}          # (lvs, node) -> last ack time
         self.failed_path: dict = {}      # (vol, node uuid) -> path down until (KATO)
+        self.reported: set = set()       # violations reported once per episode (F23)
         self.measuring = False
         self.after_fence_acks = 0
 
@@ -431,6 +444,42 @@ class Client:
             out.append((0 if st == "optimized" else 1, -changed, n.name, n))
         return [x[3] for x in sorted(out, key=lambda x: x[:3])]
 
+    def _stuck_on_peer_devices(self, node: SimNode, peer: SimNode, lvs) -> bool:
+        """Campaign c9, F23: the survivor's writes after its solo grant still
+        wait on the frozen peer's data devices (each stripe has a chunk there).
+        Modelled as the bed showed it (c9/02a, PROVEN): the leader that was
+        writing when the peer froze has data IO in flight to the peer's devices;
+        it hangs while the peer is frozen and until its connections close after
+        its abort on wake. A node that took the LVS over after the freeze is not
+        modelled as stuck: on the bed (c9/02b) such a takeover served IO before
+        the frozen primary aborted. Only the LVS of the bed's fio target (vol1)
+        is modelled: the bed measured no other volume, and 02b (sn2 frozen, sn1
+        keeps leading LVS_1) passed there. The F23 fix
+        (``CAP_STOPLIST_PEER_DEVICES``) isolates the peer's devices at the grant."""
+        if CAP_STOPLIST_PEER_DEVICES in node.caps:
+            return False
+        if lvs.name != self.world.vols["vol1"].lvs_name:
+            return False
+        if not peer.frozen_since or lvs.leader_since > peer.frozen_since:
+            return False
+        now = self.world.vt.time()
+        if peer.proc == "frozen":
+            release = peer.frozen_until
+            if peer.arbitration and peer.frozen_until - peer.frozen_since > peer.lease_ttl_ms / 1000.0:
+                release += DEVICE_TEARDOWN_S         # it will abort on wake
+        elif peer.proc == "dead" and peer.died_after_freeze:
+            release = peer.died_at + DEVICE_TEARDOWN_S
+        else:
+            return False
+        if now >= release:
+            return False
+        key = ("F23", node.uuid, lvs.name, peer.frozen_since)
+        if key not in self.reported:
+            self.reported.add(key)
+            self.world.violate("F23: %s's writes of %s wait on %s's data devices after the grant "
+                               "(until +%.1f s)" % (node.name, lvs.name, peer.name, release - self.world.t0))
+        return True
+
     def _serve(self, node: SimNode, lvs_name: str, depth=0):
         """'ack', 'wait' or 'error' for one write arriving at ``node``."""
         w = self.world
@@ -447,10 +496,14 @@ class Client:
             if w.vt.time() < lvs.takeover_until:
                 return "wait"                        # lvstore update after the takeover
             lvs.takeover_until = 0.0
+            if not lvs.leader:
+                lvs.leader_since = w.vt.time()
             lvs.leader = True
             lvs.redirect_stopped = False
             w.on_leader(node, lvs, "IO takeover")
         if lvs.leader:
+            if lv.state == SOLO and self._stuck_on_peer_devices(node, peer, lvs):
+                return "wait"
             if lv.state == SOLO:
                 w.note_ack(node, lvs_name, replicated=False)
                 return "ack"
