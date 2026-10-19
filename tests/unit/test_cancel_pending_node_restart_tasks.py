@@ -40,6 +40,11 @@ class TestCancelPendingNodeRestartTasks(unittest.TestCase):
     def _run(self, tasks, **kwargs):
         db = MagicMock()
         db.get_job_tasks = MagicMock(return_value=tasks)
+        # The cancellation commits by compare-and-set, so it mutates the row as
+        # re-read rather than the scanned copy. Standing in the scanned object
+        # for the fresh one keeps these assertions on the same object.
+        db.atomic_update = MagicMock(
+            side_effect=lambda task, mutate: task if mutate(task) is not False else None)
         with patch.object(tasks_controller, "db", db):
             n = tasks_controller.cancel_pending_node_restart_tasks(
                 "c1", "n1", **kwargs)

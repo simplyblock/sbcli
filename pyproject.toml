@@ -49,6 +49,7 @@ Homepage = "https://www.simplyblock.io/"
 sbctl = "simplyblock_cli.cli:main"
 sbcli-dev = "simplyblock_cli.cli:main"
 simplyblock-service = "simplyblock_core.services.__main__:main"
+simplyblock-task-runner = "simplyblock_core.services.task_runners:main"
 
 [dependency-groups]
 test = [

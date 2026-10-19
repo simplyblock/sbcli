@@ -12,6 +12,7 @@ patched at its boundary - here it writes the node OFFLINE, as a finished
 shutdown does. ``monitor_pass.run`` is the public update_cluster_status: a
 real set_node_offline inside it re-enters it, so one call may run two passes.
 """
+import uuid
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +26,7 @@ from simplyblock_core.services import storage_node_monitor as monitor
 from simplyblock_core.services import tasks_runner_restart as restart_runner
 from tests.integration import test_sync_replication_disaster as disaster
 from tests.integration import test_sync_replication_lvs_stack as stack
+from tests.integration.task_driver import handler_reached
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 DRAINING, DOWN = Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN
@@ -264,12 +266,22 @@ class TestSiteDrain:
 # the restart pause
 # ---------------------------------------------------------------------------
 
-def _task(node_id):
+def _task(db, cluster, node_id):
+    """A queued restart task of ``node_id``, as stored."""
     task = JobSchedule()
-    task.uuid = "task-under-test"
+    task.uuid = str(uuid.uuid4())
+    task.cluster_id = cluster.get_id()
     task.function_name = JobSchedule.FN_NODE_RESTART
     task.node_id = node_id
+    task.status = JobSchedule.STATUS_NEW
+    task.max_retry = 10
+    task.write_to_db(db.kv_store)
     return task
+
+
+def _deferred(task):
+    """The restart runner, driven through its spec, leaves ``task`` waiting."""
+    return not handler_reached(restart_runner.SPEC, task)
 
 
 class TestRestartPause:
@@ -310,9 +322,8 @@ class TestRestartPause:
     def test_the_runner_defers_only_the_draining_site(self, db, state, deferred_a):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, state, status=Cluster.STATUS_DEGRADED)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
-        fresh = db.get_cluster_by_id(cluster.get_id())
-        assert restart_runner._deferred_by_drain(fresh, _task(a[0].get_id())) is deferred_a
-        assert restart_runner._deferred_by_drain(fresh, _task(b[0].get_id())) is False
+        assert _deferred(_task(db, cluster, a[0].get_id())) is deferred_a
+        assert _deferred(_task(db, cluster, b[0].get_id())) is False
 
     @pytest.mark.parametrize("stored, drained, record, deferred", [
         (Cluster.STATUS_SUSPENDED, False, ("", ""), True),            # the cluster-wide pause still holds
@@ -322,8 +333,7 @@ class TestRestartPause:
         cluster = _seed_record(db, stack._seed_cluster(db), *record, status=stored,
                                suspend_drain_complete=drained)
         _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
-        fresh = db.get_cluster_by_id(cluster.get_id())
-        assert restart_runner._deferred_by_drain(fresh, _task("no-such-node")) is deferred
+        assert _deferred(_task(db, cluster, "no-such-node")) is deferred
 
 
 # ---------------------------------------------------------------------------

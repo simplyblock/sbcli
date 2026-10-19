@@ -154,21 +154,15 @@ def test_newest_relationship_wins(monkeypatch):
 # --- --delete-source ordering ----------------------------------------------
 
 
-class _Task:
-    max_retry = 100
-
-    def __init__(self, delete_source):
-        self.function_params = {"lvol_id": "SRC1", "replication_id": "REP1",
-                                "final_state": LVolReplication.STATE_CUTOVER_DONE,
-                                "delete_source": delete_source}
-        self.status = JobSchedule.STATUS_RUNNING
-        self.function_result = ""
-        self.retry = 0
-        self.canceled = False
-        self.writes = 0
-
-    def write_to_db(self, kv=None):
-        self.writes += 1
+def _task(delete_source):
+    task = JobSchedule()
+    task.uuid = "cutover-1"
+    task.status = JobSchedule.STATUS_RUNNING
+    task.max_retry = 100
+    task.function_params = {"lvol_id": "SRC1", "replication_id": "REP1",
+                            "final_state": LVolReplication.STATE_CUTOVER_DONE,
+                            "delete_source": delete_source}
+    return task
 
 
 def _run_finalize(monkeypatch, delete_source, delete_raises=False):
@@ -210,37 +204,40 @@ def _run_finalize(monkeypatch, delete_source, delete_raises=False):
         events.append(("delete", lvol.get_id()))
     monkeypatch.setattr(lvol_controller, "delete_lvol", _delete)
 
-    task = _Task(delete_source)
-    ok = trf._finalize(task, True, "")
-    return ok, task, events
+    task = _task(delete_source)
+    view = task.frozen_view()
+    # The handler's success path. The task's terminal state is written by the
+    # task runner afterwards, so what this observes is the ordering of the
+    # source retirement against the durable cutover state.
+    trf._record_cutover_done(view)
+    task.function_result = "cutover done"
+    trf._stop_source_replication(view)
+    trf._delete_source_if_requested(view)
+    return task, events
 
 
 def test_cutover_stops_replication_on_the_source(monkeypatch):
     """Observed 2026-08-21: after "cutover done" the source kept taking and
     replicating cadence snapshots. The hand-off must stop the source."""
-    ok, _task, events = _run_finalize(monkeypatch, delete_source=False)
-    assert ok is True
+    _task, events = _run_finalize(monkeypatch, delete_source=False)
     assert ("src_config", False, 0, "") in events,         "the source's replication config must be cleared at cutover"
 
 
 def test_source_deleted_only_after_cutover_state_is_durable(monkeypatch):
-    ok, task, events = _run_finalize(monkeypatch, delete_source=True)
-    assert ok is True
+    task, events = _run_finalize(monkeypatch, delete_source=True)
     assert ("delete", "SRC1") in events
     state_at = events.index(("state", LVolReplication.STATE_CUTOVER_DONE))
     delete_at = events.index(("delete", "SRC1"))
     assert state_at < delete_at, "the cutover state must be durable BEFORE the delete"
-    assert task.status == JobSchedule.STATUS_DONE
+    assert task.function_result == "cutover done"
 
 
 def test_source_kept_without_the_flag(monkeypatch):
-    ok, _task, events = _run_finalize(monkeypatch, delete_source=False)
-    assert ok is True
+    _task, events = _run_finalize(monkeypatch, delete_source=False)
     assert not any(e[0] == "delete" for e in events)
 
 
 def test_failed_source_delete_does_not_unsucceed_the_cutover(monkeypatch):
-    ok, task, _events = _run_finalize(monkeypatch, delete_source=True,
-                                      delete_raises=True)
-    assert ok is True
-    assert task.status == JobSchedule.STATUS_DONE
+    task, _events = _run_finalize(monkeypatch, delete_source=True,
+                                  delete_raises=True)
+    assert task.function_result == "cutover done"

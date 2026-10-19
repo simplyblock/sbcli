@@ -24,6 +24,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.sync_replication import SyncReplicationEvent
 from simplyblock_core.services import tasks_runner_node_add
+from tests.integration.task_driver import drive
 
 EVENT_INDEX = 'cluster_id+lvs_name+resolved'
 NODE_ADDR = "10.1.0.10:5000"
@@ -444,10 +445,8 @@ def test_an_invalid_site_ends_the_node_add_task(db):
         "cluster_id": cluster.get_id(), "node_addr": NODE_ADDR, "iface_name": "eth0",
         "data_nics_list": [], "max_snap": 500, "site": None,
     })
-    task = db.get_task_by_id(task_id)
     with _AddNodeWorld(_node_info()) as world:
-        assert tasks_runner_node_add.process_task(task, cluster) is True
-    stored = db.get_task_by_id(task_id)
+        stored = drive(tasks_runner_node_add.SPEC, db.get_task_by_id(task_id))
     assert stored.status == JobSchedule.STATUS_DONE
     assert stored.function_result.startswith("invalid input:")
     assert "--site is required" in stored.function_result

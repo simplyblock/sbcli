@@ -31,6 +31,7 @@ from simplyblock_core.services import tasks_runner_restart as restart_runner
 from tests.integration import test_sync_replication_disaster as disaster
 from tests.integration import test_sync_replication_lvs_stack as stack
 from tests.integration import test_sync_replication_site_activation as site_activation
+from tests.integration.task_driver import handler_reached
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 DRAINING, DOWN = Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN
@@ -249,11 +250,11 @@ class TestSiteGate:
         gate.block(before=lambda cluster_id, site, **kwargs: src.begin_site_activation(cluster_id, site))
         gate.drive(s)
         assert gate.entered.wait(10)
-        assert restart_runner._deferred_by_drain(db.get_cluster_by_id(s.cid), task) is True
+        assert handler_reached(restart_runner.SPEC, task) is False
         src.clear_site_activation(s.cid)
         gate.release.set()
         _started(gate, s)
-        assert restart_runner._deferred_by_drain(db.get_cluster_by_id(s.cid), task) is False
+        assert handler_reached(restart_runner.SPEC, task) is True
 
     def test_the_gate_reason_is_logged(self, db, gate, registry):
         s = _returned(db)

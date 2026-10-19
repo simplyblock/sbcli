@@ -30,12 +30,13 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import health_check_service, lvol_monitor, storage_node_monitor
-from simplyblock_core.services import tasks_runner_migration
+from simplyblock_core.services import tasks_runner_migration, tasks_runner_sync_lvol_del
 from simplyblock_core.utils import port_block, ttl_cache
 from tests.integration import test_sync_replication_leaderless_health as healthy
 from tests.integration import test_sync_replication_lvol_publish as publish
 from tests.integration import test_sync_replication_lvs_stack as stack
 from tests.integration import test_sync_replication_site_restart as site
+from tests.integration.task_driver import drive
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 DRAINING, DOWN = Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN
@@ -201,15 +202,17 @@ def _sync_op(db, cluster, node, vol, op="register"):
 
 
 def _run(db, task_id, passes=3):
+    """``passes`` driver passes of the sync-op runner over the task."""
     for _ in range(passes):
-        tasks_controller.run_lvol_sync_op_task(db.get_task_by_id(task_id))
+        drive(tasks_runner_sync_lvol_del.SPEC, db.get_task_by_id(task_id))
     return db.get_task_by_id(task_id)
 
 
 @pytest.fixture()
 def alerts():
     """The repeated-failure alerts of the sync-op runner, as a callable."""
-    with patch.object(tasks_controller.events_controller, "log_event_cluster") as log:
+    with patch.object(tasks_runner_sync_lvol_del.events_controller, "log_event_cluster") as log, \
+            patch.dict(tasks_runner_sync_lvol_del._last_alerted_failure, clear=True):
         yield lambda: [c for c in log.call_args_list
                        if c.kwargs.get("event") == "LVOL_TASK_FAILING_REPEATEDLY"]
 
@@ -469,7 +472,7 @@ class TestDeviceMigration:
         assert len(own) == 2
         for _ in range(3):
             for task in own:
-                assert tasks_runner_migration.task_runner(task) is False
+                assert drive(tasks_runner_migration.SPEC, task).status == JobSchedule.STATUS_SUSPENDED
 
         for task in _migration_tasks(db, cluster, a[0]):
             assert task.status == JobSchedule.STATUS_SUSPENDED
@@ -488,6 +491,6 @@ class TestDeviceMigration:
         assert tasks_controller.add_device_mig_task_for_node(a[0].get_id())
 
         task = _migration_tasks(db, cluster, b[1])[0]
-        tasks_runner_migration.task_runner(task)
+        drive(tasks_runner_migration.SPEC, task)
 
         rpcs[b[1].get_id()].distr_migration_expansion_start.assert_called_once()

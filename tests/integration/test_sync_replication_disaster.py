@@ -33,11 +33,13 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import storage_node_monitor as monitor
+from simplyblock_core.services import tasks_runner_sync_lvol_del
 from simplyblock_core.services import tasks_runner_sync_promote as runner
 from simplyblock_core.snode_client import SNodeClientException
 from tests.integration import test_sync_replication_demote_promote as dp
 from tests.integration import test_sync_replication_lvol_publish as publish
 from tests.integration import test_sync_replication_lvs_stack as stack
+from tests.integration.task_driver import drive
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 MOVING_B = "moving:" + SITE_B
@@ -1526,7 +1528,7 @@ class TestInSiteFailover:
         _set(spdk, a[1], vol, "inaccessible")
         ops.queue_sync_ana_retry(a[1], [vol])
         (task,) = _retries(db, cluster, a[1], vol)
-        tasks_controller.run_lvol_sync_op_task(task)
+        drive(tasks_runner_sync_lvol_del.SPEC, task)
         assert publish._seen(spdk, a[1], vol) == "optimized"
         ops._set_lvol_ana_on_node(vol, a[1], "non_optimized")
         assert publish._seen(spdk, a[1], vol) == "optimized"

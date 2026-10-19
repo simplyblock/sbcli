@@ -22,7 +22,7 @@ from simplyblock_cli import cli as cli_module
 from simplyblock_core import cluster_ops
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import (
-    health_controller, lvol_controller, migration_controller, snapshot_controller, tasks_controller,
+    health_controller, lvol_controller, migration_controller, snapshot_controller,
 )
 from simplyblock_core.exceptions import SyncReplicationSiteError, SyncReplicationUnsupportedError
 from simplyblock_core.models.iface import IFace
@@ -34,9 +34,10 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
-from simplyblock_core.services import tasks_runner_batch_migration, tasks_runner_lvol_migration
+from simplyblock_core.services import tasks_runner_batch_migration, tasks_runner_lvol_migration, tasks_runner_sync_lvol_del
 from simplyblock_core.utils import ttl_cache
 from tests.integration import test_sync_replication_lvs_stack as stack
+from tests.integration.task_driver import drive
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 _seed_cluster, _sites, _make_owner = stack._seed_cluster, stack._sites, stack._make_owner
@@ -575,7 +576,7 @@ class TestFailedGroup:
                    if t.function_name == JobSchedule.FN_LVOL_SYNC_OP]
         assert (task.node_id, task.function_params["lvol_id"], task.function_params["op"]) == (
             node.get_id(), vol.get_id(), "register")
-        tasks_controller.run_lvol_sync_op_task(task)
+        drive(tasks_runner_sync_lvol_del.SPEC, task)
         (done,) = [t for t in db.get_job_tasks(cluster.get_id())
                    if t.function_name == JobSchedule.FN_LVOL_SYNC_OP]
         assert done.status == JobSchedule.STATUS_DONE, done.function_result
@@ -617,7 +618,7 @@ class TestFailedGroup:
         # retry SETS it by opening its site before the retry runs
         second.sync_demoted_sites = []
         second.write_to_db(db.kv_store)
-        tasks_controller.run_lvol_sync_op_task(task)
+        drive(tasks_runner_sync_lvol_del.SPEC, task)
         assert _seen(spdk, node, second) == "non_optimized"
         assert _seen(spdk, node, first) == "non_optimized"
 
@@ -642,7 +643,7 @@ class TestFailedGroup:
         tasks = [t for t in db.get_job_tasks(cluster.get_id())
                  if t.function_name == JobSchedule.FN_LVOL_SYNC_OP]
         for task in tasks:
-            tasks_controller.run_lvol_sync_op_task(task)
+            drive(tasks_runner_sync_lvol_del.SPEC, task)
         return sorted(t.function_params["lvol_id"] for t in tasks)
 
     def _right(self, spdk, node, first, second, nics=1):
@@ -751,7 +752,7 @@ class TestFailedGroup:
         assert _seen(spdk, node, vol) == "inaccessible"
         (task,) = [t for t in db.get_job_tasks(cluster.get_id())
                    if t.function_name == JobSchedule.FN_LVOL_SYNC_OP]
-        tasks_controller.run_lvol_sync_op_task(task)
+        drive(tasks_runner_sync_lvol_del.SPEC, task)
         assert _seen(spdk, node, vol) == "non_optimized"
         assert target.subsystems[vol.nqn]["min_cntlid"] == 1000
 

@@ -541,6 +541,11 @@ REPL_XFER_INLINE_WAIT_SEC = 5.0
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
 REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
+# Delay before retrying a snapshot transfer whose transfer or finish failed:
+# base * 2^retry, capped. An immediate retry repeats whatever the target did
+# with the previous attempt.
+REPL_RETRY_BACKOFF_BASE_SEC = 15
+REPL_RETRY_BACKOFF_MAX_SEC = 600
 # Pass interval for the cutover runner while any cutover is mid-round. The
 # freeze pays for every millisecond between a transfer completing and the next
 # snapshot starting, so this must stay well under a second.
@@ -956,7 +961,23 @@ NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
 BACKUP_POLL_INTERVAL_SEC = 5
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
-BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
+
+#: Longest backup chain the control plane will accept.
+#:
+#: Bounded by the data plane, not policy: bdev_lvol_s3_backup and
+#: bdev_lvol_s3_recovery refuse a longer chain (RPC_MAX_S3_IDS in
+#: vbdev_lvol_rpc.c). Raising this alone turns every backup and restore of a
+#: longer chain into an RPC error.
+#:
+#: 40 is also where the policy argument lands: a restore reads the whole chain in
+#: one operation, so its length multiplies restore time and objects fetched.
+BACKUP_MAX_CHAIN_LENGTH = 40
+
+#: Upper bound on a backup's s3_id. The data plane packs it into bits 33..62 of
+#: the synthetic bdev offset (S3_ID_BITS in spdk_internal/lvolstore.h) and masks
+#: rather than validates, so a larger value silently aliases onto another
+#: backup's object keys.
+BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---

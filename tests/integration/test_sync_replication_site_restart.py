@@ -31,6 +31,7 @@ from simplyblock_core.services import storage_node_monitor as monitor
 from simplyblock_core.services import tasks_runner_restart
 from simplyblock_core.services import tasks_runner_sync_promote as runner
 from tests.integration import test_sync_replication_lvs_stack as stack
+from tests.integration.task_driver import handler_reached
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 DRAINING, DOWN = Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN
@@ -517,12 +518,14 @@ class TestRestartDuringASiteActivation:
         assert not tasks_controller.add_node_to_auto_restart(node_b)
         assert not tasks_controller.get_active_node_restart_task(cluster.get_id(), node_b.get_id())
         task = JobSchedule()
-        task.uuid, task.node_id = "t-1", node_b.get_id()
-        assert tasks_runner_restart._deferred_by_drain(fresh, task) is True
+        task.uuid, task.cluster_id, task.node_id = str(uuid.uuid4()), cluster.get_id(), node_b.get_id()
+        task.function_name, task.status, task.max_retry = JobSchedule.FN_NODE_RESTART, JobSchedule.STATUS_NEW, 10
+        task.write_to_db(db.kv_store)
+        assert handler_reached(tasks_runner_restart.SPEC, task) is False
 
         src.end_site_activation(cluster.get_id(), token)
         fresh = db.get_cluster_by_id(cluster.get_id())
         for node in (a[1], node_b, None):
             assert tasks_controller.is_auto_restart_paused(fresh, node) is False
-        assert tasks_runner_restart._deferred_by_drain(fresh, task) is False
+        assert handler_reached(tasks_runner_restart.SPEC, task) is True
         assert tasks_controller.add_node_to_auto_restart(node_b)

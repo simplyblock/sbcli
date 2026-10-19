@@ -157,7 +157,7 @@ def ask_for_lvol_vuid():
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
-                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols=None, all_snaps=None):
+                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
     #  Validation
     #  name validation
     db_controller = DBController()
@@ -197,7 +197,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         return False, f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
 
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
@@ -715,13 +715,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # TTL-cached scans: these feed advisory capacity math and random-vuid
     # dedup only — name uniqueness goes through the O(1) per-pool name index
     # inside validate_add_lvol_func, so a few seconds of staleness here cannot
-    # admit a duplicate name. Uncached, these two full-DB reads cost seconds
-    # per create at a few thousand objects and dominate mass-create runs.
+    # admit a duplicate name (the pool's capacity is likewise read fresh there).
+    # Uncached, these two full-DB reads cost seconds per create at a few
+    # thousand objects and dominate mass-create runs.
     from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
     all_lvols = cached_mini_lvols(db_controller)
     all_snaps = cached_mini_snapshots(db_controller)
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
-                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
+                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
     if error:
         logger.error(error)
@@ -3114,6 +3115,26 @@ def _replication_role(db_controller: DBController, lvol: LVol) -> str:
     return "none"
 
 
+def _task_shipped(task):
+    """True when a snapshot-replication task ended by shipping its snapshot.
+
+    The success path stores the new remote snapshot's uuid as the result
+    (snap-instance replication sets no counterpart id, so the result is its
+    only trace); a snapshot already on the other side ends "is already
+    replicated". Every other DONE result is a give-up.
+    """
+    if task.status != JobSchedule.STATUS_DONE or task.canceled:
+        return False
+    result = str(task.function_result or "")
+    if " is already replicated " in result:
+        return True
+    try:
+        uuid.UUID(result)
+    except ValueError:
+        return False
+    return True
+
+
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     # Id first, then name — the order the scan this replaces used. Not
@@ -3237,10 +3258,16 @@ def _replication_cycle_stats(db_controller, lvol, items, policy):
     # in source_replicated_snap_uuid and never sets the target one, so a
     # target-only test reported every failing-back volume as 0 replicated
     # and left lag_seconds None for ever — no gate on lag could ever pass.
+    #
+    # A DONE task alone is NOT a replicated snapshot: tasks that gave up
+    # (max retry, cancelled, snapshot gone) are DONE too. Counting them
+    # reported a fresh lag and a recent last_replicated_at for a volume of
+    # which nothing had reached the target for an hour, and Ramen took it
+    # as protected (2026-09-29, vm-a: 12 tasks at max retry).
     def _is_replicated(task, snap):
-        return (task.status == JobSchedule.STATUS_DONE
-                or bool(snap.target_replicated_snap_uuid)
-                or bool(snap.source_replicated_snap_uuid))
+        return (bool(snap.target_replicated_snap_uuid)
+                or bool(snap.source_replicated_snap_uuid)
+                or _task_shipped(task))
 
     replicated_pairs = [(t, s) for (t, s) in items if _is_replicated(t, s)]
     outstanding_pairs = [(t, s) for (t, s) in items if not _is_replicated(t, s)]
@@ -3323,9 +3350,14 @@ def _replication_cycle_stats(db_controller, lvol, items, policy):
     # while every status view looked normal.
     failing = [t for t in tasks
                if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
-    gave_up = [t for t in tasks
+    # A task that gave up still matters while nothing newer reached the
+    # target; once a later snapshot has, the volume is protected again and
+    # the old give-up is history, not a current error.
+    newest_replicated = max((s.created_at for s in replicated), default=None)
+    gave_up = [t for (t, s) in items
                if t.status == JobSchedule.STATUS_DONE
-               and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
+               and str(t.function_result or "").startswith(("max retry", "task cancelled"))
+               and (newest_replicated is None or s.created_at > newest_replicated)]
     out["failing_count"] = len(failing)
     out["max_retry_reached"] = len(gave_up)
     out["last_error"] = ""
@@ -4689,7 +4721,15 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
 
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
-            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            # A task whose snapshot is gone replicates nothing and belongs to
+            # no volume any more; it must not fail the stop, which a fail-over
+            # (replicate_lvol_on_target_cluster) runs first.
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                logger.warning("replication task %s names snapshot %s, which no longer exists; skipped",
+                               task.uuid, task.function_params.get("snapshot_id"))
+                continue
             if snap.lvol.uuid == lvol.uuid:
                 tasks_controller.cancel_task(task.uuid)
 

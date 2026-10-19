@@ -91,9 +91,9 @@ spec:
         - -c
         - |
           if [ ! -e /dev/fd ]; then
-            sudo ln -s /proc/self/fd /dev/fd
+            ln -s /proc/self/fd /dev/fd
           fi
-          sudo -E /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
+          /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
       env:
         - name: SSD_PCIE
           value: "{{ SSD_PCIE }}"
@@ -110,9 +110,13 @@ spec:
       lifecycle:
         postStart:
           exec:
-            command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
+            command: ["/bin/sh", "-c", "modprobe nbd || echo failed to modprobe nbd"]
       securityContext:
         privileged: true
+        # The images run as a non-root user by default, and sudo fails its
+        # PAM account check in these containers (in the SPDK image even as
+        # root): the containers run as root, and nothing uses sudo.
+        runAsUser: 0
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
@@ -146,9 +150,10 @@ spec:
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
       imagePullPolicy: "Always"
-      command: ["sudo", "-E", "python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
+      command: ["python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
       securityContext:
         privileged: true
+        runAsUser: 0
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk

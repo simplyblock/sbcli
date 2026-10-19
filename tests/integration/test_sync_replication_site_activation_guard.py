@@ -37,7 +37,7 @@ from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import (
-    tasks_runner_backup, tasks_runner_backup_merge, tasks_runner_batch_migration, tasks_runner_failed_migration,
+    backup_merge_service, tasks_runner_backup, tasks_runner_batch_migration, tasks_runner_failed_migration,
     tasks_runner_jc_comp, tasks_runner_lvol_migration, tasks_runner_migration, tasks_runner_new_dev_migration,
     tasks_runner_node_add, tasks_runner_node_removal, tasks_runner_sync_lvol_del, tasks_runner_sync_resync)
 from simplyblock_core.services import tasks_runner_sync_promote as promote
@@ -45,6 +45,7 @@ from simplyblock_core.utils import ttl_cache
 from tests.integration import test_sync_replication_lvol_publish as publish
 from tests.integration import test_sync_replication_lvs_stack as stack
 from tests.integration import test_sync_replication_site_restart as site
+from tests.integration.task_driver import drive, one_cycle
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 DOWN, DONE = Cluster.LOST_SITE_DOWN, Cluster.LOST_SITE_DONE
@@ -169,10 +170,11 @@ def _task(db, cluster, function_name, node_id, params=None, **fields):
 
 
 def _untouched(db, task):
-    """``task`` as it was written: status, result, retry, canceled."""
+    """``task`` as it was written: status, result, retry, canceled, and not
+    claimed (owner, updated_at)."""
     fresh = db.get_task_by_id(task.uuid)
-    assert (fresh.status, fresh.function_result, fresh.retry, fresh.canceled) == (
-        task.status, task.function_result, task.retry, task.canceled)
+    assert (fresh.status, fresh.function_result, fresh.retry, fresh.canceled, fresh.owner, fresh.updated_at) == (
+        task.status, task.function_result, task.retry, task.canceled, task.owner, task.updated_at)
 
 
 def _no_rpc(rpcs):
@@ -181,7 +183,8 @@ def _no_rpc(rpcs):
 
 
 def _one_pass(runner):
-    """Run ``runner.main()`` for one pass: its sleep ends the loop."""
+    """Run the own loop of ``runner.main()`` for one pass: its sleep ends the
+    loop."""
     clock = types.SimpleNamespace(sleep=MagicMock(side_effect=_StopLoop), time=lambda: 0)
     with patch.object(runner, "time", clock), pytest.raises(_StopLoop):
         runner.main()
@@ -297,13 +300,13 @@ class TestNodeLevelOperations:
 
     @pytest.mark.parametrize("window", WINDOWS)
     def test_a_node_add_waits(self, db, window):
+        """Not eligible: left untouched, as under IN_ACTIVATION."""
         cluster, a, b = _activating(db, window)
         task = _task(db, cluster, JobSchedule.FN_NODE_ADD, "", {"cluster_id": cluster.get_id()})
         with patch.object(tasks_runner_node_add.storage_node_ops, "add_node") as add:
-            assert tasks_runner_node_add.process_task(task, cluster) is False
+            drive(tasks_runner_node_add.SPEC, task)
         add.assert_not_called()
-        fresh = db.get_task_by_id(task.uuid)
-        assert (fresh.status, fresh.function_result) == (JobSchedule.STATUS_NEW, HELD)
+        _untouched(db, task)
 
     @pytest.mark.parametrize("window", WINDOWS)
     def test_a_node_removal_waits(self, db, window):
@@ -311,11 +314,10 @@ class TestNodeLevelOperations:
         task = _task(db, cluster, JobSchedule.FN_NODE_REMOVAL, b[2].get_id())
         with patch.object(tasks_runner_node_removal.storage_node_ops, "node_removal_orchestrate") as remove, \
                 patch.object(tasks_runner_node_removal.storage_node_ops, "set_node_status") as status:
-            assert tasks_runner_node_removal.process_task(task) is False
+            fresh = drive(tasks_runner_node_removal.SPEC, task)
         remove.assert_not_called()
         status.assert_called_once_with(b[2].get_id(), StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
-        fresh = db.get_task_by_id(task.uuid)
-        assert (fresh.status, fresh.function_result) == (JobSchedule.STATUS_SUSPENDED, HELD)
+        assert (fresh.status, fresh.function_result, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, HELD, 0)
 
     @pytest.mark.parametrize("case", ["no flag", "ended", "non-sync"])
     def test_node_add_and_removal_run_without_a_flag(self, db, case):
@@ -325,10 +327,11 @@ class TestNodeLevelOperations:
         with patch.object(tasks_runner_node_add.storage_node_ops, "add_node", return_value=True) as add, \
                 patch.object(tasks_runner_node_removal.storage_node_ops, "node_removal_orchestrate",
                              return_value=True) as remove:
-            tasks_runner_node_add.process_task(add_task, cluster)
-            tasks_runner_node_removal.process_task(removal)
+            added = drive(tasks_runner_node_add.SPEC, add_task)
+            removed = drive(tasks_runner_node_removal.SPEC, removal)
         add.assert_called_once()
         remove.assert_called_once()
+        assert (added.status, removed.status) == (JobSchedule.STATUS_DONE, JobSchedule.STATUS_DONE)
 
 
 # ---------------------------------------------------------------------------
@@ -347,15 +350,15 @@ class TestMigrations:
     @pytest.mark.parametrize("kind", DEVICE_MIGRATIONS)
     @pytest.mark.parametrize("window", WINDOWS)
     def test_a_device_migration_waits(self, db, rpcs, window, kind):
-        """Cluster-wide, as under IN_ACTIVATION: a task on b1 (serving site)
-        suspends with a retry counted, before the step after the gate."""
+        """Cluster-wide: a task on b1 (serving site) is held before the step
+        after the gate - suspended with no retry counted, so it resumes on the
+        first pass after the activation."""
         runner, function_name = DEVICE_MIGRATIONS[kind]
         cluster, a, b = _activating(db, window)
         task = _task(db, cluster, function_name, b[1].get_id())
-        with patch.object(tasks_controller, "defer_task_for_expansion", side_effect=_Passed):
-            assert runner.task_runner(task) is False
-        fresh = db.get_task_by_id(task.uuid)
-        assert (fresh.status, fresh.function_result, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, HELD, 1)
+        with patch.object(tasks_controller, "get_active_cluster_expand_task", side_effect=_Passed):
+            fresh = drive(runner.SPEC, task)
+        assert (fresh.status, fresh.function_result, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, HELD, 0)
         _no_rpc(rpcs)
 
     @pytest.mark.parametrize("kind", DEVICE_MIGRATIONS)
@@ -364,9 +367,9 @@ class TestMigrations:
         runner, function_name = DEVICE_MIGRATIONS[kind]
         cluster, a, b = _not_activating(db, case)
         task = _task(db, cluster, function_name, b[1].get_id())
-        with patch.object(tasks_controller, "defer_task_for_expansion", side_effect=_Passed):
+        with patch.object(tasks_controller, "get_active_cluster_expand_task", side_effect=_Passed):
             with pytest.raises(_Passed):
-                runner.task_runner(task)
+                drive(runner.SPEC, task)
 
     def test_a_volume_migration_ends_unsupported(self, db):
         """A volume migration never runs on a sync-replication cluster, the
@@ -446,9 +449,10 @@ class TestBackupRunner:
         owner = _owners(a, b)[lvs]
         tasks = [_task(db, cluster, JobSchedule.FN_BACKUP, owner.get_id()),
                  _task(db, cluster, JobSchedule.FN_BACKUP, owner.get_id(), canceled=True)]
-        with patch.object(tasks_runner_backup, "_run_backup") as run:
+        run = MagicMock()
+        with patch.dict(tasks_runner_backup._HANDLERS, {JobSchedule.FN_BACKUP: run}):
             for task in tasks:
-                tasks_runner_backup.process_task(db.get_task_by_id(task.uuid), cluster)
+                drive(tasks_runner_backup.SPEC, task)
         run.assert_not_called()
         for task in tasks:
             _untouched(db, task)
@@ -457,16 +461,18 @@ class TestBackupRunner:
     def test_a_backup_on_an_lvs_led_from_b_runs(self, db, lvs):
         cluster, a, b = _activating(db)
         task = _task(db, cluster, JobSchedule.FN_BACKUP, _owners(a, b)[lvs].get_id())
-        with patch.object(tasks_runner_backup, "_run_backup") as run:
-            tasks_runner_backup.process_task(db.get_task_by_id(task.uuid), cluster)
+        run = MagicMock()
+        with patch.dict(tasks_runner_backup._HANDLERS, {JobSchedule.FN_BACKUP: run}):
+            drive(tasks_runner_backup.SPEC, task)
         run.assert_called_once()
 
     @pytest.mark.parametrize("case", ["no flag", "non-sync"])
     def test_a_backup_runs_without_a_flag(self, db, case):
         cluster, a, b = _not_activating(db, case)
         task = _task(db, cluster, JobSchedule.FN_BACKUP, a[0].get_id())
-        with patch.object(tasks_runner_backup, "_run_backup") as run:
-            tasks_runner_backup.process_task(db.get_task_by_id(task.uuid), cluster)
+        run = MagicMock()
+        with patch.dict(tasks_runner_backup._HANDLERS, {JobSchedule.FN_BACKUP: run}):
+            drive(tasks_runner_backup.SPEC, task)
         run.assert_called_once()
 
 
@@ -476,9 +482,9 @@ class TestBackupMerge:
         vols = {lvs: _volume(db, cluster, owner).get_id() for lvs, owner in _owners(a, b).items()}
         for node in removed:
             _fresh(db, node).remove(db.kv_store)
-        with patch.object(tasks_runner_backup_merge.backup_controller, "evaluate_policy") as policy, \
-                patch.object(tasks_runner_backup_merge.backup_controller, "evaluate_schedule") as schedule:
-            _one_pass(tasks_runner_backup_merge)
+        with patch.object(backup_merge_service.backup_policy, "evaluate_policy") as policy, \
+                patch.object(backup_merge_service.backup_policy, "evaluate_schedule") as schedule:
+            _one_pass(backup_merge_service)
         by_id = {v: k for k, v in vols.items()}
         evaluated = sorted(by_id[c.args[0].get_id()] for c in policy.call_args_list)
         assert evaluated == sorted(by_id[c.args[0].get_id()] for c in schedule.call_args_list)
@@ -529,7 +535,7 @@ class TestJcCompaction:
                  self._resume(db, cluster, a[2], 2, retry=10),
                  self._resume(db, cluster, b[0], 2)]
         with patch.object(tasks_runner_jc_comp.jc_compression_upgrade, "resume_is_held", return_value=True):
-            _one_pass(tasks_runner_jc_comp)
+            one_cycle(tasks_runner_jc_comp.SPEC)
         for task in tasks:
             _untouched(db, task)
         _no_rpc(rpcs)
@@ -540,7 +546,7 @@ class TestJcCompaction:
         cluster, a, b = _activating(db)
         tasks = [self._resume(db, cluster, b[0], 3), self._resume(db, cluster, b[2], 4),
                  self._resume(db, cluster, b[1])]
-        _one_pass(tasks_runner_jc_comp)
+        one_cycle(tasks_runner_jc_comp.SPEC)
         for task in tasks:
             assert db.get_task_by_id(task.uuid).status == JobSchedule.STATUS_DONE
         rpcs[b[0].get_id()].jc_suspend_compression.assert_called_once_with(jm_vuid=3, suspend=False)
@@ -551,7 +557,7 @@ class TestJcCompaction:
     def test_a_resume_runs_without_a_flag(self, db, rpcs, case):
         cluster, a, b = _not_activating(db, case)
         task = self._resume(db, cluster, b[1], 2)
-        _one_pass(tasks_runner_jc_comp)
+        one_cycle(tasks_runner_jc_comp.SPEC)
         assert db.get_task_by_id(task.uuid).status == JobSchedule.STATUS_DONE
         rpcs[b[1].get_id()].jc_suspend_compression.assert_called_once_with(jm_vuid=2, suspend=False)
 
@@ -597,7 +603,7 @@ class TestSyncTasks:
                  self._op(db, cluster, b[0], b[1], "register"),
                  self._op(db, cluster, b[0], b[1], "resize")]
         with patch.object(ops, "repair_lvol_registration_on_non_leader") as register:
-            _one_pass(tasks_runner_sync_lvol_del)
+            one_cycle(tasks_runner_sync_lvol_del.SPEC)
         register.assert_not_called()
         for task in tasks:
             _untouched(db, task)
@@ -617,7 +623,7 @@ class TestSyncTasks:
                  self._op(db, cluster, b[1], b[2], "register"), self._op(db, cluster, a[1], b[2], "register"),
                  self._op(db, cluster, b[1], b[2], "resize")]
         with patch.object(ops, "repair_lvol_registration_on_non_leader", return_value=(True, None)) as register:
-            _one_pass(tasks_runner_sync_lvol_del)
+            one_cycle(tasks_runner_sync_lvol_del.SPEC)
         assert register.call_count == 2
         for task in tasks:
             assert db.get_task_by_id(task.uuid).status == JobSchedule.STATUS_DONE, task.function_name
@@ -630,7 +636,7 @@ class TestSyncTasks:
         cluster, a, b = _activating(db)
         task = _task(db, cluster, JobSchedule.FN_LVOL_SYNC_DEL, b[2].get_id(),
                      {"lvol_bdev_name": "LVS_9/LVOL_x", "primary_node": b[1].get_id()})
-        _one_pass(tasks_runner_sync_lvol_del)
+        one_cycle(tasks_runner_sync_lvol_del.SPEC)
         _untouched(db, task)
         _no_rpc(rpcs)
 
@@ -640,7 +646,7 @@ class TestSyncTasks:
         rpcs[b[2].get_id()].delete_lvol.return_value = (True, None)
         tasks = [self._delete(db, cluster, b[0], b[2]), self._op(db, cluster, b[0], b[1], "register")]
         with patch.object(ops, "repair_lvol_registration_on_non_leader", return_value=(True, None)) as register:
-            _one_pass(tasks_runner_sync_lvol_del)
+            one_cycle(tasks_runner_sync_lvol_del.SPEC)
         register.assert_called_once()
         for task in tasks:
             assert db.get_task_by_id(task.uuid).status == JobSchedule.STATUS_DONE, task.function_name

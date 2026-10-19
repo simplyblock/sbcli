@@ -11,6 +11,11 @@ against a node that had just come back online.
 were logged across two node removals on 2026-09-11. The three sibling call
 sites (tasks_runner_migration.py, tasks_runner_new_dev_migration.py,
 storage_node_monitor.py) already passed timezone.utc; this one was missed.
+
+The three runners now share one implementation of the check
+(``migration_task_common.nodes_settled``), so the structural guard below
+follows it there — a single owner is what stops the four call sites drifting
+apart again.
 """
 import ast
 import inspect
@@ -19,7 +24,7 @@ from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import ClassVar
 
-import simplyblock_core.services.tasks_runner_failed_migration as runner
+import simplyblock_core.services.migration_task_common as settle_check
 
 
 ONLINE_SINCE_STAMP_IS_AWARE = True  # storage_node_ops stamps datetime.now(timezone.utc)
@@ -45,14 +50,14 @@ class TestOnlineSinceComparison(unittest.TestCase):
 
 
 class TestRunnerUsesAnAwareNow(unittest.TestCase):
-    """Structural guard on the runner's source.
+    """Structural guard on the source of the shared settle check.
 
     Driving task_runner() needs FDB and a full task/node fixture; the defect
     is a one-token slip that a source assertion catches precisely.
     """
 
     def _online_since_calls(self):
-        src = inspect.getsource(runner)
+        src = inspect.getsource(settle_check)
         tree = ast.parse(src)
         found = []
         for node in ast.walk(tree):
@@ -66,7 +71,7 @@ class TestRunnerUsesAnAwareNow(unittest.TestCase):
 
     def test_the_online_since_subtraction_passes_a_timezone(self):
         calls = self._online_since_calls()
-        self.assertTrue(calls, "no online_since subtraction found in the runner")
+        self.assertTrue(calls, "no online_since subtraction found in the settle check")
         for binop in calls:
             left = binop.left
             self.assertIsInstance(
@@ -88,6 +93,9 @@ class TestAllOnlineSinceCallSitesAgree(unittest.TestCase):
     """
 
     SITES: ClassVar[list[str]] = [
+        # The shared owner of the check, plus the runners that delegate to it —
+        # listed so re-inlining a naive comparison into any of them is caught.
+        "simplyblock_core/services/migration_task_common.py",
         "simplyblock_core/services/tasks_runner_failed_migration.py",
         "simplyblock_core/services/tasks_runner_migration.py",
         "simplyblock_core/services/tasks_runner_new_dev_migration.py",
@@ -96,7 +104,7 @@ class TestAllOnlineSinceCallSitesAgree(unittest.TestCase):
 
     def test_no_naive_now_is_subtracted_from_online_since(self):
         # .../simplyblock_core/services/<this>.py -> repo root
-        root = Path(runner.__file__).resolve().parents[2]
+        root = Path(settle_check.__file__).resolve().parents[2]
         offenders = []
         checked = 0
         for rel in self.SITES:

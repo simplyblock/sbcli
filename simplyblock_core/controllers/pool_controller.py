@@ -414,7 +414,6 @@ def list_pools(cluster_id=None):
     pools = db_controller.get_pools(cluster_id)
     data = []
     all_lvols = db_controller.get_mini_lvols() or []
-    all_snapshots = db_controller.get_mini_snapshots() or []
     for pool in pools:
         lvols_count = 0
         for lvol in all_lvols:
@@ -423,7 +422,7 @@ def list_pools(cluster_id=None):
         data.append({
             "UUID": pool.get_id(),
             "Name": pool.pool_name,
-            "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snapshots)),
+            "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
             "Max size": utils.humanbytes(pool.pool_max_size),
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
             "LVols": f"{lvols_count}",
@@ -526,25 +525,16 @@ def get_io_stats(pool_id, history, records_count=20):
     ])
 
 
-def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
+def get_pool_total_capacity(pool_id):
+    """Pool volumes' size plus snapshots' used size, read fresh (admission must see a just-created volume)."""
     db_controller = DBController()
     try:
         db_controller.get_pool_by_id(pool_id)
     except KeyError:
         logger.error(f"Pool not found {pool_id}")
         return False
-    total = 0
-    if not all_lvols:
-        all_lvols = db_controller.get_lvols_by_pool_id(pool_id)
-    for lvol in all_lvols:
-        if lvol.pool_uuid == pool_id:
-            total += lvol.size
-
-    if not all_snaps:
-        all_snaps = db_controller.get_mini_snapshots()
-    for snap in all_snaps:
-        if snap.lvol.pool_uuid == pool_id:
-            total += snap.used_size
+    total = sum(lvol.size for lvol in db_controller.get_lvols_by_pool_id(pool_id))
+    total += sum(snap.used_size for snap in db_controller.get_snapshots_by_pool_id(pool_id))
     return total
 
 

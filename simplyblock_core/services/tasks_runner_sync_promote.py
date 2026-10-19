@@ -551,13 +551,9 @@ def _record_unexpected_error(task, error) -> None:
 def main():
     logger.info("Starting sync-replication promote runner...")
     while True:
-        try:
-            clusters = db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
-        for cluster in clusters:
+        # DB errors propagate: the process exits and the orchestrator restarts
+        # it with a fresh FDB client, as for the runners on the driver.
+        for cluster in db.get_clusters():
             if not cluster.sync_replication:
                 continue
             for task in db.get_active_sync_promote_tasks(cluster.get_id()):

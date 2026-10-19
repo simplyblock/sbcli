@@ -29,10 +29,12 @@ from simplyblock_core import (utils, scripts, constants, index_ops, mgmt_node_op
                               storage_node_ops)
 from simplyblock_core.utils import port_block
 from simplyblock_core.controllers.cluster_expansion.planner import RemoteTripletPlacementError
-from simplyblock_core.controllers import activation_gate, backup_controller, cluster_events, device_controller, qos_controller, storage_events, tasks_controller, tcp_ports_events
+from simplyblock_core.controllers import activation_gate, cluster_events, device_controller, qos_controller, storage_events, tasks_controller, tcp_ports_events
+from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import jm_raid
 from simplyblock_core.models import indices
+from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -367,6 +369,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
+    if backup_config:
+        # Reject a configuration the cluster could not act on before installing
+        # anything, rather than at the set_backup_config below. Everything but
+        # the bucket is checked here: that one is derived from a cluster id that
+        # does not exist yet, so an absent one is not a caller's mistake.
+        UnresolvedBackupConfig.model_validate(backup_config)
+
     if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()
         for existing in existing_clusters:
@@ -516,7 +525,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.tls_config = nvmeof_tls_config
 
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     if not disable_monitoring:
         utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
@@ -812,7 +821,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.snode_api_port = snode_api_port
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
@@ -1853,7 +1862,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
             if cluster.backup_config:
                 snode = db_controller.get_storage_node_by_id(node_id)
                 if snode.status == StorageNode.STATUS_ONLINE:
-                    backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                    backup_device.create_s3_bdev(snode, cluster.get_backup_config())
 
         else:
             _set_lvstore_status(node_id, "failed")
@@ -3676,42 +3685,42 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_SnapshotMonitor",
-                service_file="python3 simplyblock_core/services/snapshot_monitor.py",
+                command=["python3", "simplyblock_core/services/snapshot_monitor.py"],
                 service_image=service_image)
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerLVolSyncDelete",
-                service_file="python3 simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 service_image=service_image)
 
         if "app_TasksRunnerJCCompResume" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
-                service_file="python3 simplyblock_core/services/tasks_runner_jc_comp.py",
+                command=["simplyblock-task-runner", "tasks-runner-jc-comp"],
                 service_image=service_image)
 
         if "app_TasksRunnerSyncResync" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerSyncResync",
-                service_file="python3 simplyblock_core/services/tasks_runner_sync_resync.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-resync"],
                 service_image=service_image)
 
         if "app_TasksRunnerSyncPromote" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerSyncPromote",
-                service_file="python3 simplyblock_core/services/tasks_runner_sync_promote.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-promote"],
                 service_image=service_image)
 
         if "app_BackupService" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_BackupService",
-                service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
+                command=["simplyblock-task-runner", "tasks-runner-fdb-backup"],
                 service_image=service_image)
 
         if not cluster.disable_monitoring:
@@ -3771,7 +3780,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-tasks-runner-sync-lvol-del",
                 container_name="tasks-runner-sync-lvol-del",
-                service_file="simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 container_image=service_image)
 
         if "simplyblock-snapshot-monitor" not in deployment_names:
@@ -3779,7 +3788,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-snapshot-monitor",
                 container_name="snapshot-monitor",
-                service_file="simplyblock_core/services/snapshot_monitor.py",
+                command=["python", "simplyblock_core/services/snapshot_monitor.py"],
                 container_image=service_image)
 
         # Update DaemonSets

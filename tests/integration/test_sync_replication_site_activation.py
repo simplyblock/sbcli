@@ -461,8 +461,8 @@ class TestSiteFailures:
         # Both leaders built (b0 written ``ready`` by its rebuild), then the S3
         # bdev of a0's backup raises past every pass.
         s = _shapes(db, b0_status="failed")
-        _set_cluster(db, s, backup_config={"bucket": "b"})
-        with patch.object(cluster_ops.backup_controller, "create_s3_bdev",
+        _set_cluster(db, s, backup_config={"bucket_name": "b"})
+        with patch.object(cluster_ops.backup_device, "create_s3_bdev",
                           side_effect=RuntimeError("s3 unreachable")) as s3:
             bnd = _activate(db, s, expect=RuntimeError)
         s3.assert_called_once()

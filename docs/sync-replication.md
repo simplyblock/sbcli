@@ -193,13 +193,19 @@ Limitations of the assumption:
 Two task runners are new. Both must run on the management plane; without them a promote answers
 "in progress" forever and no resync ever starts.
 
-| Service | Task | Command (path form) | Name form |
-|---|---|---|---|
-| `TasksRunnerSyncPromote` | `FN_SYNC_PROMOTE` (promote / disaster fail-over) | `python3 simplyblock_core/services/tasks_runner_sync_promote.py` | `python -m simplyblock_core.services tasks-runner-sync-promote` |
-| `TasksRunnerSyncResync` | `FN_SYNC_RESYNC` (catch-up per LVS) | `python3 simplyblock_core/services/tasks_runner_sync_resync.py` | `python -m simplyblock_core.services tasks-runner-sync-resync` |
+| Service | Task | Command |
+|---|---|---|
+| `TasksRunnerSyncPromote` | `FN_SYNC_PROMOTE` (promote / disaster fail-over) | `simplyblock-task-runner tasks-runner-sync-promote` |
+| `TasksRunnerSyncResync` | `FN_SYNC_RESYNC` (catch-up per LVS) | `simplyblock-task-runner tasks-runner-sync-resync` |
 
-- Docker Swarm: already in `simplyblock_core/scripts/docker-compose-swarm.yml` and in the service list
-  that `cluster_ops` creates.
+- Docker Swarm: in `simplyblock_core/scripts/docker-compose-swarm.yml` and in the service list that
+  `cluster_ops` creates, both with the command above. The path form
+  (`python3 simplyblock_core/services/tasks_runner_sync_promote.py`) and the `python -m
+  simplyblock_core.services tasks-runner-sync-promote` form start the same runner; a Swarm service
+  created by an older control plane keeps its path command across `cluster update`.
+- Both runners drive their own poll loop rather than the shared task driver (`_NOT_ON_DRIVER` in
+  `simplyblock_core/services/task_runners.py`): their terminal step commits `done` together with the
+  task's outcome in one transaction.
 - **Kubernetes: the operator must add both to its control-plane runner table**
   (simplyblock-operator `operator/internal/controllers/controlplane/managementapi.go`).
 - The existing `MainDistrEventCollector` records the sync events (zone desync, remote journal

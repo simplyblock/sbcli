@@ -28,6 +28,7 @@ docker run --rm IMG python3 -c 'import sys; print(sys.version, sys.prefix, sys._
 docker run --rm IMG sudo -E python3 -c 'import sys; print(sys.prefix)'   # must be /opt/venv
 docker run --rm IMG sbctl --version
 docker run --rm IMG simplyblock-service --help
+docker run --rm IMG simplyblock-task-runner --help
 ```
 
 ## Stages and caching
@@ -98,9 +99,10 @@ let the scan go green while the published image still carries the vulnerability.
   This is compatibility scaffolding with a defined exit. The packaging half is already done —
   `uv sync --no-editable` installs cleanly and every data file (`env_var`, `scripts/**`,
   `templates/**`, dashboards) resolves from `site-packages`, so nothing in the wheel blocks the
-  switch. The only thing left is the consumers: once they all use the `simplyblock-service` /
-  `sbctl` entry points, the change is `uv sync --locked --no-editable` in the builder plus
-  dropping `COPY . /app` from the runtime stage. Remaining offenders:
+  switch. The only thing left is the consumers: once they all use the `simplyblock-task-runner` /
+  `simplyblock-service` / `sbctl` entry points, the change is `uv sync --locked --no-editable` in
+  the builder plus dropping `COPY . /app` from the runtime stage. The compose file's task runners
+  and `cluster_ops.py`'s runner services are already off the paths. Remaining offenders:
 
   ```bash
   # from the sbcli repository root, not from docker/
