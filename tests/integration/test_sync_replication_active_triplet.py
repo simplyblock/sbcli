@@ -1908,18 +1908,29 @@ class TestPromoteRunnerLookup:
     hand-off. The lookup reconciles a move its task no longer owns and can
     settle the marker itself; it must not make a leader on the settled one."""
 
-    @pytest.mark.parametrize("lost_by", ["cancel", "stale lease"])
+    @pytest.mark.parametrize("lost_by, transferring", [
+        pytest.param("cancel", [], id="cancel"),
+        pytest.param("cancel", ["LVS_1"], id="cancel, hand-off recorded"),
+        pytest.param("stale lease", [], id="stale lease"),
+    ])
     def test_a_task_that_lost_its_move_makes_no_leader(
-            self, db, rpcs, hub, env, adopt, no_sleep, short_lock_wait, lost_by):
+            self, db, rpcs, hub, env, adopt, no_sleep, short_lock_wait, lost_by, transferring):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         task = _promote_task(
             db, cluster, owner, canceled=lost_by == "cancel", stale=lost_by == "stale lease",
-            function_params={"lvs_names": ["LVS_1"], "owners": {"LVS_1": owner.get_id()}})
+            function_params={"lvs_names": ["LVS_1"], "owners": {"LVS_1": owner.get_id()},
+                             "transferring": transferring})
         for node in (*a, *b):
             _journal_ready(rpcs, node)
         _grant_takes(rpcs, b[0])            # a recovery grant on the taker WOULD take
-        with pytest.raises(promote_runner._PromoteFailed, match="leadership transfer to .* failed"):
+        # A canceled task stops before the hand-off; a stale one tries it on
+        # the settled marker and fails.
+        raised = ((promote_runner._PromoteCanceled, "canceled") if lost_by == "cancel"
+                  else (promote_runner._PromoteFailed, "leadership transfer to .* failed"))
+        with patch.object(ops, "move_lvs_leadership", wraps=ops.move_lvs_leadership) as move, \
+                pytest.raises(raised[0], match=raised[1]):
             promote_runner._transfer(task, "LVS_1", SITE_B)
+        assert move.called == (lost_by != "cancel")
         # the lookup's reconcile finished the move by the hand-off: b0 has its
         # role and leads from its first IO ...
         assert _fresh(db, owner).lvs_active_site == SITE_B

@@ -198,9 +198,9 @@ class TestTaskRunnerDispatcher(unittest.TestCase):
         serve.assert_not_called()
 
     def test_the_sync_replication_runners_are_started_through_their_own_main(self):
-        """Their terminal step commits DONE with its outcome in one transaction,
-        so they keep their own loop rather than a spec on the driver."""
-        for name in ("tasks-runner-sync-promote", "tasks-runner-sync-resync"):
+        """The resync runner's terminal step commits DONE with the LVS state in
+        one transaction in its own loop, so it is no spec on the driver yet."""
+        for name in ("tasks-runner-sync-resync",):
             with self.subTest(runner=name):
                 self.assertIsNone(task_runners.load_spec(name))
                 runner = importlib.import_module(

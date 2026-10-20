@@ -915,10 +915,10 @@ class TestPromoteGate:
             assert src.begin_site_activation(cluster.get_id(), SITE_A)
 
         steps = {name: MagicMock(name=name) for name in
-                 ("_site_steps", "_classify", "_mark_moving", "_checkpoint", "_lost_members_not_leading",
+                 ("_site_steps", "_classify", "_mark_moving", "checkpoint", "_lost_members_not_leading",
                   "_transfer", "_open")}
         steps["_classify"].return_value = (["LVS_2"], [])
-        steps["_checkpoint"].side_effect = lambda task: task
+        steps["checkpoint"].side_effect = lambda task: task
         if begin_in is None:
             _begin()
         else:
@@ -936,10 +936,10 @@ class TestPromoteGate:
         """No site activation: every step runs."""
         cluster, a, b = _four(db, state)
         steps = {name: MagicMock(name=name) for name in
-                 ("_site_steps", "_classify", "_mark_moving", "_checkpoint", "_lost_members_not_leading",
+                 ("_site_steps", "_classify", "_mark_moving", "checkpoint", "_lost_members_not_leading",
                   "_transfer", "_open")}
         steps["_classify"].return_value = (["LVS_2"], [])
-        steps["_checkpoint"].side_effect = lambda task: task
+        steps["checkpoint"].side_effect = lambda task: task
         with patch.multiple(promote, **steps), patch.object(promote.sync_ctl, "check_disaster_gate"):
             promote._run(self._task(db, cluster, b))
         steps["_open"].assert_called_once()

@@ -43,11 +43,9 @@ _NOT_ON_DRIVER = frozenset({
     # the driver.
     "tasks-runner-batch-migration",
     "tasks-runner-lvol-migration",
-    # Sync replication: the terminal step commits DONE together with the task's
-    # outcome in one transaction (db.finish_sync_promote_task /
-    # db.finish_sync_resync), which the driver's on_finish - run after DONE is
-    # committed, at most once - cannot do.
-    "tasks-runner-sync-promote",
+    # Sync-replication resync: its terminal step commits DONE together with
+    # the LVS state key in one transaction (db.finish_sync_resync), which its
+    # own loop still does rather than a spec's ``finish`` hook.
     "tasks-runner-sync-resync",
 })
 

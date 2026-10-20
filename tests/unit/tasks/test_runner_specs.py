@@ -685,12 +685,34 @@ def test_failed_migration_waits_for_the_last_task_on_the_device(failed_migration
     failed_migration.device_controller.device_set_failed_and_migrated.assert_not_called()
 
 
+# -- sync_promote -----------------------------------------------------------
+
+def test_sync_promote_commits_its_outcome_and_settles_its_markers():
+    from simplyblock_core.services import tasks_runner_sync_promote as promote
+
+    assert promote.SPEC.finish is promote.finish_task
+    assert promote.SPEC.on_finish is promote._settle_markers
+
+
+@pytest.mark.parametrize("retry", [1, 2, 3, 5, 20])
+def test_sync_promote_backs_off_flat(retry):
+    """A SUSPENDED promote still owns its move, so it never backs off
+    exponentially."""
+    from simplyblock_core.services import tasks_runner_sync_promote as promote
+
+    runner = trb.TaskRunner(promote.SPEC)
+    try:
+        assert runner._backoff_delay(retry) == 3
+    finally:
+        runner._executor.shutdown(wait=True)
+
+
 # -- every migrated runner --------------------------------------------------
 
 MIGRATED_RUNNERS = [
     "fdb_backup", "jc_comp", "replication_final", "sync_lvol_del", "backup",
     "cluster_expand", "node_add", "restart", "migration", "new_dev_migration",
-    "failed_migration", "node_removal", "port_allow",
+    "failed_migration", "node_removal", "port_allow", "sync_promote",
 ]
 
 

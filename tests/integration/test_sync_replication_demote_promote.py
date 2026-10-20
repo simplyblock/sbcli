@@ -46,7 +46,9 @@ from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.services import task_runner_base as trb
 from simplyblock_core.services import tasks_runner_sync_promote as runner
+from tests.integration import task_driver
 from tests.integration import test_sync_replication_lvol_publish as publish
 from tests.integration import test_sync_replication_lvs_stack as stack
 
@@ -145,7 +147,8 @@ def _task(db, task_id):
 
 
 def _run(db, task_id):
-    return runner.task_runner(_task(db, task_id))
+    """One driver pass over the task; whether it ended DONE."""
+    return task_driver.drive(runner.SPEC, _task(db, task_id)).status == JobSchedule.STATUS_DONE
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +803,7 @@ class TestResume:
     def test_after_the_grant_before_the_marker_settled(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         self._marked(db, gate, cluster, owner, task_id)
-        runner._save(_task(db, task_id), lambda t: runner._add_transferring(t, "LVS_1"))
+        trb.checkpoint(_task(db, task_id), transferring=["LVS_1"])
         moves.leader["LVS_1"] = b[0]        # the grant happened
         assert _run(db, task_id)
         assert moves.calls == []
@@ -814,6 +817,22 @@ class TestResume:
         assert _run(db, task_id)
         assert moves.calls == [] and gate.call_count == 1      # the opening only
         assert _states(spdk, b, vol) == ["optimized", "non_optimized", "non_optimized"]
+
+    def test_the_marker_transaction_leaves_the_status_alone(self, db, spdk, gate, moves):
+        cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
+        self._marked(db, gate, cluster, owner, task_id)
+        task = _task(db, task_id)
+        assert (task.status, task.function_params["moves"]) == (JobSchedule.STATUS_NEW, {"LVS_1": ""})
+
+    def test_a_resumed_hand_off_is_recorded_once(self, db, spdk, gate, moves):
+        cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
+        self._marked(db, gate, cluster, owner, task_id)
+        trb.checkpoint(_task(db, task_id), transferring=["LVS_1"])
+        # nobody leads (no IO reached the taker yet): the hand-off runs again
+        assert _run(db, task_id)
+        assert [c[:3] for c in moves.calls] == [("LVS_1", None, b[0].get_id())]
+        assert _task(db, task_id).function_params["transferring"] == ["LVS_1"]
+        assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_B
 
 
 # ---------------------------------------------------------------------------
@@ -927,7 +946,7 @@ class TestCancel:
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         TestResume()._marked(db, gate, cluster, owner, task_id)
         stale = _task(db, task_id)
-        runner._save(_task(db, task_id), lambda t: runner._add_transferring(t, "LVS_1"))
+        trb.checkpoint(_task(db, task_id), transferring=["LVS_1"])
         with patch.object(tasks_controller.db, "get_task_by_id", return_value=stale):
             tasks_controller.cancel_task(task_id)
         assert _task(db, task_id).function_params["transferring"] == ["LVS_1"]
@@ -980,6 +999,67 @@ class TestCancel:
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_A
         again = src.sync_promote_lvol(vol.get_id(), SITE_B)
         assert again.in_progress and again.task_id != task_id
+
+
+# ---------------------------------------------------------------------------
+# an unexpected error: the driver's retry
+# ---------------------------------------------------------------------------
+
+class TestUnexpectedError:
+    """An error the pass does not expect is a retry of the task driver: the
+    task keeps its markers while SUSPENDED, the next pass resumes it, and at
+    the ceiling it ends failed without a pass."""
+
+    def test_the_task_waits_with_its_markers_and_the_next_pass_resumes(self, db, spdk, gate, moves):
+        cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
+        earlier = {"task_id": "an-earlier-task", "reason": "failed: gate failed"}
+        db.atomic_update(vol, lambda v: setattr(v, "sync_promote_failures", {SITE_B: earlier}))
+        moves.leader["LVS_1"] = owner
+        moves.fail["LVS_1"] = RuntimeError("fdb timeout")
+        assert not _run(db, task_id)
+        task = _task(db, task_id)
+        assert (task.status, task.retry, task.function_result) == (
+            JobSchedule.STATUS_SUSPENDED, 1, "unhandled error: fdb timeout")
+        assert task.function_params["moves"] == {"LVS_1": ""}
+        assert task.function_params["transferring"] == ["LVS_1"]
+        assert _fresh(db, owner).lvs_active_site == MOVING_B
+        assert _failures(db, vol) == {SITE_B: earlier}
+
+        del moves.fail["LVS_1"]
+        assert _run(db, task_id)
+        task = _task(db, task_id)
+        assert task.function_result == f"promoted 1 volume(s) to site {SITE_B}"
+        assert _fresh(db, owner).lvs_active_site == SITE_B
+        assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_B
+        assert _failures(db, vol) == {}
+
+    def test_at_the_ceiling_the_task_ends_failed_without_a_pass(self, db, spdk, gate, moves):
+        cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
+        assert db.begin_sync_promote_moves(
+            _task(db, task_id), {"LVS_1": (owners[0].get_id(), ""), "LVS_2": (owners[1].get_id(), "")},
+            SITE_B, _check()) == []
+        trb.checkpoint(_task(db, task_id), transferring=["LVS_1"])
+
+        def _at_the_ceiling(t):
+            t.retry = t.max_retry
+            t.function_result = "unhandled error: fdb timeout"
+        db.atomic_update(_task(db, task_id), _at_the_ceiling)
+        reason = f"max retry reached ({_task(db, task_id).max_retry}) after: unhandled error: fdb timeout"
+
+        def _reconcile(owner_id):
+            assert ops.set_lvs_active_site(owner_id, SITE_B, expect=MOVING_B)
+            return SITE_B
+
+        handler = MagicMock()
+        with patch.object(ops, "reconcile_lvs_move", side_effect=_reconcile) as reconcile:
+            task = task_driver.drive(runner.SPEC, _task(db, task_id), handler=handler)
+        handler.assert_not_called()
+        assert (task.status, task.function_result) == (JobSchedule.STATUS_DONE, reason)
+        assert [_failures(db, v) for v in vols] == [{SITE_B: {"task_id": task_id, "reason": reason}}] * 2
+        reconcile.assert_called_once_with(owners[0].get_id())     # its hand-off had started
+        assert _fresh(db, owners[0]).lvs_active_site == SITE_B
+        assert _fresh(db, owners[1]).lvs_active_site == ""         # written back
+        assert moves.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -1370,7 +1450,7 @@ class TestFailureReport:
             return "T done late"
 
         with patch.object(runner, "_run", side_effect=_paused):
-            worker = _thread(runner.task_runner, _task(db, t_id))
+            worker = _thread(task_driver.drive, runner.SPEC, _task(db, t_id))
             assert started.wait(30)
             assert tasks_controller.cancel_task(t_id)
             u = src.sync_promote_lvol(vol.get_id(), SITE_B)

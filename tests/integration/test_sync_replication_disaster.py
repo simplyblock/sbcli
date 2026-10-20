@@ -165,7 +165,8 @@ class _Lost:
         return src.sync_promote_lvol(self.vols[name], SITE_B, force=force)
 
     def run(self, task_id):
-        return runner.task_runner(self.db.get_task_by_id(task_id))
+        """One driver pass over the task; whether it ended DONE."""
+        return drive(runner.SPEC, self.db.get_task_by_id(task_id)).status == JobSchedule.STATUS_DONE
 
     def task(self, task_id):
         return self.db.get_task_by_id(task_id)
@@ -702,8 +703,7 @@ class TestSiteSteps:
         cluster, a, b, owner, pool, vol, task_id = dp._queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         assert src.set_lost_site_state(cluster.get_id(), SITE_A, state, ("",))
-        runner.task_runner(db.get_task_by_id(task_id))
-        task = db.get_task_by_id(task_id)
+        task = drive(runner.SPEC, db.get_task_by_id(task_id))
         assert task.status == JobSchedule.STATUS_DONE
         assert f"site {SITE_A} is lost; a planned promote needs both sites" in task.function_result
         assert task.function_params["moves"] == {}

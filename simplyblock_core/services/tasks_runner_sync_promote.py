@@ -1,9 +1,14 @@
 """Sync-replication promote runner (``FN_SYNC_PROMOTE``).
 
 A promote (sync_replication_controller.sync_promote_lvol / _group) queues one
-task per request; this runner does it in ONE pass and ends the task DONE,
-successful or not - no in-task retry: the caller's next promote call judges
-the promote table again.
+task per request; this runner, a spec on the shared task driver
+(task_runner_base), does it in ONE pass that ends the task DONE, successful or
+not - no in-task retry of a failure: the caller's next promote call judges the
+promote table again. An error the pass does not expect (a DB or RPC error
+outside the promote's own failure paths) is a retry of the driver instead: the
+task is SUSPENDED, still owning its markers, and the next attempt (3 s on at
+the earliest) goes on from the DB state; at ``max_retry`` the driver gives up and the task
+ends failed, its markers settled.
 
 Per LVS the task may move (``owners``), led from the other site T:
 
@@ -26,14 +31,16 @@ under the site-rule lock: the strict ANA open first, ``sync_active_site = S``
 after; a volume being deleted is refused (and closed again when its delete
 started during the open).
 
-Any failure or a cancel ends the task DONE FIRST (it then no longer owns the
-move) - a failure recorded on each of its volumes in the same transaction
-(``LVol.sync_promote_failures``, reported once to the next promote of that
-volume to that site), unless the task was canceled or replaced meanwhile -,
-then settles every marker it set: the previous site written back for
-an LVS whose hand-off never started, storage_node_ops.reconcile_lvs_move for
-one whose hand-off did (the leader decides). A pass that restarts after a
-crash finds its markers by ``moves`` and goes on from the DB state.
+Every ending - success, failure, cancel, the driver giving up - ends the task
+DONE FIRST (it then no longer owns the move) in the spec's terminal commit
+(finish_task): the outcome recorded on each of its volumes in the same
+transaction (``LVol.sync_promote_failures``, a failure reported once to the
+next promote of that volume to that site), unless the task was canceled or
+replaced meanwhile. Then (on_finish) every marker it set is settled: the
+previous site written back for an LVS whose hand-off never started,
+storage_node_ops.reconcile_lvs_move for one whose hand-off did (the leader
+decides). A pass that restarts after a crash finds its markers by ``moves``
+and goes on from the DB state.
 
 A promote with ``lost_site`` T in the params (a site T recorded as lost, or
 the forced promote of T) judges every gate by the disaster gate of T
@@ -56,15 +63,11 @@ run and neither the node API nor its RPC gets an answer from SPDK
 node's JM link enabled (_not_gone_reason). Peers that cannot tell prove
 nothing either way.
 """
-import time
-from datetime import UTC, datetime
-
 from simplyblock_core import db_controller, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import (
     activation_gate,
     device_controller,
     health_controller,
-    tasks_controller,
 )
 from simplyblock_core.controllers import sync_replication_controller as sync_ctl
 from simplyblock_core.exceptions import PreconditionError, SyncAnaError, SyncGateError
@@ -74,6 +77,14 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.services.task_runner_base import (
+    Ending,
+    RunnerSpec,
+    TaskAbort,
+    checkpoint,
+    serve,
+    set_result,
+)
 from simplyblock_core.snode_client import SNodeClientException
 
 logger = utils.get_logger(__name__)
@@ -87,23 +98,6 @@ class _PromoteFailed(Exception):
 
 class _PromoteCanceled(_PromoteFailed):
     pass
-
-
-def _save(task, mutate):
-    """Apply ``mutate`` to the task as stored NOW (never a whole stale copy:
-    that would erase a cancel or the journal) and stamp ``updated_at``."""
-    def _apply(fresh):
-        mutate(fresh)
-        fresh.updated_at = str(datetime.now(UTC))
-    return db.atomic_update(task, _apply) or task
-
-
-def _checkpoint(task):
-    """The task as stored now; a cancel ends the pass here."""
-    task = db.get_task_by_id(task.uuid)
-    if task.canceled:
-        raise _PromoteCanceled("canceled")
-    return task
 
 
 def _settle_markers(task) -> None:
@@ -133,18 +127,6 @@ def _settle_markers(task) -> None:
         elif storage_node_ops.set_lvs_active_site(owner_id, previous, expect=moving):
             logger.warning("LVS %s: move of an ended promote undone, lvs_active_site=%r",
                            lvs_name, previous)
-
-
-def _end(task, result, outcome=None) -> bool:
-    """Record the task DONE with ``result`` and, for ``outcome`` (failed /
-    succeeded), its volumes' outcome - one guarded transaction
-    (DBController.finish_sync_promote_task: nothing is published for a task
-    that was canceled or replaced meanwhile) - then settle its markers."""
-    db.finish_sync_promote_task(task, result, outcome)
-    task = db.get_task_by_id(task.uuid)
-    logger.info("Sync promote task %s: %s", task.uuid, task.function_result)
-    _settle_markers(task)
-    return True
 
 
 def _gate(cluster_id, when, lost_site="", lvs_names=()):
@@ -396,12 +378,6 @@ def _mark_moving(task, cluster_id, to_move, site):
     logger.info("Sync promote task %s: %s marked moving to %s", task.uuid, sorted(to_move), site)
 
 
-def _add_transferring(task, lvs_name):
-    transferring = task.function_params.setdefault("transferring", [])
-    if lvs_name not in transferring:
-        transferring.append(lvs_name)
-
-
 def _transfer(task, lvs_name, site):
     owner_id = task.function_params["owners"][lvs_name]
     moving = storage_node_ops.lvs_moving_value(site)
@@ -414,7 +390,14 @@ def _transfer(task, lvs_name, site):
     # its task no longer owns (canceled, lease stale) and can settle the
     # marker, and a recovering lookup would then grant on the settled one.
     leader, _ = storage_node_ops.find_leader_with_failover([owner], lvs_name, recover=False)
-    _save(task, lambda t: _add_transferring(t, lvs_name))
+    # Recorded before the hand-off starts, once per LVS (a resumed hand-off is
+    # listed already); the write is the cancel probe too, so a canceled task
+    # never hands off.
+    transferring = list(task.function_params.get("transferring") or [])
+    if lvs_name not in transferring:
+        transferring.append(lvs_name)
+    if checkpoint(task, transferring=transferring) is None:
+        raise _PromoteCanceled("canceled")
     # A hand-off that completed before an earlier pass ended shows in one of
     # two ways. The taker leads already: only the marker is left. Nobody leads
     # (no IO has reached the taker yet): the hand-off below runs again - it
@@ -515,7 +498,9 @@ def _run(task):
         _gate(task.cluster_id, "before the move", lost, requested)
         _mark_moving(task, task.cluster_id, to_move, site)
     for lvs_name in sorted([*to_move, *resumed]):
-        task = _checkpoint(task)
+        task = checkpoint(task)
+        if task is None:
+            raise _PromoteCanceled("canceled")
         # Live, right before each hand-off - a resumed move and the second LVS
         # of a group too: the state may have changed since the marker.
         _gate(task.cluster_id, f"before the transfer of {lvs_name}", lost, [lvs_name])
@@ -527,61 +512,60 @@ def _run(task):
     # request, as a group demote has.
     _gate(task.cluster_id, "before opening the volumes", lost, requested)
     for lvol_id in params["lvol_ids"]:
-        task = _checkpoint(task)
+        task = checkpoint(task)
+        if task is None:
+            raise _PromoteCanceled("canceled")
         _open(task.cluster_id, lvol_id, site)
     return f"promoted {len(params['lvol_ids'])} volume(s) to site {site}"
 
 
-def task_runner(task):
-    """One pass over ``task``; it always ends DONE. True when it finished."""
-    task = db.get_task_by_id(task.uuid)
-    if task.canceled:
-        return _end(task, "canceled")
-    if task.status == JobSchedule.STATUS_NEW:
-        task = _save(task, lambda t: setattr(t, "status", JobSchedule.STATUS_RUNNING))
+def process_task(task):
+    """The driver's handler: one pass over ``task``. A failure or a cancel
+    ends the task (TaskAbort); any other error is the driver's retry."""
     try:
         result = _run(task)
-    except _PromoteCanceled:
-        return _end(task, "canceled")
+    except _PromoteCanceled as e:
+        raise TaskAbort(str(e)) from e
     except _PromoteFailed as e:
-        return _end(task, f"failed: {e}", db.PROMOTE_FAILED)
-    return _end(task, result, db.PROMOTE_SUCCEEDED)
+        raise TaskAbort(f"failed: {e}") from e
+    set_result(task, result)
 
 
-def _record_unexpected_error(task, error) -> None:
-    """An error the pass does not expect (a DB or RPC error outside the
-    promote's own failure paths) leaves the task as it was, to be resumed by
-    the next loop; after ``max_retry`` of them it ends like a failure (its
-    markers settled), so a persistent error never keeps an LVS moving."""
-    def bump(t):
-        t.retry += 1
-        t.function_result = f"unexpected error (attempt {t.retry}/{t.max_retry}): {error}"
-    task = _save(task, bump)
-    if task.status != JobSchedule.STATUS_DONE and task.retry >= task.max_retry:
-        _end(task, f"failed: max retry reached after unexpected errors, last: {error}", db.PROMOTE_FAILED)
+#: The outcome each ending publishes on the task's volumes; a task canceled
+#: before its pass publishes none.
+_OUTCOMES = {Ending.SUCCEEDED: db.PROMOTE_SUCCEEDED,
+             Ending.ABORTED: db.PROMOTE_FAILED,
+             Ending.GAVE_UP: db.PROMOTE_FAILED}
+
+
+def finish_task(task, ending, result):
+    """The spec's terminal commit: DONE with ``result`` and the volumes'
+    outcome in one guarded transaction (DBController.finish_sync_promote_task:
+    nothing is published for a task that was canceled or replaced
+    meanwhile). The task as committed, or None when it was DONE already."""
+    if not db.finish_sync_promote_task(task, result, _OUTCOMES.get(ending)):
+        return None
+    task = db.get_task_by_id(task.uuid)
+    logger.info("Sync promote task %s: %s", task.uuid, task.function_result)
+    return task
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-sync-promote",
+    function_names=[JobSchedule.FN_SYNC_PROMOTE],
+    handler=process_task,
+    finish=finish_task,
+    on_finish=_settle_markers,
+    # Flat: a task SUSPENDED between attempts still owns its move
+    # (storage_node_ops.sync_promote_task_owns_move), which blocks recovery
+    # grants on an LVS that may have no leader meanwhile.
+    backoff=lambda _retry: 3,
+    interval=3,
+)
 
 
 def main():
-    logger.info("Starting sync-replication promote runner...")
-    while True:
-        # DB errors propagate: the process exits and the orchestrator restarts
-        # it with a fresh FDB client, as for the runners on the driver.
-        for cluster in db.get_clusters():
-            if not cluster.sync_replication:
-                continue
-            for task in db.get_active_sync_promote_tasks(cluster.get_id()):
-                if not tasks_controller.claim_task(task):
-                    logger.info(f"Promote task {task.uuid} owned by another runner host; skipping")
-                    continue
-                try:
-                    # The live lease is what makes the task own its moves
-                    # (storage_node_ops.sync_promote_task_owns_move).
-                    with tasks_controller.task_lease_heartbeat(task):
-                        task_runner(task)
-                except Exception as e:
-                    logger.exception(f"Promote task {task.uuid} failed: {e}")
-                    _record_unexpected_error(task, e)
-        time.sleep(3)
+    serve(SPEC)
 
 
 if __name__ == "__main__":

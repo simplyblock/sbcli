@@ -22,7 +22,6 @@ happens if the ceiling is missing and the loop would otherwise spin forever).
 Runners that fan work out onto a thread pool get a synchronous stand-in so the
 retry accrues deterministically in-process.
 """
-import contextlib
 import importlib
 import re
 import types
@@ -247,34 +246,8 @@ def _spec_batch_migration(runner, monkeypatch):
     return task
 
 
-def _spec_sync_promote(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_SYNC_PROMOTE, site="site-b", lvol_ids=["vol-1"],
-                      lvs_names=["LVS_1"], owners={"LVS_1": "node-1"}, moves={}, transferring=[])
-    db, cluster, _ = _wire_base(runner, monkeypatch, task)
-    cluster.sync_replication = True
-    db.get_active_sync_promote_tasks.return_value = [task]
-
-    # Mirror DBController.finish_sync_promote_task's contract on the task: a
-    # task not yet DONE ends DONE with the result (its volumes' outcome is not
-    # this test's concern).
-    def _finish(t, result, outcome):
-        if t.status == JobSchedule.STATUS_DONE:
-            return False
-        t.status, t.function_result = JobSchedule.STATUS_DONE, result
-        return True
-    db.finish_sync_promote_task.side_effect = _finish
-    monkeypatch.setattr(runner.tasks_controller, "claim_task", lambda *a, **k: True)
-    monkeypatch.setattr(runner.tasks_controller, "task_lease_heartbeat",
-                        lambda *a, **k: contextlib.nullcontext())
-    # A pass ends its task itself; only an error it does not expect (here a
-    # DB error at every pass) is retried - up to max_retry.
-    monkeypatch.setattr(runner, "_run", MagicMock(side_effect=RuntimeError("fdb timeout")))
-    return task
-
-
 # name -> spec for the runners driven through their real main() loop.
 _MAIN_DRIVEN_SPECS = {
-    "tasks_runner_sync_promote.py": _spec_sync_promote,
     "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
 
@@ -305,6 +278,7 @@ _DRIVER_MIGRATED = {
     "tasks_runner_failed_migration.py",
     "tasks_runner_node_removal.py",
     "tasks_runner_port_allow.py",
+    "tasks_runner_sync_promote.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the

@@ -1490,8 +1490,9 @@ def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners, 
                                 "lvs_names": sorted(owners), "owners": dict(owners),
                                 "moves": {}, "transferring": [], "lost_site": lost_site,
                                 "fence": fence}
-    # A pass ends the task itself; max_retry bounds only the passes an
-    # unexpected error interrupts (tasks_runner_sync_promote).
+    # A pass ends the task itself; max_retry, enforced by the shared task
+    # driver, bounds only the passes an unexpected error interrupts
+    # (tasks_runner_sync_promote).
     task_obj.max_retry = constants.SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS
     task_obj.status = JobSchedule.STATUS_NEW
     task_id, created = db.ensure_sync_promote_task(task_obj, sorted(owners))

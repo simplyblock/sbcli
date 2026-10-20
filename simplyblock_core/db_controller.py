@@ -1077,7 +1077,6 @@ class DBController(metaclass=Singleton):
         # keeps its entry, so a failure still undoes its marker directly.
         task.function_params["moves"] = {**(task.function_params.get("moves") or {}),
                                          **{lvs_name: expect for lvs_name, (_, expect) in moves.items()}}
-        task.status = JobSchedule.STATUS_RUNNING
         task.updated_at = str(datetime.datetime.now(datetime.UTC))
         self._put_tx(tr, task, task_indexes)
         return []
@@ -1098,8 +1097,8 @@ class DBController(metaclass=Singleton):
         LVS (a pure function: it may run several times). With none at all,
         every owner's ``lvs_active_site`` becomes ``moving:<target_site>`` and
         the task records ``moves`` (``{lvs: expect}``, the journal its
-        clean-up restores from; merged into the entries it already holds) and
-        turns RUNNING - in the same transaction.
+        clean-up restores from; merged into the entries it already holds) - in
+        the same transaction.
         Returns the problems; nothing is written when there are any."""
         return fdb.transactional(DBController._begin_sync_promote_moves_tx)(
             self, self.kv_store, task.get_db_id().encode(), task.cluster_id, dict(moves),

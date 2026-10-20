@@ -1,8 +1,9 @@
-"""The own poll loops of the two sync-replication task runners against the
-real FoundationDB: a failing read of the cluster list ends the loop with that
-error instead of being logged and retried, as for the runners on the driver -
-the process exits and the orchestrator restarts it with a fresh FDB client.
-And the promote's settle of its ``moving:`` markers at the end of a task.
+"""The poll loops of the two sync-replication task runners against the real
+FoundationDB - the promote's on the shared driver, the resync's its own: a
+failing read of the cluster list ends the loop with that error instead of
+being logged and retried - the process exits and the orchestrator restarts it
+with a fresh FDB client. And the promote's settle of its ``moving:`` markers
+when the driver ends a task it never ran.
 
 The failing read is a Cluster record whose value does not decode: the real
 ``get_clusters`` range read raises on it.
@@ -24,6 +25,7 @@ from simplyblock_core.services import (
     tasks_runner_sync_promote,
     tasks_runner_sync_resync,
 )
+from tests.integration import task_driver
 from tests.integration import test_sync_replication_lvs_stack as stack
 
 
@@ -42,8 +44,15 @@ def corrupt_cluster():
         db.kv_store.clear(key)
 
 
-@pytest.mark.parametrize("runner", [tasks_runner_sync_promote, tasks_runner_sync_resync])
-def test_a_cluster_read_error_ends_the_loop(corrupt_cluster, runner):
+def test_a_cluster_read_error_ends_the_promote_loop(corrupt_cluster):
+    # one_cycle ends at the driver's sleep: the error escaping it is raised
+    # before the loop got there.
+    with pytest.raises(json.JSONDecodeError):
+        task_driver.one_cycle(tasks_runner_sync_promote.SPEC)
+
+
+def test_a_cluster_read_error_ends_the_resync_loop(corrupt_cluster):
+    runner = tasks_runner_sync_resync
     clock = types.SimpleNamespace(sleep=MagicMock(side_effect=_StopLoop), time=time.time)
     with patch.object(runner, "time", clock), pytest.raises(json.JSONDecodeError):
         runner.main()
@@ -90,27 +99,30 @@ def _first_reconcile_raises(owners):
     return patch.object(storage_node_ops, "reconcile_lvs_move", side_effect=_reconcile)
 
 
-def test_a_failing_reconcile_leaves_its_marker_and_settles_the_others():
+def test_a_failing_reconcile_of_a_canceled_task_leaves_its_marker_and_settles_the_others():
     db = DBController()
-    task, owners = _transferring_promote(db)
+    task, owners = _transferring_promote(db, canceled=True)
+    handler = MagicMock()
     with _first_reconcile_raises(owners) as reconcile:
-        assert tasks_runner_sync_promote._end(task, "canceled") is True
-    assert db.get_task_by_id(task.uuid).status == JobSchedule.STATUS_DONE
+        done = task_driver.drive(tasks_runner_sync_promote.SPEC, task, handler=handler)
+    handler.assert_not_called()
+    assert (done.status, done.function_result) == (JobSchedule.STATUS_DONE, "canceled")
     assert [c.args[0] for c in reconcile.call_args_list] == [o.get_id() for o in owners]
     # the failed one is left to the storage-node monitor's reconcile
     assert stack._fresh(db, owners[0]).lvs_active_site == MOVING_B
     assert stack._fresh(db, owners[1]).lvs_active_site == stack.SITE_B
 
 
-def test_a_failing_reconcile_does_not_escape_the_unexpected_error_path():
-    # At max_retry the unexpected-error path ends the task like a failure,
-    # inside the loop's except handler: nothing may escape it.
+def test_a_failing_reconcile_does_not_escape_the_retry_ceiling():
+    # At max_retry the driver ends the task failed without a pass; the settle
+    # after that commit lets nothing escape.
     db = DBController()
-    task, owners = _transferring_promote(db, retry=4)
+    task, owners = _transferring_promote(db, retry=5, function_result="unhandled error: lost answer")
+    handler = MagicMock()
     with _first_reconcile_raises(owners):
-        tasks_runner_sync_promote._record_unexpected_error(task, RuntimeError("lost answer"))
-    done = db.get_task_by_id(task.uuid)
+        done = task_driver.drive(tasks_runner_sync_promote.SPEC, task, handler=handler)
+    handler.assert_not_called()
     assert done.status == JobSchedule.STATUS_DONE
-    assert done.function_result.startswith("failed: max retry reached")
+    assert done.function_result == "max retry reached (5) after: unhandled error: lost answer"
     assert stack._fresh(db, owners[0]).lvs_active_site == MOVING_B
     assert stack._fresh(db, owners[1]).lvs_active_site == stack.SITE_B
