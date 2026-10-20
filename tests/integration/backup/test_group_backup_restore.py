@@ -145,13 +145,36 @@ def test_refuses_an_uncommitted_group_backup(db):
     assert "not" in err and "completed" in err
 
 
-def test_refuses_when_the_target_group_name_already_exists(db):
+def test_reclaims_an_empty_group_holding_the_target_name(db):
+    """A group record outlives its members (the last member out resets the
+    generation; nothing removes the record), so the name of an earlier restore
+    whose claims were deleted is still taken by an EMPTY group. Refusing it
+    blocked every repeat restore into the same name (live 2026-10-20). The
+    empty record is deleted and the restore goes on, minting a fresh group."""
     gb = _seed_group(db, [_member("b-db", "db")])
-    cg.ensure_group(CLUSTER, "taken")
+    leftover = cg.ensure_group(CLUSTER, "taken")
+    group_id, lvol_ids, err = group_backup.restore_group_backup(
+        gb.get_id(), "taken", "pool-1")
+    # Past the name check: this fixture's backups carry no location, so the
+    # restore stops at the member chain, not at the name.
+    assert group_id is None
+    assert "already exists" not in err
+    assert db.get_consistency_group_by_name(CLUSTER, "taken") is None, \
+        f"the empty leftover {leftover.uuid[:8]} must be deleted, not reused"
+
+
+def test_refuses_when_the_target_group_name_is_in_use(db):
+    """A group with a live member is not a leftover: a group restore always
+    produces a NEW group, never one that is serving volumes."""
+    gb = _seed_group(db, [_member("b-db", "db")])
+    taken = cg.ensure_group(CLUSTER, "taken")
+    taken.members = {_uuid("live-member"): {"joined_seq": 1, "removed_seq": 0}}
+    taken.write_to_db(db.kv_store)
     group_id, lvol_ids, err = group_backup.restore_group_backup(
         gb.get_id(), "taken", "pool-1")
     assert group_id is None
-    assert "already exists" in err
+    assert "already exists" in err and "in use" in err
+    assert db.get_consistency_group_by_name(CLUSTER, "taken") is not None
 
 
 def test_refuses_when_a_member_backup_record_is_missing(db):
