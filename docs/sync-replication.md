@@ -203,9 +203,12 @@ Two task runners are new. Both must run on the management plane; without them a 
   (`python3 simplyblock_core/services/tasks_runner_sync_promote.py`) and the `python -m
   simplyblock_core.services tasks-runner-sync-promote` form start the same runner; a Swarm service
   created by an older control plane keeps its path command across `cluster update`.
-- Both runners drive their own poll loop rather than the shared task driver (`_NOT_ON_DRIVER` in
-  `simplyblock_core/services/task_runners.py`): their terminal step commits `done` together with the
-  task's outcome in one transaction.
+- Both runners run on the shared task driver (a `RunnerSpec` in
+  `simplyblock_core/services/task_runner_base.py`). Their terminal step commits `done` together with the
+  task's outcome in one transaction through `RunnerSpec.finish`: a promote publishes the volumes'
+  promote outcome; a converged catch-up writes the LVS state key, or re-arms the task when a newer zone
+  desync arrived meanwhile. The backoff of a non-converging catch-up is the driver's and lives in the
+  runner's memory, so a restarted runner re-runs the catch-up at once, as soon as the lagging zone is up.
 - **Kubernetes: the operator must add both to its control-plane runner table**
   (simplyblock-operator `operator/internal/controllers/controlplane/managementapi.go`).
 - The existing `MainDistrEventCollector` records the sync events (zone desync, remote journal
