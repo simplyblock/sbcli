@@ -176,6 +176,7 @@ class SpdkMoveExecutor(MoveExecutor):
         primary = db.get_storage_node_by_id(primary.get_id())
         if not (primary.hublvol and primary.hublvol.uuid):
             cluster = db.get_cluster_by_id(primary.cluster_id)
+            storage_node_ops._remember_cluster_arbitration(cluster)
             try:
                 primary.create_hublvol(cluster_nqn=cluster.nqn)
                 primary.create_transfer_hublvol()

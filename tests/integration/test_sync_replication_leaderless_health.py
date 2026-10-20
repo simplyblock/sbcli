@@ -31,7 +31,6 @@ from simplyblock_core.models.nvme_device import (
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.services import health_check_service, storage_node_monitor
-from simplyblock_core.utils import port_block
 from tests.integration import test_sync_replication_lvs_stack as stack
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
@@ -59,6 +58,7 @@ class _Spdk(dict):
     def __init__(self, db):
         super().__init__()
         self.db = db
+        #: Every port fence, ``(node, port, block=..., is_reject=...)``.
         self.set_port = MagicMock(name="set_port")
         self._lvs: dict = {}
         self._blocked: dict = {}
@@ -75,8 +75,10 @@ class _Spdk(dict):
             "listen_addresses": [{"traddr": "10.9.0.1", "trsvcid": "4420"}]}
         rpc.bdev_nvme_controller_list.side_effect = lambda name=None: self._controllers(node_id, name)
         rpc.distr_get_cluster_map.side_effect = lambda distr: self._cluster_map()
-        rpc.nvmf_get_blocked_ports.side_effect = lambda: {
-            "blocked_ports": [{"port": port} for port in sorted(blocked)]}
+        rpc.nvmf_get_blocked_ports.side_effect = lambda: set(blocked)
+        rpc.nvmf_port_block.side_effect = (
+            lambda port, is_reject=False: self.set_port(node, port, block=True, is_reject=is_reject))
+        rpc.nvmf_port_unblock.side_effect = lambda port: self.set_port(node, port, block=False)
         rpc.jc_get_jm_status.return_value = {"jm": True}
         rpc.get_lvstore.side_effect = lambda name: dict(lvs[name]) if name in lvs else None
         self[node_id] = rpc
@@ -123,7 +125,6 @@ def spdk(db):
                       side_effect=lambda self, *args, **kwargs: spdk[self.get_id()]), \
             patch.object(StorageNode, "client", autospec=True, return_value=api), \
             patch.object(utils, "ping_host", return_value=True), \
-            patch.object(port_block, "set_port", spdk.set_port), \
             patch.object(ops, "ensure_nvme_options", return_value=(True, {})):
         yield spdk
 

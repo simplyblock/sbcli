@@ -5,13 +5,15 @@ tell a torn-down or not-yet-built distrib from a failure. The flows against
 the real database are in tests/integration/test_sync_replication_lvs_stack.py.
 """
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec
 
 import pytest
 
-from simplyblock_core import distr_controller
+from simplyblock_core import constants, distr_controller
 from simplyblock_core import storage_node_ops as ops
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import (
     RPCClient,
@@ -344,3 +346,173 @@ class TestFenceUnblockWarning:
         with caplog.at_level(logging.ERROR):
             self._fence().warn_if_unblocking_a_non_leader(peer)
         assert "NO LONGER leader" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# the fence of a leadership hand-off: release, abort, RPC bounds, grant budget
+# ---------------------------------------------------------------------------
+
+def _lvs_owner():
+    return _owner(cluster_id="cl", lvstore="LVS_1", jm_vuid=1, lvol_subsys_port=4402,
+                  lvstore_ports={"LVS_1": {"lvol_subsys_port": 4402, "hublvol_port": 4403}})
+
+
+class _Recorder:
+    """An RPC client that records ``(client kwargs, method)`` per call and
+    answers every call with ``answers.get(method, True)``."""
+
+    def __init__(self, kwargs, calls, answers):
+        self._kwargs, self._calls, self._answers = kwargs, calls, answers
+
+    def __getattr__(self, method):
+        def _call(*args, **kwargs):
+            self._calls.append((self._kwargs, method))
+            answer = self._answers.get(method, True)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return _call
+
+
+def _taker(calls, answers=None, *, jm_vuid=7):
+    """The taker of a hand-off (``fence.rpc_node``); its RPC clients record."""
+    node = _owner(uuid="p", cluster_id="cl", jm_vuid=jm_vuid)
+    node.rpc_client = MagicMock(side_effect=lambda **kw: _Recorder(kw, calls, answers or {}))
+    return node
+
+
+class TestFenceRelease:
+
+    @pytest.fixture(autouse=True)
+    def _regular_cluster(self, monkeypatch):
+        cluster = Cluster()
+        cluster.uuid = "cl"
+        ops._remember_cluster_arbitration(cluster)
+        self.events = MagicMock(name="tcp_ports_events")
+        monkeypatch.setattr(ops, "tcp_ports_events", self.events)
+        self.clear_budget = MagicMock(name="clear_budget")
+        monkeypatch.setattr(ops.rpc_budget, "clear_budget", self.clear_budget)
+
+    @staticmethod
+    def _peer(name, log):
+        peer = _owner(uuid=name, cluster_id="cl")
+        rpc = create_autospec(RPCClient, instance=True, name=f"rpc-{name}")
+        rpc.get_lvstore.return_value = {"name": "LVS_1", "lvs leadership": True}
+        rpc.nvmf_port_unblock.side_effect = lambda port: log.append(("unblock", name, port))
+        peer.rpc_client = MagicMock(return_value=rpc)
+        return peer, rpc
+
+    def test_an_abort_releases_every_peer_before_its_own_step(self):
+        log: list = []
+        peers = [self._peer(name, log)[0] for name in ("s", "t", "rs")]
+        fence = ops._LvsFence(_lvs_owner(), _taker([]), None,
+                              on_abort=lambda: log.append(("on_abort",)))
+        fence.blocked_peers.extend(peers)
+        for peer in peers:
+            fence.block_started[peer.get_id()] = time.monotonic()
+        with pytest.raises(ops.LeadershipTransferError, match="Abort restart: lost"):
+            fence.abort("lost")
+        assert log == [("unblock", "s", 4402), ("unblock", "t", 4402), ("unblock", "rs", 4402),
+                       ("on_abort",)]
+        assert fence.blocked_peers == []
+
+    def test_a_regular_cluster_unblocks_without_asking_the_ha_state(self):
+        log: list = []
+        (s, s_rpc), (t, t_rpc) = self._peer("s", log), self._peer("t", log)
+        fence = ops._LvsFence(_lvs_owner(), _taker([]), None)
+        fence.blocked_peers.extend([s, t])
+        fence.unblock_peer_port(s, demoted=True)
+        assert log == [("unblock", "s", 4402)]
+        assert fence.blocked_peers == [t]
+        assert not fence.defer_gate_event.is_set()
+        self.clear_budget.assert_not_called()
+        fence.unblock_peer_port(t, demoted=True)
+        assert log == [("unblock", "s", 4402), ("unblock", "t", 4402)]
+        assert fence.blocked_peers == []
+        assert fence.defer_gate_event.is_set()
+        self.clear_budget.assert_called_once_with()
+        s_rpc.jc_ha_status.assert_not_called()
+        t_rpc.jc_ha_status.assert_not_called()
+
+    def test_a_port_the_guard_keeps_blocked_is_dropped_unopened(self, monkeypatch):
+        log: list = []
+        asked: list = []
+
+        def _guard(peer, jm_vuid, db_controller, rebuild_too=True):
+            asked.append((peer.get_id(), jm_vuid, rebuild_too))
+            return "LVS 7 is fenced on the peer"
+        monkeypatch.setattr(ops, "_two_node_peer_port_must_stay_blocked", _guard)
+        s, _ = self._peer("s", log)
+        fence = ops._LvsFence(_lvs_owner(), _taker([], jm_vuid=7), None)
+        fence.blocked_peers.append(s)
+        fence.unblock_peer_port(s, demoted=True)
+        assert log == []
+        assert fence.blocked_peers == []
+        # the restarting (taker) node's journal vuid, as main passes it
+        assert asked == [("s", 7, False)]
+
+
+class TestFencedBounds:
+
+    @staticmethod
+    def _fence(calls, answers=None, *, removal=False, held_for=None):
+        fence = ops._LvsFence(_lvs_owner(), _taker(calls, answers), None,
+                              removal_in_progress=removal)
+        if held_for is not None:
+            fence.block_started["s"] = time.monotonic() - held_for
+        return fence
+
+    def test_unfenced_during_a_removal_uses_the_ordinary_client(self):
+        calls: list = []
+        assert self._fence(calls, removal=True).fenced("bdev_lvol_set_leader", "LVS_1", leader=True)
+        assert calls == [({}, "bdev_lvol_set_leader")]
+
+    def test_unfenced_failure_during_a_removal_names_it(self):
+        calls: list = []
+        fence = self._fence(calls, {"bdev_lvol_set_leader": RPCConnectionError("down")}, removal=True)
+        with pytest.raises(ops.LeadershipTransferError, match="no port fenced during a removal"):
+            fence.fenced("bdev_lvol_set_leader", "LVS_1", leader=True)
+
+    def test_unfenced_without_a_removal_keeps_the_bound(self):
+        calls: list = []
+        self._fence(calls).fenced("get_lvstore", "LVS_1")
+        assert calls == [({"timeout": constants.FENCE_RPC_TIMEOUT_SEC,
+                           "retry": constants.FENCE_RPC_RETRY}, "get_lvstore")]
+
+    @pytest.mark.parametrize("removal", [False, True])
+    def test_a_held_fence_clamps_either_way(self, removal):
+        calls: list = []
+        left = 0.2
+        self._fence(calls, removal=removal,
+                    held_for=constants.FENCE_DEADLINE_SEC - left).fenced("get_lvstore", "LVS_1")
+        [(kwargs, method)] = calls
+        assert method == "get_lvstore"
+        assert kwargs["retry"] == constants.FENCE_RPC_RETRY
+        assert 0 < kwargs["timeout"] <= left
+
+
+class TestGrantBudget:
+
+    @staticmethod
+    def _grant(held_for):
+        calls: list = []
+        lvs_node = _lvs_owner()
+        taker = _taker(calls, {"get_lvstore": {"name": "LVS_1", "lvs leadership": True}})
+        fence = ops._LvsFence(lvs_node, taker, None)
+        fence.block_started["s"] = time.monotonic() - held_for
+        ops._grant_lvs_leadership(fence)
+        assert fence.granted is True
+        return {method: kwargs["timeout"] for kwargs, method in calls}
+
+    def test_the_leader_set_gets_its_own_budget(self):
+        timeouts = self._grant(held_for=0.0)
+        assert timeouts["bdev_lvol_set_leader"] == pytest.approx(constants.FENCE_SET_LEADER_TIMEOUT_SEC, abs=0.05)
+        assert timeouts["bdev_lvol_set_lvs_opts"] == pytest.approx(constants.FENCE_RPC_TIMEOUT_SEC, abs=0.05)
+        assert timeouts["get_lvstore"] == pytest.approx(constants.FENCE_RPC_TIMEOUT_SEC, abs=0.05)
+
+    def test_near_the_deadline_the_leader_set_is_clamped_too(self):
+        left = 1.0
+        timeouts = self._grant(held_for=constants.FENCE_DEADLINE_SEC - left)
+        assert timeouts["bdev_lvol_set_leader"] <= left
+        assert timeouts["bdev_lvol_set_leader"] > constants.FENCE_RPC_TIMEOUT_SEC
+        assert timeouts["bdev_lvol_set_lvs_opts"] == pytest.approx(constants.FENCE_RPC_TIMEOUT_SEC, abs=0.05)

@@ -445,7 +445,7 @@ class TestLvolHACluster(FioWorkloadTest):
     
     def validate_checksums(self):
         "Validating checksums"
-        for _, lvol in self.lvol_mount_details.items():
+        for lvol in self.lvol_mount_details.values():
             client = lvol.get("Client", self.node)
             final_files = self.ssh_obj.find_files(node=client, directory=lvol['Mount'])
             final_checksums = self.ssh_obj.generate_checksums(node=client, files=final_files)

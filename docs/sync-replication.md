@@ -261,7 +261,7 @@ members' LVSs, one promote task for all.
 | `GET G/replication/sync-status?site=S` | **200** `SyncReplicationStatusDTO`; **400** on a cluster without sync replication. |
 | `GET G/replication/status?site=S` | **200** `ConsistencyGroupReplicationStatusDTO` filled from the sync status plus `member_count`. |
 | `PUT G/replication` body `{"replication_policy_id": null or UUID}` | **204** no-op. The field is required (422 without it). |
-| `POST G/replication/failback` (body `{}`) | **204** no-op. |
+| `POST G/replication/failback` (body `{}`) | **204** no-op, also for a group that carries policy-path async replication (see [Known limitations](#8-known-limitations)): a re-protect toward an async peer rests on the reverse policy attached at its fail-over. |
 
 A member that cannot be resolved to a live volume refuses the whole group request with **409** and the
 ids in `volumes`, before anything is fenced or queued; on demote and promote so does a member that
@@ -748,10 +748,12 @@ replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) f
   or shut down by hand.
 - Reads after a promote go to zone 0 while the home site is alive (local-zone reads are deferred).
 - Rejected on a sync cluster: lvol migration (single and batch), manual volume suspend / resume, the
-  v1 `lvol/connect` (use the v2 connect).
+  v1 `lvol/connect` (use the v2 connect), enabling two-node arbitration (v2 `PUT /clusters/{id}` with
+  `two_node_arbitration: true`, 400).
 - Only the direct async replication operations are refused; the policy paths (creating a volume with a
   replication policy, `volume replication-policy-set`, a group policy attach) still configure async
-  replication on a sync cluster.
+  replication on a sync cluster. A group fail-back on a sync cluster stays a no-op even for such a group,
+  so re-protecting it toward an async peer relies on the reverse policy attached at fail-over.
 - A completed promote builds its connection entries without a host NQN, so a volume with
   `allowed_hosts` answers 409 instead of its result.
 - A follower whose hublvol redirect is known broken stays closed (fail-safe) until a re-activation or

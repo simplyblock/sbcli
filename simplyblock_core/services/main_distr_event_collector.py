@@ -11,6 +11,7 @@ from simplyblock_core import (
     rpc_client,
     utils,
 )
+from simplyblock_core.arbitration import events as arbitration_events
 from simplyblock_core.controllers import (
     device_controller,
     events_controller,
@@ -25,6 +26,11 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+
+def cluster_of(snode):
+    """The node's cluster record (read per event batch; remote-JM events are rare)."""
+    return db.get_cluster_by_id(snode.cluster_id)
 
 EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap",
                "error_write_cannot_allocate"]
@@ -509,6 +515,18 @@ def start_event_collector_on_node(node_id):
                                 logger.info(f"Processed sync-replication event: {event.get_id()}")
                                 continue
 
+                            # JC's remote-JM health events carry only jm_vuid:
+                            # they used to fall into "Unknown event" below and
+                            # were dropped. Log them, and hand them to the
+                            # two-node arbiter (docs/design/two-node-arbitration.md).
+                            # The event type is checked first, so the cluster
+                            # is read only for these (dual-node) events, never
+                            # for the regular event stream.
+                            if arbitration_events.is_legacy_jm_event(event_dict):
+                                arbitration_events.forward_legacy_jm_event(
+                                    db, cluster_of(snode), snode.get_id(), event_dict)
+                                events_controller.log_jm_event(snode.cluster_id, snode.get_id(), event_dict)
+                                continue
                             if "storage_ID" in event_dict:
                                 sid = event_dict['storage_ID']
                             elif "vuid" in event_dict:

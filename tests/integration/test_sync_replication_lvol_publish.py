@@ -10,6 +10,7 @@ mocks of test_sync_replication_lvs_stack.py elsewhere; the database never is. Th
 tests/unit/test_sync_replication_lvol_publish.py.
 """
 import copy
+import logging
 import sys
 import uuid
 from unittest.mock import MagicMock, patch
@@ -41,6 +42,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 from simplyblock_core.services import (
+    storage_node_monitor,
     tasks_runner_batch_migration,
     tasks_runner_lvol_migration,
     tasks_runner_sync_lvol_del,
@@ -563,6 +565,21 @@ class TestSharedSubsystem:
         assert _seen(spdk, a[1], first) == "non_optimized"
         assert _seen(spdk, a[1], second) == "inaccessible"
 
+    def test_a_recreate_keeps_an_existing_listener(self, db, spdk):
+        """A recreate on a node whose listener survived adds none and still
+        sets the volume's group by the site rule."""
+        cluster, a, b, owner = _layout(db)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        node = _fresh(db, a[1])
+        target = spdk[node.get_id()]
+        assert lvol_controller.recreate_lvol_on_node(vol, node) == (True, None)
+        target.groups[(vol.nqn, _ip(node), vol.ns_id)] = "inaccessible"
+        with patch.object(target, "listeners_create", wraps=target.listeners_create) as create:
+            assert lvol_controller.recreate_lvol_on_node(vol, node) == (True, None)
+        create.assert_not_called()
+        assert len(target.subsystems[vol.nqn]["listen_addresses"]) == 1
+        assert _seen(spdk, node, vol) == "non_optimized"
+
 
 class TestFailedGroup:
 
@@ -1031,6 +1048,43 @@ class TestRestart:
         assert _ana_calls(rpcs[owner.get_id()], vol.nqn) == [(1, "optimized")]
         assert (1, "non_optimized") in _ana_calls(rpcs[a[1].get_id()], vol.nqn)
 
+    def test_a_failing_failback_does_not_abort_the_rebuild(self, db, rpcs, hub, env, attached):
+        """The home primary's failback of its secondary is housekeeping: an
+        error in it is logged and the hand-off still runs."""
+        cluster, a, b, owner = _layout(db)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        _leads(rpcs, a[1])
+        _absent_until_created(rpcs[owner.get_id()], vol.nqn)
+        _examines(rpcs[owner.get_id()], vol)
+        with patch.object(ops, "transfer_lvs_leadership", return_value=[]) as transfer, \
+                patch.object(ops, "_failback_primary_ana", side_effect=RuntimeError("peer gone")) as failback:
+            assert ops.recreate_lvstore(_fresh(db, owner)) is True
+        assert [c.args[0].get_id() for c in failback.call_args_list] == [owner.get_id()]
+        transfer.assert_called_once()
+        assert _fresh(db, owner).lvstore_status == "ready"
+        assert _ana_calls(rpcs[owner.get_id()], vol.nqn) == [(1, "optimized")]
+
+    @pytest.mark.parametrize("status, relaxed", [
+        *((status, True) for status in ops.REMOVAL_IN_FLIGHT_STATUSES),
+        (StorageNode.STATUS_REMOVED, False),
+        (StorageNode.STATUS_REMOVED_FAILED, False),
+        (StorageNode.STATUS_ONLINE, False),
+    ])
+    def test_only_a_removal_in_flight_relaxes_the_unfenced_bound(
+            self, db, rpcs, hub, env, attached, status, relaxed):
+        """The rebuild decides once whether a removal is being worked anywhere
+        in the cluster; its fence relaxes the unfenced RPC bound only then."""
+        cluster, a, b, owner = _layout(db)
+        stack._seed_node(db, cluster, "x", SITE_B, status=status)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        _leads(rpcs, a[1])
+        _absent_until_created(rpcs[owner.get_id()], vol.nqn)
+        _examines(rpcs[owner.get_id()], vol)
+        with patch.object(ops, "transfer_lvs_leadership", return_value=[]), \
+                patch.object(ops, "_LvsFence", wraps=ops._LvsFence) as fence:
+            assert ops.recreate_lvstore(_fresh(db, owner)) is True
+        assert [c.kwargs.get("removal_in_progress") for c in fence.call_args_list] == [relaxed]
+
     @pytest.mark.parametrize("force", [False, True])
     def test_a_lvstore_the_examine_does_not_bring_back(self, db, rpcs, hub, env, attached, force):
         """The validation after the examine (inside the fence, before the
@@ -1134,7 +1188,7 @@ class TestFailover:
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B,
                       demoted=[SITE_A])
-        ops.trigger_ana_failover_for_node(_fresh(db, b[0]))
+        assert ops.trigger_ana_failover_for_node(_fresh(db, b[0])) is True
         calls = _states_by_node(rpcs, (*a, *b), vol.nqn)
         assert calls[b[1].get_id()] == [(1, "optimized")]
         assert all(not v for k, v in calls.items() if k != b[1].get_id())
@@ -1142,13 +1196,13 @@ class TestFailover:
     def test_a_lost_fenced_home_primary_changes_nothing(self, db, rpcs):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
-        ops.trigger_ana_failover_for_node(_fresh(db, owner))
+        assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is False
         assert all(not v for v in _states_by_node(rpcs, (*a, *b), vol.nqn).values())
 
     def test_a_lost_home_primary_promotes_its_secondary(self, db, rpcs):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
-        ops.trigger_ana_failover_for_node(_fresh(db, owner))
+        assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is True
         calls = _states_by_node(rpcs, (*a, *b), vol.nqn)
         assert calls[a[1].get_id()] == [(1, "optimized")]
         assert all(not v for k, v in calls.items() if k != a[1].get_id())
@@ -1156,13 +1210,14 @@ class TestFailover:
     def test_a_demoted_site_is_not_reopened_by_a_failover(self, db, rpcs):
         cluster, a, b, owner = _layout(db)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, demoted=[SITE_A])
-        ops.trigger_ana_failover_for_node(_fresh(db, owner))
+        # attempted: the rule closes the path, the flip itself was sent
+        assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is True
         assert _ana_calls(rpcs[a[1].get_id()], vol.nqn) == [(1, "inaccessible")]
 
     def test_nothing_moves_while_the_leadership_moves(self, db, rpcs):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
-        ops.trigger_ana_failover_for_node(_fresh(db, owner))
+        assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is False
         assert all(not v for v in _states_by_node(rpcs, (*a, *b), vol.nqn).values())
 
     def test_failback_demotes_the_active_secondary(self, db, rpcs):
@@ -1182,6 +1237,106 @@ class TestFailover:
         # an online active primary: nothing to promote
         _update(db, b[0], status=StorageNode.STATUS_ONLINE)
         rpcs[b[1].get_id()].reset_mock()
+        ops.promote_active_secondary_ana(_fresh(db, b[1]))
+        assert _ana_calls(rpcs[b[1].get_id()], vol.nqn) == []
+
+    # -- what counts as a failover attempt (the monitor's one-shot marker) --
+
+    def test_a_peer_with_no_volume_is_still_an_attempt(self, db, rpcs):
+        _, a, b, owner = _layout(db)
+        assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is True
+
+    def test_an_offline_peer_is_skipped_until_it_is_back(self, db, rpcs):
+        cluster, a, b, owner = _layout(db)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        _update(db, a[1], status=StorageNode.STATUS_OFFLINE)
+        assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is False
+        assert _ana_calls(rpcs[a[1].get_id()], vol.nqn) == []
+        _update(db, a[1], status=StorageNode.STATUS_ONLINE)
+        assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is True
+        assert _ana_calls(rpcs[a[1].get_id()], vol.nqn) == [(1, "optimized")]
+
+    def test_a_node_that_is_no_active_primary_attempts_nothing(self, db, rpcs):
+        cluster, a, b, owner = _layout(db)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        assert ops.trigger_ana_failover_for_node(_fresh(db, a[1])) is False
+        assert all(not v for v in _states_by_node(rpcs, (*a, *b), vol.nqn).values())
+
+    def test_one_lvs_attempted_is_an_attempt_and_the_skipped_one_waits_for_port_allow(self, db, rpcs):
+        """a0 is the active primary of its own LVS_1 (peer a1) and of b0's
+        LVS_2, led from site A by its remote triplet a0 a2 a1 (peer a2). With
+        a2 OFFLINE only LVS_1 flips, and that is an attempt: the marker is
+        set and the monitor does not come back. LVS_2 is served by a2's port
+        allow (promote_active_secondary_ana) once a2 returns."""
+        cluster, a, b, owner = _layout(db)
+        owner2 = _make_owner(db, b[0], b, [a[0], a[2], a[1]], lvs_id=2)
+        owner2 = _update(db, owner2, lvs_active_site=SITE_A)
+        pool = _pool(db, cluster)
+        vol1 = _volume(db, cluster, owner, pool, ns_id=1)
+        vol2 = _volume(db, cluster, owner2, pool, ns_id=1)
+        _update(db, a[2], status=StorageNode.STATUS_OFFLINE)
+        _update(db, a[0], status=StorageNode.STATUS_OFFLINE)
+        assert ops.trigger_ana_failover_for_node(_fresh(db, a[0])) is True
+        assert _ana_calls(rpcs[a[1].get_id()], vol1.nqn) == [(1, "optimized")]
+        assert _ana_calls(rpcs[a[2].get_id()], vol2.nqn) == []
+        _update(db, a[2], status=StorageNode.STATUS_ONLINE)
+        ops.promote_active_secondary_ana(_fresh(db, a[2]))
+        assert _ana_calls(rpcs[a[2].get_id()], vol2.nqn) == [(1, "optimized")]
+
+    def test_an_error_counts_as_an_attempt(self, db, rpcs):
+        _, a, b, owner = _layout(db)
+        with patch.object(ops, "_lvs_owners_on", side_effect=RuntimeError("db gone")):
+            assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is True
+
+    def test_a_removed_node_attempts_nothing_and_reads_nothing(self, db, rpcs, caplog):
+        _, a, b, owner = _layout(db)
+        removed = _update(db, owner, status=StorageNode.STATUS_REMOVED)
+        with patch.object(ops, "_lvs_owners_on", wraps=ops._lvs_owners_on) as owners, \
+                caplog.at_level(logging.INFO, logger=ops.logger.name):
+            assert ops.trigger_ana_failover_for_node(removed) is False
+        owners.assert_not_called()
+        assert "ANA failover" not in caplog.text
+
+    def test_only_an_attempt_is_logged(self, db, rpcs, caplog):
+        _, a, b, owner = _layout(db, active_site=SITE_B)
+        with caplog.at_level(logging.INFO, logger=ops.logger.name):
+            assert ops.trigger_ana_failover_for_node(_fresh(db, owner)) is False
+        assert "ANA failover" not in caplog.text
+        with caplog.at_level(logging.INFO, logger=ops.logger.name):
+            assert ops.trigger_ana_failover_for_node(_fresh(db, b[0])) is True
+        assert f"ANA failover: node {b[0].get_id()}" in caplog.text
+
+    def test_the_monitor_retries_a_skipped_failover_and_then_stops(self, db, rpcs, monkeypatch):
+        monkeypatch.setattr(storage_node_monitor, "_ana_failover_applied", set())
+        cluster, a, b, owner = _layout(db)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
+        owner = _update(db, owner, status=StorageNode.STATUS_OFFLINE)
+        _update(db, a[1], status=StorageNode.STATUS_OFFLINE)
+        assert storage_node_monitor._ana_failover_once(owner) is False
+        assert owner.get_id() not in storage_node_monitor._ana_failover_applied
+        _update(db, a[1], status=StorageNode.STATUS_ONLINE)
+        assert storage_node_monitor._ana_failover_once(owner) is True
+        assert _ana_calls(rpcs[a[1].get_id()], vol.nqn) == [(1, "optimized")]
+        assert storage_node_monitor._ana_failover_once(owner) is False
+        assert _ana_calls(rpcs[a[1].get_id()], vol.nqn) == [(1, "optimized")]
+
+    # -- a primary shut down by a removal is down, like an OFFLINE one --
+
+    @pytest.mark.parametrize("status", StorageNode.REMOVAL_SHUT_DOWN_STATUSES)
+    def test_a_removal_shut_down_primary_keeps_its_secondary_optimized(self, db, rpcs, status):
+        cluster, a, b, owner = _layout(db, active_site=SITE_B)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
+        _update(db, b[0], status=status)
+        assert ops.lvol_ana_state(vol, _fresh(db, b[1]), "non_optimized") == "optimized"
+        ops.promote_active_secondary_ana(_fresh(db, b[1]))
+        assert _ana_calls(rpcs[b[1].get_id()], vol.nqn) == [(1, "optimized")]
+
+    @pytest.mark.parametrize("status", [StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_RESTARTING])
+    def test_a_primary_whose_spdk_runs_keeps_the_rule(self, db, rpcs, status):
+        cluster, a, b, owner = _layout(db, active_site=SITE_B)
+        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, active_site=SITE_B)
+        _update(db, b[0], status=status)
+        assert ops.lvol_ana_state(vol, _fresh(db, b[1]), "non_optimized") == "non_optimized"
         ops.promote_active_secondary_ana(_fresh(db, b[1]))
         assert _ana_calls(rpcs[b[1].get_id()], vol.nqn) == []
 

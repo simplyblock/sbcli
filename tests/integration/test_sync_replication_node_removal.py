@@ -11,7 +11,7 @@ import pytest
 
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import node_drain_steps
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import NodeTransitionInProgress, PreconditionError
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -124,3 +124,47 @@ class TestRemovalIsRefusedBeforeAnyChange:
             node_drain_steps.prepare_node_for_removal(owner.get_id())
         assert _fresh(db, owner).status == StorageNode.STATUS_ONLINE
         assert not rpcs[owner.get_id()].method_calls
+
+
+class TestDrainWaitsForASiteActivation:
+    """The Kubernetes drain steps wait for a running site activation, as the
+    removal task does: refused before any change, retryable."""
+
+    @pytest.fixture()
+    def activating(self, db):
+        cluster, a, b, owner = _layout(db)
+        cluster = db.get_cluster_by_id(cluster.get_id())
+        cluster.site_activation_site = stack.SITE_A
+        cluster.write_to_db(db.kv_store)
+        return cluster, b[1]
+
+    def test_the_admission_changes_nothing(self, db, rpcs, admissible, activating):
+        _, holder = activating
+        with patch.object(ops, "shutdown_storage_node") as shutdown, \
+                pytest.raises(NodeTransitionInProgress, match="being activated"):
+            node_drain_steps.prepare_node_for_removal(holder.get_id())
+        shutdown.assert_not_called()
+        assert _fresh(db, holder).status == StorageNode.STATUS_ONLINE
+
+    @pytest.mark.parametrize("step", ["prepare", "devices"])
+    def test_a_departing_node_rebuilds_nothing(self, db, rpcs, admissible, activating, step):
+        _, holder = activating
+        _update(db, holder, status=StorageNode.STATUS_PENDING_REMOVAL)
+        drive = (node_drain_steps.prepare_node_for_removal if step == "prepare"
+                 else node_drain_steps.start_device_decommission)
+        with patch.object(ops, "shutdown_storage_node") as shutdown, \
+                patch.object(node_drain_steps, "_spawn") as spawn, \
+                pytest.raises(NodeTransitionInProgress, match="being activated"):
+            drive(holder.get_id())
+        shutdown.assert_not_called()
+        spawn.assert_not_called()
+        assert _fresh(db, holder).status == StorageNode.STATUS_PENDING_REMOVAL
+
+    def test_without_an_activation_the_drain_starts(self, db, rpcs, admissible):
+        cluster, a, b, owner = _layout(db)
+        with patch.object(ops, "shutdown_storage_node", return_value=True) as shutdown, \
+                patch.object(node_drain_steps, "_spawn", return_value=True) as spawn:
+            assert node_drain_steps.prepare_node_for_removal(b[1].get_id())["started"] is True
+        shutdown.assert_called_once()
+        spawn.assert_called_once()
+        assert _fresh(db, b[1]).status == StorageNode.STATUS_MIGRATING_DEVICES

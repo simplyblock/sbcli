@@ -101,6 +101,17 @@ def _is_running(node_id: str, step: str) -> bool:
         return thread is not None and thread.is_alive()
 
 
+def _refuse_during_site_activation(node, db) -> None:
+    """A drain step waits for a running site activation of a sync-replication
+    cluster, as the removal task does (tasks_runner_node_removal); the
+    operator re-POSTs on the retryable refusal."""
+    from simplyblock_core.controllers import activation_gate
+
+    blocked_by = activation_gate.site_activation_blocks(db.get_cluster_by_id(node.cluster_id))
+    if blocked_by:
+        raise NodeTransitionInProgress(f"node {node.get_id()}: {blocked_by}")
+
+
 def start_device_decommission(node_id: str) -> bool:
     """Shut the node down, then rebuild its data devices onto its peers.
 
@@ -125,7 +136,8 @@ def start_device_decommission(node_id: str) -> bool:
     from simplyblock_core import storage_node_ops
     from simplyblock_core.models.storage_node import StorageNode
 
-    node = DBController().get_storage_node_by_id(node_id)
+    db = DBController()
+    node = db.get_storage_node_by_id(node_id)
     # A shutdown still running -- the operator's own ShuttingDown step started
     # it -- ends by writing OFFLINE. Stamping MIGRATING_DEVICES under it lost
     # the stamp to that write, and with it the one thing that sends the rebuild
@@ -140,6 +152,7 @@ def start_device_decommission(node_id: str) -> bool:
                        StorageNode.STATUS_REMOVED):
         logger.info(f"[DRAIN] {node_id}: already {node.status}; device rebuild not restarted")
         return False
+    _refuse_during_site_activation(node, db)
     # The same predicate remove_storage_node's phase 1 uses: shut down only a
     # node that is actually still running. A node already stopped -- by the
     # operator's own ShuttingDown step, or by an earlier pass of this one, or
@@ -269,7 +282,8 @@ def prepare_node_for_removal(node_id: str, force_remove: bool = False) -> dict:
        failure-domain balance, replica-relocation feasibility, active tasks),
        except "no snapshots on the node": the volumes and their snapshots are
        migrated after this. A refusal raises PreconditionError and changes
-       nothing.
+       nothing; a running site activation (sync replication) raises the
+       retryable NodeTransitionInProgress, also before any change.
     2. PENDING_REMOVAL is stamped. There is no way back from it: every later
        status only moves forward, and a failure leaves the node to be driven
        again, not resumed.
@@ -292,6 +306,7 @@ def prepare_node_for_removal(node_id: str, force_remove: bool = False) -> dict:
         raise PreconditionError(f"node {node_id} is already removed")
 
     if node.status not in StorageNode.DEPARTING_STATUSES:
+        _refuse_during_site_activation(node, db)
         ok, reason = storage_node_ops.check_removal_admission(
             node, db, force_remove=force_remove, check_snapshots=False)
         if not ok:

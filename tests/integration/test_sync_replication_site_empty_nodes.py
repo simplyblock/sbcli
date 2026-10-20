@@ -40,7 +40,7 @@ from simplyblock_core.services import (
     tasks_runner_migration,
     tasks_runner_sync_lvol_del,
 )
-from simplyblock_core.utils import port_block, ttl_cache
+from simplyblock_core.utils import ttl_cache
 from tests.integration import test_sync_replication_leaderless_health as healthy
 from tests.integration import test_sync_replication_lvol_publish as publish
 from tests.integration import test_sync_replication_lvs_stack as stack
@@ -342,7 +342,6 @@ def health_spdk(db):
                       side_effect=lambda self, *args, **kwargs: spdk[self.get_id()]), \
             patch.object(StorageNode, "client", autospec=True, return_value=api), \
             patch.object(utils, "ping_host", return_value=True), \
-            patch.object(port_block, "set_port", spdk.set_port), \
             patch.object(ops, "ensure_nvme_options", return_value=(True, {})):
         yield spdk
 

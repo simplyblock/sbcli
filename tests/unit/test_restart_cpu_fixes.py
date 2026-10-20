@@ -459,10 +459,10 @@ class TestBlockSpanAccounting:
         assert "_mark_leader_blocked()" in src_n
         assert "_mark_leader_unblocked()" in src_n
         assert "Longest client-port block" in src_n
-        # every block=True in the non-leader impl is stamped
+        # every fence in the non-leader impl is stamped
         # (+1: the def line itself contains the token)
         assert src_n.count("_mark_leader_blocked()") == src_n.count(
-            "block=True, timeout=3") + 1
+            ").nvmf_port_block(") + 1
 
     def test_coordinator_cap_raised(self):
         from simplyblock_core import constants

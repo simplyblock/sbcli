@@ -800,6 +800,25 @@ class TestTransfer:
         env.set_node_status.assert_not_called()
         assert _fresh(db, owner).lvstore_status == "ready"
 
+    def test_a_raw_error_releases_every_blocked_peer(self, db, rpcs, hub, env, adopt):
+        """An error that is not a fence abort leaves the window through the
+        transfer's cleanup, which releases every port the fence blocked."""
+        _, a, b, owner = _layout(db)
+        _update(db, owner, lvstore_status="ready")
+        leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
+        _transfer_ready(rpcs, leader)
+        _grant_takes(rpcs, taker)
+
+        def _fails():
+            raise RuntimeError("before the grant")
+
+        with pytest.raises(RuntimeError, match="before the grant"):
+            ops.transfer_lvs_leadership(leader, taker, [_fresh(db, n) for n in (*a, b[1], b[2])],
+                                        lvs_node=_fresh(db, owner), before_grant=_fails)
+        assert len(env.blocked()) >= 2
+        assert sorted(env.unblocked()) == sorted(env.blocked())
+        assert _fresh(db, owner).lvstore_status == "ready"
+
     def test_a_grant_that_does_not_take_aborts(self, db, rpcs, hub, env, adopt, no_sleep):
         _, a, b, owner = _layout(db)
         leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
@@ -1092,6 +1111,27 @@ class TestLeaderRebuild:
         assert events.index(("ana", "non_optimized")) < events.index(("block", b1))
         assert publish._ana_calls(rpcs[b1], vol.nqn) == [(1, "non_optimized")] * 2
         assert publish._ana_calls(rpcs[b2], vol.nqn) == [(1, "non_optimized")]
+
+    def test_a_failing_failback_does_not_abort_the_rebuild(self, db, rpcs, hub, env, adopt, attached):
+        """The failback of the returning remote primary's secondary is
+        housekeeping, like the home primary's: an error in it is logged and
+        the rebuild goes on to the grant."""
+        cluster, a, b, owner = publish._layout(db, active_site=SITE_B)
+        vol = publish._volume(db, cluster, owner, publish._pool(db, cluster), ns_id=1,
+                              active_site=SITE_B, demoted=[SITE_A])
+        b0 = b[0].get_id()
+        _grant_takes(rpcs, b[0])
+        publish._absent_until_created(rpcs[b0], vol.nqn)
+        publish._examines(rpcs[b0], vol)
+
+        with patch.object(ops, "_sync_flip_active_peer", side_effect=RuntimeError("peer gone")) as flip:
+            assert ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=_fresh(db, owner)) is True
+
+        assert [c.args[0].get_id() for c in flip.call_args_list] == [b0]
+        _examined_then_granted(rpcs, b[0])
+        assert _grants(rpcs, [*a, *b]) == [b0]
+        assert _fresh(db, owner).lvstore_status == "ready"
+        assert publish._ana_calls(rpcs[b0], vol.nqn) == [(1, "optimized")]
 
     def test_an_acting_leader_is_demoted_before_the_grant(
             self, db, rpcs, hub, env, adopt):
@@ -2164,6 +2204,27 @@ class TestReconcile:
         assert adopt.call_args.args[0].get_id() == b[0].get_id()
         assert env.blocked()[-1] == a[0].get_id()
         assert sorted(env.unblocked()) == sorted(env.blocked())
+
+    def test_the_unblock_guard_reads_the_flag_the_move_remembered(
+            self, db, rpcs, hub, env, adopt, monkeypatch):
+        """Every port the hand-off releases asks the two-node unblock guard;
+        it answers from the cluster the move read before the fence, never with
+        a database read inside the port-block window."""
+        _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
+        _transfer_ready(rpcs, a[0])
+        _demote_takes(rpcs, a[0])
+        monkeypatch.setattr(ops, "_ARBITRATION_FLAG", {})
+        real, cached = ops._cluster_two_node_arbitrated, []
+
+        def _guard_flag(cluster_id, cluster=None, db=None):
+            if cluster is None:
+                cached.append(cluster_id in ops._ARBITRATION_FLAG)
+            return real(cluster_id, cluster=cluster, db=db)
+
+        monkeypatch.setattr(ops, "_cluster_two_node_arbitrated", _guard_flag)
+        self._move(owner, SITE_B, b[0], leader=a[0])
+        assert len(env.unblocked()) >= 2
+        assert cached and all(cached), cached
 
     def test_an_old_leader_that_still_leads_fails_the_move(
             self, db, rpcs, hub, env, adopt):

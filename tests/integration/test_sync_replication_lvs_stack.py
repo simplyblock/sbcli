@@ -44,7 +44,23 @@ def db():
 
 class _Rpcs(dict):
     """One RPC mock per node id: nothing built yet, no leadership anywhere.
-    Spec'd on RPCClient, so a method the client lacks fails the test."""
+    Spec'd on RPCClient, so a method the client lacks fails the test.
+
+    ``fence``, when a test's environment sets it (``env``, ``links``), also
+    receives every port fence a node's client sends, as ``fence(node, port,
+    block=..., is_reject=...)`` with the node object the caller held; the RPC
+    mock still records the call."""
+
+    fence = None
+
+    def client(self, node):
+        rpc = self[node.get_id()]
+        fence = self.fence
+        if fence is not None:
+            rpc.nvmf_port_block.side_effect = (
+                lambda port, is_reject=False: fence(node, port, block=True, is_reject=is_reject))
+            rpc.nvmf_port_unblock.side_effect = lambda port: fence(node, port, block=False)
+        return rpc
 
     def __missing__(self, node_id):
         rpc = create_autospec(RPCClient, instance=True, name=f"rpc-{node_id}")
@@ -64,7 +80,7 @@ class _Rpcs(dict):
 def rpcs():
     rpcs = _Rpcs()
     with patch.object(StorageNode, "rpc_client", autospec=True,
-                      side_effect=lambda self, *args, **kwargs: rpcs[self.get_id()]):
+                      side_effect=lambda self, *args, **kwargs: rpcs.client(self)):
         yield rpcs
 
 
@@ -88,8 +104,14 @@ def adopt():
 class _Env:
     def __init__(self):
         self.down: set = set()
+        #: Every port fence, ``(node, port, block=..., is_reject=...)``.
         self.set_port = MagicMock(name="set_port")
         self.set_node_status = MagicMock(name="set_node_status")
+
+    def route_fences(self, request):
+        """Record the fences of the test's ``rpcs`` mocks in ``set_port``."""
+        if "rpcs" in request.fixturenames:
+            request.getfixturevalue("rpcs").fence = self.set_port
 
     def blocked(self):
         """Node ids port-blocked, in order."""
@@ -100,14 +122,14 @@ class _Env:
 
 
 @pytest.fixture()
-def env():
+def env(request):
     e = _Env()
+    e.route_fences(request)
     with patch.object(ops, "_connect_to_remote_devs", return_value=[]), \
             patch.object(ops, "_connect_to_remote_jm_devs", return_value=[]), \
             patch.object(ops.distr_controller, "send_cluster_map_to_distr", return_value=True), \
             patch.object(ops, "_check_peer_disconnected",
                          side_effect=lambda node, lvs_peer_ids=None, fresh=False: node.get_id() in e.down), \
-            patch.object(ops.port_block, "set_port", e.set_port), \
             patch.object(ops, "tcp_ports_events"), \
             patch.object(ops, "storage_events"), \
             patch.object(ops, "set_node_status", e.set_node_status), \
@@ -1150,7 +1172,6 @@ class TestRemovalReselection:
 def _activation_patches(stack):
     from simplyblock_core import cluster_ops
     stack.enter_context(patch.object(cluster_ops, "_wait_for_full_device_connectivity"))
-    stack.enter_context(patch.object(cluster_ops.port_block, "set_port"))
     stack.enter_context(patch.object(cluster_ops, "tcp_ports_events"))
     stack.enter_context(patch.object(cluster_ops.time, "sleep"))
     stack.enter_context(patch.object(cluster_ops.utils, "set_storage_mcp_max_unavailable"))
@@ -1196,6 +1217,27 @@ class TestActivationDispatch:
             for member_id in ops.remote_triplet_refs(owner):
                 assert (member_id, owner.get_id()) in built
             assert (owner.secondary_node_id, owner.get_id()) in built
+
+    def test_an_activation_remembers_the_arbitration_flag(self, db, rpcs, hub, env, monkeypatch):
+        """The activation records the cluster's two-node flag (off on a sync
+        cluster), so the port guards of its fences read no cluster."""
+        cluster = _seed_cluster(db, ftt=1)
+        a, b = _sites(db, cluster)
+        for i in range(3):
+            _make_owner(db, a[i], a[i:] + a[:i], b[i:] + b[:i], lvs_id=i + 1, ftt=1)
+            _make_owner(db, b[i], b[i:] + b[:i], a[i:] + a[:i], lvs_id=i + 4, ftt=1)
+        cluster = db.get_cluster_by_id(cluster.get_id())
+        cluster.status = Cluster.STATUS_SUSPENDED
+        cluster.activated_node_ids = [n.get_id() for n in a + b]
+        cluster.write_to_db(db.kv_store)
+        monkeypatch.setattr(ops, "_ARBITRATION_FLAG", {})
+
+        with ExitStack() as stack:
+            cluster_ops = _activation_patches(stack)
+            stack.enter_context(patch.object(ops, "recreate_lvstore", return_value=True))
+            cluster_ops._cluster_activate(cluster.get_id())
+
+        assert ops._ARBITRATION_FLAG[cluster.get_id()][0] is False
 
     def test_reactivation_rebuilds_every_remote_instance(
             self, db, rpcs, hub, env):

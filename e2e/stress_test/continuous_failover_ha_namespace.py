@@ -228,8 +228,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         node for node in self.sn_primary_secondary_map
                         if self.sn_primary_secondary_map[node] in self.current_outage_nodes
                     ]
-                    for node in self.current_outage_nodes:
-                        skip_nodes.append(node)
+                    skip_nodes += self.current_outage_nodes
 
                     host_id = [node for node in self.sn_nodes_with_sec if node not in skip_nodes]
                     parent_host_id_used = host_id[0]
@@ -596,7 +595,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                 self.lvols_without_sec_connect.remove(lvol_name)
 
             # Remove from node_vs_lvol if present (safe)
-            for _, lvols in self.node_vs_lvol.items():
+            for lvols in self.node_vs_lvol.values():
                 if lvol_name in lvols:
                     lvols.remove(lvol_name)
                     break

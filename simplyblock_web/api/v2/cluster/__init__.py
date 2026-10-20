@@ -11,6 +11,7 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core import cluster_ops
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import reject_on_sync_replication
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 
@@ -24,6 +25,7 @@ from .._dtos import (
 )
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .alert import api as alert_api
+from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
 from .replication import api as replication_api
@@ -176,12 +178,23 @@ def get(cluster: Cluster, watch: WatchParam = False) -> Union[ClusterDTO, EventS
 
 class UpdatableClusterParameters(BaseModel):
     name: str | None = None
+    #: Two-node arbitration (docs/design/two-node-arbitration.md); off by default.
+    two_node_arbitration: bool | None = None
 
 
 @instance_api.put('/', name='clusters:update')
 def update(cluster: Cluster, parameters: UpdatableClusterParameters):
+    # Two-node arbitration is a two-member data-plane mode; a sync-replication
+    # cluster runs six instances per LVS and has no HA state for the flag's
+    # port guards to read, so enabling it there would keep fenced ports blocked.
+    if parameters.two_node_arbitration:
+        with util.sync_http_errors():
+            reject_on_sync_replication(cluster, "Two-node arbitration")
     if parameters.name is not None:
         cluster_ops.set_name(cluster.get_id(), parameters.name)
+    if parameters.two_node_arbitration is not None:
+        flag = parameters.two_node_arbitration
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_arbitration", flag))
 
     return Response(status_code=204)
 
@@ -301,6 +314,7 @@ def rebalance_cluster( cluster: Cluster) -> Response:
 
 
 instance_api.include_router(alert_api, prefix='/alerts')
+instance_api.include_router(arbitration_api, prefix='/arbitration')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')

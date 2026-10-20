@@ -73,7 +73,7 @@ from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.settings import Settings
-from simplyblock_core.utils import port_block, pull_docker_image_with_retry
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -1439,6 +1439,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
     """
     from simplyblock_core.controllers import sync_replication_controller as src
     cluster = db_controller.get_cluster_by_id(cl_id)
+    storage_node_ops._remember_cluster_arbitration(cluster)
     site = site_activation.site if site_activation is not None else ""
 
     def _checkpoint() -> None:
@@ -2124,7 +2125,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 if not is_fresh_activation and leader_node.status == StorageNode.STATUS_ONLINE:
                     try:
                         leader_port = leader_node.get_lvol_subsys_port(primary_node.lvstore)
-                        port_block.set_port(leader_node, leader_port, block=True, timeout=3, retry=1)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_port)
                         tcp_ports_events.port_deny(leader_node, leader_port)
                         leader_blocked = True
                         time.sleep(0.5)
@@ -2147,7 +2148,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 finally:
                     if leader_blocked:
                         try:
-                            port_block.set_port(leader_node, leader_port, block=False, timeout=3, retry=1)
+                            leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_port)
                             tcp_ports_events.port_allowed(leader_node, leader_port)
                         except Exception as ue:
                             logger.error(

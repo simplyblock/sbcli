@@ -1711,7 +1711,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         def _node_pvc_counts():
             counts = {}
-            for pname, pinfo in self.pvc_details.items():
+            for pinfo in self.pvc_details.values():
                 nid = pinfo.get("node_id", "unknown")
                 counts.setdefault(nid, 0)
                 counts[nid] += 1
@@ -2908,11 +2908,11 @@ class K8sNativeFailoverTest(TestClusterBase):
             self._ensure_k8s_utils()
             # Collect all job names to wait for
             all_jobs = []
-            for pvc_name, pvc_info in self.pvc_details.items():
+            for pvc_info in self.pvc_details.values():
                 job_name = pvc_info.get("job_name")
                 if job_name:
                     all_jobs.append(job_name)
-            for clone_name, clone_info in self.clone_details.items():
+            for clone_info in self.clone_details.values():
                 job_name = clone_info.get("job_name")
                 if job_name:
                     all_jobs.append(job_name)
@@ -3318,11 +3318,11 @@ class K8sNativeFailoverTest(TestClusterBase):
         self._save_fio_mapping_summary()
 
         if self.use_client_fio:
-            for pvc_name, pvc_info in self.pvc_details.items():
+            for pvc_info in self.pvc_details.values():
                 self.common_utils.validate_fio_test(
                     pvc_info["client"], log_file=pvc_info["log_file"]
                 )
-            for clone_name, clone_info in self.clone_details.items():
+            for clone_info in self.clone_details.values():
                 self.common_utils.validate_fio_test(
                     clone_info["client"], log_file=clone_info["log_file"]
                 )
@@ -4990,7 +4990,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         # the last PVC on a node)
         def _node_pvc_counts():
             counts = {}
-            for pname, pinfo in self.pvc_details.items():
+            for pinfo in self.pvc_details.values():
                 nid = pinfo.get("node_id", "unknown")
                 counts.setdefault(nid, 0)
                 counts[nid] += 1

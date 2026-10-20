@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
+from tests._mocks import route_fences
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -156,8 +157,8 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             return [primary] if node_id == secondary.get_id() else []
         db.get_primary_storage_nodes_by_secondary_node_id.side_effect = _primary_for
 
-        # port_block.set_port: record block/allow calls. (Port blocking moved
-        # off the directly-imported FirewallClient onto port_block.set_port.)
+        # Fences (nvmf_port_block / nvmf_port_unblock on node.rpc_client):
+        # record block/allow calls per node.
         fw_calls = []
 
         def _fake_set_port(node, port, block, is_reject=False, timeout=5, retry=2):
@@ -202,7 +203,6 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
         patches = [
             patch.object(cluster_ops, "db_controller", db),
             patch.object(cluster_ops, "DBController", return_value=db),
-            patch("simplyblock_core.utils.port_block.set_port", _fake_set_port),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", _port_deny),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", _port_allowed),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task",
@@ -236,6 +236,7 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             n.create_secondary_hublvol = MagicMock(return_value=True)
             n.connect_to_hublvol = MagicMock(return_value=True)
             n.client = MagicMock()
+        route_fences((primary, secondary), _fake_set_port)
         # Primary's per-LVS port lookup — already populated in _node().
         # Make is_qos_set on the cluster return False so the QOS branch is skipped.
         cluster.is_qos_set = lambda: False
@@ -363,7 +364,7 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
     (Loop 1 device-unavailable + Loop 2 detach-remote-controllers).
 
     Here we just verify that `suspend_storage_node` is a noop
-    (returns True without invoking FirewallClient). The detailed
+    (returns True without fencing any port). The detailed
     coverage for the new shutdown flow lives in
     tests/test_shutdown_no_suspension.py.
     """
@@ -373,8 +374,10 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
 
         snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_ONLINE)
 
-        with patch.object(storage_node_ops, "port_block") as pb, \
-                patch.object(storage_node_ops, "set_node_status"), \
+        snode.rpc_client = MagicMock()
+        fence = MagicMock()
+        route_fences([snode], fence)
+        with patch.object(storage_node_ops, "set_node_status"), \
                 patch.object(storage_node_ops, "DBController") as _db:
             # The callee does DBController().get_storage_node_by_id(...), so the
             # node has to hang off the INSTANCE mock. Stubbing the class mock
@@ -384,20 +387,22 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
             _db.return_value.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.suspend_storage_node(snode.get_id()))
-            pb.set_port.assert_not_called()
+            fence.assert_not_called()
 
     def test_resume_is_noop_and_does_not_touch_firewall(self):
         from simplyblock_core import storage_node_ops
 
         snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_SUSPENDED)
 
-        with patch.object(storage_node_ops, "port_block") as pb, \
-                patch.object(storage_node_ops, "set_node_status"), \
+        snode.rpc_client = MagicMock()
+        fence = MagicMock()
+        route_fences([snode], fence)
+        with patch.object(storage_node_ops, "set_node_status"), \
                 patch.object(storage_node_ops, "DBController") as _db:
             _db.return_value.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.resume_storage_node(snode.get_id()))
-            pb.set_port.assert_not_called()
+            fence.assert_not_called()
 
 
 if __name__ == "__main__":

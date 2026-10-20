@@ -257,7 +257,7 @@ class RecreateUsesPresumedLeaderTest(unittest.TestCase):
         src = self._src()
         i_probe = src.index('lvs.get("lvs leadership")')
         i_fallback = src.index("_presumed_acting_leader(")
-        i_compression = src.index("jc_compression_get_status(lvs_jm_vuid)")
+        i_compression = src.index("_jc_compression_status_with_retry(current_leader, lvs_jm_vuid)")
         i_transfer = src.index("transfer_lvs_leadership(")
         self.assertLess(i_probe, i_fallback)
         self.assertLess(i_fallback, i_compression)

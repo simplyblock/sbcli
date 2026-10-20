@@ -88,7 +88,6 @@ class SPDKParams(BaseModel):
     cluster_ip: str | None = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: int | None = Field(None, ge=0)
-    firewall_port: int = Field(constants.FW_PORT_START)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)  # OpenShift-only (MCP); ignored here
 
@@ -169,7 +168,6 @@ def spdk_process_start(body: SPDKParams):
             f"PCI_ALLOWED={ssd_pcie_list}",
             f"TOTAL_HP={total_mem_mib}",
             f"NSOCKET={body.socket}",
-            f"FW_PORT={body.firewall_port}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )

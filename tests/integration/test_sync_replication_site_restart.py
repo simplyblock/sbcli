@@ -247,19 +247,19 @@ class TestRestartWithoutSyncReplication:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def links():
+def links(request):
     """stack.env with the real connectivity classification: the data-plane
     vote, its boundary, reports every node connected. ``_check_peer_disconnected``
     imports storage_node_monitor at call time, so the module patched here is
     pinned in ``sys.modules`` for the test - whatever another test left there."""
     e = stack._Env()
+    e.route_fences(request)
     e.votes = MagicMock(name="votes", side_effect=lambda node: (0, 3))
     with patch.dict(sys.modules, {monitor.__name__: monitor}), \
             patch.object(ops, "_connect_to_remote_devs", return_value=[]), \
             patch.object(ops, "_connect_to_remote_jm_devs", return_value=[]), \
             patch.object(ops.distr_controller, "send_cluster_map_to_distr", return_value=True), \
             patch.object(monitor, "_count_data_plane_votes_uncached", e.votes), \
-            patch.object(ops.port_block, "set_port", e.set_port), \
             patch.object(ops, "tcp_ports_events"), \
             patch.object(ops, "storage_events"), \
             patch.object(ops, "set_node_status", e.set_node_status), \
@@ -414,8 +414,11 @@ class TestAnaFlip:
         """a1, ONLINE without lvstores on the recorded site, holds no
         instance to flip: as if it were OFFLINE."""
         cluster, a, b = _layout(db, state)
-        _ANA_TRIGGERS[trigger](_fresh(db, a[0]))
+        ret = _ANA_TRIGGERS[trigger](_fresh(db, a[0]))
         flips.assert_not_called()
+        if trigger == "failover":
+            # skipped, not attempted: the monitor retries it
+            assert ret is False
 
     @pytest.mark.parametrize("trigger", list(_ANA_TRIGGERS))
     @pytest.mark.parametrize("case", ["no record", "draining", "serving site"])
@@ -428,8 +431,10 @@ class TestAnaFlip:
         else:
             node, expected = a[0], {(f"vol-{a[0].get_id()}", a[1].get_id()),
                                     (f"vol-{b[0].get_id()}", a[1].get_id())}
-        _ANA_TRIGGERS[trigger](_fresh(db, node))
+        ret = _ANA_TRIGGERS[trigger](_fresh(db, node))
         assert {(c.args[0], c.args[1].get_id()) for c in flips.call_args_list} == expected
+        if trigger == "failover":
+            assert ret is True
 
 
 class TestSyncStatus:

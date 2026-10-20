@@ -3186,7 +3186,7 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
         from simplyblock_core.models.job_schedule import JobSchedule
         from simplyblock_core.services import migration_task_common as mig
         from simplyblock_core.services import tasks_runner_failed_migration as runner
-        from simplyblock_core.services.task_runner_base import TaskRetry
+        from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 
         task = MagicMock(spec=JobSchedule)
         task.node_id, task.cluster_id, task.retry = "n1", "cl-1", 0
@@ -3205,12 +3205,15 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
         with patch.object(runner, "db", db), patch.object(mig, "db", db):
             try:
                 runner.task_runner(task)
-            except TaskRetry as e:
-                # The gate refuses by raising; the driver, not the handler, is
-                # what turns that into STATUS_SUSPENDED. Any other TaskRetry
-                # comes from the real device/RPC work past the gate, which this
+            except TaskDefer as e:
+                # The gate refuses by deferring (no retry consumed; the driver,
+                # not the handler, turns that into STATUS_SUSPENDED). Any other
+                # TaskDefer comes from the real work past the gate, which this
                 # test deliberately does not mock.
-                return "cluster is not active" not in str(e)
+                return "allows operations" not in str(e)
+            except TaskRetry:
+                # Real device/RPC work past the gate failing: the gate passed.
+                return True
             except Exception:
                 pass
         return True

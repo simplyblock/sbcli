@@ -18,7 +18,7 @@ for real behind the RPC mocks.
 import threading
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import fdb
 import pytest
@@ -167,7 +167,9 @@ class _Boundary:
         es.enter_context(patch.object(cluster_ops.time, "sleep"))
         es.enter_context(patch.object(cluster_ops, "tcp_ports_events"))
         if set_port:
-            self.set_port = es.enter_context(patch.object(cluster_ops.port_block, "set_port"))
+            # Every port fence of the test's ``rpcs`` mocks, (node, port, block=...).
+            self.set_port = MagicMock(name="set_port")
+            es.enter_context(patch.object(stack._Rpcs, "fence", self.set_port))
         es.enter_context(patch.object(cluster_ops.utils, "set_storage_mcp_max_unavailable"))
         self.jm_mesh = es.enter_context(patch.object(ops, "verify_jm_mesh_coverage", return_value=[]))
         self.create = es.enter_context(patch.object(ops, "create_lvstore", side_effect=self._create))

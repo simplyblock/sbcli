@@ -1490,7 +1490,8 @@ class RPCClient:
     def distr_migration_status(self, name):
         return self._request("distr_migration_status", name=name)
 
-    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
+                                      relaxed_mode=False):
         params = {
             "name": name,
             "storage_ID": storage_ID,
@@ -1501,9 +1502,12 @@ class RPCClient:
             params["job_size"] = job_size
         if jobs:
             params["jobs"] = jobs
+        if relaxed_mode:
+            params["relaxed_mode"] = True
         return self._request("distr_migration_failure_start", **params)
 
-    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
+                                        relaxed_mode=False):
         params = {
             "name": name,
         }
@@ -1513,6 +1517,8 @@ class RPCClient:
             params["job_size"] = job_size
         if jobs:
             params["jobs"] = jobs
+        if relaxed_mode:
+            params["relaxed_mode"] = True
         return self._request("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -1758,7 +1764,8 @@ class RPCClient:
         }
         return self._request('bdev_lvol_connect_hublvol', **params)
 
-    def jc_set_dual_node(self, enable):
+    def jc_set_dual_node(self, enable, *, hold_ms=None, lease_ttl_ms=None, arbitration=None,
+                         remote_jm_timeout_ms=None):
         """Tell the journal component whether this is a DUAL-NODE cluster.
 
         The JC aborts its whole SPDK application when the number of reachable
@@ -1770,8 +1777,69 @@ class RPCClient:
         a network outage nd=1 njms=2" / "JC aborts the node due to network
         outage" / core dump, every client path gone, XFS shut down).
         The fork implements the tolerance; nothing ever switched it on.
+
+        The two-node arbitration fields (docs/design/two-node-arbitration.md,
+        section 3.1) are optional and sent only when given, so a node without
+        the protocol still accepts the call. A call without them resets the
+        node to its defaults (arbitration off), so callers on an arbitrated
+        cluster pass ``arbitration.dual_node_params``. There is no preferred
+        node: the node's own ``preferred`` field defaults to false and is never
+        sent.
+
+        Raises ``RPCRemoteError`` when the node rejects the call, for example
+        because it was built without the arbitration fields.
         """
-        return self._request("jc_set_dual_node", enable=bool(enable))
+        params: dict = {"enable": bool(enable)}
+        if hold_ms is not None:
+            params["hold_ms"] = int(hold_ms)
+        if lease_ttl_ms is not None:
+            params["lease_ttl_ms"] = int(lease_ttl_ms)
+        if arbitration is not None:
+            params["arbitration"] = bool(arbitration)
+        if remote_jm_timeout_ms is not None:
+            # Campaign c2 (F5); older nodes reject it, see arbitration.set_dual_node.
+            params["remote_jm_timeout_ms"] = int(remote_jm_timeout_ms)
+        return self._request("jc_set_dual_node", **params)
+
+    # ---- two-node arbitration (docs/design/two-node-arbitration.md, section 3) ----
+    # These raise RPCRemoteError with code -errno.ESTALE / EBUSY / EAGAIN /
+    # ENOENT / EINVAL as the contract lists; callers decide what each means.
+
+    def jc_lease_renew(self, epoch, ttl_ms):
+        return self._request("jc_lease_renew", epoch=int(epoch), ttl_ms=int(ttl_ms))
+
+    def jc_grant_solo(self, epoch, lvs, ttl_ms):
+        return self._request("jc_grant_solo", epoch=int(epoch),
+                             lvs=[int(v) for v in lvs], ttl_ms=int(ttl_ms))
+
+    def jc_fence(self, epoch, lvs):
+        return self._request("jc_fence", epoch=int(epoch), lvs=[int(v) for v in lvs])
+
+    def jc_unfence(self, epoch, lvs):
+        return self._request("jc_unfence", epoch=int(epoch), lvs=[int(v) for v in lvs])
+
+    def jc_ha_status(self):
+        return self._request("jc_ha_status")
+
+    def jc_wait_events(self, instance, after_seq, timeout_ms=20000, max_events=256):
+        """Long-poll for HA events (contract section 3.7).
+
+        The node may hold the request for ``timeout_ms``, so the HTTP timeout
+        is set above it; the proxy derives its own SPDK wait from that.
+        """
+        return self._request(
+            "jc_wait_events", request_timeout=int(timeout_ms) / 1000.0 + 5,
+            instance=str(instance), after_seq=int(after_seq),
+            timeout_ms=int(timeout_ms), max=int(max_events))
+
+    def supports_two_node_arbitration(self):
+        """True when the node exposes every RPC the arbiter drives
+        (constants.TWO_NODE_ARBITRATION_RPCS). Any error means no."""
+        try:
+            methods = set(self.rpc_get_methods() or [])
+        except Exception:                           # noqa: BLE001 - probe only
+            return False
+        return all(m in methods for m in constants.TWO_NODE_ARBITRATION_RPCS)
 
     def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
         """One crash-consistent snapshot per consistency-group member.
@@ -1961,6 +2029,19 @@ class RPCClient:
         return self._request("jc_compression", jm_vuid=jm_vuid)
 
     def nvmf_port_block(self, port, is_reject=False):
+        """Fence ``port``: SPDK stops serving client connections on it.
+
+        Callers fencing a peer's client listener build this client with a
+        short budget, e.g. ``node.rpc_client(timeout=0.5, retry=1)``.
+        ``timeout`` is per HTTP attempt and the client retries ``retry``
+        times with backoff, so the wall clock is roughly (retry+1) x timeout
+        plus backoff. While the port is blocked the peer cannot answer
+        keep-alives, and the client KATO is 4s: a fence window longer than
+        that is an outage. On 2026-08-31 a failing block on a rebooting peer
+        with a (5s, 2) budget took 12s, left a healthy survivor fenced, and
+        the client lost its last path at 4.1s. A healthy peer answers in
+        ~11ms, so 0.5s is ~45x the observed latency.
+        """
         params = {"port": port}
         if is_reject:
             params["reject"] = is_reject
@@ -1969,8 +2050,18 @@ class RPCClient:
     def nvmf_port_unblock(self, port):
         return self._request("nvmf_port_unblock", port=port)
 
-    def nvmf_get_blocked_ports(self):
-        return self._request("nvmf_get_blocked_ports")
+    def nvmf_get_blocked_ports(self) -> set[int]:
+        """Ports currently fenced on this SPDK.
+
+        The RPC returns ``{"blocked_ports": [{"port": N, ...}, ...]}``. Test
+        membership against the projected set, never against the raw reply:
+        ``port in reply`` tested the dict's keys and read every fenced port as
+        open (2026-09-11, k8s rapid failover)."""
+        blocked = self._request("nvmf_get_blocked_ports")
+        if not blocked:
+            return set()
+        entries = blocked.get("blocked_ports", []) if isinstance(blocked, dict) else []
+        return {int(e.get("port", -1)) for e in entries}
 
     def bdev_raid_get_bdevs(self):
         return self._request("bdev_raid_get_bdevs", category="online")

@@ -863,7 +863,7 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
 
             # 6. Clean up tracking
             self.lvol_mount_details.pop(lvol_name, None)
-            for _, lvols in self.node_vs_lvol.items():
+            for lvols in self.node_vs_lvol.values():
                 if lvol_name in lvols:
                     lvols.remove(lvol_name)
                     break
@@ -1567,7 +1567,7 @@ class BulkLvolHotDeleteDocker(_BulkHotDeleteMixin, BulkLvolDeleteDocker):
 
             # Clean up tracking
             self.lvol_mount_details.pop(lvol_name, None)
-            for _, lvols in self.node_vs_lvol.items():
+            for lvols in self.node_vs_lvol.values():
                 if lvol_name in lvols:
                     lvols.remove(lvol_name)
                     break

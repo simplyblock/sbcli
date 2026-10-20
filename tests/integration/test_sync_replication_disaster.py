@@ -415,8 +415,7 @@ class TestSiteSteps:
         for node in lost.b:
             _answers(spdk[node.get_id()].get_lvstore, {"name": "LVS_1", "lvs leadership": False})
         result = lost.promote("v1a")
-        with patch.object(ops.port_block, "set_port"):
-            assert lost.run(result.task_id)
+        assert lost.run(result.task_id)
         task = lost.task(result.task_id)
         assert task.status == JobSchedule.STATUS_DONE and task.function_result.startswith("promoted"), \
             task.function_result
