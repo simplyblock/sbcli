@@ -154,7 +154,12 @@ def restore_group_backup(cluster: Cluster, group_backup: GroupBackupResource,
         target_node_id=parameters.target_node_id,
         s3_credentials=parameters.s3_credentials)
     if error:
-        raise HTTPException(422, error)
+        # 409, not 422: FastAPI reserves 422 for its own request-validation
+        # error, whose body is a LIST of field errors, and every generated
+        # client types it so. A string detail under 422 is undecodable to the
+        # operator ("cannot unmarshal string into ... HTTPValidationError.detail",
+        # live 2026-10-20), which hid the refusal behind a parse error.
+        raise HTTPException(409, error)
     return {"group_id": group_id, "members": members}
 
 

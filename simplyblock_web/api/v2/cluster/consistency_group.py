@@ -289,7 +289,9 @@ def create_group_backup(cluster: Cluster, group: ConsistencyGroupResource,
     group_backup_id, err = group_backup_controller.create_group_backup(
         group.get_id(), group_seq=body.group_seq)
     if err is not None:
-        raise HTTPException(422, err)
+        # 409, not 422: see group_backup.restore_group_backup -- a string
+        # detail under 422 cannot be decoded by the generated clients.
+        raise HTTPException(409, err)
     return GroupBackupDTO.from_model(db.get_group_backup_by_id(group_backup_id))
 
 

@@ -115,13 +115,15 @@ class TestRestoreGroupBackup:
         assert args[1] == 'restored-cg'
         assert args[2] == 'pool-1'
 
-    def test_a_restore_error_is_422(self, client, db, group_backup, group_backup_controller):
+    def test_a_restore_error_is_409(self, client, db, group_backup, group_backup_controller):
         group_backup_controller.restore_group_backup.return_value = (
             None, None, 'consistency group restored-cg already exists')
         response = client.post(
             f'{BASE}/{GROUP_BACKUP_ID}/restore',
             json={'into_group_name': 'restored-cg', 'pool': 'pool-1'})
-        assert response.status_code == 422
+        # 409, never 422: a string detail under 422 is undecodable to the
+        # generated clients, which type 422 as FastAPI's field-error list.
+        assert response.status_code == 409
         assert 'already exists' in response.json()['detail']
 
 
@@ -166,12 +168,12 @@ class TestCreateGroupBackupUnderGroup:
         _, kwargs = group_backup_controller.create_group_backup.call_args
         assert kwargs['group_seq'] == 3
 
-    def test_a_create_error_is_422(self, client, db, cluster, group_backup_controller):
+    def test_a_create_error_is_409(self, client, db, cluster, group_backup_controller):
         self._group(db)
         group_backup_controller.create_group_backup.return_value = (
             None, 'consistency group has no member snapshots at generation 3')
         response = client.post(f'{CG_BASE}/backups', json={'group_seq': 3})
-        assert response.status_code == 422
+        assert response.status_code == 409
         assert 'no member snapshots' in response.json()['detail']
 
 
