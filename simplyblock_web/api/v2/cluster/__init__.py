@@ -11,7 +11,6 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core import cluster_ops
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.exceptions import reject_on_sync_replication
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 
@@ -184,17 +183,17 @@ class UpdatableClusterParameters(BaseModel):
 
 @instance_api.put('/', name='clusters:update')
 def update(cluster: Cluster, parameters: UpdatableClusterParameters):
-    # Two-node arbitration is a two-member data-plane mode; a sync-replication
-    # cluster runs six instances per LVS and has no HA state for the flag's
-    # port guards to read, so enabling it there would keep fenced ports blocked.
-    if parameters.two_node_arbitration:
+    flag = parameters.two_node_arbitration
+    # The flag is validated before the rename, so a refused request changes
+    # nothing.
+    if flag is not None:
         with util.sync_http_errors():
-            reject_on_sync_replication(cluster, "Two-node arbitration")
+            cluster_ops.check_two_node_arbitration(cluster, flag)
     if parameters.name is not None:
         cluster_ops.set_name(cluster.get_id(), parameters.name)
-    if parameters.two_node_arbitration is not None:
-        flag = parameters.two_node_arbitration
-        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_arbitration", flag))
+    if flag is not None:
+        with util.sync_http_errors():
+            cluster_ops.set_two_node_arbitration(cluster.get_id(), flag)
 
     return Response(status_code=204)
 

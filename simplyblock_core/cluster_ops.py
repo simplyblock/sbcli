@@ -48,6 +48,7 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     RemoteTripletPlacementError,
 )
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import reject_on_sync_replication
 from simplyblock_core.models import indices
 from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
@@ -871,6 +872,33 @@ def set_name(cl_id, name) -> Cluster:
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_name_change(cluster, name, old_name)
     return cluster
+
+
+def check_two_node_arbitration(cluster, enabled) -> None:
+    """Raise SyncReplicationUnsupportedError when ``enabled`` would switch
+    two-node arbitration on for a sync-replication cluster.
+
+    Arbitration is a two-member data-plane mode; a sync-replication cluster
+    runs six instances per LVS and has no HA state for the flag's port guards
+    to read, so the flag would keep fenced ports blocked. Switching it off is
+    always allowed.
+    """
+    if enabled:
+        reject_on_sync_replication(cluster, "Two-node arbitration")
+
+
+def set_two_node_arbitration(cl_id, enabled: bool) -> None:
+    """Switch two-node arbitration (docs/design/two-node-arbitration.md) on
+    or off; refused on a sync-replication cluster (check_two_node_arbitration),
+    judged on the record the transaction writes."""
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    check_two_node_arbitration(cluster, enabled)
+
+    def mutate(fresh):
+        check_two_node_arbitration(fresh, enabled)
+        fresh.two_node_arbitration = enabled
+
+    db_controller.atomic_update(cluster, mutate)
 
 
 def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10, checkpoint=None):
@@ -4250,6 +4278,9 @@ def set_(cl_id, attr, value) -> bool:
     else:
         value = cluster.get_attrs_map()[attr]['type'](value)
         logger.info(f"Setting {attr} to {value}")
+        if attr == "two_node_arbitration":
+            set_two_node_arbitration(cl_id, value)
+            return True
         setattr(cluster, attr, value)
         cluster.write_to_db()
     return True
