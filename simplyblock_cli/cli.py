@@ -1230,6 +1230,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'List all backups.')
         subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('--all', help='Also show merged backups, hidden by default.', dest='all', action='store_true')
 
     def init_backup__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete all backups for a logical volume.')
