@@ -225,7 +225,7 @@ class TestBuildManifest:
 
     def test_survives_a_deleted_volume(self, db, cluster, lvol):
         """A backup outlives its volume; that must not stop the manifest."""
-        backup = _backup(db, 1)
+        backup = _backup(db, 1, max_namespace_per_subsys=10)
         lvol.remove(db.kv_store)
 
         manifest = backup_controller.build_manifest(backup)
@@ -234,6 +234,16 @@ class TestBuildManifest:
         assert manifest.volume.pool_name is None     # only on the volume
         # Absent, not 0 -- which for a QoS cap would read as "unlimited".
         assert manifest.volume.rw_ios_per_sec is None
+        # The subsystem sharing is carried on the backup, so it outlives the
+        # volume too: it is what a restore reapplies.
+        assert manifest.volume.max_namespace_per_subsys == 10
+
+    def test_records_the_subsystem_sharing_off_the_backup(self, db, cluster, lvol):
+        assert backup_controller.build_manifest(
+            _backup(db, 1, max_namespace_per_subsys=10)).volume.max_namespace_per_subsys == 10
+        # A record from before the field: absent, not 0.
+        assert backup_controller.build_manifest(
+            _backup(db, 2, max_namespace_per_subsys=0)).volume.max_namespace_per_subsys is None
 
     def test_records_source_as_provenance(self, db, cluster, lvol):
         manifest = backup_controller.build_manifest(_backup(db, 1))
@@ -300,6 +310,18 @@ class TestExportImportRoundTrip:
         assert restored.cluster_id == OTHER_CLUSTER_ID
         assert restored.get_location().bucket_name == BUCKET
         assert restored.encrypted is True
+
+    def test_import_keeps_the_subsystem_sharing(self, db, cluster, lvol):
+        """A restore on the importing cluster recreates the source's sharing."""
+        _backup(db, 1, max_namespace_per_subsys=10)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
+        for backup in db.get_backups():
+            backup.remove(db.kv_store)
+
+        backup_controller.import_backups(
+            _export(exported, _config().location()), cluster_id=OTHER_CLUSTER_ID)
+
+        assert db.get_backup_by_id(_backup_id(1)).max_namespace_per_subsys == 10
 
     def test_encrypted_flag_survives(self, db, cluster, lvol):
         """It used to be dropped, restoring a plaintext volume over ciphertext."""

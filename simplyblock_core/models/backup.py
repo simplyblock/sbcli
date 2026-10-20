@@ -77,6 +77,16 @@ class Backup(BaseModel):
     group_backup_id: str = ""
     group_seq: int = 0
 
+    #: How the source volume shared its NVMe subsystem: the namespace cap of the
+    #: subsystem it was created with (``LVol.max_namespace_per_subsys``; 1 is a
+    #: subsystem of its own, more is a namespaced volume that shares one). A
+    #: restore recreates the volume with the same cap, so a group restored from
+    #: members that shared a subsystem shares one again instead of landing each
+    #: member in its own (observed 2026-10-20: three restored members, three
+    #: subsystems, every one at NSID 1). 0 is a record that predates the field;
+    #: restore then falls back to add_lvol_ha's default, a subsystem of its own.
+    max_namespace_per_subsys: int = 0
+
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
 

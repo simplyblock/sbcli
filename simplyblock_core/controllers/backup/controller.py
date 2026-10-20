@@ -168,6 +168,7 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         "snapshot_id": backup.snapshot_id,
         "snapshot_name": backup.snapshot_name,
         "size": backup.size,
+        "max_namespace_per_subsys": backup.max_namespace_per_subsys or None,
         **settings,
     })
 
@@ -483,6 +484,8 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
     backup.created_at = int(time.time())
     backup.status = Backup.STATUS_PENDING
     backup.encrypted = bool(lvol.crypto_bdev)
+    # The subsystem sharing the restore reapplies (Backup.max_namespace_per_subsys).
+    backup.max_namespace_per_subsys = int(getattr(lvol, "max_namespace_per_subsys", 0) or 1)
 
     if backup.encrypted:
         cluster = db_controller.get_cluster_by_id(cluster_id)
@@ -800,7 +803,8 @@ def backup_snapshot(snapshot_id, cluster_id=None):
 
 def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
                    target_node_id: str | None = None,
-                   s3_credentials: S3Credentials | None = None):
+                   s3_credentials: S3Credentials | None = None,
+                   consistency_group: str | None = None):
     """Restore a backup chain into a new fully-accessible lvol.
 
     Creates the volume (with subsystem, listeners, namespace) via
@@ -808,7 +812,18 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     fill in the data from S3.  The volume is in STATUS_RESTORING
     until the data transfer completes.
 
+    The volume is created with the subsystem sharing its source had
+    (``Backup.max_namespace_per_subsys``): a member of a shared subsystem comes
+    back namespaced under the same cap, a volume that owned its subsystem comes
+    back owning one. A record from before the field was kept takes
+    add_lvol_ha's default.
+
     Args:
+        consistency_group: Name of the consistency group the restored volume
+            joins AT CREATION, which is what lets a namespaced member take the
+            group's own subsystem (cg_colocation) rather than any subsystem of
+            the pool with a free slot. A group restore passes the group it is
+            forming; a single-volume restore leaves it unset.
         s3_credentials: Credentials for the backup's bucket, when that is not
             the cluster's own. Omit to use the nodes' instance role.
         target_node_id: Optional node to restore onto. If not provided, a node
@@ -861,6 +876,9 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     # cannot run.
     s3_config = foreign_bucket_config(backup, cluster, s3_credentials)
 
+    # 0 is a record that predates the field: leave both unset, and add_lvol_ha
+    # gives the volume a subsystem of its own as it always did.
+    ns_cap = backup.max_namespace_per_subsys or 0
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
@@ -878,6 +896,9 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
         distr_vuid=0,
         lvol_priority_class=0,
         fabric="tcp",
+        namespaced=ns_cap > 1,
+        max_namespace_per_subsys=ns_cap if ns_cap > 0 else None,
+        consistency_group=consistency_group,
     )
     if error or not lvol_id:
         raise RuntimeError(f"Failed to create restore volume: {error}")
@@ -1147,6 +1168,7 @@ def import_backups(export: backup_manifest.BackupExport, cluster_id=None) -> int
         backup.node_id = str(manifest.source.node_id)
         backup.prev_backup_id = str(manifest.prev_backup_id) if manifest.prev_backup_id else ""
         backup.size = manifest.size
+        backup.max_namespace_per_subsys = manifest.volume.max_namespace_per_subsys or 0
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED

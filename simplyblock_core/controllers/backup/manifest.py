@@ -120,6 +120,12 @@ class ManifestVolume(BaseModel):
     ha_type: Literal["single", "ha"] | None = None
 
     fabric: Literal["tcp", "rdma", "tcp,rdma"] | None = None
+    #: The namespace cap of the subsystem the volume was created with: 1 is a
+    #: subsystem of its own, more is a namespaced volume sharing one. Unlike the
+    #: settings below it comes off the backup record, so it survives the volume
+    #: and a restore -- including an imported one -- recreates the same sharing.
+    #: Absent for a backup recorded before the field existed.
+    max_namespace_per_subsys: int | None = None
     lvol_priority_class: int | None = None
     max_size: int | None = None
     rw_ios_per_sec: int | None = None

@@ -716,6 +716,10 @@ class BackupDTO(BaseModel):
     #: legible as a unit.
     group_backup_id: str | None = None
     group_seq: int = 0
+    #: The namespace cap of the subsystem the source volume shared (1: its own
+    #: subsystem); a restore recreates the same sharing. 0 for a record from
+    #: before the field was kept.
+    max_namespace_per_subsys: int = 0
 
     @staticmethod
     def from_model(model: Backup):
@@ -735,6 +739,7 @@ class BackupDTO(BaseModel):
             encrypted=model.encrypted,
             group_backup_id=model.group_backup_id or None,
             group_seq=model.group_seq,
+            max_namespace_per_subsys=model.max_namespace_per_subsys,
         )
 
 

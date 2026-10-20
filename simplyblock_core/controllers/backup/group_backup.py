@@ -427,7 +427,12 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
 
     # Create the member volumes, pinned to one store so they can form a group.
     # The first restore may auto-select a node; the rest are pinned to it, which
-    # add_member_to_group then enforces (design §3.5).
+    # add_member_to_group then enforces (design §3.5). Each member is created
+    # INTO the new group (add_lvol_ha's consistency_group): that is what lets a
+    # member whose source shared a subsystem take the group's own subsystem
+    # (cg_colocation), so the restored group is laid out as its source was --
+    # one shared subsystem, members at NSIDs 1..N -- rather than one subsystem
+    # per member (observed 2026-10-20).
     pin_node = target_node_id
     created_ids: list = []
     members_out: list = []
@@ -436,7 +441,8 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
         try:
             lvol_id = backup_controller.restore_backup(
                 backup.uuid, lvol_name, pool_id_or_name,
-                target_node_id=pin_node, s3_credentials=s3_credentials)
+                target_node_id=pin_node, s3_credentials=s3_credentials,
+                consistency_group=into_group_name)
         except (PreconditionError, RuntimeError, ValueError) as e:
             _unwind_restored(created_ids)
             return None, None, (
@@ -456,7 +462,10 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     group = cg.ensure_group(cluster_id, into_group_name)
     for lvol_id in created_ids:
         try:
-            group = cg.add_member_to_group(group, db.get_lvol_by_id(lvol_id))
+            lvol = db.get_lvol_by_id(lvol_id)
+            if getattr(lvol, "group_id", "") == group.get_id():
+                continue    # joined at creation; re-adding would open a fresh epoch
+            group = cg.add_member_to_group(group, lvol)
         except (cg.ConsistencyGroupError, KeyError) as e:
             _unwind_restored(created_ids)
             db.get_consistency_group_by_id(group.get_id()).remove(db.kv_store)
