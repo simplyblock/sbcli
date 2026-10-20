@@ -30,15 +30,16 @@ def _rep():
 
 
 class _FakeDB:
-    def __init__(self, reps, nodes):
+    def __init__(self, reps, nodes, lvol=None):
         self._reps = reps
         self._nodes = nodes
+        self._lvol = lvol
         # No policy or target unless a test installs one.
         self.policies: dict = {}
         self.targets: dict = {}
 
     def get_lvol_by_id(self, lid):
-        return _failed_over_lvol()
+        return self._lvol if self._lvol is not None else _failed_over_lvol()
 
     def get_lvol_replication_objects(self):
         return self._reps
@@ -172,13 +173,12 @@ def test_own_cluster_as_source_on_a_demoted_primary_replicates_to_the_policy_tar
     must replicate to its policy's target as the plain path always did; refusing
     it stalled every relocate (run 20261019-1541-ebs, tests 1 and 3)."""
     nodes = {"N_tgt": _node("N_tgt", "CL_tgt")}
-    db = _FakeDB([], nodes)
+    lv = _failed_over_lvol()
+    lv.replication_policy_id = "P1"
+    db = _FakeDB([], nodes, lvol=lv)
     db.policies = {"P1": type("P", (), {"target_id": "T1"})()}
     db.targets = {"T1": type("T", (), {"target_cluster_id": "CL_peer"})()}
     monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
-    lv = _failed_over_lvol()
-    lv.replication_policy_id = "P1"
-    db.get_lvol_by_id = lambda lid: lv
 
     assert lvol_controller.replication_failback("LV_TGT", source_cluster_id="CL_tgt") is True
 
