@@ -12,7 +12,13 @@ werkzeug>=3.1.9
 kubernetes==35.0.0
 oauthlib>=4.0.0
 PyYAML
-urllib3>=2.6.0,<2.7.0
+# botocore pins urllib3<1.27 on python<3.10 in every release (it has never
+# shipped a version compatible with urllib3>=2.6 there); boto3/botocore are
+# unpinned below, so without this split pip backtracks through the entire
+# botocore release history hunting for a urllib3>=2.6 match on py3.9 that
+# does not exist, downloading ~1000 botocore wheels before giving up.
+urllib3>=2.6.0,<2.7.0; python_version >= "3.10"
+urllib3<1.27,>=1.25.4; python_version < "3.10"
 graypy==2.1.0
 boto3
 jinja2
