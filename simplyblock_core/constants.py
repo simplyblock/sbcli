@@ -910,9 +910,10 @@ qos_class_meta_and_migration_weight_percent = 25
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
-# Sync-replication resync (tasks_runner_sync_resync): a failed catch-up run is
-# re-run after BASE * 2^(runs-1) seconds, capped at MAX, and one alert is raised
-# once ALERT_RUNS runs in a row have not converged.
+# Sync-replication resync (tasks_runner_sync_resync): the shared task driver
+# re-runs a failed catch-up after BASE * 2^(runs-1) seconds, capped at MAX (its
+# backoff, held in memory: a restarted runner re-runs at once once the lagging
+# zone is up), and one alert is raised once ALERT_RUNS runs have not converged.
 SYNC_RESYNC_RETRY_BASE_SEC = 30
 SYNC_RESYNC_RETRY_MAX_SEC = 600
 SYNC_RESYNC_ALERT_RUNS = 5

@@ -197,22 +197,6 @@ class TestTaskRunnerDispatcher(unittest.TestCase):
         legacy_main.assert_called_once_with()
         serve.assert_not_called()
 
-    def test_the_sync_replication_runners_are_started_through_their_own_main(self):
-        """The resync runner's terminal step commits DONE with the LVS state in
-        one transaction in its own loop, so it is no spec on the driver yet."""
-        for name in ("tasks-runner-sync-resync",):
-            with self.subTest(runner=name):
-                self.assertIsNone(task_runners.load_spec(name))
-                runner = importlib.import_module(
-                    f"simplyblock_core.services.{name.replace('-', '_')}")
-                with mock.patch.object(runner, "main") as own_main, \
-                        mock.patch.object(task_runners, "serve") as serve, \
-                        mock.patch.object(sys, "argv", ["simplyblock-task-runner", name]):
-                    task_runners.main()
-
-                own_main.assert_called_once_with()
-                serve.assert_not_called()
-
     def test_an_unknown_runner_is_rejected(self):
         with mock.patch.object(sys, "argv", ["simplyblock-task-runner", "tasks-runner-nope"]), \
                 mock.patch.object(sys, "stderr", io.StringIO()):

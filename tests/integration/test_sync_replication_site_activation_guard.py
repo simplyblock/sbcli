@@ -428,17 +428,16 @@ class TestResync:
         from B) waits for the activation to end, nothing started."""
         cluster, a, b = _activating(db, "cleared")
         task = self._resync(db, cluster, b)
-        assert tasks_runner_sync_resync.task_runner(task) is False
-        fresh = db.get_task_by_id(task.uuid)
+        fresh = drive(tasks_runner_sync_resync.SPEC, task)
         assert (fresh.status, fresh.function_result, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, HELD, 0)
         _no_rpc(rpcs)
 
     def test_the_resync_waits_on_the_record_first(self, db):
         cluster, a, b = _activating(db, "record")
         task = self._resync(db, cluster, b)
-        assert tasks_runner_sync_resync.task_runner(task) is False
-        assert db.get_task_by_id(task.uuid).function_result == (
-            f"site {SITE_A} is lost, waiting for its return")
+        fresh = drive(tasks_runner_sync_resync.SPEC, task)
+        assert (fresh.status, fresh.function_result, fresh.retry) == (
+            JobSchedule.STATUS_SUSPENDED, f"site {SITE_A} is lost, waiting for its return", 0)
 
     def test_the_resync_goes_on_after_the_flag(self, db):
         """The flag ended: the runner goes on to its next check (here the
@@ -447,8 +446,9 @@ class TestResync:
         task = self._resync(db, cluster, b)
         src.clear_site_activation(cluster.get_id())
         _update(db, b[1], lvs_active_site=ops.lvs_moving_value(SITE_A))
-        assert tasks_runner_sync_resync.task_runner(task) is False
-        assert "is moving" in db.get_task_by_id(task.uuid).function_result
+        fresh = drive(tasks_runner_sync_resync.SPEC, task)
+        assert (fresh.status, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, 0)
+        assert "is moving" in fresh.function_result
 
 
 # ---------------------------------------------------------------------------

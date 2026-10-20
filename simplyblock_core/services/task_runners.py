@@ -35,18 +35,13 @@ _PACKAGE = "simplyblock_core.services"
 _MODULE_PREFIX = "tasks_runner_"
 
 # Runners that still drive their own poll loop instead of exporting a spec, and
-# are therefore started through their module's ``main()``.
+# are therefore started through their module's ``main()``. Both are under active
+# upstream rewrite; they join the rest when they migrate onto the driver.
 # Explicit rather than "no SPEC attribute means legacy", so a migrated runner
 # that fails to export its spec is an error instead of a silent fallback.
 _NOT_ON_DRIVER = frozenset({
-    # Under active upstream rewrite; they join the rest when they migrate onto
-    # the driver.
     "tasks-runner-batch-migration",
     "tasks-runner-lvol-migration",
-    # Sync-replication resync: its terminal step commits DONE together with
-    # the LVS state key in one transaction (db.finish_sync_resync), which its
-    # own loop still does rather than a spec's ``finish`` hook.
-    "tasks-runner-sync-resync",
 })
 
 

@@ -1,12 +1,13 @@
 """Pure rules of the sync-replication resync runner: how a
-``distr_migration_status`` element of a catch-up is judged and how long a
-non-converging run backs off. The runner's flow (waits, start, poll, finish,
+``distr_migration_status`` element of a catch-up is judged, how long a
+non-converging run backs off and how its driver spec is wired. The runner's flow (waits, start, poll, finish,
 re-runs, alert) runs against the real database in
 tests/integration/test_tasks_runner_sync_resync.py.
 """
 import pytest
 
 from simplyblock_core import constants
+from simplyblock_core.services import task_runner_base as trb
 from simplyblock_core.services import tasks_runner_sync_resync as runner
 
 
@@ -36,3 +37,19 @@ def test_retry_delay_doubles_from_the_base_up_to_the_cap():
     assert runner.retry_delay(0) == base
     assert runner.retry_delay(50) == cap
     assert all(runner.retry_delay(n) <= runner.retry_delay(n + 1) for n in range(1, 20))
+
+
+def test_the_spec_closes_a_catch_up_in_its_terminal_commit_and_backs_off_by_retry_delay():
+    assert runner.SPEC.name == "tasks-runner-sync-resync"
+    assert runner.SPEC.finish is runner.finish_task
+    assert runner.SPEC.backoff is runner.retry_delay
+    assert runner.SPEC.on_finish is None
+
+
+@pytest.mark.parametrize("runs", range(1, 7))
+def test_the_driver_backs_off_a_non_converging_run_by_retry_delay(runs):
+    driver = trb.TaskRunner(runner.SPEC)
+    try:
+        assert driver._backoff_delay(runs) == runner.retry_delay(runs)
+    finally:
+        driver._executor.shutdown(wait=True)

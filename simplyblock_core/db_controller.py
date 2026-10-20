@@ -863,6 +863,7 @@ class DBController(metaclass=Singleton):
         state["zone_synced_seq"] = max(state["zone_synced_seq"], seq_limit)
         newer = state["last_zone_seq"] > seq_limit
         task.function_params.pop("resync", None)
+        task.function_params.pop("converged", None)
         if newer:
             task.status = JobSchedule.STATUS_SUSPENDED
             task.function_result = "a newer zone desync arrived during the catch-up, re-running"

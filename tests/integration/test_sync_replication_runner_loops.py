@@ -1,16 +1,14 @@
-"""The poll loops of the two sync-replication task runners against the real
-FoundationDB - the promote's on the shared driver, the resync's its own: a
-failing read of the cluster list ends the loop with that error instead of
-being logged and retried - the process exits and the orchestrator restarts it
-with a fresh FDB client. And the promote's settle of its ``moving:`` markers
-when the driver ends a task it never ran.
+"""The poll loops of the two sync-replication task runners, both on the shared
+driver, against the real FoundationDB: a failing read of the cluster list ends
+the loop with that error instead of being logged and retried - the process
+exits and the orchestrator restarts it with a fresh FDB client. And the
+promote's settle of its ``moving:`` markers when the driver ends a task it
+never ran.
 
 The failing read is a Cluster record whose value does not decode: the real
 ``get_clusters`` range read raises on it.
 """
 import json
-import time
-import types
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -27,10 +25,6 @@ from simplyblock_core.services import (
 )
 from tests.integration import task_driver
 from tests.integration import test_sync_replication_lvs_stack as stack
-
-
-class _StopLoop(BaseException):
-    """Raised by the loop's sleep: the pass got to the end."""
 
 
 @pytest.fixture()
@@ -52,11 +46,8 @@ def test_a_cluster_read_error_ends_the_promote_loop(corrupt_cluster):
 
 
 def test_a_cluster_read_error_ends_the_resync_loop(corrupt_cluster):
-    runner = tasks_runner_sync_resync
-    clock = types.SimpleNamespace(sleep=MagicMock(side_effect=_StopLoop), time=time.time)
-    with patch.object(runner, "time", clock), pytest.raises(json.JSONDecodeError):
-        runner.main()
-    clock.sleep.assert_not_called()
+    with pytest.raises(json.JSONDecodeError):
+        task_driver.one_cycle(tasks_runner_sync_resync.SPEC)
 
 
 # ---------------------------------------------------------------------------

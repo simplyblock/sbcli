@@ -693,8 +693,11 @@ def _live_lvs_statuses(db: DBController, cluster) -> list[LvsSyncStatus]:
     answers = {n.get_id(): _query_node(n) for n in nodes
                if n.get_id() in wanted and n.status == StorageNode.STATUS_ONLINE
                and not storage_node_ops.member_absent_on_recorded_site(cluster, n)}
+    # Started and not ended: the driver turns every task it dispatches RUNNING
+    # for the length of a pass, a waiting one included.
     running = {t.function_params.get("lvs_name") for t in db.get_active_sync_resync_tasks(cluster_id)
-               if t.status == JobSchedule.STATUS_RUNNING and not t.canceled}
+               if t.status == JobSchedule.STATUS_RUNNING and not t.canceled
+               and t.function_params.get("resync")}
     now = datetime.now(UTC)
     statuses = []
     for owner, layout in zip(owners, layouts):

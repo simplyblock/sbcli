@@ -712,7 +712,7 @@ def test_sync_promote_backs_off_flat(retry):
 MIGRATED_RUNNERS = [
     "fdb_backup", "jc_comp", "replication_final", "sync_lvol_del", "backup",
     "cluster_expand", "node_add", "restart", "migration", "new_dev_migration",
-    "failed_migration", "node_removal", "port_allow", "sync_promote",
+    "failed_migration", "node_removal", "port_allow", "sync_promote", "sync_resync",
 ]
 
 

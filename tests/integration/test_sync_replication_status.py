@@ -102,6 +102,22 @@ def _lvol(owner, site=""):
     return lvol
 
 
+def _catch_up_task(db, layout, status, *, started, canceled=False):
+    """LVS_1's resync task in ``status``; ``started`` records a catch-up the
+    runner started (``resync``), as it does before polling it."""
+    task_id = tasks_controller.add_sync_resync_task(
+        layout.cluster.get_id(), layout.owner1.get_id(), "LVS_1")
+
+    def apply(t):
+        t.status = status
+        t.canceled = canceled
+        if started:
+            t.function_params["resync"] = {"leader_id": layout.a[0].get_id(), "started_at": 0,
+                                           "distribs": ["distrib_11", "distrib_12"]}
+
+    db.atomic_update(db.get_task_by_id(task_id), apply)
+
+
 def _gate_problems(fn, *args):
     with pytest.raises(SyncGateError) as exc:
         fn(*args)
@@ -155,19 +171,23 @@ class TestStatus:
         assert status.state == src.STATE_RESYNCING and status.resyncing and not status.degraded
         assert not status.peer_ready
 
-    @pytest.mark.parametrize("task_status, state", [
-        (JobSchedule.STATUS_RUNNING, src.STATE_RESYNCING),
-        (JobSchedule.STATUS_SUSPENDED, src.STATE_DEGRADED),   # waits for the zone: nothing catches up
-    ])
-    def test_a_running_catch_up_task_is_resyncing(self, db, rpcs, task_status, state):
+    @pytest.mark.parametrize("task_status, started, canceled, state", [
+        (JobSchedule.STATUS_RUNNING, True, False, src.STATE_RESYNCING),
+        # waits for the zone: nothing catches up
+        (JobSchedule.STATUS_SUSPENDED, False, False, src.STATE_DEGRADED),
+        # a waiting task mid-pass: the driver runs every pass RUNNING
+        (JobSchedule.STATUS_RUNNING, False, False, src.STATE_DEGRADED),
+        # a started catch-up waiting (lost site, leadership moving, ...)
+        (JobSchedule.STATUS_SUSPENDED, True, False, src.STATE_DEGRADED),
+        (JobSchedule.STATUS_RUNNING, True, True, src.STATE_DEGRADED),
+    ], ids=["running", "waiting", "waiting-mid-pass", "started-waiting", "canceled"])
+    def test_a_running_catch_up_task_is_resyncing(self, db, rpcs, task_status, started, canceled,
+                                                  state):
         layout = _Layout(db, rpcs)
         # idle LVS during the catch-up: no HA leader, the non-leaders report unsynced
         layout.leaders["LVS_1"] = ""
         layout.set(layout.a[1], "distrib_12", status="replica_unsynced")
-        task_id = tasks_controller.add_sync_resync_task(
-            layout.cluster.get_id(), layout.owner1.get_id(), "LVS_1")
-        task = db.get_task_by_id(task_id)
-        db.atomic_update(task, lambda t: setattr(t, "status", task_status))
+        _catch_up_task(db, layout, task_status, started=started, canceled=canceled)
         status = src.cluster_sync_status(layout.cluster.get_id())
         assert layout.lvs(status, "LVS_1").state == state
         assert status.state == state
@@ -266,11 +286,13 @@ class TestGates:
     def test_a_running_catch_up_fails_the_planned_gate(self, db, rpcs):
         layout = _Layout(db, rpcs)
         cluster_id = layout.cluster.get_id()
-        task_id = tasks_controller.add_sync_resync_task(
-            cluster_id, layout.owner1.get_id(), "LVS_1")
-        task = db.get_task_by_id(task_id)
-        db.atomic_update(task, lambda t: setattr(t, "status", JobSchedule.STATUS_RUNNING))
+        _catch_up_task(db, layout, JobSchedule.STATUS_RUNNING, started=True)
         assert _gate_problems(src.check_gate, cluster_id) == ["LVS LVS_1: catch-up task running"]
+
+    def test_a_waiting_catch_up_task_mid_pass_passes_the_planned_gate(self, db, rpcs):
+        layout = _Layout(db, rpcs)
+        _catch_up_task(db, layout, JobSchedule.STATUS_RUNNING, started=False)
+        src.check_gate(layout.cluster.get_id())
 
     def test_a_journal_drop_fails_only_the_disaster_gate(self, db, rpcs):
         layout = _Layout(db, rpcs)

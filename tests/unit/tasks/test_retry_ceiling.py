@@ -279,6 +279,7 @@ _DRIVER_MIGRATED = {
     "tasks_runner_node_removal.py",
     "tasks_runner_port_allow.py",
     "tasks_runner_sync_promote.py",
+    "tasks_runner_sync_resync.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
@@ -287,9 +288,6 @@ _DRIVER_MIGRATED = {
 # the reason, surfaced in the skip message.
 INTENTIONALLY_UNBOUNDED = {
     "tasks_runner_lvol_migration.py": "created with max_retry=-1; retry gated on resource recovery",
-    "tasks_runner_sync_resync.py": ("created with max_retry=-1; a non-converging catch-up re-runs with "
-                                    "backoff once the lagging zone is up, alerting after "
-                                    "SYNC_RESYNC_ALERT_RUNS runs"),
 }
 
 _INCREMENTS_RETRY = re.compile(r"\.retry\s*\+=\s*1")
