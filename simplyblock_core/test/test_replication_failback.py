@@ -33,6 +33,9 @@ class _FakeDB:
     def __init__(self, reps, nodes):
         self._reps = reps
         self._nodes = nodes
+        # No policy or target unless a test installs one.
+        self.policies: dict = {}
+        self.targets: dict = {}
 
     def get_lvol_by_id(self, lid):
         return _failed_over_lvol()
@@ -44,6 +47,19 @@ class _FakeDB:
         if nid not in self._nodes:
             raise KeyError(nid)
         return self._nodes[nid]
+
+    def get_consistency_group_by_id(self, gid):
+        raise KeyError(gid)
+
+    def get_replication_policy_by_id(self, pid):
+        if pid not in self.policies:
+            raise KeyError(pid)
+        return self.policies[pid]
+
+    def get_replication_target_by_id(self, tid):
+        if tid not in self.targets:
+            raise KeyError(tid)
+        return self.targets[tid]
 
 
 @pytest.fixture
@@ -148,7 +164,29 @@ def test_own_cluster_as_source_recovers_to_the_relationships_source(monkeypatch,
     assert "N_src_orig" in patched["node_writes"], "delta fail-back to the original node"
 
 
-def test_own_cluster_as_source_without_a_relationship_is_refused(monkeypatch, patched):
+def test_own_cluster_as_source_on_a_demoted_primary_replicates_to_the_policy_target(
+        monkeypatch, patched):
+    """A plain relocate: Ramen demotes this site and resyncs it before promoting
+    the peer. The member is the demoted primary -- never a fail-over target, so
+    no relationship -- and the data is still here. Handed its own cluster, it
+    must replicate to its policy's target as the plain path always did; refusing
+    it stalled every relocate (run 20261019-1541-ebs, tests 1 and 3)."""
+    nodes = {"N_tgt": _node("N_tgt", "CL_tgt")}
+    db = _FakeDB([], nodes)
+    db.policies = {"P1": type("P", (), {"target_id": "T1"})()}
+    db.targets = {"T1": type("T", (), {"target_cluster_id": "CL_peer"})()}
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+    lv = _failed_over_lvol()
+    lv.replication_policy_id = "P1"
+    db.get_lvol_by_id = lambda lid: lv
+
+    assert lvol_controller.replication_failback("LV_TGT", source_cluster_id="CL_tgt") is True
+
+    assert patched["cluster"] == "CL_peer", "the policy's target, never its own cluster"
+    assert patched["mode"] == "migration"
+
+
+def test_own_cluster_as_source_without_relationship_or_policy_is_refused(monkeypatch, patched):
     nodes = {"N_tgt": _node("N_tgt", "CL_tgt")}
     db = _FakeDB([], nodes)
     monkeypatch.setattr(lvol_controller, "DBController", lambda: db)

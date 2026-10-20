@@ -4544,6 +4544,28 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     return True
 
 
+def _policy_target_cluster(db_controller, lvol):
+    """The cluster *lvol*'s replication policy ships to -- the volume's own
+    policy, else its consistency group's -- or "" when none resolves."""
+    policy_ids = [getattr(lvol, "replication_policy_id", "")]
+    if getattr(lvol, "group_id", ""):
+        try:
+            policy_ids.append(db_controller.get_consistency_group_by_id(lvol.group_id).policy_id)
+        except KeyError:
+            pass
+    for policy_id in policy_ids:
+        if not policy_id:
+            continue
+        try:
+            policy = db_controller.get_replication_policy_by_id(policy_id)
+            target = db_controller.get_replication_target_by_id(policy.target_id)
+        except KeyError:
+            continue
+        if getattr(target, "target_cluster_id", ""):
+            return target.target_cluster_id
+    return ""
+
+
 def _own_cluster_id(db_controller, lvol):
     """The cluster *lvol* lives on, via its node; "" when the node is unknown."""
     try:
@@ -6108,19 +6130,30 @@ def replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None):
     # own cluster can never be that: taken at face value it configured
     # replication to itself (#34: the CSI driver's group resync passed the
     # class's sourceClusterID through, and on the resyncing site that names the
-    # peer -- the cluster the live clone sits on). The only sane reading is a
-    # recovery to the relationship's source, so take that branch; without a
-    # relationship there is nothing to fail back to.
+    # peer -- the cluster the live clone sits on). Read it for what the volume
+    # is: a failed-over clone (the target of a relationship) recovers to that
+    # relationship's source; a demoted primary with no such relationship -- a
+    # plain relocate's resync, where the data is still here and the peer is
+    # about to be promoted -- replicates to its policy's target, as the plain
+    # path always has. Refusing the latter stalled every relocate (run
+    # 20261019-1541-ebs). Only a volume with neither is refused.
     if source_cluster_id and source_cluster_id == _own_cluster_id(db_controller, lvol):
-        if rep is None:
-            logger.error("Fail-back of %s refused: source_cluster_id %s is the volume's own "
-                         "cluster and it has no fail-over relationship to recover to",
-                         lvol_id, source_cluster_id)
-            return False, "source_cluster_id names the volume's own cluster"
-        logger.warning("Fail-back of %s names its own cluster %s as the cluster to recover "
-                       "to; recovering to the relationship's source cluster %s instead",
-                       lvol_id, source_cluster_id, rep.source_cluster_id)
-        source_cluster_id = None
+        if rep is not None:
+            logger.warning("Fail-back of %s names its own cluster %s as the cluster to recover "
+                           "to; recovering to the relationship's source cluster %s instead",
+                           lvol_id, source_cluster_id, rep.source_cluster_id)
+            source_cluster_id = None
+        else:
+            peer_cluster_id = _policy_target_cluster(db_controller, lvol)
+            if not peer_cluster_id or peer_cluster_id == source_cluster_id:
+                logger.error("Fail-back of %s refused: source_cluster_id %s is the volume's "
+                             "own cluster, it has no fail-over relationship to recover to "
+                             "and no policy target to replicate to", lvol_id, source_cluster_id)
+                return False, "source_cluster_id names the volume's own cluster"
+            logger.warning("Fail-back of %s names its own cluster %s as the cluster to recover "
+                           "to; it is a demoted primary, replicating to its policy's target "
+                           "cluster %s instead", lvol_id, source_cluster_id, peer_cluster_id)
+            source_cluster_id = peer_cluster_id
 
     if rep is not None and (not source_cluster_id or source_cluster_id == rep.source_cluster_id):
         orig_node_id = rep.source_lvol.node_id
