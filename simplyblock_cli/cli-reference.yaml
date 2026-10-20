@@ -3337,7 +3337,7 @@ commands:
             dest: secret_access_key
             type: secret
       - name: delete
-        help: "Delete a consistency-group backup: its group manifest and record. Member backups follow per-volume retention."
+        help: "Delete a consistency-group backup: its group manifest and record. Its member backups are retired: merged into the copy of the next generation while that chains against them, deleted once nothing does."
         arguments:
           - name: "group_backup_id"
             help: "Group backup id (or uuid)."

@@ -1340,7 +1340,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--secret-access-key', help='Secret key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='secret_access_key')
 
     def init_group_backup__delete(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'delete', 'Delete a consistency-group backup: its group manifest and record. Member backups follow per-volume retention.')
+        subcommand = self.add_sub_command(subparser, 'delete', 'Delete a consistency-group backup: its group manifest and record. Its member backups are retired: merged into the copy of the next generation while that chains against them, deleted once nothing does.')
         subcommand.add_argument('group_backup_id', help='Group backup id (or uuid).', type=str)
 
     def init_group_backup__export(self, subparser):

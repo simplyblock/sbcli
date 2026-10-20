@@ -499,13 +499,22 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
 
 
 def delete_group_backup(group_backup_id):
-    """Delete a group backup: its group manifest and its record (design §9).
+    """Delete a group backup: its group manifest and its record, then retire
+    its member backups (design §9).
 
-    The member backups are left to per-volume retention, as the design says: a
-    group backup is the unit of the group manifest, not of the member objects,
-    which a later generation may still chain against. Best-effort on the manifest
-    -- a bucket that cannot be reached does not block removing the record, which
-    would otherwise strand the group backup as permanently un-deletable.
+    A group backup is the unit of the group manifest, not of the member objects,
+    which a later generation may still chain against: a member backup that is
+    the predecessor of the next generation's copy is MERGED into it (the chain
+    stays restorable and the base's objects fold into the survivor), and one
+    that nothing chains against is deleted. Without this, every pruned
+    generation left its member copies in the bucket and in ``backup list`` for
+    good: with a `5m,2` schedule the oldest generation's three full copies
+    outlived their group backup while the chain grew under them (live
+    2026-10-20). Best-effort on the manifest -- a bucket that cannot be reached
+    does not block removing the record, which would otherwise strand the group
+    backup as permanently un-deletable; and retirement is retried by the group
+    schedule each cycle (:func:`retire_orphaned_member_backups`), so a merge
+    that cannot start now is not lost.
 
     Returns ``(True, None)`` or ``(False, error_message)``.
     """
@@ -526,7 +535,73 @@ def delete_group_backup(group_backup_id):
         logger.warning("Group backup %s: could not delete group manifest: %s",
                        group_backup.uuid, e)
     group_backup.remove(db.kv_store)
+    retire_orphaned_member_backups(
+        [m["lvol_id"] for m in (group_backup.members or []) if m.get("lvol_id")], db=db)
     return True, None
+
+
+def retire_orphaned_member_backups(lvol_ids, db=None):
+    """Retire the member backups of group backups that no longer exist (design
+    §9): for each of *lvol_ids*, every completed backup whose ``group_backup_id``
+    names a GroupBackup that is gone (pruned, or deleted by hand).
+
+    * A backup the next generation chains against (a successor names it as
+      ``prev_backup_id``) is MERGED into that successor, the same
+      ``policy._trigger_merge`` the single-volume schedule runs: the chain
+      stays restorable and the base's objects fold into the survivor. One
+      merge per volume chain, and none while one is already in flight there,
+      as the single-volume schedule keeps it; the next cycle takes the rest.
+    * A backup nothing chains against is deleted outright.
+
+    Called by :func:`delete_group_backup` for the generation just deleted and by
+    the group schedule every cycle, so a retirement that could not run (a
+    successor still uploading, a merge in flight) is picked up later, and so
+    member copies orphaned before this existed are swept too.
+
+    Returns ``(merges_started, deleted)``.
+    """
+    from simplyblock_core import db_controller
+    from simplyblock_core.controllers.backup import controller as backup_controller
+    from simplyblock_core.controllers.backup import policy as backup_policy
+
+    if db is None:
+        db = db_controller.DBController()
+    merges = deleted = 0
+    for lvol_id in lvol_ids:
+        chain = db.get_backups_by_lvol_id(lvol_id)
+        if any(b.status == Backup.STATUS_MERGING for b in chain):
+            continue
+        orphans = []
+        for b in chain:
+            if b.status != Backup.STATUS_COMPLETED or not b.group_backup_id:
+                continue
+            try:
+                db.get_group_backup_by_id(b.group_backup_id)
+            except KeyError:
+                orphans.append(b)
+        by_prev = {b.prev_backup_id: b for b in chain if b.prev_backup_id}
+        # Oldest first: the base of the chain is the one whose merge unblocks
+        # the next, and a leaf is only a leaf once nothing is below it.
+        for old in sorted(orphans, key=lambda b: (b.created_at, b.uuid)):
+            successor = by_prev.get(old.uuid)
+            if successor is None:
+                ok, err = backup_controller.delete_backup(old.uuid)
+                if ok:
+                    deleted += 1
+                    logger.info("Retired orphaned member backup %s of volume %s: "
+                                "nothing chains against it, deleted", old.uuid[:8], lvol_id[:8])
+                else:
+                    logger.warning("Orphaned member backup %s of volume %s not deleted: %s",
+                                   old.uuid[:8], lvol_id[:8], err)
+                continue
+            if successor.status != Backup.STATUS_COMPLETED:
+                break           # let it finish; the next cycle merges
+            backup_policy._trigger_merge(successor, old)
+            merges += 1
+            logger.info("Retiring orphaned member backup %s of volume %s: merging into "
+                        "its successor %s", old.uuid[:8], lvol_id[:8], successor.uuid[:8])
+            break               # one merge per chain per cycle
+    return merges, deleted
 
 
 def export_group_backup(group_backup_id, cluster_id=None):

@@ -993,6 +993,46 @@ def delete_backups(lvol_id):
     return True, None
 
 
+def delete_backup(backup_id):
+    """Delete ONE backup: its record, its KMS keys and, best effort, its S3
+    objects -- the single-record form of :func:`delete_backups`, for a backup
+    that nothing chains against any more (a pruned group generation's leaf
+    copy, design-consistency-group-backup.md §9).
+
+    Refused while another backup names this one as its predecessor: deleting
+    the base of an incremental chain would make every descendant unrestorable.
+    Such a base is merged into its successor first (``policy._trigger_merge``),
+    after which it is MERGED, not deleted, and its objects are the survivor's.
+
+    Returns (success, error_message).
+    """
+    try:
+        backup = db_controller.get_backup_by_id(backup_id)
+    except KeyError as e:
+        return False, str(e)
+    dependents = [b.uuid for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
+                  if b.prev_backup_id == backup.uuid]
+    if dependents:
+        return False, (f"backup {backup.uuid} is the predecessor of "
+                       f"{', '.join(d[:8] for d in dependents)}; merge it into its "
+                       "successor instead of deleting it")
+
+    _cleanup_backup_kms_keys([backup])
+    if backup.status == Backup.STATUS_COMPLETED:
+        try:
+            snode = db_controller.get_storage_node_by_id(backup.node_id)
+        except KeyError:
+            snode = None
+        if snode is not None and snode.status == StorageNode.STATUS_ONLINE:
+            try:
+                snode.rpc_client().bdev_lvol_s3_delete([backup.s3_id])
+            except Exception as e:                           # noqa: BLE001 - best effort, as delete_backups
+                logger.error(f"Error deleting S3 objects of backup {backup.uuid}: {e}")
+    backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
+    backup.remove(db_controller.kv_store)
+    return True, None
+
+
 def list_backups(cluster_id=None):
     """List all backups, optionally filtered by cluster."""
     backups = db_controller.get_backups(cluster_id)

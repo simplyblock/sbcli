@@ -355,6 +355,13 @@ def evaluate_group_schedule(group):
     in_flight = [g for g in group_backups
                  if g.status in (GroupBackup.STATUS_PENDING, GroupBackup.STATUS_IN_PROGRESS)]
 
+    # Member copies of pruned generations: merge each into the next generation's
+    # copy, or delete a leaf (design §9). Every cycle, so a retirement that could
+    # not run when its generation was pruned is picked up, and so copies orphaned
+    # before retirement existed are swept.
+    group_backup.retire_orphaned_member_backups(
+        [lid for lid, m in (group.members or {}).items() if m.get("removed_seq", 0) == 0])
+
     # One group backup at a time: do not start another while one is still
     # committing, the same gate the single-volume schedule keeps.
     if not in_flight:
