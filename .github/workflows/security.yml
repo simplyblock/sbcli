@@ -95,6 +95,7 @@ jobs:
       # Grype uses Red Hat's Security Data API — much more current than Trivy's OVAL source.
       - name: Run Grype on branch image (gating)
         id: grype-branch
+        continue-on-error: true
         uses: anchore/scan-action@v6
         with:
           image: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}
@@ -105,7 +106,7 @@ jobs:
 
       - name: Run Grype on released image (informational)
         id: grype-release
-        if: always() && matrix.branch != 'main'
+        if: matrix.branch != 'main'
         uses: anchore/scan-action@v6
         with:
           image: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.release_tag }}
@@ -115,6 +116,8 @@ jobs:
           output-format: json
 
       - name: Run Trivy on branch image (gating)
+        id: trivy-branch
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}
@@ -126,7 +129,7 @@ jobs:
           scanners: vuln,secret
 
       - name: Run Trivy on released image (informational)
-        if: always() && matrix.branch != 'main'
+        if: matrix.branch != 'main'
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.release_tag }}
@@ -142,7 +145,7 @@ jobs:
       # upstream and just hasn't shipped yet, so it's reported, not failed.
       - name: Compute pending-release CVEs
         id: diff
-        if: always() && matrix.branch != 'main'
+        if: matrix.branch != 'main'
         run: |
           sev_filter='select(.vulnerability.severity | ascii_downcase | IN("medium","high","critical")) | .vulnerability.id'
 
@@ -178,6 +181,14 @@ jobs:
           path: sbom.cdx.json
           retention-days: 90
 
+      # grype-branch and trivy-branch are continue-on-error so a real finding
+      # doesn't skip the informational/diff/SBOM steps below them -- this is
+      # what actually fails the job on their behalf, once everything else has
+      # had a chance to run.
+      - name: Fail if a gating scan found vulnerabilities
+        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
+        run: exit 1
+
       - name: Notify Slack on scan failure
         if: failure()
         uses: slackapi/slack-github-action@v2
@@ -200,7 +211,7 @@ jobs:
             }
 
       - name: Notify Slack on pending-release CVEs
-        if: always() && steps.diff.outputs.has_pending == 'true'
+        if: steps.diff.outputs.has_pending == 'true'
         uses: slackapi/slack-github-action@v2
         with:
           webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
