@@ -91,11 +91,19 @@ def test_no_group_or_no_seq_is_silent():
 # --------------------------------------------------------------------------- #
 
 class _FakeDB:
-    def __init__(self, group):
+    def __init__(self, group, lvols=()):
         self._group = group
+        # The volume records that still exist; a member id not here is a
+        # dangling entry whose volume is gone.
+        self._lvols = set(lvols)
 
     def get_consistency_group_for_policy(self, policy_id):
         return self._group
+
+    def get_lvol_by_id(self, lvol_id):
+        if lvol_id not in self._lvols:
+            raise KeyError(lvol_id)
+        return _Lvol(lvol_id, "NODE_A", "LVS_1")
 
     @property
     def kv_store(self):
@@ -192,10 +200,36 @@ def test_delete_group_refuses_while_it_has_a_current_member(monkeypatch):
     g = _group({"v1": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
     removed = []
     g.remove = lambda kv=None: removed.append(g)
-    monkeypatch.setattr(cgc, "db", _FakeDB(g))
+    monkeypatch.setattr(cgc, "db", _FakeDB(g, lvols=("v1",)))
     with pytest.raises(cgc.ConsistencyGroupError, match="still has 1 member"):
         cgc.delete_group(g)
     assert removed == [], "a group with a live member must NOT be deleted"
+
+
+def test_delete_group_drops_a_dangling_member_whose_volume_is_gone(monkeypatch):
+    """A member joined through add_member_to_group alone carries no group_id, so
+    deleting its volume never closed its epoch: the entry outlived the volume
+    and held the group "in use" for good (live 2026-10-20, three restored
+    members long deleted). An open entry without a volume record is dangling,
+    not live, and does not block the delete."""
+    g = _group({"gone": {"joined_seq": 1, "removed_seq": 0},
+                "closed": {"joined_seq": 1, "removed_seq": 3}}, last_seq=4)
+    removed = []
+    g.remove = lambda kv=None: removed.append(g)
+    monkeypatch.setattr(cgc, "db", _FakeDB(g))          # no volume record exists
+    cgc.delete_group(g)
+    assert removed == [g]
+
+
+def test_delete_group_still_refuses_when_one_open_member_is_live(monkeypatch):
+    g = _group({"gone": {"joined_seq": 1, "removed_seq": 0},
+                "live": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
+    removed = []
+    g.remove = lambda kv=None: removed.append(g)
+    monkeypatch.setattr(cgc, "db", _FakeDB(g, lvols=("live",)))
+    with pytest.raises(cgc.ConsistencyGroupError, match="still has 1 member"):
+        cgc.delete_group(g)
+    assert removed == []
 
 
 def test_delete_group_removes_an_empty_group(monkeypatch):

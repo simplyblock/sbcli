@@ -168,7 +168,14 @@ def test_refuses_when_the_target_group_name_is_in_use(db):
     produces a NEW group, never one that is serving volumes."""
     gb = _seed_group(db, [_member("b-db", "db")])
     taken = cg.ensure_group(CLUSTER, "taken")
-    taken.members = {_uuid("live-member"): {"joined_seq": 1, "removed_seq": 0}}
+    # A LIVE member: its volume record exists. An open entry whose volume is
+    # gone is dangling and would not hold the name (see delete_group).
+    live = LVol()
+    live.uuid = _uuid("live-member")
+    live.lvol_name = "live"
+    live.group_id = taken.get_id()
+    live.write_to_db(db.kv_store)
+    taken.members = {live.uuid: {"joined_seq": 1, "removed_seq": 0}}
     taken.write_to_db(db.kv_store)
     group_id, lvol_ids, err = group_backup.restore_group_backup(
         gb.get_id(), "taken", "pool-1")

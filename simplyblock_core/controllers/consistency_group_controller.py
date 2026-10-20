@@ -93,14 +93,34 @@ def delete_group(group):
     fail-back could resolve no members.
 
     Raises ConsistencyGroupError when the group still has an open member.
+
+    An open member whose volume record no longer exists is dangling, not live:
+    a volume that joined through :func:`add_member_to_group` alone carried no
+    ``group_id``, so its deletion could not close its epoch, and the entry
+    outlived the volume (restored members, live 2026-10-20: "still has 3
+    member(s)" for three volumes long gone). Dangling entries do not hold the
+    group; they are dropped with it.
     """
     open_members = [lid for lid, m in (group.members or {}).items()
                     if m.get("removed_seq", 0) == 0]
-    if open_members:
+    live, dangling = [], []
+    for lid in open_members:
+        try:
+            db.get_lvol_by_id(lid)
+        except KeyError:
+            dangling.append(lid)
+        else:
+            live.append(lid)
+    if live:
         raise ConsistencyGroupError(
             f"consistency group {group.group_name or group.uuid[:8]} still has "
-            f"{len(open_members)} member(s); detach or hand them off before "
+            f"{len(live)} member(s); detach or hand them off before "
             f"deleting it")
+    if dangling:
+        logger.warning("Consistency group %s (%s): %d open member(s) have no volume "
+                       "record any more (%s); dropping them with the group",
+                       group.uuid[:8], group.group_name or "-", len(dangling),
+                       ", ".join(d[:8] for d in dangling))
     group.remove(db.kv_store)
     logger.info("Deleted consistency group %s (%s)", group.uuid[:8],
                 group.group_name or "-")

@@ -482,6 +482,11 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
             if getattr(lvol, "group_id", "") == group.get_id():
                 continue    # joined at creation; re-adding would open a fresh epoch
             group = cg.add_member_to_group(group, lvol)
+            # Stamp the volume too: add_member_to_group writes only the group,
+            # and a member without group_id cannot be detached when it is
+            # deleted, so its entry outlives it and holds the group "in use".
+            lvol.group_id = group.get_id()
+            lvol.write_to_db(db.kv_store)
         except (cg.ConsistencyGroupError, KeyError) as e:
             _unwind_restored(created_ids)
             db.get_consistency_group_by_id(group.get_id()).remove(db.kv_store)
