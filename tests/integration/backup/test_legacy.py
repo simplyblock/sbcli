@@ -806,6 +806,28 @@ class TestListBackups(unittest.TestCase):
         self.assertEqual([row["ID"] for row in data], ["newer", "older"])
         self.assertEqual(data[0]["Created"], time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(1710000005)))
 
+    @patch("simplyblock_core.controllers.backup.controller.db_controller")
+    def test_merged_hidden_by_default(self, mock_db):
+        merged = _backup(uuid="merged-1", status=Backup.STATUS_MERGED)
+        completed = _backup(uuid="completed-1")
+        mock_db.get_backups.return_value = [merged, completed]
+
+        from simplyblock_core.controllers.backup.controller import list_backups
+        data = list_backups()
+
+        self.assertEqual([row["ID"] for row in data], ["completed-1"])
+
+    @patch("simplyblock_core.controllers.backup.controller.db_controller")
+    def test_merged_shown_with_show_all(self, mock_db):
+        merged = _backup(uuid="merged-1", status=Backup.STATUS_MERGED)
+        completed = _backup(uuid="completed-1")
+        mock_db.get_backups.return_value = [merged, completed]
+
+        from simplyblock_core.controllers.backup.controller import list_backups
+        data = list_backups(show_all=True)
+
+        self.assertEqual({row["ID"] for row in data}, {"merged-1", "completed-1"})
+
 
 # ===========================================================================
 # 11. Policy management

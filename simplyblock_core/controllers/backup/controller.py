@@ -972,9 +972,16 @@ def delete_backups(lvol_id):
     return True, None
 
 
-def list_backups(cluster_id=None):
-    """List all backups, optionally filtered by cluster."""
+def list_backups(cluster_id=None, show_all=False):
+    """List all backups, optionally filtered by cluster.
+
+    Merged backups are hidden unless `show_all` is set -- a merge folds a
+    backup's data into its successor, so the record stays for chain history
+    but is no longer something an operator restores from.
+    """
     backups = db_controller.get_backups(cluster_id)
+    if not show_all:
+        backups = [b for b in backups if b.status != Backup.STATUS_MERGED]
     backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     data = []
     for b in backups:
