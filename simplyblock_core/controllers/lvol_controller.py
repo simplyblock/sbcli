@@ -4552,7 +4552,8 @@ def _policy_target_cluster(db_controller, lvol):
         try:
             policy_ids.append(db_controller.get_consistency_group_by_id(lvol.group_id).policy_id)
         except KeyError:
-            pass
+            logger.debug("Consistency group %s not found for lvol %s; skipping group policy fallback",
+                         lvol.group_id, lvol.get_id())
     for policy_id in policy_ids:
         if not policy_id:
             continue
