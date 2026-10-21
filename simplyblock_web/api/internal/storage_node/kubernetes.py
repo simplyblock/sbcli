@@ -331,11 +331,16 @@ def _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus):
     regression, so the patch is only sent when the kubelet does not have
     the settings yet."""
     try:
-        raw = k8s_core_v1.connect_get_node_proxy_with_path(node_name, "configz")
+        # Not preloaded: the client's 'str' deserialization of this call is
+        # str(bytes), i.e. "b'{...}'", which is not JSON. Read the body.
+        resp = k8s_core_v1.connect_get_node_proxy_with_path(node_name, "configz", _preload_content=False)
+        raw = resp.data if hasattr(resp, "data") else resp
     except ApiException as e:
         logger.warning("Cannot read the kubelet configuration of '%s' (HTTP %s)", node_name, e.status)
         return None
     try:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
         cfg = (json.loads(raw) if isinstance(raw, str) else raw).get("kubeletconfig", {})
     except (ValueError, AttributeError):
         logger.warning("Unexpected kubelet configz payload from '%s'", node_name)
