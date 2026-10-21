@@ -19,7 +19,7 @@ from tests.unit.web.api.v2._factories import (
     VOLUME_ID,
 )
 
-BASE = f'/api/v2/clusters/{CLUSTER_ID}/group-backups'
+BASE = f'/api/v2/clusters/{CLUSTER_ID}/backups/groups'
 CG_BASE = f'/api/v2/clusters/{CLUSTER_ID}/consistency-groups/{CONSISTENCY_GROUP_ID}'
 
 #: The source consistency group, as the group manifest spells it.
@@ -141,20 +141,23 @@ class TestDeleteGroupBackup:
         assert response.status_code == 400
 
 
-class TestCreateGroupBackupUnderGroup:
-    def _group(self, db):
-        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+class TestCreateGroupBackup:
+    """POST /backups/groups/ backs up one generation of the group the body names."""
+
+    def _group(self, db, **attrs):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group(**attrs)
 
     def test_takes_a_fresh_generation_by_default(
             self, client, db, cluster, group_backup, group_backup_controller):
         self._group(db)
         group_backup_controller.create_group_backup.return_value = (group_backup.get_id(), None)
 
-        response = client.post(f'{CG_BASE}/backups', json={})
+        response = client.post(f'{BASE}/', json={'consistency_group_id': CONSISTENCY_GROUP_ID})
 
         assert response.status_code == 201
         assert response.json()['id'] == GROUP_BACKUP_ID
-        _, kwargs = group_backup_controller.create_group_backup.call_args
+        args, kwargs = group_backup_controller.create_group_backup.call_args
+        assert args[0] == CG_COMPOSITE
         assert kwargs['group_seq'] is None
 
     def test_backs_up_a_named_generation(
@@ -162,7 +165,7 @@ class TestCreateGroupBackupUnderGroup:
         self._group(db)
         group_backup_controller.create_group_backup.return_value = (group_backup.get_id(), None)
 
-        response = client.post(f'{CG_BASE}/backups', json={'group_seq': 3})
+        response = client.post(f'{BASE}/', json={'consistency_group_id': CONSISTENCY_GROUP_ID, 'group_seq': 3})
 
         assert response.status_code == 201
         _, kwargs = group_backup_controller.create_group_backup.call_args
@@ -172,9 +175,60 @@ class TestCreateGroupBackupUnderGroup:
         self._group(db)
         group_backup_controller.create_group_backup.return_value = (
             None, 'consistency group has no member snapshots at generation 3')
-        response = client.post(f'{CG_BASE}/backups', json={'group_seq': 3})
+        response = client.post(f'{BASE}/', json={'consistency_group_id': CONSISTENCY_GROUP_ID, 'group_seq': 3})
         assert response.status_code == 409
-        assert 'no member snapshots' in response.json()['detail']
+
+    def test_an_unknown_group_is_404(self, client, db, cluster, group_backup_controller):
+        db.get_consistency_group_by_id.side_effect = KeyError('ConsistencyGroup not found')
+        response = client.post(f'{BASE}/', json={'consistency_group_id': CONSISTENCY_GROUP_ID})
+        assert response.status_code == 404
+        group_backup_controller.create_group_backup.assert_not_called()
+
+    def test_a_group_of_another_cluster_is_404(self, client, db, cluster, group_backup_controller):
+        self._group(db, cluster_id='00000000-0000-4000-8000-000000000000')
+        response = client.post(f'{BASE}/', json={'consistency_group_id': CONSISTENCY_GROUP_ID})
+        assert response.status_code == 404
+        group_backup_controller.create_group_backup.assert_not_called()
+
+    def test_the_group_is_required(self, client, db, cluster, group_backup_controller):
+        response = client.post(f'{BASE}/', json={})
+        assert response.status_code == 422
+        group_backup_controller.create_group_backup.assert_not_called()
+
+
+class TestGroupBackupMembers:
+    def test_lists_the_member_backups(self, client, db, group_backup):
+        member = factories.make_backup(group_backup_id=group_backup.get_id(), group_seq=7)
+        db.get_backups_by_group_backup_id.return_value = [member]
+
+        response = client.get(f'{BASE}/{GROUP_BACKUP_ID}/members/')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert [m['id'] for m in body] == [BACKUP_ID]
+        assert body[0]['group_seq'] == 7
+        db.get_backups_by_group_backup_id.assert_called_once_with(group_backup.get_id())
+
+    def test_404_for_a_group_backup_of_another_cluster(self, client, db, cluster):
+        db.get_group_backup_by_id.return_value = factories.make_group_backup(
+            cluster_id='00000000-0000-4000-8000-000000000000')
+        response = client.get(f'{BASE}/{GROUP_BACKUP_ID}/members/')
+        assert response.status_code == 404
+
+
+class TestGroupBackupRoutes:
+    """Group backups live under /backups/, beside routes whose last segment is a
+    backup id. /backups/groups/ must reach the group routes, not be read as a
+    backup id that is not a UUID."""
+
+    def test_groups_is_not_read_as_a_backup_id(self, client, db, group_backup):
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/backups/groups/')
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+    def test_the_old_paths_are_gone(self, client, db, cluster, group_backup):
+        assert client.get(f'/api/v2/clusters/{CLUSTER_ID}/group-backups/').status_code == 404
+        assert client.post(f'{CG_BASE}/backups', json={}).status_code in (404, 405)
 
 
 class TestExportGroupBackup:

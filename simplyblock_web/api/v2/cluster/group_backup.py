@@ -1,15 +1,20 @@
 """Consistency-group backup REST surface (design-consistency-group-backup.md §8).
 
-A group backup is CREATED under its source group
-(`consistency-groups/{group_id}/backups`), because taking one resolves a
-generation of that group. This router exposes the group backups themselves,
-independent of the group that produced them: listing them, reading one, restoring
-one into a new consistency group, and deleting one. The endpoints are thin --
-restore fans out to the single-volume restore path per member and re-forms the
-group; delete removes the group manifest and the record, leaving the member
-backups to per-volume retention (§9).
+Group backups are backups, so they live under the backup tree, at
+`/clusters/{cluster_id}/backups/groups/`: creating one from a generation of the
+consistency group the body names, listing them, reading one and its member
+backups, restoring one into a new consistency group, deleting one, and the
+export, import, and discover a single-volume backup has. The endpoints are thin.
+Create fans out to the single-volume backup path per member, restore fans out to
+the single-volume restore path per member and re-forms the group, and delete
+removes the group manifest and the record, leaving the member backups to
+per-volume retention (§9).
+
+This router is mounted ahead of the single-volume one, whose
+`/backups/{backup_id}/` would otherwise take `groups` for a backup id.
 """
 from typing import Union
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict
@@ -22,6 +27,7 @@ from simplyblock_core.models.backup_config import S3Credentials
 from .._dependencies import Cluster, GroupBackupResource
 from .._dtos import (
     BackupConfigDTO,
+    BackupDTO,
     GroupBackupDTO,
     GroupBackupExportDTO,
     GroupBackupManifestDTO,
@@ -31,7 +37,7 @@ api = APIRouter(tags=['group-backups'])
 db = DBController()
 
 
-@api.get('/', name='clusters:group-backups:list', response_model=list[GroupBackupDTO])
+@api.get('/', name='clusters:backups:groups:list', response_model=list[GroupBackupDTO])
 def list_group_backups(cluster: Cluster) -> list[GroupBackupDTO]:
     """List the cluster's group backups, newest first."""
     group_backups = db.get_group_backups(cluster.get_id())
@@ -39,7 +45,38 @@ def list_group_backups(cluster: Cluster) -> list[GroupBackupDTO]:
     return [GroupBackupDTO.from_model(g) for g in group_backups]
 
 
-@api.get('/export', name='clusters:group-backups:export')
+class _GroupBackupCreateParams(BaseModel):
+    #: The consistency group to back up.
+    consistency_group_id: UUID
+    #: Back up an existing generation by its sequence. Omit to take a fresh
+    #: crash-consistent generation and back that up.
+    group_seq: int | None = None
+
+
+@api.post('/', name='clusters:backups:groups:create', status_code=201, response_model=GroupBackupDTO)
+def create_group_backup(cluster: Cluster, body: _GroupBackupCreateParams) -> GroupBackupDTO:
+    """Back up one generation of a consistency group to S3 as one all-or-nothing
+    unit (design §6). Takes a fresh crash-consistent generation unless
+    ``group_seq`` names an existing one. Returns the in-progress group backup,
+    which commits once every member backup completes.
+    """
+    try:
+        group = db.get_consistency_group_by_id(str(body.consistency_group_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if group.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'ConsistencyGroup {body.consistency_group_id} not found')
+    group_backup_id, err = group_backup_controller.create_group_backup(
+        group.get_id(), group_seq=body.group_seq)
+    if err is not None:
+        # 409, not 422: FastAPI reserves 422 for its own validation error, whose
+        # body is a list the generated clients decode; a string detail there is
+        # undecodable (see restore below).
+        raise HTTPException(409, err)
+    return GroupBackupDTO.from_model(db.get_group_backup_by_id(group_backup_id))
+
+
+@api.get('/export', name='clusters:backups:groups:export')
 def export_group_backup(
     cluster: Cluster,
     group_backup_id: str = Query(..., description="Export the group backup with this UUID"),
@@ -87,7 +124,7 @@ class _GroupImportFromBucket(BaseModel):
 _GroupImportParams = Union[_GroupImportManifests, _GroupImportFromBucket]
 
 
-@api.post('/import', name='clusters:group-backups:import')
+@api.post('/import', name='clusters:backups:groups:import')
 def import_group_backup(cluster: Cluster, parameters: _GroupImportParams):
     """Import a group backup, preserving ids, all-or-nothing (§6.5)."""
     try:
@@ -108,7 +145,7 @@ def import_group_backup(cluster: Cluster, parameters: _GroupImportParams):
     return {"imported": len(ids), "group_backup_ids": ids}
 
 
-@api.post('/discover', name='clusters:group-backups:discover')
+@api.post('/discover', name='clusters:backups:groups:discover')
 def discover_group_backups(parameters: BackupConfigDTO) -> list[GroupBackupManifestDTO]:
     """List the group backups a bucket contains, without importing anything (§6.5).
 
@@ -125,9 +162,16 @@ def discover_group_backups(parameters: BackupConfigDTO) -> list[GroupBackupManif
 instance_api = APIRouter(prefix='/{group_backup_id}')
 
 
-@instance_api.get('/', name='clusters:group-backups:detail', response_model=GroupBackupDTO)
+@instance_api.get('/', name='clusters:backups:groups:detail', response_model=GroupBackupDTO)
 def get_group_backup(cluster: Cluster, group_backup: GroupBackupResource) -> GroupBackupDTO:
     return GroupBackupDTO.from_model(group_backup)
+
+
+@instance_api.get('/members/', name='clusters:backups:groups:members', response_model=list[BackupDTO])
+def list_group_backup_members(cluster: Cluster, group_backup: GroupBackupResource) -> list[BackupDTO]:
+    """The group backup's member backups, as the single-volume backup records
+    they are: one per member volume of the generation."""
+    return [BackupDTO.from_model(b) for b in db.get_backups_by_group_backup_id(group_backup.get_id())]
 
 
 class _GroupRestoreParams(BaseModel):
@@ -141,7 +185,7 @@ class _GroupRestoreParams(BaseModel):
     s3_credentials: S3Credentials | None = None
 
 
-@instance_api.post('/restore', name='clusters:group-backups:restore', status_code=202)
+@instance_api.post('/restore', name='clusters:backups:groups:restore', status_code=202)
 def restore_group_backup(cluster: Cluster, group_backup: GroupBackupResource,
                          parameters: _GroupRestoreParams):
     """Restore a group backup into a NEW consistency group, all-or-nothing
@@ -163,7 +207,7 @@ def restore_group_backup(cluster: Cluster, group_backup: GroupBackupResource,
     return {"group_id": group_id, "members": members}
 
 
-@instance_api.delete('/', name='clusters:group-backups:delete',
+@instance_api.delete('/', name='clusters:backups:groups:delete',
                      status_code=204, responses={204: {"content": None}})
 def delete_group_backup(cluster: Cluster, group_backup: GroupBackupResource) -> Response:
     """Delete a group backup: its group manifest and its record. The member

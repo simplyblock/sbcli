@@ -231,11 +231,10 @@ def backup_controller(monkeypatch):
 
 @pytest.fixture()
 def group_backup_controller(monkeypatch):
-    """The CG-backup controller, reached as ``group_backup_controller`` from both
-    the group-backups router and the consistency-group router (create)."""
+    """The CG-backup controller, reached as ``group_backup_controller`` from the
+    group-backups router."""
     mock = MagicMock()
     monkeypatch.setattr(group_backup_module, 'group_backup_controller', mock)
-    monkeypatch.setattr(consistency_group_module, 'group_backup_controller', mock)
     return mock
 
 

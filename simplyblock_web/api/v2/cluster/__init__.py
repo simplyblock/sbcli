@@ -311,8 +311,10 @@ instance_api.include_router(arbitration_api, prefix='/arbitration')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
+# Ahead of the single-volume backups, whose /backups/{backup_id}/ would
+# otherwise take "groups" for a backup id.
+instance_api.include_router(group_backup_api, prefix='/backups/groups')
 instance_api.include_router(backup_api, prefix='/backups')
-instance_api.include_router(group_backup_api, prefix='/group-backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
 instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
