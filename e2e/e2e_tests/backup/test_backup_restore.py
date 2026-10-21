@@ -133,6 +133,13 @@ class BackupTestBase(TestClusterBase):
         self.mounted: list[tuple[str, str]] = [] # (node, mount_point)
         self.connected: list[str] = []           # lvol IDs that were NVMe-connected
 
+        # K8s node every FIO job and utility pod is pinned to (spec.nodeName),
+        # or None to let the scheduler choose. A test that registers ONE host
+        # on a DHCHAP/allowed-hosts pool sets this to that host's node: a pod
+        # scheduled anywhere else presents an NQN the pool does not allow and
+        # never mounts (live 2026-10-20: pool allowed worker-0, pod on worker-4).
+        self._k8s_pin_node: str | None = None
+
         # K8s-native resource tracking for cleanup (only used when k8s_test=True)
         self.created_pvcs: list[str] = []
         self.created_volume_snapshots: list[str] = []
@@ -312,7 +319,7 @@ class BackupTestBase(TestClusterBase):
             last_err = None
             for attempt in range(1, _max_attempts + 1):
                 pod_name = f"cksum-{_rand_suffix().lower()}"
-                k8s.create_utility_pod(pod_name, pvc_name)
+                k8s.create_utility_pod(pod_name, pvc_name, node_name=self._k8s_pin_node)
                 self.created_utility_pods.append(pod_name)
                 try:
                     k8s.wait_pod_running(pod_name, timeout=600)
@@ -399,7 +406,8 @@ class BackupTestBase(TestClusterBase):
             pod_mount = "/spdkvol"
             actual_cmd = command.replace(mount, pod_mount)
             pod_name = f"vol-exec-{_rand_suffix()}"
-            k8s.create_utility_pod(pod_name, pvc_name, mount_path=pod_mount)
+            k8s.create_utility_pod(pod_name, pvc_name, mount_path=pod_mount,
+                                   node_name=self._k8s_pin_node)
             k8s.wait_pod_running(pod_name, timeout=600)
             self.created_utility_pods.append(pod_name)
             try:
@@ -1276,7 +1284,8 @@ class BackupTestBase(TestClusterBase):
                 f"nrfiles={nrfiles}\n"
             )
 
-            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config)
+            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
+                               node_name=self._k8s_pin_node)
             self.created_fio_jobs.append(job_name)
             self.created_configmaps.append(cm_name)
 
@@ -5895,6 +5904,9 @@ class TestBackupSecurityLvol(BackupTestBase):
         if self.k8s_test:
             allowed = ([self._worker_node_name]
                        if self._worker_node_name else None)
+            # Only this node's NQN is registered, so every pod that mounts the
+            # volume must run there; anywhere else the connect is refused.
+            self._k8s_pin_node = self._worker_node_name
             self._ensure_pool_and_sc(dhchap=True, allowed_nodes=allowed)
         else:
             self._ensure_pool_and_sc(dhchap=True)
