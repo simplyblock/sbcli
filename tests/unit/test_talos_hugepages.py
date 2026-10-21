@@ -111,7 +111,16 @@ class TestKubeletTopologyHelpers(unittest.TestCase):
             "cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
             "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}})
         self.assertTrue(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
-        core.connect_get_node_proxy_with_path.assert_called_with('worker-1', 'configz')
+        # Not preloaded: the client's preloaded 'str' is a Python repr of the
+        # dict ("{'kubeletconfig': {...}}"), not JSON (seen on the lab cluster).
+        core.connect_get_node_proxy_with_path.assert_called_with('worker-1', 'configz', _preload_content=False)
+        raw = MagicMock()
+        raw.data = core.connect_get_node_proxy_with_path.return_value.encode()
+        core.connect_get_node_proxy_with_path.return_value = raw
+        self.assertTrue(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
+        core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {
+            "cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
+            "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}})
         self.assertFalse(k8s_node._kubelet_topology_configured(core, 'worker-1', '0-3'))  # other reserved set
         core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {"cpuManagerPolicy": "none"}})
         self.assertFalse(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
@@ -121,8 +130,9 @@ class TestKubeletTopologyHelpers(unittest.TestCase):
         core.connect_get_node_proxy_with_path.side_effect = ApiException(status=403)
         self.assertIsNone(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
         core.connect_get_node_proxy_with_path.side_effect = None
-        core.connect_get_node_proxy_with_path.return_value = "not json"
-        self.assertIsNone(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
+        for bad in ("not json", "{'kubeletconfig': {'cpuManagerPolicy': 'static'}}"):  # the preloaded repr form
+            core.connect_get_node_proxy_with_path.return_value = bad
+            self.assertIsNone(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'), bad)
 
 
 class TestSizingHelpers(unittest.TestCase):
