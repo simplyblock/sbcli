@@ -231,6 +231,25 @@ class StorageNode(BaseNodeObject):
             return self.hublvol.nvmf_port
         return 0
 
+    def lvstore_cluster_size(self, lvs_name: str) -> int | None:
+        """The ``cluster_sz`` this node's lvstore ``lvs_name`` was created with,
+        in bytes, or None when the persisted stack has no such lvstore.
+
+        ``lvstore_stack`` is written once by create_lvstore with the exact
+        parameters sent to SPDK and replayed verbatim on every restart, so this
+        is the running lvstore's real cluster size whatever release created it.
+        Anything that turns ``num_allocated_clusters`` into bytes must use this
+        rather than recompute the size from the current cluster settings: the
+        formula has changed between releases (page size x1 before 26.3.2, x ndcs
+        since) and an lvstore keeps the size it was born with.
+        """
+        for entry in self.lvstore_stack:
+            if entry.get("type") == "bdev_lvstore" and entry.get("name") == lvs_name:
+                cluster_sz = (entry.get("params") or {}).get("cluster_sz")
+                if cluster_sz:
+                    return int(cluster_sz)
+        return None
+
     def watch_scope(self):
         return (self.cluster_id,)
 
