@@ -20,7 +20,6 @@ from simplyblock_core.controllers.backup.manifest import (
     FDBKeyDescriptor,
     GroupBackupExport,
     GroupBackupManifest,
-    GroupManifestMembership,
     GroupManifestSource,
     LocatedManifests,
     ManifestDataPlane,
@@ -318,7 +317,6 @@ def _group_manifest():
             consistency_group_id=f"{_id('cluster')}/{_id('cg')}",
             consistency_group_name="gitea", generation=7),
         member_backup_ids=[_id("b-1")],
-        membership=GroupManifestMembership(expected_lvol_ids=[_id("volume")]),
     )
 
 

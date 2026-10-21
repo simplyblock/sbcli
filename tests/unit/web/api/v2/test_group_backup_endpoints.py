@@ -51,7 +51,6 @@ _GROUP_MANIFEST: dict[str, Any] = {
     'source': {'cluster_id': CLUSTER_ID, 'consistency_group_id': CG_COMPOSITE,
                'consistency_group_name': 'app-group-cg', 'generation': 7},
     'member_backup_ids': [BACKUP_ID],
-    'membership': {'expected_lvol_ids': [VOLUME_ID]},
     'encrypted': False,
 }
 

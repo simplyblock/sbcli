@@ -17,7 +17,6 @@ from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     GroupBackupExport,
     GroupBackupManifest,
-    GroupManifestMembership,
     GroupManifestSource,
     LocatedManifests,
     ManifestDataPlane,
@@ -48,8 +47,6 @@ def _group_manifest(**overrides):
             consistency_group_name="gitea",
             generation=7),
         "member_backup_ids": [_id("b-" + n) for n in names],
-        "membership": GroupManifestMembership(
-            expected_lvol_ids=[_id(n) for n in names]),
     }
     fields.update(overrides)
     return GroupBackupManifest(**fields)
@@ -85,6 +82,7 @@ class TestSchema:
         manifests/<backup_id>.json; the group manifest only links to it."""
         data = json.loads(_group_manifest().model_dump_json())
         assert "members" not in data
+        assert "membership" not in data
 
     def test_says_nothing_about_how_to_reach_the_bucket(self):
         data = json.dumps(json.loads(_group_manifest().model_dump_json()))
@@ -116,12 +114,6 @@ class TestCompleteness:
 
     def test_incomplete_when_a_member_manifest_is_missing(self):
         assert _group_manifest().is_complete([_backup_manifest("db")]) is False
-
-    def test_incomplete_when_an_expected_volume_has_no_member(self):
-        gm = _group_manifest()
-        gm.membership.expected_lvol_ids.append(_id("web"))   # expected 3, present 2
-        members = [_backup_manifest("db"), _backup_manifest("data")]
-        assert gm.is_complete(members) is False
 
     def test_other_manifests_in_the_bucket_do_not_count(self):
         members = [_backup_manifest("db"), _backup_manifest("web")]

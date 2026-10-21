@@ -127,9 +127,6 @@ def build_group_manifest(group_backup, member_backups: dict):
             generation=group_backup.group_seq,
         ),
         member_backup_ids=member_backup_ids,
-        membership=backup_manifest.GroupManifestMembership(
-            expected_lvol_ids=[UUID(entry["lvol_id"]) for entry in group_backup.members],
-        ),
         encrypted=encrypted,
     )
 

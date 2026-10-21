@@ -501,20 +501,6 @@ class GroupManifestSource(BaseModel):
     cluster_name: str | None = None
 
 
-class GroupManifestMembership(BaseModel):
-    """The generation's membership, so a reader can verify completeness.
-
-    A group backup is restorable only when every expected member is present
-    (design-consistency-group-backup.md §6). Recording the expected ids here is
-    the expected-versus-present check (design-consistency-groups.md §8.3) encoded
-    in the bucket, so a reader with only the bucket can tell a complete group
-    backup from a torn one.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    expected_lvol_ids: list[UUID]
-
-
 class GroupBackupManifest(BaseModel):
     """The self-describing document for one consistency-group backup."""
     model_config = ConfigDict(extra="forbid")
@@ -530,7 +516,6 @@ class GroupBackupManifest(BaseModel):
     #: about a member -- its volume, s3 id, chain link, key -- is in its own
     #: manifest, ``manifests/<backup_id>.json``.
     member_backup_ids: list[UUID]
-    membership: GroupManifestMembership
 
     #: Whether the members are encrypted. Homogeneous (design §3.4): every member
     #: shares this disposition. The actual per-member keys are NOT here -- each
@@ -541,18 +526,14 @@ class GroupBackupManifest(BaseModel):
 
     def is_complete(self, member_manifests: Iterable[BackupManifest]) -> bool:
         """Whether a bucket holding ``member_manifests`` holds this group backup
-        whole: a manifest for every member it names, covering every expected
-        volume.
+        whole: a manifest for every member it names.
 
         The group manifest is written only once every member completed, so a
         torn group backup is one whose member manifests have since gone missing,
         which the group manifest alone cannot show.
         """
-        by_id = {m.backup_id: m for m in member_manifests}
-        if any(backup_id not in by_id for backup_id in self.member_backup_ids):
-            return False
-        present = {by_id[backup_id].volume.lvol_id for backup_id in self.member_backup_ids}
-        return set(self.membership.expected_lvol_ids) <= present
+        present = {m.backup_id for m in member_manifests}
+        return all(backup_id in present for backup_id in self.member_backup_ids)
 
 
 def write_group(config: BackupConfig, manifest: GroupBackupManifest) -> None:
