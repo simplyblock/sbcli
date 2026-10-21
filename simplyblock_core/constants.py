@@ -390,6 +390,16 @@ SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
+# talosctl, run as a Job on a Talos worker to reserve its huge pages through the
+# Talos API (the host has no shell and no writable sysfs for us). Pin the tag
+# to the cluster's Talos minor; the operator passes TALOSCTL_IMAGE through.
+TALOSCTL_IMAGE = get_config_var(
+        "TALOSCTL_IMAGE", "ghcr.io/siderolabs/talosctl:v1.14.3")
+# The Secret Talos issues for a `talos.dev/v1alpha1 ServiceAccount` of the same
+# name in our namespace (`talosctl inject serviceaccount` default naming); it
+# holds the client config the Job authenticates to the node's apid with.
+TALOS_API_SECRET = get_config_var(
+        "TALOS_API_SECRET", "talos-api-access-talos-secrets")
 SIMPLY_BLOCK_VERSION = __version__
 
 GELF_PORT = 12202
