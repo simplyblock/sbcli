@@ -27,6 +27,7 @@ from typing import Any, TypedDict
 import cpuinfo
 import requests
 
+from simplyblock_core.utils import get_k8s_core_client, host_network
 from simplyblock_core.utils import shell as shell_utils
 
 
@@ -46,7 +47,7 @@ def get_static_node_info() -> StaticNodeInfo:
     known not to apply, avoiding up to a few seconds of network timeout on
     the first call after boot).
     """
-    hostname, _, _ = shell_utils.run_command("hostname -s")
+    hostname = host_network.node_hostname().split(".")[0]
     system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
     cloud_info: dict[str, Any] = {}
@@ -64,12 +65,51 @@ def get_static_node_info() -> StaticNodeInfo:
 
 
 def get_cloud_info() -> dict | None:
+    """The instance this node runs on: from the cloud's metadata service, or,
+    where a pod cannot reach it, from the node's Kubernetes object."""
+    return _metadata_cloud_info() or _kubernetes_cloud_info()
+
+
+def _metadata_cloud_info() -> dict | None:
     getters: list[Callable[[], dict | None]] = [_google_info, _amazon_info, _equinix_info]
     return next((
         info
         for getter in getters
         if (info := getter()) is not None
     ), None)
+
+
+# _PROVIDER_CLOUDS maps a Node's spec.providerID scheme to the cloud name the
+# metadata getters report.
+_PROVIDER_CLOUDS = {"aws": "amazon", "gce": "google", "azure": "azure", "equinixmetal": "equinix"}
+
+
+def _kubernetes_cloud_info() -> dict | None:
+    """The instance as the node's Kubernetes object states it. On the pod
+    network, the metadata service can be out of reach: AWS answers an IMDSv2
+    token only within the hop limit, and a NetworkPolicy may block it. The
+    cloud's node controller writes the same facts onto the Node."""
+    node_name = os.environ.get("HOSTNAME")
+    if not node_name:
+        return None
+    try:
+        node = get_k8s_core_client().read_node(node_name)
+    except Exception:
+        return None
+    provider_id = node.spec.provider_id or ""
+    scheme, _, rest = provider_id.partition("://")
+    instance = rest.rstrip("/").rsplit("/", 1)[-1]
+    if scheme not in _PROVIDER_CLOUDS or not instance:
+        return None
+    addresses = {address.type: address.address for address in node.status.addresses or []}
+    labels = node.metadata.labels or {}
+    return {
+        "id": instance,
+        "type": labels.get("node.kubernetes.io/instance-type", ""),
+        "cloud": _PROVIDER_CLOUDS[scheme],
+        "ip": addresses.get("InternalIP", ""),
+        "public_ip": addresses.get("ExternalIP", ""),
+    }
 
 
 def _google_info() -> dict | None:
