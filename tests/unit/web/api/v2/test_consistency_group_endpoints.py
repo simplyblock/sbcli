@@ -347,3 +347,42 @@ class TestGroupColocationRoutes:
         resp = client.post(f'{BASE}/migration', json={"target_node_id": "N2"})
         assert resp.status_code == 409
         mc.create_group_migration.assert_called_once_with(factories.VOLUME_ID, "N2", host_nqn=None)
+
+
+class TestTakeGeneration:
+    """POST /snapshots takes one generation. A request id makes a retry return
+    the generation the first call took, so the answer is that generation, not
+    whichever generation happens to be the latest."""
+
+    @staticmethod
+    def _row(seq):
+        return {"group_seq": seq, "created_at": 1, "expected": 1, "present": 1,
+                "complete": True, "members": []}
+
+    def _setup(self, db, consistency_group_controller, seq_taken):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        db.get_snapshot_by_id.return_value = factories.make_snapshot(group_seq=seq_taken)
+        consistency_group_controller.create_group_snapshot_for_group.return_value = (["s-1"], None)
+        consistency_group_controller.list_generations.return_value = [self._row(3), self._row(4)]
+
+    def test_the_request_id_is_passed_and_its_generation_answered(
+            self, client, db, cluster, consistency_group_controller):
+        self._setup(db, consistency_group_controller, seq_taken=3)
+
+        resp = client.post(f'{BASE}/snapshots', json={'request_id': 'sbk-uid-1'})
+
+        assert resp.status_code == 200
+        assert resp.json()['group_seq'] == 3
+        _, kwargs = consistency_group_controller.create_group_snapshot_for_group.call_args
+        assert kwargs['request_id'] == 'sbk-uid-1'
+
+    def test_no_body_still_takes_a_generation(
+            self, client, db, cluster, consistency_group_controller):
+        self._setup(db, consistency_group_controller, seq_taken=4)
+
+        resp = client.post(f'{BASE}/snapshots')
+
+        assert resp.status_code == 200
+        assert resp.json()['group_seq'] == 4
+        _, kwargs = consistency_group_controller.create_group_snapshot_for_group.call_args
+        assert kwargs['request_id'] == ''

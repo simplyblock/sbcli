@@ -977,14 +977,36 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
     return create_group_snapshot_for_group(group, snap_type=snap_type, lock=lock)
 
 
-def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, lock=True):
+def generation_for_request(group, request_id):
+    """The member snapshot ids of the generation taken with ``request_id``.
+
+    Empty when no generation of this group carries the id, and always empty for
+    an empty id, so a take without an id never matches one.
+    """
+    if not request_id:
+        return []
+    return [s.get_id() for s in _group_snapshots(group)
+            if s.group_request_id == request_id]
+
+
+def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, lock=True,
+                                    request_id=""):
     """Take ONE crash-consistent snapshot of every group member.
 
     Returns (list_of_snapshot_ids, None) or (None, error). All-or-nothing:
     a failure anywhere rolls back every snapshot bdev of this tick (SPDK
     already GC'd if the failure was inside the RPC; registration/record
     failures are rolled back here) and the generation counter does not move.
+
+    ``request_id`` makes the take idempotent for a caller that may retry it
+    after losing the answer: it is stamped on every member snapshot, and a take
+    with an id some generation of this group already carries returns that
+    generation's snapshot ids without taking another.
     """
+    taken = generation_for_request(group, request_id)
+    if taken:
+        return taken, None
+
     members, precheck_err = _precheck_members(group)
     if precheck_err is not None:
         return None, precheck_err
@@ -1027,6 +1049,11 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
     # so a take that just released it is seen.
     with object_mutation_lock(pool.cluster_id, group.get_id(), enabled=lock):
         group = db.get_consistency_group_by_id(group.get_id())
+        # Checked again under the lock: a concurrent take with the same id may
+        # have committed between the check above and acquiring it.
+        taken = generation_for_request(group, request_id)
+        if taken:
+            return taken, None
         group_seq = group.last_group_seq + 1
         now_ts = int(time.time())
         plan = []
@@ -1142,6 +1169,7 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
             snap.snap_type = snap_type
             snap.group_id = group.get_id()
             snap.group_seq = group_seq
+            snap.group_request_id = request_id
             snap.create_dt = str(datetime.now())
             snap.write_to_db(db.kv_store)
 

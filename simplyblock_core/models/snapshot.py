@@ -74,6 +74,10 @@ class SnapShot(BaseModel):
     #: this snapshot belongs to (0 = not a group snapshot).
     group_id: str = ""
     group_seq: int = 0
+    #: the caller's request id for the group generation this snapshot belongs
+    #: to, stamped on every member snapshot of it, so a retried take with the
+    #: same id answers with this generation instead of taking another.
+    group_request_id: str = ""
     #: The volume's own snapshot sequence, in creation order. prev_snap_uuid
     #: is also the blob parent: a snapshot's blob holds only the clusters
     #: written since that predecessor. It is empty on the first snapshot taken
