@@ -6,6 +6,7 @@ record, enqueuing member backups, publishing the group manifest) touches the
 database and the data plane and is the integration tier's.
 """
 import zlib
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -125,6 +126,8 @@ class TestBuildGroupManifest:
         assert manifest.source.generation == 7
         assert manifest.size == 150
         assert manifest.member_backup_ids == [UUID(by_id[e["backup_id"]].uuid) for e in gb.members]
+        assert manifest.created_at == datetime.fromtimestamp(gb.created_at, tz=UTC)
+        assert manifest.completed_at == datetime.fromtimestamp(gb.completed_at, tz=UTC)
         assert manifest.encrypted is False
 
     def test_carries_the_encrypted_disposition(self):

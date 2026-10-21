@@ -13,6 +13,7 @@ member finished -- lives here too and calls into the single-volume create flow
 rather than reimplementing it.
 """
 import time
+from datetime import UTC, datetime
 from enum import Enum
 from uuid import UUID, uuid4
 
@@ -117,8 +118,8 @@ def build_group_manifest(group_backup, member_backups: dict):
 
     return backup_manifest.GroupBackupManifest(
         group_backup_id=UUID(group_backup.uuid),
-        created_at=group_backup.created_at,
-        completed_at=group_backup.completed_at,
+        created_at=datetime.fromtimestamp(group_backup.created_at, tz=UTC),
+        completed_at=datetime.fromtimestamp(group_backup.completed_at, tz=UTC),
         size=total_size,
         source=backup_manifest.GroupManifestSource(
             cluster_id=UUID(group_backup.cluster_id),
@@ -796,8 +797,8 @@ def import_group_backup(export, cluster_id=None):
     group_backup.location = location
     group_backup.encrypted = group_manifest.encrypted
     group_backup.size = group_manifest.size
-    group_backup.created_at = group_manifest.created_at
-    group_backup.completed_at = group_manifest.completed_at
+    group_backup.created_at = int(group_manifest.created_at.timestamp())
+    group_backup.completed_at = int(group_manifest.completed_at.timestamp())
     group_backup.status = GroupBackup.STATUS_COMPLETED
     group_backup.write_to_db()
 

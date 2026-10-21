@@ -48,7 +48,15 @@ from uuid import UUID
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, TypeAdapter
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    SecretStr,
+    TypeAdapter,
+)
 
 from simplyblock_core.kms import KMS
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
@@ -507,9 +515,12 @@ class GroupBackupManifest(BaseModel):
 
     schema_version: int = GROUP_MANIFEST_SCHEMA_VERSION
     group_backup_id: UUID
-    created_at: int
-    completed_at: int
-    size: int
+    created_at: AwareDatetime
+    #: When the group backup committed. A group manifest is written only at
+    #: commit, so this is always set.
+    completed_at: AwareDatetime
+    #: The sum of the member backups' sizes, in bytes.
+    size: Annotated[int, Field(ge=0)]
 
     source: GroupManifestSource
     #: The member backups, one per member volume of the generation. Everything

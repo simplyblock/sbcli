@@ -5,6 +5,7 @@ integration tier's, like the per-backup manifest (test_manifest.py).
 """
 import json
 import zlib
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -32,14 +33,16 @@ def _id(name: str) -> UUID:
 
 
 CLUSTER_ID = _id("cluster")
+CREATED = datetime.fromtimestamp(1700000000, tz=UTC)
+COMPLETED = datetime.fromtimestamp(1700000100, tz=UTC)
 
 
 def _group_manifest(**overrides):
     names = overrides.pop("names", ["db", "data"])
     fields = {
         "group_backup_id": _id("gb-1"),
-        "created_at": 100,
-        "completed_at": 200,
+        "created_at": CREATED,
+        "completed_at": COMPLETED,
         "size": 8192,
         "source": GroupManifestSource(
             cluster_id=CLUSTER_ID,
@@ -96,6 +99,19 @@ class TestSchema:
 
     def test_an_unencrypted_group_is_marked_plain(self):
         assert _group_manifest().encrypted is False
+
+    def test_times_are_utc_datetimes_on_the_wire(self):
+        data = json.loads(_group_manifest().model_dump_json())
+        assert datetime.fromisoformat(data["created_at"]) == CREATED
+        assert datetime.fromisoformat(data["completed_at"]) == COMPLETED
+
+    def test_a_time_without_a_timezone_is_rejected(self):
+        with pytest.raises(ValueError):
+            _group_manifest(created_at=datetime(2026, 10, 21, 12, 0, 0))
+
+    def test_a_negative_size_is_rejected(self):
+        with pytest.raises(ValueError):
+            _group_manifest(size=-1)
 
     def test_unknown_field_is_rejected(self):
         with pytest.raises(ValueError):

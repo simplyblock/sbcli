@@ -1491,7 +1491,7 @@ class CLIWrapperBase:
             "Complete": "yes" if m.is_complete(member_manifests) else "no",
             "Size": m.size,
             "Encrypted": "yes" if m.encrypted else "no",
-            "Created": _format_timestamp(m.created_at),
+            "Created": _format_timestamp(m.created_at.timestamp()),
         } for m in manifests]
 
     def group_backup__import(self, sub_command, args):
