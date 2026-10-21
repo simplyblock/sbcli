@@ -9,8 +9,8 @@ import re
 import time
 import uuid
 
-from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import group_backup
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import (
@@ -222,7 +222,7 @@ def evaluate_policy(lvol):
     if versions_exceeded or age_exceeded:
         oldest = completed[0]
         second = completed[1]
-        _trigger_merge(second, oldest)
+        backup_controller.trigger_merge(second, oldest)
 
 
 def evaluate_schedule(lvol):
@@ -296,7 +296,7 @@ def evaluate_schedule(lvol):
             tier_backups.sort(key=lambda b: b.created_at)
             oldest = tier_backups[0]
             second = tier_backups[1]
-            _trigger_merge(second, oldest)
+            backup_controller.trigger_merge(second, oldest)
             return  # One merge per cycle to avoid conflicts
 
 
@@ -309,8 +309,6 @@ def evaluate_group_policy(group):
     holds follow through ``delete_group_backup``; a member a later generation
     still chains against is left by the per-volume chain retention.
     """
-    from simplyblock_core.controllers.backup import group_backup
-
     policy = db_controller.get_policy_for_group(group)
     if not policy:
         return
@@ -335,8 +333,6 @@ def evaluate_group_schedule(group):
     excess oldest generations in that age band -- generations are pruned whole, not
     merged, because a group backup is the retention unit.
     """
-    from simplyblock_core.controllers.backup import group_backup
-
     policy = db_controller.get_policy_for_group(group)
     if not policy or not policy.backup_schedule:
         return
@@ -429,18 +425,3 @@ def _auto_backup_lvol(lvol):
         logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
 
 
-def _trigger_merge(keep_backup, old_backup):
-    """Trigger a merge of old_backup into keep_backup."""
-    if old_backup.status != Backup.STATUS_COMPLETED:
-        return
-    if keep_backup.status != Backup.STATUS_COMPLETED:
-        return
-
-    old_backup.status = Backup.STATUS_MERGING
-    old_backup.write_to_db()
-
-    tasks_controller.add_backup_merge_task(
-        keep_backup.cluster_id,
-        keep_backup.node_id,
-        keep_backup.uuid,
-        old_backup.uuid)

@@ -1001,7 +1001,7 @@ def delete_backup(backup_id):
 
     Refused while another backup names this one as its predecessor: deleting
     the base of an incremental chain would make every descendant unrestorable.
-    Such a base is merged into its successor first (``policy._trigger_merge``),
+    Such a base is merged into its successor first (``trigger_merge``),
     after which it is MERGED, not deleted, and its objects are the survivor's.
 
     Returns (success, error_message).
@@ -1245,3 +1245,26 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
                 manifests=discover_backups(config)),
         ]),
         cluster_id=cluster_id)
+
+
+def trigger_merge(keep_backup, old_backup):
+    """Merge ``old_backup`` into ``keep_backup``, its successor in one volume's
+    chain: mark the old one merging and queue the merge task.
+
+    Both must be completed; otherwise nothing happens and a later pass retries.
+    Used by the single-volume retention (policy) and by the group backup's
+    retirement of a pruned generation's members (group_backup).
+    """
+    if old_backup.status != Backup.STATUS_COMPLETED:
+        return
+    if keep_backup.status != Backup.STATUS_COMPLETED:
+        return
+
+    old_backup.status = Backup.STATUS_MERGING
+    old_backup.write_to_db()
+
+    tasks_controller.add_backup_merge_task(
+        keep_backup.cluster_id,
+        keep_backup.node_id,
+        keep_backup.uuid,
+        old_backup.uuid)

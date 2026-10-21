@@ -106,6 +106,16 @@ class TestGetGroupBackup:
         body = client.get(f'{BASE}/{GROUP_BACKUP_ID}/').json()
         assert datetime.fromisoformat(body['completed_at']) == datetime.fromtimestamp(1700000100, tz=UTC)
 
+    def test_a_group_backup_without_an_error_reports_none(self, client, db, group_backup):
+        body = client.get(f'{BASE}/{GROUP_BACKUP_ID}/').json()
+        assert body['error_message'] is None
+
+    def test_a_failed_group_backup_reports_its_error(self, client, db, cluster):
+        db.get_group_backup_by_id.return_value = factories.make_group_backup(
+            status='failed', error_message='member vol-1 could not be backed up')
+        body = client.get(f'{BASE}/{GROUP_BACKUP_ID}/').json()
+        assert body['error_message'] == 'member vol-1 could not be backed up'
+
     def test_404_when_the_group_backup_belongs_to_another_cluster(self, client, db, cluster):
         other = factories.make_group_backup(cluster_id='00000000-0000-0000-0000-000000000000')
         db.get_group_backup_by_id.return_value = other

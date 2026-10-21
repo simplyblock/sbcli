@@ -779,7 +779,8 @@ class GroupBackupDTO(BaseModel):
     #: When the group backup committed: every member completed and the group
     #: manifest was published. None until then.
     completed_at: datetime | None = None
-    error_message: str = ""
+    #: Why the group backup failed. None unless it did.
+    error_message: str | None = None
 
     @staticmethod
     def from_model(model: GroupBackup):
@@ -796,7 +797,7 @@ class GroupBackupDTO(BaseModel):
             created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
             completed_at=(datetime.fromtimestamp(model.completed_at, tz=UTC)
                           if model.completed_at else None),
-            error_message=model.error_message,
+            error_message=model.error_message or None,
         )
 
 

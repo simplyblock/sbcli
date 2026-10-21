@@ -91,7 +91,7 @@ class TestOrphanedMemberBackups:
 
     def _retire(self, monkeypatch, db, lvols=("v1",)):
         merged, deleted = [], []
-        monkeypatch.setattr(policy, "_trigger_merge", lambda keep, old: merged.append((old.uuid, keep.uuid)))
+        monkeypatch.setattr(backup_controller, "trigger_merge", lambda keep, old: merged.append((old.uuid, keep.uuid)))
         monkeypatch.setattr(backup_controller, "delete_backup",
                             lambda uuid: (deleted.append(uuid), (True, None))[1])
         result = group_backup.retire_orphaned_member_backups(list(lvols), db=db)

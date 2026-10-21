@@ -15,7 +15,11 @@ rather than reimplementing it.
 import time
 from uuid import UUID, uuid4
 
-from simplyblock_core import utils
+from simplyblock_core import db_controller, utils
+from simplyblock_core.controllers import consistency_group_controller as cg
+from simplyblock_core.controllers import lvol_controller, tasks_controller
+from simplyblock_core.controllers.backup import chain as backup_chain
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, GroupBackup
@@ -142,7 +146,6 @@ def _config_for_group(group_backup):
             it -- the cluster's backup configuration was repointed while the
             group backup was in flight.
     """
-    from simplyblock_core import db_controller
 
     db = db_controller.DBController()
     config = db.get_cluster_by_id(group_backup.cluster_id).get_backup_config()
@@ -170,12 +173,6 @@ def create_group_backup(consistency_group_id, group_seq=None):
 
     Returns ``(group_backup_id, None)`` or ``(None, error_message)``.
     """
-    from simplyblock_core import db_controller
-    from simplyblock_core.controllers import tasks_controller
-    from simplyblock_core.controllers.backup import controller as backup_controller
-    from simplyblock_core.controllers.consistency_group_controller import (
-        create_group_snapshot_for_group,
-    )
 
     db = db_controller.DBController()
     try:
@@ -185,7 +182,7 @@ def create_group_backup(consistency_group_id, group_seq=None):
 
     cluster_id = group.cluster_id
     if group_seq is None:
-        snapshot_ids, err = create_group_snapshot_for_group(group)
+        snapshot_ids, err = cg.create_group_snapshot_for_group(group)
         if err is not None:
             return None, err
         try:
@@ -287,7 +284,6 @@ def try_commit_group_backup(group_backup_id):
         ManifestError, PreconditionError: the group manifest could not be
             published; the record is left in progress so the caller can retry.
     """
-    from simplyblock_core import db_controller
 
     db = db_controller.DBController()
     try:
@@ -343,8 +339,6 @@ def _unwind_restored(lvol_ids: list) -> None:
     failed group restore leaves no half-group behind. The volumes are still
     STATUS_RESTORING, so the teardown is forced.
     """
-    from simplyblock_core import db_controller
-    from simplyblock_core.controllers import lvol_controller
 
     db = db_controller.DBController()
     for lvol_id in lvol_ids:
@@ -377,10 +371,6 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     where ``members`` is ``[{"lvol_id", "member_name"}, ...]``, one per restored
     volume, in member order.
     """
-    from simplyblock_core import db_controller
-    from simplyblock_core.controllers import consistency_group_controller as cg
-    from simplyblock_core.controllers.backup import controller as backup_controller
-    from simplyblock_core.controllers.backup.chain import BackupChain
 
     db = db_controller.DBController()
     try:
@@ -434,7 +424,7 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     all_backups = db.get_backups()
     for backup in member_backups:
         try:
-            chain = BackupChain.of_backups(UUID(backup.uuid), all_backups)
+            chain = backup_chain.BackupChain.of_backups(UUID(backup.uuid), all_backups)
             chain.require_restorable(
                 completed=True,
                 what=f"member {backup.lvol_name} of group backup {group_backup.uuid}")
@@ -518,7 +508,6 @@ def delete_group_backup(group_backup_id):
 
     Returns ``(True, None)`` or ``(False, error_message)``.
     """
-    from simplyblock_core import db_controller
 
     db = db_controller.DBController()
     try:
@@ -547,7 +536,7 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
 
     * A backup the next generation chains against (a successor names it as
       ``prev_backup_id``) is MERGED into that successor, the same
-      ``policy._trigger_merge`` the single-volume schedule runs: the chain
+      ``backup_controller.trigger_merge`` the single-volume schedule runs: the chain
       stays restorable and the base's objects fold into the survivor. One
       merge per volume chain, and none while one is already in flight there,
       as the single-volume schedule keeps it; the next cycle takes the rest.
@@ -560,9 +549,6 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
 
     Returns ``(merges_started, deleted)``.
     """
-    from simplyblock_core import db_controller
-    from simplyblock_core.controllers.backup import controller as backup_controller
-    from simplyblock_core.controllers.backup import policy as backup_policy
 
     if db is None:
         db = db_controller.DBController()
@@ -596,7 +582,7 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
                 continue
             if successor.status != Backup.STATUS_COMPLETED:
                 break           # let it finish; the next cycle merges
-            backup_policy._trigger_merge(successor, old)
+            backup_controller.trigger_merge(successor, old)
             merges += 1
             logger.info("Retiring orphaned member backup %s of volume %s: merging into "
                         "its successor %s", old.uuid[:8], lvol_id[:8], successor.uuid[:8])
@@ -632,9 +618,6 @@ def export_group_backup(group_backup_id, cluster_id=None):
         ValueError: one of the selected backups records no usable location, so it
             cannot be described.
     """
-    from simplyblock_core import db_controller
-    from simplyblock_core.controllers.backup import controller as backup_controller
-    from simplyblock_core.controllers.backup.chain import BackupChain
 
     db = db_controller.DBController()
     try:
@@ -669,7 +652,7 @@ def export_group_backup(group_backup_id, cluster_id=None):
     chain_records = {}
     for backup in member_by_id.values():
         try:
-            chain = BackupChain.of_backups(UUID(backup.uuid), all_backups)
+            chain = backup_chain.BackupChain.of_backups(UUID(backup.uuid), all_backups)
         except ValueError as e:
             raise PreconditionError(str(e)) from e
         for record in chain.records():
@@ -748,8 +731,6 @@ def import_group_backup(export, cluster_id=None):
         ValueError: the group names a member whose manifest the export does not
             carry, so the group would import incomplete.
     """
-    from simplyblock_core import db_controller
-    from simplyblock_core.controllers.backup import controller as backup_controller
 
     db = db_controller.DBController()
     group_manifest = export.group_manifest
@@ -844,7 +825,6 @@ def import_group_backup_from_bucket(config, cluster_id=None):
         PreconditionError: a group backup it holds cannot be imported.
         ValueError: a group manifest names a member the bucket does not hold.
     """
-    from simplyblock_core.controllers.backup.chain import BackupChain
 
     group_manifests = backup_manifest.list_all_groups(config)
     member_manifests = backup_manifest.list_all(config)
@@ -865,7 +845,7 @@ def import_group_backup_from_bucket(config, cluster_id=None):
                     f"backup {member.backup_id}, which the bucket does not hold")
             # of_manifests builds its links from manifests; the isinstance narrows
             # the Backup|BackupManifest link type back to the manifest it is.
-            for link in BackupChain.of_manifests(head, member_manifests, location).links:
+            for link in backup_chain.BackupChain.of_manifests(head, member_manifests, location).links:
                 if isinstance(link, backup_manifest.BackupManifest):
                     chain_manifests[link.backup_id] = link
 
