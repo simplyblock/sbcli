@@ -43,15 +43,33 @@ gets only the restart. The add fails with the numbers if either wait runs out.
 What `talosctl` printed is copied into the node agent's log before a completed
 Job is deleted; a failed Job is left in place with its pod log.
 
-State Talos in the deployment: `spec.environment: Talos` on the
-ClusterDeploymentConfig, which the operator passes to the node agent as
-`TALOS_CLUSTER=true` (the way OpenShift is passed as `OPENSHIFT_CLUSTER`). A
-stated Talos node also skips the CPU-topology / core-isolation Jobs, which
-`nsenter` into the host; kubelet and kernel arguments come from the machine
-config on Talos. Without the flag the node still recognises Talos from the
-kernel version string inside the init Job and skips the host write, but then
-nothing reserves the pages and the pod stays Pending on
-`Insufficient hugepages-2Mi`.
+The node detects Talos by itself, from what the kubelet reports about its host
+in the Node object (`status.nodeInfo.osImage`, e.g. `Talos (v1.12.7)`), so no
+flag is needed. `TALOS_CLUSTER=true|false` on the node agent overrides the
+detection (a Talos derivative whose osImage says something else, or forcing the
+managed path); the operator sets it from `spec.environment: Talos` but it is
+not required.
+
+## Kubelet CPU topology
+
+On other distributions the CPU-topology Job edits the kubelet's config file
+(`cpuManagerPolicy: static`, `reservedSystemCPUs`, `topologyManagerPolicy:
+single-numa-node`, `topologyManagerScope: pod`) and restarts the kubelet. On
+Talos the same keys go into `machine.kubelet.extraConfig` through a third
+`talosctl` Job; Talos applies it without a reboot and restarts the kubelet
+itself, and the add waits for the node to be Ready again. Before patching, the
+node reads the kubelet's live configuration through the API server's node
+proxy (`nodes/<name>/proxy/configz`) and skips the patch when the settings are
+already in place, so a plain node restart never restarts the kubelet. That read
+needs `nodes/proxy get` on the storage-node role; without it the step is skipped
+with a warning rather than restarting the kubelet on every restart. The step
+runs under the same switches as elsewhere (`enableCpuTopology`, and not
+`skipKubeletConfiguration`).
+
+Core isolation (`isolcpus`, `nohz_full`, `rcu_nocbs`) is not applied on Talos:
+those are kernel arguments, which on Talos live in
+`machine.install.extraKernelArgs` and take effect only through an upgrade and
+reboot. Set them in the machine config yourself if you need them.
 
 ### Prerequisite: Talos API access from Kubernetes
 
@@ -104,7 +122,7 @@ the namespace to simplyblock's own workloads.
 
 | Env | Default | Meaning |
 |-----|---------|---------|
-| `TALOS_CLUSTER` | `false` | The host is Talos: reserve huge pages through the Talos API, skip host-touching Jobs. |
+| `TALOS_CLUSTER` | unset (detect) | Override the Talos detection: `true` forces the Talos path, `false` the managed one. |
 | `TALOSCTL_IMAGE` | `ghcr.io/siderolabs/talosctl:v1.14.3` | Image the Job runs; pin to the cluster's Talos minor, mirror it for air-gapped sites. |
 | `TALOS_API_SECRET` | `talos-api-access-talos-secrets` | Name of the ServiceAccount / Secret above. |
 

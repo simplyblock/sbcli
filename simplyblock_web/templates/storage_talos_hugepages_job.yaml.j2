@@ -8,6 +8,9 @@
                  no reboot). Talos writes the kernel parameter asynchronously,
                  so the caller waits for the pool to appear in /proc/meminfo
                  before the next step.
+     kubelet-config -- patch the CPU topology settings into
+                 machine.kubelet.extraConfig (applied live; Talos restarts the
+                 kubelet itself), the Talos form of the vanilla CPU-topology Job.
      kubelet  -- restart the kubelet so the node's hugepages-2Mi capacity
                  reflects the pool. Run only once the pool is there: the
                  kubelet reads huge-page capacity at start, and a restart
@@ -43,14 +46,14 @@ spec:
           secret:
             secretName: {{ TALOS_API_SECRET }}
       containers:
-        - name: {{ "patch-machine-config" if TALOS_STEP == "patch" else "restart-kubelet" }}
+        - name: {{ {"patch": "patch-machine-config", "kubelet-config": "patch-kubelet-config"}.get(TALOS_STEP, "restart-kubelet") }}
           image: {{ TALOSCTL_IMAGE }}
           args:
             - --nodes
             - $(NODE_IP)
             - --endpoints
             - $(NODE_IP)
-            {% if TALOS_STEP == "patch" %}
+            {% if TALOS_STEP in ("patch", "kubelet-config") %}
             - patch
             - machineconfig
             - --mode=no-reboot
