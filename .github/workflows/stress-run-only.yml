@@ -653,6 +653,34 @@ jobs:
           echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Export RUN_BASE_DIR from RUN_DIR_FILE
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The harness writes its run directory here during setup()
+          # (e2e/e2e_tests/cluster_test_base.py). Every collection step below
+          # reads RUN_BASE_DIR; without this step they get nothing, and the two
+          # that use os.environ[...] rather than a default raise
+          # "Error: 'RUN_BASE_DIR'" and collect nothing -- which is how run
+          # 39565026057 lost its mgmt snapshots and distrib dumps.
+          #
+          # Deliberately not fatal: a run that failed before setup() never
+          # wrote the file, and losing the extra collection is no reason to
+          # turn an already-reported failure into a confusing one.
+          if [[ -z "${RUN_DIR_FILE:-}" || ! -f "${RUN_DIR_FILE}" ]]; then
+            echo "WARN: RUN_DIR_FILE not found (${RUN_DIR_FILE:-unset});"
+            echo "      the run probably failed before setup() wrote it."
+            exit 0
+          fi
+          RUN_BASE_DIR="$(tr -d '[:cntrl:]' < "${RUN_DIR_FILE}")"
+          if [[ -z "${RUN_BASE_DIR}" ]]; then
+            echo "WARN: ${RUN_DIR_FILE} is empty; RUN_BASE_DIR not set."
+            exit 0
+          fi
+          echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV"
+          echo "Detected RUN_BASE_DIR=${RUN_BASE_DIR}"
+
       - name: Collect mgmt snapshots into RUN_BASE_DIR (on failure)
         id: collect-mgmt
         if: always()
@@ -669,7 +697,10 @@ jobs:
           user = os.environ["SSH_USER"]
           sbcli = os.environ["SBCLI_CMD"]
           cluster_id = os.environ["CLUSTER_ID"]
-          run_base = os.environ["RUN_BASE_DIR"].rstrip("/")
+          run_base = os.environ.get("RUN_BASE_DIR", "").rstrip("/")
+          if not run_base:
+              print("RUN_BASE_DIR is not set; nothing to collect into.")
+              raise SystemExit(0)
           outdir = f"{run_base}/{mgmt_ip}/mgmt_details"
 
           os.makedirs(f"{outdir}/mgmt", exist_ok=True)
@@ -812,7 +843,10 @@ jobs:
 
           ssh_user = os.environ["SSH_USER"]
           key = os.environ["KEY_PATH"]
-          run_base = os.environ["RUN_BASE_DIR"].rstrip("/")
+          run_base = os.environ.get("RUN_BASE_DIR", "").rstrip("/")
+          if not run_base:
+              print("RUN_BASE_DIR is not set; nothing to collect into.")
+              raise SystemExit(0)
           tag = "finaldistrib_bdev_logs"
 
           storage_ips = os.environ["STORAGE_PRIVATE_IPS"].split()
