@@ -1677,7 +1677,63 @@ jobs:
             export BLOCK_DENY_LIST="${LBLK_DENY_LIST}"
           fi
 
+          # ── keep regcred on every service account while the operator works ──
+          #
+          # The operator creates its OWN service accounts -- simplyblock-sa,
+          # simplyblock-storage-node-sa, simplyblock-nodeprobe-sa -- during
+          # this step, and the pods that use them are created moments later.
+          # Patching service accounts in a step AFTER this one is too late by
+          # construction: those pods are already admitted without a pull
+          # secret, they pull docker.io anonymously, and on a shared runner
+          # that means
+          #
+          #   toomanyrequests: You have reached your unauthenticated pull
+          #   rate limit
+          #
+          # The run then deadlocks -- activation waits for pods that cannot
+          # pull, and the step that would fix the secret waits for activation.
+          #
+          # So the patching runs alongside the bring-up rather than after it,
+          # and keeps running, because an account that does not exist yet
+          # cannot be patched in advance. Pods already stuck are deleted: a
+          # pod inherits imagePullSecrets at admission, so an existing one
+          # never picks the secret up and has to be recreated.
+          PULLSECRET_WATCHER=""
+          if kubectl get secret regcred -n "${NAMESPACE}" >/dev/null 2>&1; then
+            (
+              while :; do
+                for sa in $(kubectl get sa -n "${NAMESPACE}" --no-headers 2>/dev/null | awk '{print $1}'); do
+                  kubectl get sa "$sa" -n "${NAMESPACE}" \
+                      -o jsonpath='{.imagePullSecrets[*].name}' 2>/dev/null \
+                    | grep -q regcred && continue
+                  kubectl patch sa "$sa" -n "${NAMESPACE}" \
+                    -p '{"imagePullSecrets":[{"name":"regcred"}]}' >/dev/null 2>&1 \
+                    && echo "[pullsecret] patched sa/$sa"
+                done
+                kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+                  | grep -E 'ImagePullBackOff|ErrImagePull' | awk '{print $1}' \
+                  | while read -r p; do
+                      kubectl delete pod "$p" -n "${NAMESPACE}" --wait=false >/dev/null 2>&1 \
+                        && echo "[pullsecret] recycled pod/$p"
+                    done
+                sleep 5
+              done
+            ) &
+            PULLSECRET_WATCHER=$!
+            echo "pull-secret watcher started (pid ${PULLSECRET_WATCHER})"
+          else
+            echo "::warning::no regcred secret in ${NAMESPACE}; images will be pulled anonymously"
+          fi
+
           python3 $GITHUB_WORKSPACE/e2e/scripts/k8s_cluster_bringup.py
+          bringup_rc=$?
+
+          if [ -n "${PULLSECRET_WATCHER}" ]; then
+            kill "${PULLSECRET_WATCHER}" 2>/dev/null || true
+            wait "${PULLSECRET_WATCHER}" 2>/dev/null || true
+            echo "pull-secret watcher stopped"
+          fi
+          [ "${bringup_rc}" -eq 0 ] || exit "${bringup_rc}"
 
           echo "=== Settings the deployment config does not carry ==="
           # A deployment config describes a deployment, not every knob of a
