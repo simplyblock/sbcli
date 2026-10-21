@@ -66,11 +66,10 @@ spec:
               fi
 
               # Idempotent on the CONTENT of the kubelet config, not on a marker
-              # file: reservedSystemCPUs follows the node's SPDK core layout
-              # (everything but the SPDK cores), so it legitimately changes
-              # when the layout does, and a marker would leave the kubelet on
-              # the old set. Nothing is touched -- no kubelet restart -- when
-              # every key already holds.
+              # file: reservedSystemCPUs is the operator's choice and may be
+              # changed on the StorageCluster, and a marker would leave the
+              # kubelet on the old set. Nothing is touched -- no kubelet
+              # restart -- when every key already holds.
               has_key () {  # has_key KEY VALUE: the config already says KEY: VALUE
                 have=$(grep -E "^$1:" "$KUBELET_CFG" | head -1 | sed -E "s/^$1:[[:space:]]*//; s/[[:space:]]*$//" | tr -d '"')
                 [ "$have" = "$2" ]
@@ -87,7 +86,7 @@ spec:
               # cpuManagerReconcilePeriod: 5s
               # topologyManagerPolicy: single-numa-node
               # topologyManagerScope: pod
-              # reservedSystemCPUs: "<every CPU that is not an SPDK core>"
+              # reservedSystemCPUs: "<the StorageCluster's reservedSystemCPU, default 0,1>"
               #
               set_key () {
                 key="$1"; val="$2"
