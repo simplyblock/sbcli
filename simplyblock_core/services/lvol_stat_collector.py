@@ -34,7 +34,37 @@ def sum_stats(stats_list):
     return ret
 
 
-def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
+def lvstore_cluster_size(cluster, lvol, snode) -> int:
+    """Bytes per lvstore cluster for ``lvol``, i.e. what one unit of
+    ``num_allocated_clusters`` is worth.
+
+    Taken from the lvstore's persisted creation parameters on its node
+    (``StorageNode.lvstore_cluster_size``): that is the size SPDK was given
+    and replays on every restart, whatever release created the lvstore.
+    Recomputing it from the current cluster settings is wrong for any lvstore
+    created under a different formula -- lvstores built before 26.3.2 use one
+    page per cluster, those since use ``ndcs`` pages, and the 26.3.2 collector
+    assumed the new size for all of them, doubling reported usage on a 2x2
+    cluster (customer report 2026-10-21).
+
+    The settings-based formula remains only as a fallback for a node record
+    with no lvstore entry, and is logged when used so a mis-sized sample is
+    traceable rather than silent.
+    """
+    cluster_size = snode.lvstore_cluster_size(lvol.lvs_name) if snode is not None else None
+    if cluster_size:
+        return cluster_size
+    # distr_ndcs defaults to 0, and multiplying by it would report every
+    # volume as using nothing at all -- a worse answer than one page.
+    cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
+    logger.warning(
+        "lvstore %s of lvol %s has no persisted cluster_sz on node %s; "
+        "assuming %d bytes from the cluster settings, reported usage may be off",
+        lvol.lvs_name, lvol.get_id(), snode.get_id() if snode is not None else None, cluster_size)
+    return cluster_size
+
+
+def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None, snode=None):
     now = int(time.time())
     data = {
         "pool_id": lvol.pool_uuid,
@@ -45,15 +75,7 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
         size_used = 0
         lvol_dict = capacity_dict
         size_total = int(lvol_dict['num_blocks']*lvol_dict['block_size'])
-        # Must match what create_lvstore sized the lvstore with, or every
-        # allocated cluster is converted back into the wrong number of bytes
-        # and reported usage is off by the data-chunk count.
-        #
-        # Falls back to one page when the cluster records no data-chunk count:
-        # distr_ndcs defaults to 0, and multiplying by it would report every
-        # volume as using nothing at all -- a worse answer than the single-page
-        # size this used to assume.
-        cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
+        cluster_size = lvstore_cluster_size(cluster, lvol, snode)
         if "driver_specific" in lvol_dict and "lvol" in lvol_dict["driver_specific"]:
             num_allocated_clusters = lvol_dict["driver_specific"]["lvol"]["num_allocated_clusters"]
             size_used = int(num_allocated_clusters*cluster_size)
@@ -268,7 +290,7 @@ def main():
                                     if ret:
                                         capacity_dict = ret[0]
 
-                    record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
+                    record = add_lvol_stats(cluster, lvol, stats, capacity_dict, snode=snode)
                     if record:
                         if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
                             pools_lvols_stats[lvol.pool_uuid].append(record)
