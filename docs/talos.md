@@ -55,16 +55,44 @@ not required.
 On other distributions the CPU-topology Job edits the kubelet's config file
 (`cpuManagerPolicy: static`, `reservedSystemCPUs`, `topologyManagerPolicy:
 single-numa-node`, `topologyManagerScope: pod`) and restarts the kubelet. On
-Talos the same keys go into `machine.kubelet.extraConfig` through a third
-`talosctl` Job; Talos applies it without a reboot and restarts the kubelet
-itself, and the add waits for the node to be Ready again. Before patching, the
-node reads the kubelet's live configuration through the API server's node
-proxy (`nodes/<name>/proxy/configz`) and skips the patch when the settings are
+Talos the same keys go into `machine.kubelet.extraConfig` through a `talosctl`
+Job; Talos applies it without a reboot and restarts the kubelet itself, and the
+add waits for the node to be Ready again. Before patching, the node reads the
+kubelet's live configuration through the API server's node proxy
+(`nodes/<name>/proxy/configz`) and skips the patch when the settings are
 already in place, so a plain node restart never restarts the kubelet. That read
 needs `nodes/proxy get` on the storage-node role; without it the step is skipped
 with a warning rather than restarting the kubelet on every restart. The step
 runs under the same switches as elsewhere (`enableCpuTopology`, and not
 `skipKubeletConfiguration`).
+
+Right before the patch, a privileged Job with `/var/lib/kubelet` mounted removes
+the kubelet's CPU-manager checkpoint (`cpu_manager_state`). The kubelet refuses
+to start over a checkpoint written under another policy, or one whose
+assignments overlap the new reserved set; the vanilla Job removes the file
+before its restart, and Talos has no shell to do that from. The SPDK pod is
+down while this runs, and the kubelet rebuilds the state from the pods it finds.
+
+### Which CPUs are reserved
+
+The static CPU manager knows two sets: `reservedSystemCPUs`, which it never
+hands out exclusively, and all the rest, from which it picks the exclusive CPUs
+of every integer-CPU Guaranteed container, any of them. There is no way to name
+the CPUs a pod must get, so the SPDK pod lands on the cores `sbcli sn configure`
+laid out for it only when those are the *only* non-reserved CPUs. The node
+therefore derives `reservedSystemCPUs` as every CPU of the host that is not an
+SPDK core (the complement of the node config's `isolated_cores`, across every
+socket), unless the StorageCluster states a reserved set, which is passed as
+`RESERVED_SYSTEM_CPUS` and wins. On OpenShift the value lands in the pool-wide
+KubeletConfig, so a pool must be homogeneous or state the set.
+
+Normal pods lose nothing: the kubelet runs Burstable and BestEffort pods on the
+reserved CPUs as well. The exception is the `strict-cpu-reservation` policy
+option, which keeps every pod off the reserved CPUs; with the SPDK cores the
+only non-reserved CPUs nothing else could run, so a kubelet that has it on is
+refused with a message naming it. The SPDK pod's proxy container requests a
+fractional CPU (requests equal to limits, so the pod stays Guaranteed) and runs
+in the shared pool; only the SPDK container holds exclusive cores.
 
 Core isolation (`isolcpus`, `nohz_full`, `rcu_nocbs`) is not applied on Talos:
 those are kernel arguments, which on Talos live in

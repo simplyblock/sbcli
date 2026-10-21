@@ -6,7 +6,7 @@ from jinja2 import Environment, FileSystemLoader
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "simplyblock_web" / "templates"
 
 
-def _render_storage_deploy(tls_provider: str) -> str:
+def _render_storage_deploy(tls_provider: str, cpu_topology_enabled: bool = False) -> str:
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
         trim_blocks=True,
@@ -33,7 +33,7 @@ def _render_storage_deploy(tls_provider: str) -> str:
         TOTAL_HP="",
         NSOCKET=0,
         FW_PORT=50001,
-        CPU_TOPOLOGY_ENABLED=False,
+        CPU_TOPOLOGY_ENABLED=cpu_topology_enabled,
         MEM_MEGA=1536,
         MEM2_MEGA=1024,
         TLS_ENABLED=True,
@@ -69,6 +69,25 @@ class TestStorageDeployTemplate(unittest.TestCase):
                 continue
             hook = c.get("lifecycle", {}).get("postStart", {}).get("exec", {}).get("command", [])
             self.assertNotIn("sudo", " ".join(c.get("command", []) + hook), c["name"])
+
+    def test_cpu_topology_pod_is_guaranteed_with_only_spdk_on_exclusive_cores(self):
+        """Under the static CPU manager the SPDK container gets exclusive
+        cores only if the whole pod is Guaranteed: every container's
+        requests must equal its limits (the proxy's 100m/400m before #830
+        silently made the pod Burstable). The proxy's CPU is fractional so
+        it does not take an exclusive core of its own: that core would have
+        to come out of the pool sized for the SPDK cores, and full-pcpus-only
+        rejects an odd count on a hyperthreaded host (chess, R25.10 #940)."""
+        import yaml
+        docs = [d for d in yaml.safe_load_all(_render_storage_deploy("cert-manager", cpu_topology_enabled=True)) if d]
+        pod = next(d for d in docs if d.get("kind") == "Pod")
+        by_name = {c["name"]: c["resources"] for c in pod["spec"]["containers"]}
+        for name, res in by_name.items():
+            for resource in ("cpu", "memory"):
+                self.assertEqual(res["requests"].get(resource, res["limits"].get(resource)),
+                                 res["limits"][resource], f"{name} {resource}")
+        self.assertEqual(by_name["spdk-container"]["limits"]["cpu"], 2)
+        self.assertEqual(by_name["spdk-proxy-container"]["limits"]["cpu"], "500m")
 
     def test_cert_manager_mounts_secret_directly(self):
         rendered = _render_storage_deploy("cert-manager")

@@ -312,6 +312,46 @@ _KUBELET_TOPOLOGY = {
 }
 
 
+def _cpu_list(cpu_ids):
+    """``cpu_ids`` in the kubelet's CPU-list syntax ('0-3,12-15')."""
+    ranges: list[list[int]] = []
+    for cpu in sorted({int(c) for c in cpu_ids}):
+        if ranges and cpu == ranges[-1][1] + 1:
+            ranges[-1][1] = cpu
+        else:
+            ranges.append([cpu, cpu])
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
+
+
+def _reserved_system_cpus(node_info, cores_by_numa):
+    """The kubelet's reservedSystemCPUs for this host: every CPU that is not
+    an SPDK core.
+
+    The static CPU manager knows two sets: the reserved CPUs, which it never
+    hands out exclusively, and all the rest, from which it picks the
+    exclusive CPUs of every integer-CPU Guaranteed container -- any of them,
+    topology permitting. There is no way to name the CPUs a pod must get.
+    So the SPDK pod lands on the cores sn configure laid out for it only
+    when those are the ONLY non-reserved CPUs: the reserved set is the
+    complement of the host's isolated cores (the list isolcpus is built
+    from, across every socket), not a fixed '0,1'. Normal pods lose nothing:
+    the kubelet runs them on the reserved CPUs as well, unless
+    strict-cpu-reservation is on, which _strict_cpu_reservation refuses.
+    Raises ValueError when the node config cannot answer.
+    """
+    isolated = {int(c) for c in node_info.get("isolated_cores") or []}
+    if not isolated:
+        raise ValueError("the node config carries no isolated cores; run 'sbcli sn configure' first")
+    all_cpus = {int(cpu) for cpus in cores_by_numa.values() for cpu in cpus}
+    unknown = isolated - all_cpus
+    if unknown:
+        raise ValueError(f"isolated cores {sorted(unknown)} are not CPUs of this host; the node config is stale")
+    reserved = all_cpus - isolated
+    if not reserved:
+        raise ValueError("every CPU of the host is an SPDK core; the kubelet needs at least one reserved CPU")
+    return _cpu_list(reserved)
+
+
 def _talos_kubelet_patch(reserved_system_cpus):
     """The strategic-merge machine-config patch that gives the kubelet the
     CPU topology settings. machine.kubelet.extraConfig is merged into the
@@ -321,15 +361,11 @@ def _talos_kubelet_patch(reserved_system_cpus):
     return {"machine": {"kubelet": {"extraConfig": cfg}}}
 
 
-def _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus):
-    """True/False whether the kubelet on ``node_name`` already runs with the
-    topology settings, read from its live configuration through the API
-    server's node proxy (``/api/v1/nodes/<node>/proxy/configz``); None when
-    that cannot be read (the storage-node role needs ``nodes/proxy get``).
-    This is what makes the step idempotent: Talos restarts the kubelet on
-    every machine-config change, and a restart per SPDK restart would be a
-    regression, so the patch is only sent when the kubelet does not have
-    the settings yet."""
+def _read_kubelet_config(k8s_core_v1, node_name):
+    """The kubelet's live configuration on ``node_name`` -- the
+    'kubeletconfig' object of ``/api/v1/nodes/<node>/proxy/configz`` -- or
+    None when it cannot be read (the storage-node role needs ``nodes/proxy
+    get``)."""
     try:
         # Not preloaded: the client's 'str' deserialization of this call is
         # str(bytes), i.e. "b'{...}'", which is not JSON. Read the body.
@@ -345,8 +381,34 @@ def _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus):
     except (ValueError, AttributeError):
         logger.warning("Unexpected kubelet configz payload from '%s'", node_name)
         return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _kubelet_topology_configured(cfg, reserved_system_cpus):
+    """Whether the kubelet configuration ``cfg`` (see _read_kubelet_config)
+    already carries the CPU topology settings with this reserved set. This
+    is what makes the step idempotent: Talos restarts the kubelet on every
+    machine-config change, and a restart per SPDK restart would be a
+    regression, so the patch is only sent when the kubelet does not have
+    the settings yet -- or has them with another reserved set, which
+    changes with the node's SPDK core layout."""
     want = dict(_KUBELET_TOPOLOGY, reservedSystemCPUs=str(reserved_system_cpus))
     return all(str(cfg.get(k, "")) == v for k, v in want.items())
+
+
+def _strict_cpu_reservation(cfg, node_name):
+    """The message to refuse the node with when its kubelet runs the static
+    policy with the strict-cpu-reservation option, else None. The reserved
+    set here is everything but the SPDK cores, which only works because the
+    kubelet runs normal pods on the reserved CPUs too; that option keeps
+    them off, and once SPDK holds its cores nothing else on the host would
+    have a CPU to run on."""
+    options = cfg.get("cpuManagerPolicyOptions") or {}
+    if str(options.get("strict-cpu-reservation", "")).strip().lower() == "true":
+        return (f"the kubelet on '{node_name}' runs with cpuManagerPolicyOptions strict-cpu-reservation, "
+                f"which keeps every other pod off the reserved CPUs; with the SPDK cores the only "
+                f"non-reserved CPUs nothing else could run there -- turn the option off")
+    return None
 
 
 def _wait_for_node_ready(k8s_core_v1, node_name):
@@ -371,13 +433,16 @@ def _configure_talos_kubelet_topology(node_name, namespace, values, reserved_sys
     with a warning, when its configuration cannot be read at all: without
     that check every restart would restart the kubelet."""
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    state = _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus)
-    if state is True:
-        logger.info("Kubelet on '%s' already runs with the CPU topology settings; nothing to apply", node_name)
-        return None
-    if state is None:
+    cfg = _read_kubelet_config(k8s_core_v1, node_name)
+    if cfg is None:
         logger.warning("Not configuring the kubelet CPU topology on Talos node '%s': its configuration cannot be "
                        "verified (grant the storage-node role nodes/proxy get)", node_name)
+        return None
+    refusal = _strict_cpu_reservation(cfg, node_name)
+    if refusal:
+        return refusal
+    if _kubelet_topology_configured(cfg, reserved_system_cpus):
+        logger.info("Kubelet on '%s' already runs with the CPU topology settings; nothing to apply", node_name)
         return None
     secret_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
     missing = _talos_api_secret_missing(k8s_core_v1, namespace, secret_name)
@@ -387,6 +452,17 @@ def _configure_talos_kubelet_topology(node_name, namespace, values, reserved_sys
                       TALOSCTL_IMAGE=os.environ.get("TALOSCTL_IMAGE") or constants.TALOSCTL_IMAGE,
                       TALOS_API_SECRET=secret_name,
                       TALOS_PATCH=json.dumps(_talos_kubelet_patch(reserved_system_cpus), separators=(',', ':')))
+    # The kubelet refuses to start over a CPU-manager checkpoint written
+    # under another policy ("configured policy differs from state checkpoint
+    # policy") or one whose assignments overlap the new reserved set; the
+    # vanilla Job removes the file before restarting the kubelet, and Talos
+    # has no shell to do that from, so a hostPath Job removes it here. Safe
+    # while SPDK is down (spdk_process_start removed its pod above): the
+    # kubelet rebuilds the state from the pods it finds at start.
+    logger.info("Removing the kubelet's CPU-manager checkpoint on Talos node '%s' before the config patch", node_name)
+    err = _run_talos_job("kubelet-state", node_name, namespace, job_values)
+    if err:
+        return err
     logger.info("Configuring the kubelet CPU topology on Talos node '%s' through the Talos API "
                 "(cpuManagerPolicy=static, reservedSystemCPUs=%s)", node_name, reserved_system_cpus)
     err = _run_talos_job("kubelet-config", node_name, namespace, job_values)
@@ -396,7 +472,8 @@ def _configure_talos_kubelet_topology(node_name, namespace, values, reserved_sys
     err = _wait_for_node_ready(k8s_core_v1, node_name)
     if err:
         return err
-    if _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus) is False:
+    cfg = _read_kubelet_config(k8s_core_v1, node_name)
+    if cfg is not None and not _kubelet_topology_configured(cfg, reserved_system_cpus):
         return (f"the kubelet on '{node_name}' came back without the CPU topology settings after the "
                 f"machine config patch")
     return None
@@ -549,17 +626,26 @@ def _job_pod_logs(k8s_core_v1, namespace, job_name):
         return f"<pod log unavailable: HTTP {e.status}>"
 
 
+# The Jobs of the Talos flow: step -> (Job name prefix, template). All but the
+# checkpoint removal are talosctl against the node's own apid.
+_TALOS_STEPS = {
+    "patch": ("snode-talos-hugepages-", "storage_talos_hugepages_job.yaml.j2"),
+    "kubelet": ("snode-talos-kubelet-", "storage_talos_hugepages_job.yaml.j2"),
+    "kubelet-config": ("snode-talos-kubelet-config-", "storage_talos_hugepages_job.yaml.j2"),
+    "kubelet-state": ("snode-talos-kubelet-state-", "storage_kubelet_state_reset_job.yaml.j2"),
+}
+
+
 def _run_talos_job(step, node_name, namespace, job_values):
-    """Run one step of the Talos huge-page flow as a Job on the node and wait
-    for it; return None, or the message to fail the add with. The Job is
-    deleted on success (its pod log is copied into the agent log first) and
-    left in place on failure, where its pod log says why talosctl failed
+    """Run one step of the Talos flow (_TALOS_STEPS) as a Job on the node and
+    wait for it; return None, or the message to fail the add with. The Job
+    is deleted on success (its pod log is copied into the agent log first)
+    and left in place on failure, where its pod log says why talosctl failed
     (role not allowed, apid unreachable, patch rejected)."""
-    prefix = {"patch": "snode-talos-hugepages-", "kubelet": "snode-talos-kubelet-",
-              "kubelet-config": "snode-talos-kubelet-config-"}[step]
+    prefix, template_name = _TALOS_STEPS[step]
     values = dict(job_values, TALOS_STEP=step, TALOS_JOBNAME=_job_name(prefix, node_name))
     env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
-    job_yaml = yaml.safe_load(env.get_template('storage_talos_hugepages_job.yaml.j2').render(values))
+    job_yaml = yaml.safe_load(env.get_template(template_name).render(values))
     batch_v1 = core_utils.get_k8s_batch_client()
     k8s_core_v1 = core_utils.get_k8s_core_client()
     job_resp = _create_job_replacing_stale(batch_v1, namespace, job_yaml)
@@ -734,7 +820,20 @@ def spdk_process_start(body: SPDKParams):
     skip_kubelet_configuration = os.environ.get("SKIP_KUBELET_CONFIGURATION", False)
     if isinstance(skip_kubelet_configuration, str):
        skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
-    reserved_system_cpus = os.environ.get("RESERVED_SYSTEM_CPUS", "0,1")
+    # The kubelet's reserved CPUs: what the operator states (RESERVED_SYSTEM_CPUS,
+    # from the StorageCluster), else derived from the node config as every CPU
+    # that is not an SPDK core -- see _reserved_system_cpus for why that, and
+    # not a fixed '0,1', is what puts the SPDK pod on its own cores.
+    reserved_system_cpus = (os.environ.get("RESERVED_SYSTEM_CPUS") or "").strip()
+    if cpu_topology_enabled and not skip_kubelet_configuration and not reserved_system_cpus:
+        try:
+            reserved_system_cpus = _reserved_system_cpus(
+                core_utils.load_config(constants.NODES_CONFIG_FILE), core_utils.get_numa_cores())
+        except (OSError, ValueError) as e:
+            msg = f"cannot derive the kubelet's reserved CPUs for '{node_name}': {e}"
+            logger.error(msg)
+            return utils.get_response(False, msg)
+        logger.info("Kubelet reserved CPUs on '%s', derived from the node config: %s", node_name, reserved_system_cpus)
     # Initial storage-MCP maxUnavailable when it's first created for CPU-topology
     # apply = the configured parallel-add count, so the first-time,
     # pre-activation reboots roll in one wave instead of a one-at-a-time queue.
@@ -868,6 +967,11 @@ def spdk_process_start(body: SPDKParams):
                                "arguments in the machine config (machine.install.extraKernelArgs)", node_name)
         elif wants_host_config:
             if cpu_topology_enabled and not skip_kubelet_configuration:
+                cfg = _read_kubelet_config(core_utils.get_k8s_core_client(), node_name)
+                refusal = _strict_cpu_reservation(cfg, node_name) if cfg is not None else None
+                if refusal:
+                    logger.error(refusal)
+                    return utils.get_response(False, refusal)
                 if not openshift:
                     template_name = 'storage_cpu_topology.yaml.j2'
                 else:

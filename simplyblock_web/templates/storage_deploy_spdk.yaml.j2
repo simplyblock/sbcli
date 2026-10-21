@@ -191,12 +191,20 @@ spec:
         - name: SB_TLS_PROVIDER
           value: "{{ TLS_PROVIDER }}"
       {% if CPU_TOPOLOGY_ENABLED %}
+      {# Requests equal limits on every container, or the pod is not
+         Guaranteed and the SPDK container gets no exclusive cores (the
+         100m/400m it had before #830). The CPU is fractional on purpose: an
+         integer here is a second exclusive-core allocation, one the static
+         CPU manager's full-pcpus-only option rejects when odd (the chess
+         SMT error, R25.10 #940) and that would need its own core in the
+         pool. A fractional container of a Guaranteed pod runs in the
+         shared pool, which is where a relay using ~1 % of a core belongs. #}
       resources:
         limits:
-          cpu: 1
+          cpu: 500m
           memory: "512Mi"
         requests:
-          cpu: 1
+          cpu: 500m
           memory: "512Mi"
       {% endif %}
 

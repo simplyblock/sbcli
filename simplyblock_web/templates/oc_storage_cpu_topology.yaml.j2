@@ -172,7 +172,7 @@ spec:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
                   topologyManagerPolicy: single-numa-node
-                  reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
+                  reservedSystemCPUs: "{{ RESERVED_SYSTEM_CPUS }}"
               KCEOF
               fi
 
