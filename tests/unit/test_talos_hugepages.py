@@ -105,34 +105,90 @@ class TestKubeletTopologyHelpers(unittest.TestCase):
             "cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
             "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}}}})
 
-    def test_configured_reads_the_live_kubelet_config(self):
+    def test_reads_the_live_kubelet_config(self):
+        static = {"cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
+                  "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}
         core = MagicMock()
-        core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {
-            "cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
-            "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}})
-        self.assertTrue(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
+        core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": static})
+        self.assertEqual(k8s_node._read_kubelet_config(core, 'worker-1'), static)
         # Not preloaded: the client's preloaded 'str' is a Python repr of the
         # dict ("{'kubeletconfig': {...}}"), not JSON (seen on the lab cluster).
         core.connect_get_node_proxy_with_path.assert_called_with('worker-1', 'configz', _preload_content=False)
         raw = MagicMock()
         raw.data = core.connect_get_node_proxy_with_path.return_value.encode()
         core.connect_get_node_proxy_with_path.return_value = raw
-        self.assertTrue(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
-        core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {
-            "cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
-            "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}})
-        self.assertFalse(k8s_node._kubelet_topology_configured(core, 'worker-1', '0-3'))  # other reserved set
-        core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {"cpuManagerPolicy": "none"}})
-        self.assertFalse(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
+        self.assertEqual(k8s_node._read_kubelet_config(core, 'worker-1'), static)
+
+    def test_configured_compares_every_key_including_the_reserved_set(self):
+        static = {"cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
+                  "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}
+        self.assertTrue(k8s_node._kubelet_topology_configured(static, '0,1'))
+        self.assertFalse(k8s_node._kubelet_topology_configured(static, '0-3'))  # other reserved set
+        self.assertFalse(k8s_node._kubelet_topology_configured({"cpuManagerPolicy": "none"}, '0,1'))
 
     def test_unreadable_config_is_unknown(self):
         core = MagicMock()
         core.connect_get_node_proxy_with_path.side_effect = ApiException(status=403)
-        self.assertIsNone(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'))
+        self.assertIsNone(k8s_node._read_kubelet_config(core, 'worker-1'))
         core.connect_get_node_proxy_with_path.side_effect = None
         for bad in ("not json", "{'kubeletconfig': {'cpuManagerPolicy': 'static'}}"):  # the preloaded repr form
             core.connect_get_node_proxy_with_path.return_value = bad
-            self.assertIsNone(k8s_node._kubelet_topology_configured(core, 'worker-1', '0,1'), bad)
+            self.assertIsNone(k8s_node._read_kubelet_config(core, 'worker-1'), bad)
+
+    def test_strict_cpu_reservation_is_refused(self):
+        """With the reserved set being everything but the SPDK cores, that
+        option would leave the host's other pods no CPU at all."""
+        self.assertIsNone(k8s_node._strict_cpu_reservation({"cpuManagerPolicy": "static"}, 'worker-1'))
+        self.assertIsNone(k8s_node._strict_cpu_reservation(
+            {"cpuManagerPolicyOptions": {"full-pcpus-only": "true"}}, 'worker-1'))
+        msg = k8s_node._strict_cpu_reservation(
+            {"cpuManagerPolicyOptions": {"strict-cpu-reservation": "true"}}, 'worker-1')
+        self.assertIn("strict-cpu-reservation", msg)
+        self.assertIn("worker-1", msg)
+
+
+class TestReservedSystemCpus(unittest.TestCase):
+    """reservedSystemCPUs is the complement of the SPDK cores: the static CPU
+    manager hands exclusive cores out of everything that is not reserved,
+    so the SPDK pod only lands on its own cores when those are the only
+    non-reserved CPUs on the host."""
+
+    def test_cpu_list_syntax(self):
+        self.assertEqual(k8s_node._cpu_list([0, 1, 2, 3, 12, 13, 14, 15]), '0-3,12-15')
+        self.assertEqual(k8s_node._cpu_list([5]), '5')
+        self.assertEqual(k8s_node._cpu_list([7, 5, 5, 3]), '3,5,7')
+        self.assertEqual(k8s_node._cpu_list([]), '')
+
+    def test_one_socket(self):
+        node_info = {"isolated_cores": [4, 5, 6, 7, 8, 9, 10, 11]}
+        self.assertEqual(k8s_node._reserved_system_cpus(node_info, {0: list(range(16))}), '0-3,12-15')
+
+    def test_two_sockets_reserve_the_leftovers_of_both(self):
+        """Two slots, one per socket: the union of their isolated cores is
+        what the node config carries, and the reserved set is the rest of
+        both sockets -- the kubelet has one list for the whole host."""
+        node_info = {"isolated_cores": [2, 3, 4, 5, 10, 11, 12, 13]}
+        cores_by_numa = {0: list(range(8)), 1: list(range(8, 16))}
+        self.assertEqual(k8s_node._reserved_system_cpus(node_info, cores_by_numa), '0-1,6-9,14-15')
+
+    def test_an_unused_socket_is_reserved_whole(self):
+        node_info = {"isolated_cores": [2, 3, 4, 5, 6, 7]}
+        cores_by_numa = {0: list(range(8)), 1: list(range(8, 16))}
+        self.assertEqual(k8s_node._reserved_system_cpus(node_info, cores_by_numa), '0-1,8-15')
+
+    def test_unconfigured_node_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'sn configure'):
+            k8s_node._reserved_system_cpus({"nodes": []}, {0: list(range(8))})
+        with self.assertRaisesRegex(ValueError, 'sn configure'):
+            k8s_node._reserved_system_cpus({"isolated_cores": []}, {0: list(range(8))})
+
+    def test_stale_config_is_refused(self):
+        with self.assertRaisesRegex(ValueError, r'\[8, 9\] are not CPUs of this host'):
+            k8s_node._reserved_system_cpus({"isolated_cores": [4, 5, 8, 9]}, {0: list(range(8))})
+
+    def test_nothing_left_to_reserve_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'at least one reserved CPU'):
+            k8s_node._reserved_system_cpus({"isolated_cores": list(range(8))}, {0: list(range(8))})
 
 
 class TestSizingHelpers(unittest.TestCase):
@@ -218,6 +274,21 @@ class TestTalosJobTemplate(unittest.TestCase):
         spec = self._job('patch')['spec']['template']['spec']
         env = {e['name']: e for e in spec['containers'][0]['env']}
         self.assertEqual(env['NODE_IP']['valueFrom']['fieldRef']['fieldPath'], 'status.hostIP')
+
+    def test_state_reset_step_removes_the_checkpoint_through_a_host_path(self):
+        """Talos has no shell: the kubelet's CPU-manager checkpoint is removed
+        by a privileged pod with the kubelet directory mounted."""
+        values = {'TALOS_JOBNAME': 'snode-talos-kubelet-state-worker-1', 'NAMESPACE': 'simplyblock',
+                  'HOSTNAME': 'worker-1', 'SIMPLYBLOCK_DOCKER_IMAGE': 'simplyblock:test'}
+        job = yaml.safe_load(_env().get_template('storage_kubelet_state_reset_job.yaml.j2').render(values))
+        spec = job['spec']['template']['spec']
+        self.assertEqual(spec['nodeSelector'], {'kubernetes.io/hostname': 'worker-1'})
+        [c] = spec['containers']
+        self.assertEqual(c['image'], 'simplyblock:test')
+        self.assertTrue(c['securityContext']['privileged'])
+        self.assertEqual(spec['volumes'][0]['hostPath']['path'], '/var/lib/kubelet')
+        self.assertEqual(c['volumeMounts'][0]['mountPath'], '/var/lib/kubelet')
+        self.assertIn('rm -f /var/lib/kubelet/cpu_manager_state', c['args'][0])
 
 
 def _body(spdk_mem):
@@ -442,7 +513,10 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
         self.core.connect_get_node_proxy_with_path.side_effect = [DEFAULT_KUBELET, STATIC_KUBELET]
         data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
         self.assertIsNone(error, error)
-        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-config-worker-1'])
+        # The checkpoint goes first: the kubelet would refuse to start over
+        # one written under the 'none' policy.
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-state-worker-1',
+                                              'snode-talos-kubelet-config-worker-1'])
         [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-kubelet-config')]
         c = job['spec']['template']['spec']['containers'][0]
         self.assertEqual(c['name'], 'patch-kubelet-config')
@@ -480,6 +554,59 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
         self.assertIn('without the CPU topology settings', error)
         self.core.create_namespaced_pod.assert_not_called()
 
+    def test_reserved_set_is_derived_from_the_node_config_when_not_stated(self):
+        """No RESERVED_SYSTEM_CPUS: the reserved set is every CPU that is not
+        an SPDK core, from the node config's isolated_cores and the host's
+        topology, and the patch (and the configured check) carry it."""
+        env = self._topology_env()
+        del env['RESERVED_SYSTEM_CPUS']
+        node_info = {"nodes": [{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}],
+                     "isolated_cores": [2, 3, 4, 5]}
+        self.core.connect_get_node_proxy_with_path.side_effect = [
+            STATIC_KUBELET,  # reserved 0,1: not the derived set, so it is patched
+            json.dumps({"kubeletconfig": dict(json.loads(STATIC_KUBELET)["kubeletconfig"], reservedSystemCPUs="0-1,6-7")})]
+        with patch.object(k8s_node.core_utils, 'load_config', return_value=node_info), \
+                patch.object(k8s_node.core_utils, 'get_numa_cores', return_value={0: list(range(8))}):
+            data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=env)
+        self.assertIsNone(error, error)
+        [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-kubelet-config')]
+        patch_arg = json.loads(job['spec']['template']['spec']['containers'][0]['args'][8])
+        self.assertEqual(patch_arg['machine']['kubelet']['extraConfig']['reservedSystemCPUs'], '0-1,6-7')
+        self.core.create_namespaced_pod.assert_called()
+
+    def test_a_stated_reserved_set_wins_over_the_derivation(self):
+        self.core.connect_get_node_proxy_with_path.side_effect = [
+            STATIC_KUBELET,
+            json.dumps({"kubeletconfig": dict(json.loads(STATIC_KUBELET)["kubeletconfig"], reservedSystemCPUs="0-3")})]
+        with patch.object(k8s_node.core_utils, 'get_numa_cores') as topology:
+            data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                      env=self._topology_env(RESERVED_SYSTEM_CPUS='0-3'))
+        self.assertIsNone(error, error)
+        topology.assert_not_called()
+        [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-kubelet-config')]
+        patch_arg = json.loads(job['spec']['template']['spec']['containers'][0]['args'][8])
+        self.assertEqual(patch_arg['machine']['kubelet']['extraConfig']['reservedSystemCPUs'], '0-3')
+
+    def test_an_unconfigured_node_cannot_derive_the_reserved_set(self):
+        env = self._topology_env()
+        del env['RESERVED_SYSTEM_CPUS']
+        with patch.object(k8s_node.core_utils, 'get_numa_cores', return_value={0: list(range(8))}):
+            data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=env)
+        self.assertFalse(data)
+        self.assertIn("cannot derive the kubelet's reserved CPUs", error)
+        self.assertIn('sn configure', error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.core.create_namespaced_pod.assert_not_called()
+
+    def test_strict_cpu_reservation_fails_the_add_before_any_job(self):
+        self.core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {
+            "cpuManagerPolicy": "static", "cpuManagerPolicyOptions": {"strict-cpu-reservation": "true"}}})
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertFalse(data)
+        self.assertIn('strict-cpu-reservation', error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.core.create_namespaced_pod.assert_not_called()
+
 
 class TestApplyConfigSizingUnchanged(unittest.TestCase):
 
@@ -493,6 +620,31 @@ class TestApplyConfigSizingUnchanged(unittest.TestCase):
             k8s_node.apply_config()
         self.assertEqual([c.args for c in set_hp.call_args_list],
                          [(numa, pages) for numa, pages in k8s_node._hugepages_per_numa(nodes).items()])
+
+
+class TestCpuTopologyJobScript(unittest.TestCase):
+    """The vanilla CPU-topology Job: idempotent on the kubelet config's
+    content, since reservedSystemCPUs follows the node's SPDK core layout."""
+
+    def _script(self, **overrides):
+        values = {'CORE_JOBNAME': 'snode-spdk-enable-cpu-topology-worker-1', 'NAMESPACE': 'simplyblock',
+                  'HOSTNAME': 'worker-1', 'RESERVED_SYSTEM_CPUS': '0-3,12-15'}
+        values.update(overrides)
+        job = yaml.safe_load(_env().get_template('storage_cpu_topology.yaml.j2').render(values))
+        return job['spec']['template']['spec']['containers'][0]['args'][0]
+
+    def test_no_marker_file(self):
+        self.assertNotIn('cpu_topology_applied', self._script())
+
+    def test_compares_the_reserved_set_and_writes_it_quoted(self):
+        script = self._script()
+        self.assertIn('has_key reservedSystemCPUs "0-3,12-15"', script)
+        self.assertIn('set_key "reservedSystemCPUs" "\\"0-3,12-15\\""', script)
+        self.assertIn('rm -rf $CPU_MNG', script)  # the checkpoint still goes before the restart
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('dash'), 'dash is not installed')
+    def test_parses_under_dash(self):
+        subprocess.run(['dash', '-n', '-c', self._script()], check=True)
 
 
 class TestInitJobScript(unittest.TestCase):
