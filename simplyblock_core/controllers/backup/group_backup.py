@@ -102,7 +102,7 @@ def build_group_manifest(group_backup, member_backups: dict):
             manifest types ids as UUID, and this is the seam where a malformed
             one is caught while committing rather than during a recovery.
     """
-    members = []
+    member_backup_ids = []
     total_size = 0
     encrypted = False
     for entry in group_backup.members:
@@ -111,12 +111,7 @@ def build_group_manifest(group_backup, member_backups: dict):
             raise ValueError(
                 f"member backup {entry['backup_id']} missing while committing "
                 f"group backup {group_backup.uuid}")
-        members.append(backup_manifest.GroupManifestMember(
-            lvol_id=UUID(backup.lvol_id),
-            lvol_name=backup.lvol_name,
-            backup_id=UUID(backup.uuid),
-            s3_id=backup.s3_id,
-        ))
+        member_backup_ids.append(UUID(backup.uuid))
         total_size += backup.size
         encrypted = encrypted or backup.encrypted
 
@@ -131,7 +126,7 @@ def build_group_manifest(group_backup, member_backups: dict):
             consistency_group_name=group_backup.consistency_group_name,
             generation=group_backup.group_seq,
         ),
-        members=members,
+        member_backup_ids=member_backup_ids,
         membership=backup_manifest.GroupManifestMembership(
             expected_lvol_ids=[UUID(entry["lvol_id"]) for entry in group_backup.members],
         ),
@@ -762,8 +757,8 @@ def import_group_backup(export, cluster_id=None):
         manifest.backup_id
         for group in export.members.groups for manifest in group.manifests
     }
-    missing = [member.backup_id for member in group_manifest.members
-               if member.backup_id not in exported]
+    missing = [backup_id for backup_id in group_manifest.member_backup_ids
+               if backup_id not in exported]
     if missing:
         raise ValueError(
             "group export is missing member manifests for "
@@ -782,12 +777,14 @@ def import_group_backup(export, cluster_id=None):
     # manifests do not carry it, so import_backups left it blank -- and the
     # generation, both preserved from the group manifest.
     members = []
-    for member in group_manifest.members:
-        backup = db.get_backup_by_id(str(member.backup_id))
+    for backup_id in group_manifest.member_backup_ids:
+        backup = db.get_backup_by_id(str(backup_id))
         backup.group_backup_id = composite_id
         backup.group_seq = group_manifest.source.generation
         backup.write_to_db()
-        members.append({"lvol_id": str(member.lvol_id), "backup_id": backup.get_id()})
+        # The member's volume comes from its own manifest, which import_backups
+        # recorded on the backup.
+        members.append({"lvol_id": backup.lvol_id, "backup_id": backup.get_id()})
 
     # Recreate the GroupBackup record, preserving its uuid and generation. It is
     # imported COMPLETED: only a committed group backup is exportable, so what
@@ -843,12 +840,12 @@ def import_group_backup_from_bucket(config, cluster_id=None):
         # manifests. Walked rather than taking every manifest in the bucket, which
         # would pull in other group backups' and standalone backups' chains.
         chain_manifests = {}
-        for member in group_manifest.members:
-            head = by_id.get(member.backup_id)
+        for backup_id in group_manifest.member_backup_ids:
+            head = by_id.get(backup_id)
             if head is None:
                 raise ValueError(
                     f"group backup {group_manifest.group_backup_id} names member "
-                    f"backup {member.backup_id}, which the bucket does not hold")
+                    f"backup {backup_id}, which the bucket does not hold")
             # of_manifests builds its links from manifests; the isinstance narrows
             # the Backup|BackupManifest link type back to the manifest it is.
             for link in backup_chain.BackupChain.of_manifests(head, member_manifests, location).links:

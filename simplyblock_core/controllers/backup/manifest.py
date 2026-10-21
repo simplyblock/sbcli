@@ -41,6 +41,7 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
+from collections.abc import Iterable
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
@@ -500,17 +501,6 @@ class GroupManifestSource(BaseModel):
     cluster_name: str | None = None
 
 
-class GroupManifestMember(BaseModel):
-    """One member of a group backup: the volume and the backup that copied it."""
-    model_config = ConfigDict(extra="forbid")
-
-    lvol_id: UUID
-    lvol_name: str
-    #: The per-member backup uuid; its own manifest is ``manifests/<backup_id>.json``.
-    backup_id: UUID
-    s3_id: int
-
-
 class GroupManifestMembership(BaseModel):
     """The generation's membership, so a reader can verify completeness.
 
@@ -536,7 +526,10 @@ class GroupBackupManifest(BaseModel):
     size: int
 
     source: GroupManifestSource
-    members: list[GroupManifestMember]
+    #: The member backups, one per member volume of the generation. Everything
+    #: about a member -- its volume, s3 id, chain link, key -- is in its own
+    #: manifest, ``manifests/<backup_id>.json``.
+    member_backup_ids: list[UUID]
     membership: GroupManifestMembership
 
     #: Whether the members are encrypted. Homogeneous (design §3.4): every member
@@ -546,9 +539,19 @@ class GroupBackupManifest(BaseModel):
     #: statement that a reader must resolve per-member keys before a restore.
     encrypted: bool = False
 
-    def is_complete(self) -> bool:
-        """Whether every expected member is present in this manifest."""
-        present = {member.lvol_id for member in self.members}
+    def is_complete(self, member_manifests: Iterable[BackupManifest]) -> bool:
+        """Whether a bucket holding ``member_manifests`` holds this group backup
+        whole: a manifest for every member it names, covering every expected
+        volume.
+
+        The group manifest is written only once every member completed, so a
+        torn group backup is one whose member manifests have since gone missing,
+        which the group manifest alone cannot show.
+        """
+        by_id = {m.backup_id: m for m in member_manifests}
+        if any(backup_id not in by_id for backup_id in self.member_backup_ids):
+            return False
+        present = {by_id[backup_id].volume.lvol_id for backup_id in self.member_backup_ids}
         return set(self.membership.expected_lvol_ids) <= present
 
 

@@ -29,6 +29,7 @@ from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup.chain import BackupChain
 from simplyblock_core.controllers.backup.manifest import (
     ManifestError,
+    list_all,
     parse_export,
     parse_group_export,
 )
@@ -1469,23 +1470,25 @@ class CLIWrapperBase:
         config = _bucket_config(args)
         try:
             manifests = group_backup.discover_group_backups(config)
+            # "Complete" means the bucket still holds every member's manifest,
+            # which the group manifest alone cannot say -- a torn generation is
+            # worth showing rather than hiding, as that IS the finding a
+            # discover is for.
+            member_manifests = list_all(config) if manifests else []
         except (ManifestError, ValueError) as e:
             print(f"Error: {e}")
             return False
         if not manifests:
             print(f"No group backups found in {args.bucket}")
             return False
-        # A group manifest records its own membership, so "complete" is answered
-        # from the document alone -- a torn generation is worth showing rather than
-        # hiding, as that IS the finding a discover is for.
         # str, not UUID: this row goes through `utils.dump_json` for --json output,
         # and json.dumps has no encoder for a UUID.
         return [{
             "ID": str(m.group_backup_id),
             "Group": m.source.consistency_group_name,
             "Gen": m.source.generation,
-            "Members": len(m.members),
-            "Complete": "yes" if m.is_complete() else "no",
+            "Members": len(m.member_backup_ids),
+            "Complete": "yes" if m.is_complete(member_manifests) else "no",
             "Size": m.size,
             "Encrypted": "yes" if m.encrypted else "no",
             "Created": _format_timestamp(m.created_at),

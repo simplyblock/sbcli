@@ -112,7 +112,7 @@ def test_all_completed_publishes_the_manifest_then_completes(db):
     # The manifest is published exactly once, before the record is completed.
     write_group.assert_called_once()
     _, manifest = write_group.call_args[0]
-    assert {str(m.lvol_name) for m in manifest.members} == {"b-db", "b-data"}
+    assert {str(i) for i in manifest.member_backup_ids} == {_uuid("b-db"), _uuid("b-data")}
     assert manifest.size == 150
 
     stored = db.get_group_backup_by_id(gb.get_id())

@@ -17,7 +17,6 @@ from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     GroupBackupExport,
     GroupBackupManifest,
-    GroupManifestMember,
     GroupManifestMembership,
     GroupManifestSource,
     LocatedManifests,
@@ -36,14 +35,8 @@ def _id(name: str) -> UUID:
 CLUSTER_ID = _id("cluster")
 
 
-def _member(name):
-    return GroupManifestMember(lvol_id=_id(name), lvol_name=name,
-                               backup_id=_id("b-" + name),
-                               s3_id=zlib.crc32(name.encode()))
-
-
 def _group_manifest(**overrides):
-    members = overrides.pop("members", [_member("db"), _member("data")])
+    names = overrides.pop("names", ["db", "data"])
     fields = {
         "group_backup_id": _id("gb-1"),
         "created_at": 100,
@@ -54,9 +47,9 @@ def _group_manifest(**overrides):
             consistency_group_id=f"{CLUSTER_ID}/{_id('cg')}",
             consistency_group_name="gitea",
             generation=7),
-        "members": members,
+        "member_backup_ids": [_id("b-" + n) for n in names],
         "membership": GroupManifestMembership(
-            expected_lvol_ids=[m.lvol_id for m in members]),
+            expected_lvol_ids=[_id(n) for n in names]),
     }
     fields.update(overrides)
     return GroupBackupManifest(**fields)
@@ -85,8 +78,13 @@ class TestSchema:
 
     def test_lists_member_backup_ids(self):
         data = json.loads(_group_manifest().model_dump_json())
-        assert [m["backup_id"] for m in data["members"]] == [
-            str(_id("b-db")), str(_id("b-data"))]
+        assert data["member_backup_ids"] == [str(_id("b-db")), str(_id("b-data"))]
+
+    def test_names_members_by_backup_id_only(self):
+        """Each member's volume, s3 id, and the rest are in its own manifest,
+        manifests/<backup_id>.json; the group manifest only links to it."""
+        data = json.loads(_group_manifest().model_dump_json())
+        assert "members" not in data
 
     def test_says_nothing_about_how_to_reach_the_bucket(self):
         data = json.dumps(json.loads(_group_manifest().model_dump_json()))
@@ -108,13 +106,26 @@ class TestSchema:
 
 
 class TestCompleteness:
-    def test_complete_when_every_expected_member_is_present(self):
-        assert _group_manifest().is_complete() is True
+    """Completeness is a property of the bucket, not of the group manifest alone:
+    the group manifest is written only once every member completed, so what can
+    go missing afterwards is a member's own manifest."""
 
-    def test_incomplete_when_an_expected_member_is_missing(self):
+    def test_complete_when_every_member_manifest_is_present(self):
+        members = [_backup_manifest("db"), _backup_manifest("data")]
+        assert _group_manifest().is_complete(members) is True
+
+    def test_incomplete_when_a_member_manifest_is_missing(self):
+        assert _group_manifest().is_complete([_backup_manifest("db")]) is False
+
+    def test_incomplete_when_an_expected_volume_has_no_member(self):
         gm = _group_manifest()
         gm.membership.expected_lvol_ids.append(_id("web"))   # expected 3, present 2
-        assert gm.is_complete() is False
+        members = [_backup_manifest("db"), _backup_manifest("data")]
+        assert gm.is_complete(members) is False
+
+    def test_other_manifests_in_the_bucket_do_not_count(self):
+        members = [_backup_manifest("db"), _backup_manifest("web")]
+        assert _group_manifest().is_complete(members) is False
 
 
 class TestParse:

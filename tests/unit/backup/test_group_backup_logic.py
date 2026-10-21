@@ -124,9 +124,8 @@ class TestBuildGroupManifest:
         assert manifest.source.consistency_group_id == gb.consistency_group_id
         assert manifest.source.generation == 7
         assert manifest.size == 150
-        assert [m.lvol_name for m in manifest.members] == ["db", "data"]
+        assert manifest.member_backup_ids == [UUID(by_id[e["backup_id"]].uuid) for e in gb.members]
         assert manifest.encrypted is False
-        assert manifest.is_complete()
 
     def test_carries_the_encrypted_disposition(self):
         gb, by_id = self._group_and_members(encrypted=True)

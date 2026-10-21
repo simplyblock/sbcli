@@ -20,7 +20,6 @@ from simplyblock_core.controllers.backup.manifest import (
     FDBKeyDescriptor,
     GroupBackupExport,
     GroupBackupManifest,
-    GroupManifestMember,
     GroupManifestMembership,
     GroupManifestSource,
     LocatedManifests,
@@ -318,8 +317,7 @@ def _group_manifest():
             cluster_id=_id("cluster"),
             consistency_group_id=f"{_id('cluster')}/{_id('cg')}",
             consistency_group_name="gitea", generation=7),
-        members=[GroupManifestMember(lvol_id=_id("volume"), lvol_name="vol",
-                                     backup_id=_id("b-1"), s3_id=1)],
+        member_backup_ids=[_id("b-1")],
         membership=GroupManifestMembership(expected_lvol_ids=[_id("volume")]),
     )
 
@@ -404,9 +402,10 @@ class TestGroupDiscoverRendering:
     """`group-backup discover` reports the group backups a bucket holds, including
     a torn generation (design §6.5)."""
 
-    def _run(self, manifests):
+    def _run(self, manifests, member_manifests=()):
         with patch.object(group_backup_controller, "discover_group_backups",
-                          return_value=manifests):
+                          return_value=manifests), \
+                patch.object(clibase, "list_all", return_value=list(member_manifests)):
             return clibase.CLIWrapperBase.group_backup__discover(
                 clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
                 "discover", _Args(bucket="backups", region="eu-central-1",
@@ -415,15 +414,14 @@ class TestGroupDiscoverRendering:
                                   path_style=False))
 
     def test_lists_a_complete_group_backup(self):
-        rows = self._run([_group_manifest()])
+        rows = self._run([_group_manifest()], [_manifest("b-1")])
         assert rows[0]["ID"] == str(_id("gb-1"))
         assert rows[0]["Members"] == 1
         assert rows[0]["Complete"] == "yes"
 
     def test_shows_a_torn_generation_as_incomplete(self):
-        gm = _group_manifest()
-        gm.membership.expected_lvol_ids.append(_id("missing"))   # expected 2, present 1
-        rows = self._run([gm])
+        """The bucket no longer holds a member's own manifest."""
+        rows = self._run([_group_manifest()], [])
         assert rows[0]["Complete"] == "no"
 
     def test_an_empty_bucket_is_reported(self, capsys):
