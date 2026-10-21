@@ -46,6 +46,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
 from ..models.mgmt_node import MgmtNode
+from . import host_network
 from . import pci as pci_utils
 from . import shell as shell_utils
 from .helpers import parse_thread_siblings_list
@@ -134,7 +135,7 @@ def get_nvme_info(dev_name):
 
 def get_nics_data():
     logger.debug("function:get_nics_data start")
-    out, err, rc = shell_utils.run_command("ip -j address show")
+    out, err, rc = shell_utils.run_command(host_network.host_command("ip -j address show"))
     if rc != 0:
         logger.error(err)
         return []
