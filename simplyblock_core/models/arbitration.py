@@ -54,6 +54,26 @@ class ClusterArbitration(BaseModel):
     #: The arbiter treats the node as gone (its peer may be granted at once)
     #: until it comes back with a new instance.
     planned_loss: dict = default_factory(dict)
+    #: Campaign c3, F10. A node re-admitted after a fence may lack the writes
+    #: its peer took alone; until the data rebuild has finished it is not a
+    #: full replica: {node_id: {"reason": str, "since": ms, "scheduled_at": ms
+    #: (0 = not queued yet), "queued": bool}}. Empty when the pair is fully
+    #: redundant.
+    rebuild: dict = default_factory(dict)
+    #: Campaign c3, F10. The only up-to-date node was lost while ``rebuild``
+    #: was pending: the stale node is NOT granted, the volumes are unavailable
+    #: until the up-to-date node returns: {"node": stale id, "since": ms,
+    #: "reason": str}. Empty otherwise.
+    data_unavailable: dict = default_factory(dict)
+    #: Campaign c4, F12. Nodes the arbiter handed to the restart flow because
+    #: their data devices were missing at re-admission, or their rebuild was
+    #: stuck on unavailable devices: {node_id: {"reason": str, "at": ms}}.
+    device_recovery: dict = default_factory(dict)
+    #: Campaign c5, 07/08. LVS whose leadership the arbiter put back on the
+    #: primary after a heal or re-admission unfenced it (after a fence only
+    #: bdev_lvol_set_leader restores leadership and the primary's ANA):
+    #: {lvs_name: {"node": id, "epoch": int, "at": ms, "ok": bool, "why": str}}.
+    leadership_restored: dict = default_factory(dict)
 
     def get_id(self):
         return self.cluster_id

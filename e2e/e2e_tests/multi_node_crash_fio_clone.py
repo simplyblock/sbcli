@@ -180,7 +180,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         del lvol_fio_info[lvol_to_delete]
 
         # Step 7: Create snapshot and clone for the current LVOL
-        for lvol_name, _ in lvol_vs_node.items():
+        for lvol_name in lvol_vs_node.keys():
             snapshot_name = f"{lvol_name}_snapshot"
             self.logger.info(f"Taking snapshot of LVOL {lvol_name}")
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)

@@ -1904,7 +1904,7 @@ class _DeviceFailureMigrationBase:
             sleep_n_sec(5)
 
             # Unmount and disconnect
-            for name, info in self.lvol_mount_details.items():
+            for info in self.lvol_mount_details.values():
                 client = info.get("Client", self.fio_node[0])
                 try:
                     self.ssh_obj.unmount_path(client, info["Device"])
@@ -3166,7 +3166,7 @@ class _DeviceAddAfterBootstrapBase:
             self.ssh_obj.exec_command(client, "pkill -f fio || true")
             sleep_n_sec(5)
 
-            for name, info in self.lvol_mount_details.items():
+            for info in self.lvol_mount_details.values():
                 cl = info.get("Client", self.fio_node[0])
                 try:
                     self.ssh_obj.unmount_path(cl, info["Device"])

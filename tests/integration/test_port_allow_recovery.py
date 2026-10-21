@@ -10,7 +10,7 @@ plane prepares redirection and then steps away. Invariants covered:
      port-blocked the acting leader during failback; blocking LVS ports
      mid-IO severed redirect chains (DISTRIBD n_unavail_read) and JC paths
      (history_append n_success=0 -> node abort). The runner's ONLY
-     ``port_block.set_port`` call is the final unblock of the recovering
+     fence call is the final ``nvmf_port_unblock`` of the recovering
      node's own port.
 
   2. **Device-state refresh before unblock** (replaces the old full
@@ -63,6 +63,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services.task_runner_base import TaskAbort, TaskDefer
+from tests._mocks import route_fences
 
 
 def _make_lvol(uuid, status=None):
@@ -172,13 +173,15 @@ class _BasePortAllowTest(unittest.TestCase):
                     return _side
                 getattr(rpc, method).side_effect = _make_side()
 
-        # port_block.set_port spy. Record each call in the legacy
-        # ("firewall_set_port", target_uuid, port, action) shape so the
+        # Fence spy. Record each nvmf_port_block / nvmf_port_unblock in the
+        # legacy ("firewall_set_port", target_uuid, port, action) shape so the
         # assertions below keep working unchanged.
         def _set_port_side_effect(node, port, block, *a, **kw):
             action = "block" if block else "allow"
             self.calls.append(("firewall_set_port", node.uuid, port, action))
             return True
+        self._fence = _set_port_side_effect
+        route_fences([self.node, self.sec], self._fence)
 
         self.db_mock = MagicMock(
             get_task_by_id=MagicMock(return_value=self.task),
@@ -256,10 +259,6 @@ class _BasePortAllowTest(unittest.TestCase):
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tasks_controller.get_active_node_restart_task",
                 return_value=None,
-            ),
-            patch(
-                "simplyblock_core.utils.port_block.set_port",
-                side_effect=_set_port_side_effect,
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tcp_ports_events.port_allowed",
@@ -664,6 +663,7 @@ class TestLeadershipFailbackTertiaryActingLeader(_BasePortAllowTest):
         self.node.tertiary_node_id = self.tert.uuid
         self.tert_rpc = MagicMock(name="tert_rpc")
         self.tert.rpc_client = MagicMock(return_value=self.tert_rpc)
+        route_fences([self.tert], self._fence)
         self.tert.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
         self.tert.connect_to_hublvol = MagicMock(return_value=True)
         self.tert.get_lvol_subsys_port = MagicMock(return_value=self.port)
@@ -787,7 +787,7 @@ class TestOnlyNodePortAllowed(_BasePortAllowTest):
                   if c[0] == "firewall_set_port" and c[3] == "block"]
         self.assertEqual(
             blocks, [],
-            "the runner must NEVER call port_block.set_port with block=True — "
+            "the runner must NEVER call nvmf_port_block — "
             "on any node, any port, any phase. LVS ports carry hublvol/"
             "redirect and journal traffic; blocking them mid-IO produced "
             "DISTRIBD n_unavail_read errors and JC history_append failures "
@@ -828,7 +828,7 @@ class TestSourceShape(unittest.TestCase):
         i_failback_call = self.src.find(
             "failback_ok, failback_msg = _failback_leadership_to_primary(")
         i_unblock = self.src.find(
-            "port_block.set_port(node, p, block=False")
+            "node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)")
         self.assertGreater(i_gate, 0)
         self.assertGreater(i_failback_call, i_gate,
                            "failback must run only after the peer hublvol gate")
@@ -840,7 +840,7 @@ class TestSourceShape(unittest.TestCase):
         # poll, no bs_nonleadership / force_to_non_leader — exactly one
         # plain demote of the acting leader.
         fn = self._failback_fn()
-        self.assertNotIn("block=True", fn)
+        self.assertNotIn(".nvmf_port_block(", fn)
         self.assertNotIn("bdev_distrib_check_inflight_io", fn)
         self.assertNotIn("bs_nonleadership", fn)
         self.assertNotIn("bdev_distrib_force_to_non_leader", fn)
@@ -863,15 +863,15 @@ class TestSourceShape(unittest.TestCase):
         # A management-forced leader=True caused the 2026-07-06
         # stale-blob-metadata corruption; _take_leadership_on_primary is
         # deleted. And the runner never blocks any port: exactly one
-        # port_block.set_port callsite, the final block=False unblock.
+        # fence callsite, the final nvmf_port_unblock.
         self.assertNotIn("def _take_leadership_on_primary", self.src)
         self.assertNotIn("leader=True)", self.src)
-        self.assertNotIn("block=True", self.src)
+        self.assertNotIn(".nvmf_port_block(", self.src)
         import re
-        set_port_calls = re.findall(r"port_block\.set_port\(", self.src)
-        self.assertEqual(len(set_port_calls), 1,
-                         "exactly one set_port callsite: the final unblock")
-        self.assertIn("port_block.set_port(node, p, block=False", self.src)
+        fence_calls = re.findall(r"\.nvmf_port_(?:un)?block\(", self.src)
+        self.assertEqual(len(fence_calls), 1,
+                         "exactly one fence callsite: the final unblock")
+        self.assertIn("node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)", self.src)
 
     def test_fencing_recommit_and_map_push_are_gone(self):
         for gone in (
@@ -897,7 +897,7 @@ class TestSourceShape(unittest.TestCase):
             "exactly one ANA callsite in the runner: the deferred "
             "post-unblock promotion")
         i_unblock = self.src.find(
-            "port_block.set_port(node, p, block=False")
+            "node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)")
         i_event = self.src.find("tcp_ports_events.port_allowed")
         i_gate = self.src.find("ana_primary.status == StorageNode.STATUS_OFFLINE")
         i_ana = self.src.find("storage_node_ops._set_lvol_ana_on_node(")
@@ -919,7 +919,7 @@ class TestSourceShape(unittest.TestCase):
         i_broadcast = self.src.find("distr_controller.send_dev_status_event(")
         i_targeted = self.src.find("target_node=node")
         i_unblock = self.src.find(
-            "port_block.set_port(node, p, block=False")
+            "node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)")
         self.assertGreater(i_readmit, 0)
         self.assertGreater(i_broadcast, i_readmit,
                            "FDB re-admit before the broadcast")
@@ -1341,6 +1341,7 @@ class _SecRoleReconnectBase(_BasePortAllowTest):
         self.prim_rpc = MagicMock(name="prim_rpc")
         self.prim_rpc.get_lvstore.return_value = {"lvs leadership": True}
         self.prim.rpc_client = MagicMock(return_value=self.prim_rpc)
+        route_fences([self.prim], self._fence)
 
     def _get_node(self, uuid):
         if uuid == self.prim.uuid:

@@ -27,6 +27,7 @@ V_PARTITION = "partition"  # fence the loser per LVS, then grant the winner
 V_DEGRADED = "degraded"    # grant the survivor (the peer is down and fenced)
 V_HEAL = "heal"            # both healthy and stable: run the healing flow
 V_DONE = "done"            # healing finished: back to steady
+V_UNAVAILABLE = "unavailable"  # the only up-to-date node is lost: grant nobody (F10)
 
 
 @dataclass
@@ -78,6 +79,10 @@ class Snapshot:
     healing_done: bool = False
     #: Winner of the verdict in force (DEGRADED), "" otherwise.
     winner: str = ""
+    #: Nodes re-admitted after a fence whose data rebuild has not finished
+    #: (campaign c3, F10): they may lack writes their peer took alone, so they
+    #: are never granted solo. Empty when the pair is fully redundant.
+    stale_nodes: tuple = ()
 
 
 @dataclass
@@ -143,6 +148,18 @@ def _partition_verdict(snap: Snapshot) -> Verdict:
 
 
 def _degraded_verdict(snap: Snapshot, survivor: NodeView, dead: NodeView, reason: str) -> Verdict:
+    if survivor.node_id in snap.stale_nodes:
+        # Campaign c3, F10: the survivor was re-admitted after a fence and its
+        # data rebuild has not finished; the stripes its peer wrote alone exist
+        # only on the peer. Granting it would serve those reads from nowhere
+        # (03: the stale node aborted on an unreadable md stripe, the client
+        # got EIO). Nobody is granted: the survivor fences itself at its hold
+        # deadline and the volumes stay unavailable until the up-to-date node
+        # returns. A double fault inside the rebuild window, i.e. beyond FTT 1.
+        return Verdict(V_UNAVAILABLE, snap.state if snap.state != ARB_STEADY else ARB_DECIDING,
+                       winner="", loser=dead.node_id,
+                       reason="%s, but survivor %s is not rebuilt yet: data unavailable, "
+                              "nobody granted" % (reason, survivor.node_id))
     vuids = _all_lvs(snap)
     verdict = Verdict(V_DEGRADED, ARB_DEGRADED, raise_epoch=True, winner=survivor.node_id,
                       loser=dead.node_id, grant={v: survivor.node_id for v in vuids},
@@ -178,8 +195,8 @@ def _unreported_loss(snap: Snapshot) -> Verdict | None:
 
     Safe without the survivor's report: a peer whose lease has expired fences
     itself the moment it starts holding (lease-expiry rule on the node), and a
-    node that wakes from a stall longer than its lease fences itself (node
-    side, campaign c2); a gone peer does not write at all. A grant to a
+    node that wakes from a stall longer than its lease aborts (node side,
+    ultra #211); a gone peer does not write at all. A grant to a
     survivor whose remote JM is still healthy only permits it to continue
     alone should it lose the peer later."""
     a, b, now, margin = snap.a, snap.b, snap.now_ms, snap.lease_margin_ms
@@ -260,7 +277,8 @@ def decide(snap: Snapshot) -> Verdict:
             if survivor is not None and survivor.holding():
                 return _deciding(snap)
             unreported = _unreported_loss(snap)
-            if unreported is not None and unreported.winner == snap.winner:
+            if unreported is not None and (unreported.winner == snap.winner
+                                           or unreported.kind == V_UNAVAILABLE):
                 return unreported
         return Verdict(V_NONE, snap.state, reason="verdict in force")
 

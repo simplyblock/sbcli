@@ -820,6 +820,30 @@ def _lineage_origin(lvol_id, reps):
     return origin, cluster
 
 
+def _is_superseded_failed_over_source(lvol_id, reps):
+    """True when *lvol_id* is the SOURCE of a failed-over relationship: a former
+    primary whose writes already moved to the peer's clone after an unplanned
+    failover.
+
+    Its volume still exists -- a re-protect deletes it only once the demote
+    completes, unlike a relocate, which deletes the demoted members up front -- so
+    it is still an open member of its group. But it no longer holds the group's
+    live data, so resolve_group must not let it keep the group marked active (#33):
+    counting it names the retired group for the window before deletion, and the
+    driver resolves a re-protect resync to the group's active end, so that resync
+    lands on the retired group instead of the live peer.
+
+    The discriminator is the relationship state, the same one
+    consistency_group_controller._members_are_superseded_source keys on for the
+    demote; *reps* is db.get_lvol_replication_objects()."""
+    for rep in reps:
+        if (rep.state == LVolReplication.STATE_FAILED_OVER
+                and rep.source_lvol is not None
+                and rep.source_lvol.get_id() == lvol_id):
+            return True
+    return False
+
+
 def resolve_group(group):
     """Where the data of consistency group *group* lives NOW, keyed the way
     PersistentVolumes keep it.
@@ -859,9 +883,17 @@ def resolve_group(group):
                 and v.status != LVol.STATUS_IN_DELETION]
 
     own, peer_own = open_members(group), open_members(peer)
-    active = group if own else (peer if peer_own else None)
-
     reps = db.get_lvol_replication_objects()
+    # The active group is the one holding LIVE data. A superseded failed-over
+    # source is still an open member until the demote deletes it, but its data has
+    # moved to the peer's clone, so it must not count toward "active" -- otherwise
+    # a re-protected old primary names itself active for the window before its
+    # members are deleted, and the driver's resync resolves to the retired group
+    # (#33). The full open sets still seed the member lineages below.
+    own_live = [v for v in own if not _is_superseded_failed_over_source(v.get_id(), reps)]
+    peer_live = [v for v in peer_own if not _is_superseded_failed_over_source(v.get_id(), reps)]
+    active = group if own_live else (peer if peer_live else None)
+
     candidates = {v.get_id(): v for v in own + peer_own}
     for rep in reps:
         for side in (rep.source_lvol, rep.target_lvol):

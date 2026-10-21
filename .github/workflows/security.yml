@@ -1,10 +1,19 @@
 name: Security Scan
 
+# Scans the images we actually ship, not a fresh build from source -- a CVE
+# disclosed after a release went out has to show up here without needing a
+# new push to the branch. One matrix entry per supported branch.
+#
+# Each branch's own latest build (the image docker-image.yml already
+# publishes on every push to it) is what gates the run: that's the code
+# we're about to ship, so an unfixed CVE there fails the job. Release
+# branches additionally get a second, non-gating scan of their latest
+# *released* image -- a CVE that shows up there but not in the branch image
+# has already been fixed on the branch, just not released yet, so it's
+# reported (a release should happen soon) without failing the run. main has
+# no release to compare against, so it only gets the gating scan.
+
 on:
-  push:
-    branches:
-      - main
-      - R26.3
   schedule:
     - cron: '0 6 * * *'  # Daily at 06:00 UTC
   workflow_dispatch:
@@ -14,70 +23,222 @@ env:
 
 jobs:
   scan:
-    name: Security Scan
+    name: Security Scan (${{ matrix.branch }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every currently supported release line (>=26.3; anything older is
+        # legacy and unmanaged here), plus main. Add a branch the day its
+        # release line becomes supported, remove it the day support ends.
+        # Dev/beta branches (e.g. R26.4-Beta) don't belong here -- they're
+        # snapshots off main, not a release anyone runs in production.
+        branch:
+          - main
+          - R26.3
 
     steps:
-      - name: Checkout repository
+      # Each branch keeps its own .grype.yaml, so checking it out (rather
+      # than scanning from a fixed ref) is what makes per-branch exceptions
+      # work: a release branch's exceptions start identical to main's and
+      # diverge from there through ordinary commits, same as any other file.
+      - name: Checkout branch
         uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Deliberately the same daily key the publishing workflows use: this
-      # scan has to report on the OS packages that are actually shipped. A key
-      # that changed per run would rebuild against fresher packages and go
-      # green while the published image still carries the vulnerability.
-      - name: Set base layer cache key
-        run: echo "CACHE_KEY=$(date -u +%F)" >> $GITHUB_ENV
-
-      - name: Build image for scanning (linux/amd64 only)
-        uses: docker/build-push-action@v6
         with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64
-          load: true
-          tags: ${{ env.IMAGE_NAME }}:scan
-          build-args: CACHE_KEY=${{ env.CACHE_KEY }}
-          cache-from: type=gha
+          ref: ${{ matrix.branch }}
+
+      - name: Resolve image tags
+        id: tags
+        run: |
+          branch="${{ matrix.branch }}"
+          echo "branch_tag=$branch" >> "$GITHUB_OUTPUT"
+
+          if [[ "$branch" == main ]]; then
+            echo "release_tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          prefix="${branch#R}"
+          escaped="$(printf '%s' "$prefix" | sed 's/\./\\./g')"
+          tag="$(git ls-remote --tags --refs origin \
+                   | sed 's#.*refs/tags/##' \
+                   | grep -E "^${escaped}(\.|$)" \
+                   | sort -V | tail -1)"
+          if [[ -z "$tag" ]]; then
+            echo "No release tag found for branch '$branch' (prefix '$prefix')." >&2
+            exit 1
+          fi
+          # Defensive: refuse a resolved tag that doesn't match the shape
+          # release.yml's own validation enforces at publish time -- catches
+          # a stray legacy-style tag matching the prefix by accident.
+          if [[ ! "$tag" =~ ^[0-9]+(\.[0-9]+){1,3}(-[A-Za-z0-9]+)?$ ]]; then
+            echo "Resolved tag '$tag' for branch '$branch' doesn't match the expected release-tag shape -- refusing to scan it." >&2
+            exit 1
+          fi
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: hamdysimplyblock
+          password: ${{ secrets.DOCKER_PASS }}
+
+      - name: Pull branch image
+        run: docker pull --platform linux/amd64 ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}
+
+      - name: Pull released image
+        if: matrix.branch != 'main'
+        run: docker pull --platform linux/amd64 ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.release_tag }}
 
       # Grype uses Red Hat's Security Data API — much more current than Trivy's OVAL source.
-      - name: Run Grype vulnerability scan (Red Hat advisories)
-        id: grype
+      - name: Run Grype on branch image (gating)
+        id: grype-branch
+        continue-on-error: true
         uses: anchore/scan-action@v6
         with:
-          image: ${{ env.IMAGE_NAME }}:scan
+          image: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}
           severity-cutoff: medium
           fail-build: true
           only-fixed: true
-          output-format: table
+          output-format: json
 
-      - name: Run Trivy vulnerability scan (Python packages + secrets)
+      - name: Run Grype on released image (informational)
+        id: grype-release
+        if: matrix.branch != 'main'
+        uses: anchore/scan-action@v6
+        with:
+          image: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.release_tag }}
+          severity-cutoff: medium
+          fail-build: false
+          only-fixed: true
+          output-format: json
+
+      - name: Run Trivy on branch image (gating)
+        id: trivy-branch
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref: ${{ env.IMAGE_NAME }}:scan
-          format: table
+          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}
+          format: json
+          output: trivy-branch.json
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
           exit-code: '1'
           scanners: vuln,secret
 
+      # grype-branch and trivy-branch write their findings to disk, not the
+      # step log, so a gating failure otherwise can't be told apart from any
+      # other CVE without downloading a JSON file and reading it by hand.
+      # This turns both into one small, de-duplicated table -- in the job
+      # summary, in this step's own log, as an artifact, and in the Slack
+      # alert -- without scanning anything a second time.
+      - name: Summarize gating scan findings
+        id: gating-summary
+        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
+        run: |
+          trivy_rows=$(jq -r '
+            .Results[]?.Vulnerabilities[]? |
+            [.Severity, .VulnerabilityID, .PkgName, .InstalledVersion, (.FixedVersion // "-"), "Trivy"] | @tsv
+          ' trivy-branch.json 2>/dev/null || true)
+
+          grype_rows=$(jq -r '
+            .matches[]? |
+            [.vulnerability.severity, .vulnerability.id, .artifact.name, .artifact.version,
+             ((.vulnerability.fix.versions // []) | join(",") | if . == "" then "-" else . end), "Grype"] | @tsv
+          ' "${{ steps.grype-branch.outputs.json }}" 2>/dev/null || true)
+
+          rows="$(printf '%s\n%s\n' "$trivy_rows" "$grype_rows" | sed '/^$/d' | sort -u)"
+          count=$(printf '%s\n' "$rows" | sed '/^$/d' | wc -l | tr -d ' ')
+
+          {
+            echo "### Gating scan findings — ${{ matrix.branch }} ($count)"
+            echo
+            echo "| Severity | CVE | Package | Installed | Fixed | Tool |"
+            echo "|---|---|---|---|---|---|"
+            printf '%s\n' "$rows" | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6}'
+          } > "findings-${{ matrix.branch }}.md"
+
+          cat "findings-${{ matrix.branch }}.md"
+          cat "findings-${{ matrix.branch }}.md" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "count=$count"
+            echo "list<<GATING_FINDINGS_EOF"
+            printf '%s\n' "$rows" | awk -F'\t' '{printf "%s  %s  %s@%s -> %s  (%s)\n", $1, $2, $3, $4, $5, $6}' | head -20
+            if [[ "$count" -gt 20 ]]; then echo "...and $((count - 20)) more (see job summary)"; fi
+            echo "GATING_FINDINGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload gating findings artifact
+        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gating-findings-${{ matrix.branch }}
+          path: findings-${{ matrix.branch }}.md
+          retention-days: 90
+
+      - name: Run Trivy on released image (informational)
+        if: matrix.branch != 'main'
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.release_tag }}
+          format: json
+          output: trivy-release.json
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+          exit-code: '0'
+          scanners: vuln,secret
+
+      # Diffs the two non-gating JSON scans against the gating ones: a CVE in
+      # the released image but absent from the branch image is already fixed
+      # upstream and just hasn't shipped yet, so it's reported, not failed.
+      - name: Compute pending-release CVEs
+        id: diff
+        if: matrix.branch != 'main'
+        run: |
+          sev_filter='select(.vulnerability.severity | ascii_downcase | IN("medium","high","critical")) | .vulnerability.id'
+
+          grype_branch_ids=$(jq -r "$sev_filter" "${{ steps.grype-branch.outputs.json }}" 2>/dev/null | sort -u)
+          grype_release_ids=$(jq -r "$sev_filter" "${{ steps.grype-release.outputs.json }}" 2>/dev/null | sort -u)
+          trivy_branch_ids=$(jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID' trivy-branch.json 2>/dev/null | sort -u)
+          trivy_release_ids=$(jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID' trivy-release.json 2>/dev/null | sort -u)
+
+          pending_grype=$(comm -23 <(echo "$grype_release_ids") <(echo "$grype_branch_ids") | sed '/^$/d')
+          pending_trivy=$(comm -23 <(echo "$trivy_release_ids") <(echo "$trivy_branch_ids") | sed '/^$/d')
+          pending="$(printf '%s\n%s\n' "$pending_grype" "$pending_trivy" | sed '/^$/d' | sort -u)"
+
+          if [[ -n "$pending" ]]; then
+            echo "Fixed on branch '${{ matrix.branch }}', not yet released:"
+            echo "$pending"
+            echo "has_pending=true" >> "$GITHUB_OUTPUT"
+            echo "pending=$(printf '%s' "$pending" | tr '\n' ' ' | sed 's/ $//')" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_pending=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate SBOM (CycloneDX)
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref: ${{ env.IMAGE_NAME }}:scan
+          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}
           format: cyclonedx
           output: sbom.cdx.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-${{ github.sha }}
+          name: sbom-${{ matrix.branch }}-${{ steps.tags.outputs.branch_tag }}
           path: sbom.cdx.json
           retention-days: 90
+
+      # grype-branch and trivy-branch are continue-on-error so a real finding
+      # doesn't skip the informational/diff/SBOM steps below them -- this is
+      # what actually fails the job on their behalf, once everything else has
+      # had a chance to run.
+      - name: Fail if a gating scan found vulnerabilities
+        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
+        run: exit 1
 
       - name: Notify Slack on scan failure
         if: failure()
@@ -92,9 +253,32 @@ jobs:
                 {
                   "color": "danger",
                   "fields": [
-                    { "title": "Branch",   "value": "${{ github.ref_name }}", "short": true },
-                    { "title": "Commit",   "value": "${{ github.sha }}", "short": true },
+                    { "title": "Branch",   "value": "${{ matrix.branch }}", "short": true },
+                    { "title": "Image",    "value": "${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}", "short": true },
+                    { "title": "Findings (${{ steps.gating-summary.outputs.count }})", "value": ${{ toJSON(steps.gating-summary.outputs.list) }}, "short": false },
                     { "title": "Workflow", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>", "short": false }
+                  ]
+                }
+              ]
+            }
+
+      - name: Notify Slack on pending-release CVEs
+        if: steps.diff.outputs.has_pending == 'true'
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":hourglass_flowing_sand: *Security fix pending release* in `${{ github.repository }}`",
+              "attachments": [
+                {
+                  "color": "warning",
+                  "fields": [
+                    { "title": "Branch",          "value": "${{ matrix.branch }}", "short": true },
+                    { "title": "Released image",  "value": "${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.release_tag }}", "short": true },
+                    { "title": "Fixed on branch but not yet released", "value": "${{ steps.diff.outputs.pending }}", "short": false },
+                    { "title": "Workflow",        "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>", "short": false }
                   ]
                 }
               ]

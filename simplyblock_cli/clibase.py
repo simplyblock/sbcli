@@ -1542,7 +1542,7 @@ class CLIWrapperBase:
 
     def backup__list(self, sub_command, args):
         cluster_id = getattr(args, 'cluster_id', None)
-        data = backup_controller.list_backups(cluster_id)
+        data = backup_controller.list_backups(cluster_id, show_all=args.all)
         if data:
             return utils.print_table(data)
         return "No backups found"

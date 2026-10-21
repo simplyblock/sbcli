@@ -1,6 +1,7 @@
 """The two-node arbiter against an in-memory DB and fake nodes."""
 
 import errno
+import time
 
 import pytest
 
@@ -28,6 +29,10 @@ class FakeRPC:
     def __getattr__(self, name):
         def call(*args, **kwargs):
             self.node.calls.append((name, args, kwargs))
+            if self.node.slow:
+                # frozen SPDK: the call blocks for its whole timeout (c3, 02a)
+                time.sleep(self.node.slow)
+                raise ConnectionError("timed out")
             if self.node.down:
                 raise ConnectionError("down")
             if self.node.http500 and name != "supports_two_node_arbitration":
@@ -57,6 +62,8 @@ class Node:
         self.remediation_fenced = False
         self.calls, self.errors, self.down = [], {}, False
         self.http500 = False
+        #: seconds every RPC blocks before it times out (0: answers at once)
+        self.slow = 0.0
         #: jc_ha_status as the node reports it: None = not answered (the
         #: event-driven view stays), else {jm_vuid: (state, remote_jm_health)}
         self.ha = None
@@ -130,9 +137,18 @@ def env(monkeypatch):
         return db.leadership_result
 
     db.leadership_result = ([], [])
+    #: campaign c3, F10: rebuilds queued by the arbiter, and the open task count
+    db.rebuild_queued, db.open_tasks = [], 0
+
+    def schedule_rebuild(node):
+        db.rebuild_queued.append(node.get_id())
+        return True
     a = arb.Arbiter(db, clock=clock, readmit=readmitted.append,
                     log_event=lambda item, event: db.logged.append((item.node_id, event["status"])),
-                    reconcile_leadership=reconcile_leadership)
+                    reconcile_leadership=reconcile_leadership,
+                    schedule_rebuild=schedule_rebuild,
+                    open_rebuild_tasks=lambda _cid: db.open_tasks,
+                    restore_leadership=lambda *_: True)
     return a, db, nodes, clock, readmitted
 
 

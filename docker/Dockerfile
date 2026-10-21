@@ -3,8 +3,15 @@
 ARG UBI_VERSION=10.2
 ARG FDB_VERSION=7.3.69
 ARG UV_VERSION=0.12.22
-# Toolchain of the two-node HA event collector (tools/event-collector).
-ARG GO_VERSION=1.24.4
+# Toolchain of the two-node HA event collector (tools/event-collector). The Go
+# toolchain links its own stdlib statically into the built binary, so this is
+# also what the image's scanned Go stdlib version is (grype flags it as
+# `stdlib`, package type go-module) — bump it whenever a scan flags a stdlib
+# CVE with no fix in 1.24.x, same as the CACHE_KEY-driven OS-package refresh
+# does for dnf packages. go.mod's `go 1.24` line is an unrelated minimum
+# language-version requirement, not a toolchain pin, so any newer toolchain
+# here keeps building it fine.
+ARG GO_VERSION=1.27.2
 
 # The application interpreter, free-threaded ("t" suffix). Managed by uv rather
 # than dnf: UBI carries no free-threaded build, and tying the runtime to the

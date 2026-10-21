@@ -290,7 +290,6 @@ class SPDKParams(BaseModel):
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: int | None = Field(None, ge=0)
-    firewall_port: int | None = Field(constants.FW_PORT_START)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)
 
@@ -405,7 +404,6 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
-            'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
@@ -748,30 +746,6 @@ def write_key_file(body: WriteKeyFileBody):
     finally:
         os.close(fd)
     return utils.get_response(key_path)
-
-
-class _FirewallParams(BaseModel):
-    port_id: int
-    port_type: str
-    action: str
-    rpc_port: int = Field(ge=1, le=65536)
-
-
-@api.post('/firewall_set_port', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def firewall_set_port(body: _FirewallParams):
-    return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
-
-@api.get('/get_firewall', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def get_firewall():
-    return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
 @api.post('/persist_node_config', responses={

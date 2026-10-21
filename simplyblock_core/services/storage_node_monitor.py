@@ -1163,11 +1163,18 @@ _ana_failover_applied: set = set()
 def _ana_failover_once(node) -> bool:
     """Run ANA failover for ``node`` at most once per offline episode.
 
-    Returns True when the failover was actually invoked this call."""
+    Returns True when a failover was attempted this call. The episode marker
+    is set only then: a call that was SKIPPED -- the first secondary not
+    online yet, as when it is restarting after the crash that took the
+    cluster down -- leaves the marker clear so the next cycle tries again once
+    the secondary is back (2026-10-14 run 63). An attempt that failed still
+    consumes the one shot, as it always did: retrying it every cycle against
+    a peer that cannot take the flips is the 2026-08-09 pause storm."""
     node_id = node.get_id()
     if node_id in _ana_failover_applied:
         return False
-    storage_node_ops.trigger_ana_failover_for_node(node)
+    if not storage_node_ops.trigger_ana_failover_for_node(node):
+        return False
     _ana_failover_applied.add(node_id)
     return True
 
@@ -1843,14 +1850,26 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
                 port, snode.get_id(), held, owner.lvstore)
             continue
 
+        # Two-node arbitration only (campaign c5, 07): during fence_both this
+        # lifted each node's own client port at +17-21 s while the LVS was
+        # still HA-fenced. That block belongs to the fence; the arbiter's
+        # unfence (spdk_lvs_ha_unfence) lifts it. Regular clusters return ""
+        # without a status call (remembered cluster flag).
+        keep = storage_node_ops._two_node_peer_port_must_stay_blocked(
+            snode, owner.jm_vuid, db, rebuild_too=False)
+        if keep:
+            logger.warning(
+                "Port %s on %s blocked %.0fs for %s, left blocked: %s",
+                port, snode.get_id(), held, owner.lvstore, keep)
+            continue
+
         logger.error(
             "Port %s on %s has been blocked %.0fs on a %s node with a "
             "healthy hublvol and no restart owning %s -- SPDK fenced it and "
             "nothing released it. Unblocking.",
             port, snode.get_id(), held, snode.status, owner.lvstore)
         try:
-            from simplyblock_core.utils import port_block
-            port_block.set_port(snode, port, block=False, timeout=5, retry=1)
+            snode.rpc_client(timeout=5, retry=1).nvmf_port_unblock(port)
             _blocked_port_since.pop(key, None)
         except Exception as e:
             logger.error("Failed to unblock stale port %s on %s: %s",
@@ -1989,6 +2008,29 @@ def check_node(snode):
                 snode.get_id(), StorageNode.STATUS_OFFLINE, caused_by="monitor_reconcile")
         else:
             logger.info(f"Node status is: {snode.status}, skipping")
+        return False
+
+    # A node in a removal state past the shutdown has no SPDK, exactly like an
+    # OFFLINE one, but it never comes back through OFFLINE: the drain stamps
+    # MIGRATING_DEVICES over it and the OFFLINE branch below never sees it
+    # again. Its volumes still have to be served by the first secondary until
+    # the drain has migrated them, so the failover is owed here as well.
+    # Normally the shutdown itself issued it; the one-shot marker keeps this
+    # from re-flipping every cycle, and it is only set by a promotion that
+    # ran. 2026-10-14 run 63: the secondary's SPDK aborted during the
+    # primary's removal shutdown, the shutdown-time promotion went nowhere,
+    # and the primary moved OFFLINE -> PENDING_REMOVAL -> MIGRATING_DEVICES
+    # before the secondary was back; the drain then re-created and
+    # auto-cancelled migrations for 25 minutes because nothing served the
+    # volumes, until the failover was triggered by hand.
+    if snode.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        try:
+            if _ana_failover_once(snode):
+                logger.info("ANA failover applied for node %s in removal (%s)",
+                            snode.get_id(), snode.status)
+        except Exception as e:
+            logger.error("ANA failover for node %s in removal failed: %s", snode.get_id(), e)
+        logger.info(f"Node status is: {snode.status}, skipping")
         return False
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
@@ -2360,7 +2402,11 @@ def main():
                 update_cluster_status(cluster_id)
                 logger.debug("Iteration has been finished...")
             except Exception:
-                logger.error("Error while updating cluster status")
+                # cluster_activate runs inside update_cluster_status; swallowing
+                # its message here left a cluster that could not re-activate
+                # with 100+ identical "Error while updating cluster status"
+                # lines and no reason (incident 2026-10-08 run 62).
+                logger.exception("Error while updating cluster status for %s", cluster_id)
             _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 

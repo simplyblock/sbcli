@@ -501,8 +501,12 @@ def start_event_collector_on_node(node_id):
                             # they used to fall into "Unknown event" below and
                             # were dropped. Log them, and hand them to the
                             # two-node arbiter (docs/design/two-node-arbitration.md).
-                            if arbitration_events.forward_legacy_jm_event(
-                                    db, cluster_of(snode), snode.get_id(), event_dict):
+                            # The event type is checked first, so the cluster
+                            # is read only for these (dual-node) events, never
+                            # for the regular event stream.
+                            if arbitration_events.is_legacy_jm_event(event_dict):
+                                arbitration_events.forward_legacy_jm_event(
+                                    db, cluster_of(snode), snode.get_id(), event_dict)
                                 events_controller.log_jm_event(snode.cluster_id, snode.get_id(), event_dict)
                                 continue
                             if "storage_ID" in event_dict:

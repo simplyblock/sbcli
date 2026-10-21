@@ -196,7 +196,7 @@ def test_sync_tolerates_nodes_without_the_ha_status_rpc(pair, monkeypatch):
 def test_restart_paths_run_the_solo_resync():
     import inspect
     src = inspect.getsource(storage_node_ops._restart_storage_node_impl)
-    assert src.count("_resync_solo_lvs_after_restart(snode)") == 2
+    assert src.count("_resync_solo_lvs_after_restart(snode, cluster)") == 2
 
 
 # ---- B6: leadership reconciliation ---------------------------------------------
@@ -340,6 +340,12 @@ def test_keep_alive_for_arbitrated_clusters(arbitrated, expected):
     assert entry.keep_alive_tmo == expected
     assert f"--keep-alive-tmo={expected}" in entry.connect
     if arbitrated:
-        assert expected == 4
-        assert entry.fast_io_fail_tmo == 8 and entry.ctrl_loss_tmo == 3600
-        assert entry.reconnect_delay == 2
+        # campaign c8, F20: a frozen node's path is detected only by the keep-alive
+        assert expected == 2
+        # held IO must be answered before the kernel fails it: fast_io_fail > KATO + hold
+        assert entry.fast_io_fail_tmo > expected + constants.TWO_NODE_HOLD_MS / 1000.0
+    else:
+        # regular clusters keep their keep-alive (shared path unchanged)
+        assert expected == 8
+    assert entry.fast_io_fail_tmo == 8 and entry.ctrl_loss_tmo == 3600
+    assert entry.reconnect_delay == 2

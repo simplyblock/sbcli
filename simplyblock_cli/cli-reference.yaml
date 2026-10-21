@@ -3068,6 +3068,11 @@ commands:
             help: "The cluster id."
             dest: cluster_id
             type: str
+          - name: "--all"
+            help: "Also show merged backups, hidden by default."
+            dest: all
+            type: bool
+            action: store_true
       - name: delete
         help: "Delete all backups for a logical volume."
         arguments:

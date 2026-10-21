@@ -65,6 +65,31 @@ class TestGet:
         assert 'lease_age_ms' in body and 'enabled' in body
         write.assert_called_once()
 
+    def test_reports_a_pending_rebuild_as_not_redundant(self, client, db, two_nodes):
+        # campaign c3, F10: a re-admitted node is not a full replica until rebuilt
+        rec = ClusterArbitration()
+        rec.cluster_id = CLUSTER_ID
+        db.get_cluster_arbitration.return_value = rec
+        body = client.get(f'{BASE}/').json()
+        assert body['redundant'] is True and body['rebuild_pending'] == []
+        rec.rebuild = {NODE_B: {"reason": "re-admitted", "since": 1, "scheduled_at": 0,
+                                "queued": False}}
+        body = client.get(f'{BASE}/').json()
+        assert body['redundant'] is False and body['rebuild_pending'] == [NODE_B]
+        assert body['rebuild_stuck'] == []
+
+    def test_reports_a_stuck_rebuild(self, client, db, two_nodes):
+        # campaign c4, F12: a rebuild failing on unavailable devices is flagged
+        rec = ClusterArbitration()
+        rec.cluster_id = CLUSTER_ID
+        rec.rebuild = {NODE_B: {"reason": "re-admitted", "since": 1, "scheduled_at": 2,
+                                "queued": True, "stuck": True, "stuck_error": 520}}
+        rec.device_recovery = {NODE_B: {"reason": "rebuild stuck", "at": 3}}
+        db.get_cluster_arbitration.return_value = rec
+        body = client.get(f'{BASE}/').json()
+        assert body['rebuild_stuck'] == [NODE_B] and body['redundant'] is False
+        assert body['device_recovery'][NODE_B]['reason'] == "rebuild stuck"
+
     def test_refuses_a_cluster_that_is_not_two_nodes(self, client, db, cluster):
         db.get_cluster_arbitration.return_value = None
         db.get_storage_nodes_by_cluster_id.return_value = [_node(NODE_A)]

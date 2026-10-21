@@ -761,6 +761,17 @@ FENCE_DEADLINE_SEC = 7.5
 # budget. 6s is above the 0.5s norm but still inside the 8s reject threshold,
 # and overrunning it releases the fence rather than stretching the block.
 FENCE_WAIT_EXAMINE_TIMEOUT_SEC = 6
+# bdev_lvol_set_leader on the recovering node is the other in-fence call that
+# does real work: it replays the journal and re-levels the blobstore before it
+# returns, so its latency scales with how much the lvstore has outstanding
+# rather than with a healthy node's RPC round trip. 2026-10-14 run 63: a
+# survivor holding a departing node's orphaned replica took 669ms against the
+# 0.5s norm (the other survivors: 74ms and 153ms) and the restart aborted on
+# every cycle, each one draining the cluster back to all-offline. 2s absorbs
+# that with margin; two attempts (FENCE_RPC_RETRY) still fit the 7.5s deadline
+# next to the rest of the window, and the clamp in _fenced() bounds the call to
+# the time actually left on the fence.
+FENCE_SET_LEADER_TIMEOUT_SEC = 2
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
@@ -970,7 +981,6 @@ if LVOL_NVMF_PORT_ENV:
 
 # Backward compatibility aliases
 RPC_PORT_RANGE_START = RPC_BASE_PORT
-FW_PORT_START = SNODE_API_PORT
 LVOL_NVMF_PORT_START = NVMF_BASE_PORT
 NODE_NVMF_PORT_START = NVMF_BASE_PORT
 NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
@@ -1040,6 +1050,10 @@ TWO_NODE_WAIT_TIMEOUT_MS = 20000
 TWO_NODE_VERDICT_HISTORY = 50
 #: Arbiter decision loop period (events are folded and decided every tick).
 TWO_NODE_DECISION_TICK_MS = 100
+#: With no cluster that has ``two_node_arbitration`` on, the arbiter (and the
+#: Go event collector) re-scan the cluster list only this often instead of every
+#: tick, so deployments without two-node clusters carry almost no FDB load.
+TWO_NODE_IDLE_RESCAN_S = 30
 #: How often the arbiter re-reads each node's ``jc_ha_status`` and replaces its
 #: per-node, per-LVS view (holding/solo/fenced) with it. Also done at once after
 #: a reconnect and on an instance change or a sequence gap.
@@ -1051,9 +1065,12 @@ TWO_NODE_SPDK_DOWN_HTTP500_STREAK = 2
 #: Seconds between two leadership reconciliation passes, and how long an LVS
 #: must stay leaderless (two passes) before leadership is restored.
 TWO_NODE_LEADERSHIP_RECONCILE_S = 10
-#: Client keep-alive for clusters with two-node arbitration: hosts must detect
-#: a silent path within the hold window (hold_ms 2500 < KATO).
-TWO_NODE_CLIENT_KEEP_ALIVE_TO = 4
+#: Client keep-alive for clusters with two-node arbitration. A frozen storage
+#: node keeps its TCP connections open, so a host notices the dead path only
+#: through the NVMe keep-alive, 1-2 KATO intervals after the last answered
+#: keep-alive (campaign c8, F20: 7.1 s with KATO 4). KATO 2 bounds that to
+#: 2-4 s, inside the client-path stall limit of KATO + 1 s = 3 s.
+TWO_NODE_CLIENT_KEEP_ALIVE_TO = 2
 #: The node RPCs a storage node must expose before the arbiter drives it.
 TWO_NODE_ARBITRATION_RPCS = (
     "jc_wait_events", "jc_ha_status", "jc_lease_renew",
@@ -1078,6 +1095,49 @@ TWO_NODE_JM_RECONNECT_S = 30
 TWO_NODE_PARTITION_RESTART_AFTER_S = 120
 #: How often the link between the two nodes is probed while partitioned.
 TWO_NODE_LINK_PROBE_S = 10
+#: Campaign c3 (02a): lease renewals and jc_ha_status polls run on a bounded
+#: pool, one call per node in flight, so a frozen node (each call blocks for
+#: its full timeout) never delays the renewal of, or a decision about, its
+#: peer. The decision itself stays on the decision loop.
+TWO_NODE_RPC_WORKERS = 4
+#: How long a tick waits for the status polls it started before it decides on
+#: what has arrived; a poll still running is applied on a later tick.
+TWO_NODE_POLL_WAIT_MS = 150
+#: Campaign c7 (F16): the decision thread never makes a blocking RPC to a
+#: node. Node work that is not a renewal or status poll (jc_set_dual_node,
+#: device check + jc_unfence, the leadership reconciliation probe) runs on a
+#: second bounded pool, one call per node (or cluster) in flight, so it can
+#: neither delay a verdict nor starve the renewals of a healthy peer.
+TWO_NODE_WORK_WORKERS = 4
+#: Timeout of the leadership reconciliation's ``get_lvstore`` probe (B6),
+#: no retry: a frozen node is "unknown", never waited for (c7, F16).
+TWO_NODE_LEADER_PROBE_TIMEOUT_S = 1
+#: Timeout of a best-effort fence (planned loss, operator override): the
+#: grant to the peer does not depend on it (c7, F16).
+TWO_NODE_BEST_EFFORT_FENCE_TIMEOUT_S = 1
+#: Campaign c3 (F10): after a node is re-admitted (it was fenced while its
+#: peer may have written alone), the arbiter schedules the data rebuild and
+#: checks every this many seconds whether it has finished ...
+TWO_NODE_REBUILD_CHECK_S = 5
+#: ... and schedules it again this often while nothing was queued (e.g. the
+#: node was not ONLINE yet).
+TWO_NODE_REBUILD_SCHEDULE_RETRY_S = 30
+#: Campaign c4, F12: a rebuild whose migration tasks keep failing because a
+#: source or destination device is not available for this long is stuck; the
+#: arbiter flags it and hands the node to the restart flow.
+TWO_NODE_REBUILD_STUCK_S = 120
+#: Campaign c4, F12: at most one device recovery (restart) per node in this window.
+TWO_NODE_DEVICE_RECOVERY_RETRY_S = 300
+#: How long the arbiter's leadership restoration (after an unfence) waits for
+#: the leadership to be confirmed after bdev_lvol_set_leader.
+TWO_NODE_PROMOTE_VERIFY_S = 3
+#: Campaign c5, 07/08: after a heal or a re-admission unfences, the arbiter
+#: puts each LVS's leadership back on its primary; a failed attempt is
+#: retried after this long.
+TWO_NODE_LEADERSHIP_RETRY_MS = 3000
+#: Campaign c5: a port-allow task open longer than this no longer holds back
+#: the arbiter's leadership restoration (it targets the same primary).
+TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60

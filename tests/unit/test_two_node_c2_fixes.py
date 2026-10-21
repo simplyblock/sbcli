@@ -372,7 +372,7 @@ def test_f1_compression_precheck_retries_while_the_journal_relevels():
     leader = _Leader([RuntimeError("Compression request failed")] * 3 + [False])
     got = storage_node_ops._jc_compression_status_with_retry(
         leader, 1, timeout_s=60, interval_s=2, sleep=lambda s: t.__setitem__(0, t[0] + s),
-        clock=lambda: t[0])
+        clock=lambda: t[0], arbitrated=True)
     assert got is False and t[0] == 6
 
 
@@ -382,7 +382,7 @@ def test_f1_compression_precheck_gives_up_after_the_window():
     with pytest.raises(RuntimeError):
         storage_node_ops._jc_compression_status_with_retry(
             leader, 1, timeout_s=10, interval_s=2,
-            sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0])
+            sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0], arbitrated=True)
     assert t[0] <= 10
 
 
