@@ -128,6 +128,57 @@ jobs:
           exit-code: '1'
           scanners: vuln,secret
 
+      # grype-branch and trivy-branch write their findings to disk, not the
+      # step log, so a gating failure otherwise can't be told apart from any
+      # other CVE without downloading a JSON file and reading it by hand.
+      # This turns both into one small, de-duplicated table -- in the job
+      # summary, in this step's own log, as an artifact, and in the Slack
+      # alert -- without scanning anything a second time.
+      - name: Summarize gating scan findings
+        id: gating-summary
+        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
+        run: |
+          trivy_rows=$(jq -r '
+            .Results[]?.Vulnerabilities[]? |
+            [.Severity, .VulnerabilityID, .PkgName, .InstalledVersion, (.FixedVersion // "-"), "Trivy"] | @tsv
+          ' trivy-branch.json 2>/dev/null || true)
+
+          grype_rows=$(jq -r '
+            .matches[]? |
+            [.vulnerability.severity, .vulnerability.id, .artifact.name, .artifact.version,
+             ((.vulnerability.fix.versions // []) | join(",") | if . == "" then "-" else . end), "Grype"] | @tsv
+          ' "${{ steps.grype-branch.outputs.json }}" 2>/dev/null || true)
+
+          rows="$(printf '%s\n%s\n' "$trivy_rows" "$grype_rows" | sed '/^$/d' | sort -u)"
+          count=$(printf '%s\n' "$rows" | sed '/^$/d' | wc -l | tr -d ' ')
+
+          {
+            echo "### Gating scan findings — ${{ matrix.branch }} ($count)"
+            echo
+            echo "| Severity | CVE | Package | Installed | Fixed | Tool |"
+            echo "|---|---|---|---|---|---|"
+            printf '%s\n' "$rows" | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6}'
+          } > "findings-${{ matrix.branch }}.md"
+
+          cat "findings-${{ matrix.branch }}.md"
+          cat "findings-${{ matrix.branch }}.md" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "count=$count"
+            echo "list<<GATING_FINDINGS_EOF"
+            printf '%s\n' "$rows" | awk -F'\t' '{printf "%s  %s  %s@%s -> %s  (%s)\n", $1, $2, $3, $4, $5, $6}' | head -20
+            if [[ "$count" -gt 20 ]]; then echo "...and $((count - 20)) more (see job summary)"; fi
+            echo "GATING_FINDINGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload gating findings artifact
+        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gating-findings-${{ matrix.branch }}
+          path: findings-${{ matrix.branch }}.md
+          retention-days: 90
+
       - name: Run Trivy on released image (informational)
         if: matrix.branch != 'main'
         uses: aquasecurity/trivy-action@v0.35.0
@@ -204,6 +255,7 @@ jobs:
                   "fields": [
                     { "title": "Branch",   "value": "${{ matrix.branch }}", "short": true },
                     { "title": "Image",    "value": "${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}", "short": true },
+                    { "title": "Findings (${{ steps.gating-summary.outputs.count }})", "value": ${{ toJSON(steps.gating-summary.outputs.list) }}, "short": false },
                     { "title": "Workflow", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>", "short": false }
                   ]
                 }
