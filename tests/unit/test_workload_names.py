@@ -153,3 +153,17 @@ def test_add_cluster_hands_the_workload_names_to_the_create():
 
     for field, value in NAMES.items():
         assert impl.call_args.kwargs[field] == value
+
+
+def test_a_secret_name_yaml_would_read_as_another_type_stays_a_string():
+    """A Secret named true, null, or 123 is a valid Kubernetes name, and
+    unquoted in the template YAML reads it as a bool, a null, or an int,
+    which Kubernetes refuses as a Secret reference."""
+    for name in ("true", "null", "123"):
+        for provider in ("cert-manager", "openshift"):
+            (pod,) = [d for d in _render("storage_deploy_spdk.yaml.j2", TLS_PROVIDER=provider,
+                                         SPDK_PROXY_TLS_SECRET=name)
+                      if d["kind"] == "Pod"]
+            assert _tls_secret_names(pod) == {name}, (name, provider)
+        (job,) = _render("storage_init_job.yaml.j2", SPDK_PROXY_TLS_SECRET=name)
+        assert _tls_secret_names(job) == {name}, name

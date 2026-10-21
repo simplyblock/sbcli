@@ -72,7 +72,7 @@ class TestStorageDeployTemplate(unittest.TestCase):
 
     def test_cert_manager_mounts_secret_directly(self):
         rendered = _render_storage_deploy("cert-manager")
-        self.assertIn("secretName: simplyblock-spdk-proxy-tls", rendered)
+        self.assertIn('secretName: "simplyblock-spdk-proxy-tls"', rendered)
         self.assertNotIn("simplyblock-certificate-authority", rendered)
         self.assertNotIn("projected:", rendered)
         self.assertIn('name: SB_TLS_PROVIDER', rendered)

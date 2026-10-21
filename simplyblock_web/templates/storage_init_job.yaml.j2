@@ -29,7 +29,7 @@ spec:
         {% if TLS_CONNECT == "authenticated" %}
         - name: tls
           secret:
-            secretName: {{ SPDK_PROXY_TLS_SECRET }}
+            secretName: "{{ SPDK_PROXY_TLS_SECRET }}"
         {% endif %}
       containers:
         - name: init-setup
