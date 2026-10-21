@@ -1367,18 +1367,63 @@ class SshUtils:
         if log_file:
             fio_cmd = f"{fio_cmd} > {log_file} 2>&1"
 
-        start_cmd = f"sudo tmux new-session -d -s {session} \"{fio_cmd}\" || sudo tmux kill-session -t {session} 2>/dev/null || true; sudo tmux new-session -d -s {session} \"{fio_cmd}\""
+        def _running():
+            """(is FIO alive for this job, first matching process line)."""
+            out, _ = self.exec_command(
+                node=node, command=f"pgrep -fa 'fio.*{name}' || true",
+                max_retries=1, supress_logs=True)
+            tmux_ok, _ = self.exec_command(
+                node=node,
+                command=f"sudo tmux has-session -t {session} 2>/dev/null || echo MISSING",
+                max_retries=1, supress_logs=True)
+            return bool(out.strip()) and "MISSING" not in tmux_ok, out
+
+        # Never start FIO over a job that is already writing.
+        #
+        # This used to run `tmux new-session || tmux kill-session; tmux
+        # new-session`, so a caller that asked twice killed the running job
+        # -- SIGKILL, wherever it was, including part-way through a 64 KiB
+        # write -- and started a second job with a NEW random seed on the
+        # same file. Reading back a block caught mid-write then fails as
+        # "verify: bad magic header", which is reported as data corruption
+        # and is not: run 20261019-211527 failed that way, and did it 51
+        # times across 34 volumes in one run.
+        #
+        # The fallback was harmless from March 2026 until 0e0f48347 made FIO
+        # a service that runs ACROSS outages (2026-09-25); before that FIO
+        # ran in waves and nothing ever started it on a volume that already
+        # had it. Finding it already running is now the normal case, and the
+        # right answer is to leave it alone.
+        already, out = _running()
+        if already:
+            self.logger.info(
+                f"FIO already running for {name} on {node}, leaving it: "
+                f"{out.strip().splitlines()[0]}")
+            return
+
+        # Nothing is running, so a leftover session is an empty husk and is
+        # safe to clear -- that is the only case this kill may touch.
+        start_cmd = (
+            f"sudo tmux kill-session -t {session} 2>/dev/null || true; "
+            f"sudo tmux new-session -d -s {session} \"{fio_cmd}\""
+        )
         self.logger.info(f"Starting FIO on {node}: {name} in tmux session '{session}'")
         self.exec_command(node=node, command=start_cmd, max_retries=2)
 
         # Ensure process is up: check tmux & pgrep
         for i in range(8):
-            out, _ = self.exec_command(node=node, command=f"pgrep -fa 'fio.*{name}' || true", max_retries=1, supress_logs=False)
-            tmux_ok, _ = self.exec_command(node=node, command=f"sudo tmux has-session -t {session} 2>/dev/null || echo MISSING", max_retries=1, supress_logs=False)
-            if out.strip() and "MISSING" not in tmux_ok:
+            ok, out = _running()
+            if ok:
                 self.logger.info(f"FIO is running for {name}: {out.strip().splitlines()[0]}")
                 return
             if i >= 2:
+                # Re-check immediately before re-issuing: the start may have
+                # landed between the poll and here, and re-issuing would then
+                # kill the job we were waiting for.
+                ok, out = _running()
+                if ok:
+                    self.logger.info(f"FIO is running for {name}: {out.strip().splitlines()[0]}")
+                    return
                 self.logger.warning(f"FIO not detected yet for {name}; re-issuing start (try {i-1}/8)")
                 self.exec_command(node=node, command=start_cmd, max_retries=1, supress_logs=False)
             time.sleep(2 + i)
