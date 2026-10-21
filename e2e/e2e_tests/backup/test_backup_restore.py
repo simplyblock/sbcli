@@ -4299,7 +4299,16 @@ class TestBackupConcurrentIO(BackupTestBase):
         # TC-BCK-102: wait for FIO to finish then wait for backup
         self.logger.info("TC-BCK-102: waiting for FIO + backup to complete")
         fio_thread.join()
-        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        # Docker only. _run_fio already validates this log on the docker path
+        # (it reads it over SSH from fio_node once FIO exits), so this is a
+        # second look there -- but on k8s FIO is a Job, nothing writes
+        # log_file, and fio_node is 0.0.0.0 because there are no client
+        # machines. Reading it then reports
+        #   "FIO log .../fio_concurrent_*.log on 0.0.0.0 is missing or empty"
+        # which is true and says nothing: the Job ran and was waited on
+        # inside _run_fio, where its success is already asserted.
+        if not self.k8s_test:
+            self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-102")
         self.logger.info(f"TC-BCK-102: backup {bk_id} complete after concurrent FIO ✓")
 

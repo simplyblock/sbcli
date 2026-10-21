@@ -4755,12 +4755,52 @@ class K8sUtils:
                 self.logger.info(f"[K8sUtils] Pod '{pod_name}' is Running")
                 return True
             if phase in ("Failed", "Error"):
+                self._dump_pod_diagnostics(pod_name, ns, f"entered {phase}")
                 raise RuntimeError(
                     f"Pod '{pod_name}' entered {phase} state")
             time.sleep(5)
+        # Say why before the caller deletes it. A checksum pod that never
+        # starts used to be reported as "not Running within 600s" and nothing
+        # else, and the caller's retry deletes the pod immediately -- so the
+        # events, the container's waiting reason and the mount state all went
+        # with it. TestBackupSecurityLvol burned two attempts and 20 minutes
+        # that way on 2026-10-20 and left no evidence at all; all the logs
+        # hold is "getting running pods" ten times over.
+        self._dump_pod_diagnostics(pod_name, ns, f"not Running within {timeout}s")
         raise TimeoutError(
             f"Pod '{pod_name}' not Running within {timeout}s"
         )
+
+    def _dump_pod_diagnostics(self, pod_name: str, namespace: str,
+                              what: str) -> None:
+        """Why a pod is not Running, read while it still exists.
+
+        The three ways a pod stalls without ever logging anything: it is not
+        scheduled, its image will not pull, or its volume will not mount.
+        describe carries all three, and the pod's own log carries the fourth
+        case where it started and died. Every read is bounded and independent,
+        so one failure does not cost the others.
+        """
+        self.logger.error(
+            f"[pod-diag] Pod '{pod_name}' {what}. Dumping diagnostics...")
+
+        def _show(label, cmd):
+            try:
+                out, _ = self._exec_kubectl(cmd, supress_logs=True)
+                out = (out or "").strip()
+                if out:
+                    self.logger.error("[pod-diag] %s:\n%s", label, out)
+                else:
+                    self.logger.error("[pod-diag] %s: <empty>", label)
+            except Exception as exc:                          # noqa: BLE001
+                self.logger.warning(f"[pod-diag] {label} failed: {exc}")
+
+        _show("pod", f"kubectl get pod {pod_name} -n {namespace} -o wide 2>&1")
+        _show("detail", f"kubectl describe pod {pod_name} -n {namespace} 2>&1 | tail -45")
+        _show("events", f"kubectl get events -n {namespace} --sort-by=.lastTimestamp "
+                        f"2>&1 | grep -i {pod_name} | tail -20")
+        _show("log", f"kubectl logs {pod_name} -n {namespace} --tail=40 "
+                     f"--all-containers 2>&1")
 
     def csi_node_pod(self, node_name: str) -> tuple:
         """The CSI node-plugin pod on *node_name*, as (pod, container).
