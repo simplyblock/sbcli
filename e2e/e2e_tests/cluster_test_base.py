@@ -2022,6 +2022,18 @@ class TestClusterBase:
                 f"k8s_test={getattr(self, 'k8s_test', False)})"
             )
 
+        # 2b. FDB traces and PSI. Both are cheap and both are gone by teardown
+        #     if not taken here: FDB rotates its traces roughly every six hours,
+        #     and PSI is an instantaneous reading with no history of its own.
+        try:
+            self.collect_fdb_traces()
+        except Exception as e:
+            self.logger.warning(f"[diagnostics] collect_fdb_traces failed: {e}")
+        try:
+            self.collect_pressure_stall(tag=label)
+        except Exception as e:
+            self.logger.warning(f"[diagnostics] collect_pressure_stall failed: {e}")
+
         # 3. Compress old dump files & delete aged-out compressed dumps in background
         dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
         threading.Thread(
@@ -2031,6 +2043,150 @@ class TestClusterBase:
         ).start()
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
+
+    def collect_fdb_traces(self):
+        """Archive FoundationDB trace files off the mgmt node, incrementally.
+
+        The fdb-server containers log almost nothing to stdout ("Starting FDB
+        server", "FDBD joined cluster"), so the ``docker logs`` we already keep
+        are useless for diagnosing FDB. The real diagnostics -- role changes,
+        slow tasks, commit and read latencies, ``TransactionTooOld`` -- are the
+        XML trace files, written to a per-server docker volume that FDB rotates
+        as a ring buffer about every six hours. A 23-hour soak therefore ends
+        with the traces covering only its last few hours, which is how run
+        39380260756's FDB 1031 storm ended up unexplainable.
+
+        So this runs on every diagnostics checkpoint rather than at teardown.
+        Files already archived (``.gz`` present) are skipped; the server's
+        currently-open trace is refreshed each time and compressed once it has
+        been quiet for ten minutes. Trace XML gzips about 12:1.
+        """
+        if getattr(self, "k8s_test", False) or not self.mgmt_nodes:
+            return
+        mgmt = self.mgmt_nodes[0]
+        dst = os.path.join(self.docker_logs_path, mgmt, "fdb_traces")
+        # Single quoted block: runs on the mgmt node, writes straight to the
+        # NFS run dir, and must never fail the caller.
+        cmd = (
+            f"mkdir -p '{dst}' 2>/dev/null; "
+            "for v in /var/lib/docker/volumes/*fdb*log*/_data; do "
+            "  [ -d \"$v\" ] || continue; "
+            "  n=$(basename $(dirname \"$v\")); "
+            f"  d='{dst}'/\"$n\"; mkdir -p \"$d\" 2>/dev/null; "
+            "  for f in \"$v\"/*.xml; do "
+            "    [ -f \"$f\" ] || continue; "
+            "    b=$(basename \"$f\"); "
+            "    [ -f \"$d/$b.gz\" ] && continue; "
+            # -p matters twice: it keeps FDB's own mtime, so the -mmin test
+            # below means "FDB has stopped writing this trace" rather than
+            # "we copied it a while ago", and it lets -u see the server's
+            # still-open trace as newer and refresh it on the next pass.
+            "    cp -pu \"$f\" \"$d/$b\" 2>/dev/null || true; "
+            "  done; "
+            "done; "
+            f"find '{dst}' -name '*.xml' -mmin +10 -exec gzip -f {{}} \\; 2>/dev/null || true; "
+            f"du -sh '{dst}' 2>/dev/null | cut -f1"
+        )
+        try:
+            out, _ = self.ssh_obj.exec_command(
+                node=mgmt, command=cmd, timeout=180, supress_logs=True
+            )
+            self.logger.info(f"[diagnostics] fdb traces archived ({(out or '').strip()}) -> {dst}")
+        except Exception as e:
+            self.logger.warning(f"[diagnostics] fdb trace collection failed: {e}")
+
+    def collect_pressure_stall(self, tag=""):
+        """Append /proc/pressure (PSI) for every node to a per-node log.
+
+        PSI is the cheapest direct answer to "was this node starved of CPU, memory
+        or IO?", which is the question left open whenever nodes stall together and
+        nothing in the application logs explains it.
+
+        The lab kernels are built ``CONFIG_PSI=y`` with
+        ``CONFIG_PSI_DEFAULT_DISABLED=y``, so ``/proc/pressure`` does not exist
+        until ``psi=1`` is on the kernel command line (see
+        ``scripts/enable_psi.sh``). Until then this records that it is off, once
+        per node, rather than failing or going silent.
+        """
+        nodes = list(self.mgmt_nodes or []) + list(self.storage_nodes or [])
+        nodes += [n for n in (self.fio_node or []) if n not in nodes]
+        stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if not hasattr(self, "_psi_unavailable"):
+            self._psi_unavailable = set()
+        for node in nodes:
+            out_file = os.path.join(self.docker_logs_path, node, f"pressure_{node}.log")
+            cmd = (
+                f"mkdir -p $(dirname '{out_file}') 2>/dev/null; "
+                "if [ -d /proc/pressure ]; then "
+                f"  {{ echo '=== {stamp} {tag}'; "
+                # Whatever the kernel exposes: cpu/memory/io everywhere, plus
+                # irq on 5.13+. Reading the directory rather than a fixed list
+                # means a newer kernel's resources come along for free.
+                "    for r in /proc/pressure/*; do "
+                "      printf '%s: ' \"$(basename $r)\"; tr '\\n' '|' < \"$r\"; echo; "
+                "    done; "
+                f"  }} >> '{out_file}' 2>/dev/null; echo ok; "
+                "else echo no_psi; fi"
+            )
+            try:
+                out, _ = self.ssh_obj.exec_command(
+                    node=node, command=cmd, timeout=30, supress_logs=True
+                )
+                if "no_psi" in (out or "") and node not in self._psi_unavailable:
+                    self._psi_unavailable.add(node)
+                    self.logger.warning(
+                        f"[diagnostics] PSI unavailable on {node}: /proc/pressure is absent. "
+                        "The kernel needs psi=1 on its command line "
+                        "(e2e/scripts/enable_psi.sh) and a reboot."
+                    )
+            except Exception as e:
+                self.logger.warning(f"[diagnostics] PSI read failed on {node}: {e}")
+
+    def collect_prometheus_snapshot(self, suffix=""):
+        """Archive the Prometheus TSDB and a few decoded series off the mgmt node.
+
+        Prometheus holds the per-second picture of the cluster that no log has --
+        capacity, queue depths, latencies -- but it is retained for only 7 days
+        and lives on the mgmt node, so an archived run that is read later has
+        nothing. The TSDB is small (tens of MB); taking the whole thing is both
+        simpler and more useful than guessing which metrics will be wanted.
+
+        The admin snapshot API (``/api/v1/admin/tsdb/snapshot``) is not enabled on
+        this deployment -- it answers ``admin APIs disabled`` -- so this copies
+        the data directory instead. The in-progress head block may be torn, which
+        is why the decoded range queries are taken as well: they go through the
+        query API and are always consistent.
+        """
+        if getattr(self, "k8s_test", False) or not self.mgmt_nodes:
+            return
+        mgmt = self.mgmt_nodes[0]
+        dst = os.path.join(self.docker_logs_path, mgmt, "prometheus")
+        cmd = (
+            f"mkdir -p '{dst}' 2>/dev/null; "
+            "d=$(ls -d /var/lib/docker/volumes/*prometheus*/_data 2>/dev/null | head -1); "
+            "if [ -n \"$d\" ]; then "
+            f"  tar -C \"$d\" -czf '{dst}/tsdb{suffix}.tar.gz' . 2>/dev/null || true; "
+            "fi; "
+            # Decoded series, independent of the TSDB copy being clean.
+            "for q in 'up' "
+            "'node_filesystem_avail_bytes' "
+            "'node_pressure_cpu_waiting_seconds_total' "
+            "'node_memory_MemAvailable_bytes' "
+            "'node_load1'; do "
+            f"  curl -s -m 20 --get 'http://127.0.0.1:9090/api/v1/query' "
+            f"    --data-urlencode \"query=$q\" -o '{dst}'/\"$q\"{suffix}.json || true; "
+            "done; "
+            f"ls -1 '{dst}' | wc -l; du -sh '{dst}' 2>/dev/null | cut -f1"
+        )
+        try:
+            out, _ = self.ssh_obj.exec_command(
+                node=mgmt, command=cmd, timeout=300, supress_logs=True
+            )
+            self.logger.info(
+                f"[diagnostics] prometheus archived ({' '.join((out or '').split())}) -> {dst}"
+            )
+        except Exception as e:
+            self.logger.warning(f"[diagnostics] prometheus collection failed: {e}")
 
     def device_subsys_nqn(self, client, device):
         """The NQN of the subsystem currently backing *device*, or "".
@@ -3369,6 +3525,20 @@ class TestClusterBase:
                         self.logger.info(f"\n{file}:")
                         for line in lines:
                             self.logger.info(f"  -> {line}")
+
+            # Final sweep: the last FDB traces (including the server's still-open
+            # one), a final PSI reading, and the Prometheus TSDB -- which is kept
+            # for only 7 days on the mgmt node, so an archive read later has
+            # nothing unless it is taken now.
+            for fn, name in (
+                (self.collect_fdb_traces, "collect_fdb_traces"),
+                (lambda: self.collect_pressure_stall(tag="final"), "collect_pressure_stall"),
+                (lambda: self.collect_prometheus_snapshot(suffix="_final"), "collect_prometheus_snapshot"),
+            ):
+                try:
+                    fn()
+                except Exception as e:
+                    self.logger.warning(f"[teardown] {name} failed: {e}")
 
             self.ssh_obj.copy_logs_and_configs_to_nfs(
                 logs_path=self.docker_logs_path, storage_nodes=self.storage_nodes
