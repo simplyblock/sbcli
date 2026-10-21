@@ -279,6 +279,124 @@ def _env_flag(name):
     return os.environ.get(name, "").strip().lower() == "true"
 
 
+def _talos_host(node_name):
+    """Whether this worker runs Talos Linux.
+
+    Read off the Node object, where the kubelet publishes the host's
+    os-release (``status.nodeInfo.osImage``, e.g. ``Talos (v1.12.7)``): the
+    fact is the host's own, so nothing has to be told and nothing can be
+    told wrongly. The discovery run derives ``environment: Talos`` from the
+    same source. ``TALOS_CLUSTER=true|false`` overrides it -- for a Talos
+    derivative whose osImage says something else, or to force the managed
+    path -- and is otherwise not needed. Unreadable Node object: not Talos,
+    with a warning, which is the managed path this code always took.
+    """
+    override = os.environ.get("TALOS_CLUSTER", "").strip().lower()
+    if override in ("true", "false"):
+        return override == "true"
+    try:
+        node = core_utils.get_k8s_core_client().read_node(node_name)
+        os_image = (node.status.node_info.os_image or "")
+    except Exception as e:
+        logger.warning("Cannot read Node '%s' to detect the host OS (%s); assuming it is not Talos", node_name, e)
+        return False
+    return os_image.strip().lower().startswith("talos")
+
+
+# The kubelet keys the CPU-topology Job writes on a vanilla host
+# (storage_cpu_topology.yaml.j2); on Talos they go into the machine config.
+_KUBELET_TOPOLOGY = {
+    "cpuManagerPolicy": "static",
+    "topologyManagerPolicy": "single-numa-node",
+    "topologyManagerScope": "pod",
+}
+
+
+def _talos_kubelet_patch(reserved_system_cpus):
+    """The strategic-merge machine-config patch that gives the kubelet the
+    CPU topology settings. machine.kubelet.extraConfig is merged into the
+    kubelet configuration Talos renders; the change is applied without a
+    reboot and Talos restarts the kubelet itself."""
+    cfg = dict(_KUBELET_TOPOLOGY, reservedSystemCPUs=str(reserved_system_cpus))
+    return {"machine": {"kubelet": {"extraConfig": cfg}}}
+
+
+def _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus):
+    """True/False whether the kubelet on ``node_name`` already runs with the
+    topology settings, read from its live configuration through the API
+    server's node proxy (``/api/v1/nodes/<node>/proxy/configz``); None when
+    that cannot be read (the storage-node role needs ``nodes/proxy get``).
+    This is what makes the step idempotent: Talos restarts the kubelet on
+    every machine-config change, and a restart per SPDK restart would be a
+    regression, so the patch is only sent when the kubelet does not have
+    the settings yet."""
+    try:
+        raw = k8s_core_v1.connect_get_node_proxy_with_path(node_name, "configz")
+    except ApiException as e:
+        logger.warning("Cannot read the kubelet configuration of '%s' (HTTP %s)", node_name, e.status)
+        return None
+    try:
+        cfg = (json.loads(raw) if isinstance(raw, str) else raw).get("kubeletconfig", {})
+    except (ValueError, AttributeError):
+        logger.warning("Unexpected kubelet configz payload from '%s'", node_name)
+        return None
+    want = dict(_KUBELET_TOPOLOGY, reservedSystemCPUs=str(reserved_system_cpus))
+    return all(str(cfg.get(k, "")) == v for k, v in want.items())
+
+
+def _wait_for_node_ready(k8s_core_v1, node_name):
+    """Block until the Node reports Ready again (the kubelet restarted), or
+    return the message to fail with."""
+    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
+    while True:
+        node = k8s_core_v1.read_node(node_name)
+        ready = next((c.status for c in (node.status.conditions or []) if c.type == "Ready"), None)
+        if ready == "True":
+            return None
+        if time.monotonic() >= deadline:
+            return f"node '{node_name}' did not report Ready after its kubelet restart"
+        time.sleep(_TALOS_HUGEPAGE_POLL_S)
+
+
+def _configure_talos_kubelet_topology(node_name, namespace, values, reserved_system_cpus):
+    """Give the kubelet on a Talos worker the CPU topology settings the
+    vanilla CPU-topology Job writes, through the Talos API, and return None
+    -- or the message to fail the add with. Skipped when the kubelet
+    already runs with them (a plain node restart touches nothing) and,
+    with a warning, when its configuration cannot be read at all: without
+    that check every restart would restart the kubelet."""
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    state = _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus)
+    if state is True:
+        logger.info("Kubelet on '%s' already runs with the CPU topology settings; nothing to apply", node_name)
+        return None
+    if state is None:
+        logger.warning("Not configuring the kubelet CPU topology on Talos node '%s': its configuration cannot be "
+                       "verified (grant the storage-node role nodes/proxy get)", node_name)
+        return None
+    secret_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
+    missing = _talos_api_secret_missing(k8s_core_v1, namespace, secret_name)
+    if missing:
+        return missing
+    job_values = dict(values,
+                      TALOSCTL_IMAGE=os.environ.get("TALOSCTL_IMAGE") or constants.TALOSCTL_IMAGE,
+                      TALOS_API_SECRET=secret_name,
+                      TALOS_PATCH=json.dumps(_talos_kubelet_patch(reserved_system_cpus), separators=(',', ':')))
+    logger.info("Configuring the kubelet CPU topology on Talos node '%s' through the Talos API "
+                "(cpuManagerPolicy=static, reservedSystemCPUs=%s)", node_name, reserved_system_cpus)
+    err = _run_talos_job("kubelet-config", node_name, namespace, job_values)
+    if err:
+        return err
+    time.sleep(_TALOS_HUGEPAGE_POLL_S)  # Talos restarts the kubelet a moment after accepting the patch
+    err = _wait_for_node_ready(k8s_core_v1, node_name)
+    if err:
+        return err
+    if _kubelet_topology_configured(k8s_core_v1, node_name, reserved_system_cpus) is False:
+        return (f"the kubelet on '{node_name}' came back without the CPU topology settings after the "
+                f"machine config patch")
+    return None
+
+
 def _hugepage_shortfall(host_hugetlb_bytes, required_mib):
     """The message to fail the add with when the host carries fewer huge
     pages than the SPDK pod is about to request, or None when it carries
@@ -432,7 +550,8 @@ def _run_talos_job(step, node_name, namespace, job_values):
     deleted on success (its pod log is copied into the agent log first) and
     left in place on failure, where its pod log says why talosctl failed
     (role not allowed, apid unreachable, patch rejected)."""
-    prefix = {"patch": "snode-talos-hugepages-", "kubelet": "snode-talos-kubelet-"}[step]
+    prefix = {"patch": "snode-talos-hugepages-", "kubelet": "snode-talos-kubelet-",
+              "kubelet-config": "snode-talos-kubelet-config-"}[step]
     values = dict(job_values, TALOS_STEP=step, TALOS_JOBNAME=_job_name(prefix, node_name))
     env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
     job_yaml = yaml.safe_load(env.get_template('storage_talos_hugepages_job.yaml.j2').render(values))
@@ -582,15 +701,15 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(openshift, str):
        openshift = openshift.strip().lower() in ("true")
 
-    # Talos is stated the same way OpenShift is: a flag the operator sets on
-    # the node agent from the StorageCluster's environment, not something
-    # sniffed off the host at run time. On Talos the host is immutable and
-    # has no shell, so nothing here touches it directly -- no nr_hugepages
-    # write, no nsenter kubelet restart, no grubby/KubeletConfig Job. Huge
-    # pages are reserved through the Talos API instead (a talosctl Job
-    # patching machine.sysfs and restarting the kubelet), and the add waits
-    # for the pool before creating the pod; see _provision_talos_hugepages.
-    talos = _env_flag("TALOS_CLUSTER")
+    # Talos is detected from what the kubelet reports about its host (see
+    # _talos_host), with TALOS_CLUSTER as an override. On Talos the host is
+    # immutable and has no shell, so nothing here touches it directly -- no
+    # nr_hugepages write, no nsenter kubelet restart, no grubby/KubeletConfig
+    # Job. Huge pages are reserved and the kubelet's CPU topology configured
+    # through the Talos API instead (talosctl Jobs patching the machine
+    # config); see _provision_talos_hugepages and
+    # _configure_talos_kubelet_topology.
+    talos = _talos_host(node_name)
 
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
@@ -729,12 +848,19 @@ def spdk_process_start(body: SPDKParams):
             logger.info(f"Job '{job_resp.metadata.name}' already gone, skipping delete")
         wants_host_config = (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled)
         if wants_host_config and talos:
-            # Both Jobs nsenter into the host (kubelet config, grubby). Talos
-            # has neither; its kubelet and kernel args come from the machine
-            # config, so this is a configuration mismatch to surface, not a
-            # Job to attempt and watch fail.
-            logger.warning("TALOS_CLUSTER is set: skipping the CPU-topology/core-isolation Job on '%s'; "
-                           "configure the kubelet and kernel args through the Talos machine config", node_name)
+            # Both Jobs nsenter into the host (kubelet config, grubby), which
+            # Talos has not. The kubelet half goes through the Talos API
+            # instead; the kernel-argument half (core isolation) would need
+            # machine.install.extraKernelArgs and an upgrade/reboot cycle,
+            # which is not done here.
+            if cpu_topology_enabled and not skip_kubelet_configuration:
+                err = _configure_talos_kubelet_topology(node_name, namespace, values, reserved_system_cpus)
+                if err:
+                    logger.error(err)
+                    return utils.get_response(False, err)
+            if core_isolate and not cpu_topology_enabled:
+                logger.warning("Talos node '%s': core isolation (isolcpus) is not applied; set the kernel "
+                               "arguments in the machine config (machine.install.extraKernelArgs)", node_name)
         elif wants_host_config:
             if cpu_topology_enabled and not skip_kubelet_configuration:
                 if not openshift:
