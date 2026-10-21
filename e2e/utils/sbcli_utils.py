@@ -29,11 +29,23 @@ class SbcliUtils:
             "Authorization": f"{cluster_id} {cluster_secret}"
         }
         self.logger = setup_logger(__name__)
-        # Extended API recovery: when > 0, wait up to this many seconds
-        # for the API to come back after quick retries exhaust on 503 or
-        # connection errors.  Callers (e.g. stress tests) opt-in by
-        # setting this to a positive value (e.g. 1800).
-        self.api_recovery_timeout = 0
+        # Extended API recovery: after the quick retries exhaust on a 503,
+        # 502, 504 or a connection error, wait up to this many seconds for
+        # the API to come back and then try once more.
+        #
+        # On by default, because opt-in meant off everywhere that mattered.
+        # Only mass_create_delete_stress set it, so a 23h soak
+        # (run 39380260756) ended on a 32-second control-plane restart: the
+        # quick retries covered 17s of it, this waiter was disabled, and the
+        # API returned 15 seconds after the run had already failed. The
+        # mechanism existed, classified the 503 correctly, and did nothing.
+        #
+        # 300s rather than the 1800s the stress lanes ask for: long enough
+        # to ride out a stack restart several times over, short enough that
+        # an API which is genuinely gone still fails the run in minutes
+        # instead of half an hour. A lane that wants to wait longer sets its
+        # own value, as the stress lanes already do.
+        self.api_recovery_timeout = 300
 
     def _url(self, api_url):
         """Join the base and an endpoint with exactly one slash between them.
