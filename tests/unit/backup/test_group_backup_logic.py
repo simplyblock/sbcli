@@ -52,28 +52,37 @@ class TestHomogeneity:
 class TestCommitDecision:
     def test_all_completed_is_ready_to_commit(self):
         statuses = [Backup.STATUS_COMPLETED, Backup.STATUS_COMPLETED]
-        assert group_backup.group_commit_state(statuses) == group_backup.COMMIT_READY
+        assert group_backup.group_commit_state(statuses) == group_backup.CommitState.READY
 
     def test_any_failed_fails_the_group(self):
         statuses = [Backup.STATUS_COMPLETED, Backup.STATUS_FAILED]
-        assert group_backup.group_commit_state(statuses) == group_backup.COMMIT_FAILED
+        assert group_backup.group_commit_state(statuses) == group_backup.CommitState.FAILED
 
     def test_an_in_flight_member_holds_the_group(self):
         statuses = [Backup.STATUS_COMPLETED, Backup.STATUS_IN_PROGRESS]
-        assert group_backup.group_commit_state(statuses) == group_backup.COMMIT_PENDING
+        assert group_backup.group_commit_state(statuses) == group_backup.CommitState.PENDING
 
     def test_a_pending_member_holds_the_group(self):
         statuses = [Backup.STATUS_PENDING, Backup.STATUS_PENDING]
-        assert group_backup.group_commit_state(statuses) == group_backup.COMMIT_PENDING
+        assert group_backup.group_commit_state(statuses) == group_backup.CommitState.PENDING
 
     def test_failure_wins_over_still_in_flight(self):
         # All-or-nothing: one terminal failure fails the group even while others
         # are still uploading (design §3.3).
         statuses = [Backup.STATUS_FAILED, Backup.STATUS_IN_PROGRESS]
-        assert group_backup.group_commit_state(statuses) == group_backup.COMMIT_FAILED
+        assert group_backup.group_commit_state(statuses) == group_backup.CommitState.FAILED
 
     def test_no_members_is_not_ready(self):
-        assert group_backup.group_commit_state([]) == group_backup.COMMIT_PENDING
+        assert group_backup.group_commit_state([]) == group_backup.CommitState.PENDING
+
+    def test_the_decision_is_a_commit_state_not_a_bare_string(self):
+        """A closed set: a caller comparing against a string literal is a bug
+        the type makes visible rather than one that silently never matches."""
+        state = group_backup.group_commit_state([Backup.STATUS_COMPLETED])
+        assert isinstance(state, group_backup.CommitState)
+        assert state != "ready"
+        assert set(group_backup.CommitState) == {
+            group_backup.CommitState.PENDING, group_backup.CommitState.READY, group_backup.CommitState.FAILED}
 
 
 class TestBuildGroupManifest:

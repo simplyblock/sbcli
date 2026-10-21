@@ -432,9 +432,9 @@ def _run_group_backup_commit(task):
     except (ManifestError, PreconditionError) as e:
         raise TaskRetry(f"Could not publish group manifest: {e}")
 
-    if state == group_backup.COMMIT_PENDING:
+    if state == group_backup.CommitState.PENDING:
         raise TaskDefer("Group backup members still in flight")
-    if state == group_backup.COMMIT_FAILED:
+    if state == group_backup.CommitState.FAILED:
         raise TaskAbort("Group backup failed: a member backup did not complete")
 
     set_result(task, "Group backup completed")

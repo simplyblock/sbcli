@@ -77,7 +77,7 @@ def test_pending_member_defers_without_touching_s3(db):
     with patch.object(group_backup.backup_manifest, "write_group") as write_group:
         state = group_backup.try_commit_group_backup(gb.get_id())
 
-    assert state == group_backup.COMMIT_PENDING
+    assert state == group_backup.CommitState.PENDING
     write_group.assert_not_called()
     assert db.get_group_backup_by_id(gb.get_id()).status == GroupBackup.STATUS_IN_PROGRESS
 
@@ -90,7 +90,7 @@ def test_failed_member_fails_the_group_without_touching_s3(db):
     with patch.object(group_backup.backup_manifest, "write_group") as write_group:
         state = group_backup.try_commit_group_backup(gb.get_id())
 
-    assert state == group_backup.COMMIT_FAILED
+    assert state == group_backup.CommitState.FAILED
     write_group.assert_not_called()
     stored = db.get_group_backup_by_id(gb.get_id())
     assert stored.status == GroupBackup.STATUS_FAILED
@@ -108,7 +108,7 @@ def test_all_completed_publishes_the_manifest_then_completes(db):
             patch.object(group_backup, "_config_for_group", return_value="cfg"):
         state = group_backup.try_commit_group_backup(gb.get_id())
 
-    assert state == group_backup.COMMIT_READY
+    assert state == group_backup.CommitState.READY
     # The manifest is published exactly once, before the record is completed.
     write_group.assert_called_once()
     _, manifest = write_group.call_args[0]
@@ -133,7 +133,7 @@ def test_a_missing_member_record_fails_the_group(db):
     with patch.object(group_backup.backup_manifest, "write_group") as write_group:
         state = group_backup.try_commit_group_backup(gb.get_id())
 
-    assert state == group_backup.COMMIT_FAILED
+    assert state == group_backup.CommitState.FAILED
     write_group.assert_not_called()
     assert db.get_group_backup_by_id(gb.get_id()).status == GroupBackup.STATUS_FAILED
 
@@ -144,9 +144,9 @@ def test_commit_is_idempotent_once_completed(db):
     with patch.object(group_backup.backup_manifest, "write_group") as write_group:
         state = group_backup.try_commit_group_backup(gb.get_id())
 
-    assert state == group_backup.COMMIT_READY
+    assert state == group_backup.CommitState.READY
     write_group.assert_not_called()
 
 
 def test_commit_of_an_unknown_group_backup_is_terminal(db):
-    assert group_backup.try_commit_group_backup(f"{CLUSTER}/nope") == group_backup.COMMIT_FAILED
+    assert group_backup.try_commit_group_backup(f"{CLUSTER}/nope") == group_backup.CommitState.FAILED

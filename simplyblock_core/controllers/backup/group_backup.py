@@ -13,6 +13,7 @@ member finished -- lives here too and calls into the single-volume create flow
 rather than reimplementing it.
 """
 import time
+from enum import Enum
 from uuid import UUID, uuid4
 
 from simplyblock_core import db_controller, utils
@@ -26,10 +27,15 @@ from simplyblock_core.models.backup import Backup, GroupBackup
 
 logger = utils.get_logger(__name__)
 
-#: The commit decision for a group backup, from its members' statuses.
-COMMIT_PENDING = "pending"   # at least one member is not yet terminal
-COMMIT_READY = "ready"       # every member completed; publish the group manifest
-COMMIT_FAILED = "failed"     # a member failed terminally; fail the group as a unit
+class CommitState(Enum):
+    """The commit decision for a group backup, from its members' statuses."""
+
+    #: At least one member is not yet terminal.
+    PENDING = "pending"
+    #: Every member completed: publish the group manifest.
+    READY = "ready"
+    #: A member failed terminally: fail the group as a unit.
+    FAILED = "failed"
 
 
 def check_members_homogeneous(members: list) -> list:
@@ -55,24 +61,24 @@ def check_members_homogeneous(members: list) -> list:
     return problems
 
 
-def group_commit_state(member_statuses: list) -> str:
+def group_commit_state(member_statuses: list) -> CommitState:
     """The commit decision for a group backup, from its members' backup statuses.
 
     All-or-nothing (§3.3): a group backup commits (its group manifest is
     published) only when every member backup has completed, and one terminal
     member failure fails the whole group even while others are still uploading.
 
-    * ``COMMIT_FAILED`` -- any member is terminally failed.
-    * ``COMMIT_READY``  -- there is at least one member and every member completed.
-    * ``COMMIT_PENDING`` -- otherwise (a member is still pending or in progress,
+    * ``CommitState.FAILED`` -- any member is terminally failed.
+    * ``CommitState.READY``  -- there is at least one member and every member completed.
+    * ``CommitState.PENDING`` -- otherwise (a member is still pending or in progress,
       or there are no members yet).
     """
     if any(status == Backup.STATUS_FAILED for status in member_statuses):
-        return COMMIT_FAILED
+        return CommitState.FAILED
     if member_statuses and all(
             status == Backup.STATUS_COMPLETED for status in member_statuses):
-        return COMMIT_READY
-    return COMMIT_PENDING
+        return CommitState.READY
+    return CommitState.PENDING
 
 
 def build_group_manifest(group_backup, member_backups: dict):
@@ -262,23 +268,23 @@ def create_group_backup(consistency_group_id, group_seq=None):
     return group_backup.get_id(), None
 
 
-def try_commit_group_backup(group_backup_id):
+def try_commit_group_backup(group_backup_id) -> CommitState:
     """The all-or-nothing commit barrier for a group backup (design §3.3).
 
     Reads the member backups, decides with :func:`group_commit_state`, and on
     the first version's three outcomes:
 
-    * ``COMMIT_PENDING`` -- a member is still uploading; the caller defers.
-    * ``COMMIT_FAILED`` -- a member failed terminally (or its record is gone);
+    * ``CommitState.PENDING`` -- a member is still uploading; the caller defers.
+    * ``CommitState.FAILED`` -- a member failed terminally (or its record is gone);
       the group is marked failed as a unit.
-    * ``COMMIT_READY`` -- every member completed, so the group manifest is
+    * ``CommitState.READY`` -- every member completed, so the group manifest is
       published and only then is the record marked completed, which keeps the
       manifest-before-``COMPLETED`` invariant the single-volume path keeps: a
       ``COMPLETED`` group backup is always identifiable from the bucket alone.
 
     Idempotent: a group backup already in a terminal state returns that outcome
     without touching S3, so the commit task is safe to re-run. Returns one of the
-    ``COMMIT_*`` constants.
+    ``CommitState`` values.
 
     Raises:
         ManifestError, PreconditionError: the group manifest could not be
@@ -289,12 +295,12 @@ def try_commit_group_backup(group_backup_id):
     try:
         group_backup = db.get_group_backup_by_id(group_backup_id)
     except KeyError:
-        return COMMIT_FAILED
+        return CommitState.FAILED
 
     if group_backup.status == GroupBackup.STATUS_COMPLETED:
-        return COMMIT_READY
+        return CommitState.READY
     if group_backup.status == GroupBackup.STATUS_FAILED:
-        return COMMIT_FAILED
+        return CommitState.FAILED
 
     member_backups = {}
     for entry in group_backup.members:
@@ -308,12 +314,12 @@ def try_commit_group_backup(group_backup_id):
         return _fail_group(group_backup, "a member backup record is missing")
 
     state = group_commit_state([b.status for b in member_backups.values()])
-    if state == COMMIT_PENDING:
-        return COMMIT_PENDING
-    if state == COMMIT_FAILED:
+    if state == CommitState.PENDING:
+        return CommitState.PENDING
+    if state == CommitState.FAILED:
         return _fail_group(group_backup, "a member backup failed")
 
-    # COMMIT_READY: publish the group manifest LAST, before marking completed,
+    # CommitState.READY: publish the group manifest LAST, before marking completed,
     # so the record is never COMPLETED without its manifest in the bucket.
     group_backup.completed_at = int(time.time())
     group_backup.size = sum(b.size for b in member_backups.values())
@@ -322,14 +328,14 @@ def try_commit_group_backup(group_backup_id):
 
     group_backup.status = GroupBackup.STATUS_COMPLETED
     group_backup.write_to_db()
-    return COMMIT_READY
+    return CommitState.READY
 
 
-def _fail_group(group_backup, reason: str) -> str:
+def _fail_group(group_backup, reason: str) -> CommitState:
     group_backup.status = GroupBackup.STATUS_FAILED
     group_backup.error_message = reason
     group_backup.write_to_db()
-    return COMMIT_FAILED
+    return CommitState.FAILED
 
 
 def _unwind_restored(lvol_ids: list) -> None:
