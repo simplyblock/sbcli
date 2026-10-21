@@ -149,6 +149,11 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
         
         self.logger.info(f"[LFNG] SN sec map: {self.sn_primary_secondary_map}")
 
+        # This lane also runs no-bootstrap against a live cluster, so check
+        # before provisioning anything that the cluster is not still carrying
+        # the previous run's data.
+        self.assert_capacity_to_start()
+
         # initial lvols + mount + then later clone from snapshots
         self._compute_fio_size(extra_lvols=self.total_lvols)
         self._create_lvols(count=self.total_lvols)  # start_fio=False → we launch after clones
@@ -834,6 +839,7 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                 self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
                 self.logger.info("[LFNG] Next FIO wave started")
 
+            self.assert_capacity_headroom(f"after iter {iteration}")
             self.logger.info(f"[LFNG] Iter {iteration} complete → starting next outage ASAP")
             iteration += 1
 
@@ -2192,6 +2198,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
                 self.logger.info("[V2] Next FIO wave started")
 
+            self.assert_capacity_headroom(f"after iter {iteration}")
             self.logger.info(f"[V2] Iter {iteration} complete → starting next outage")
             iteration += 1
 
