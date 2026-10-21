@@ -167,3 +167,18 @@ def test_a_secret_name_yaml_would_read_as_another_type_stays_a_string():
             assert _tls_secret_names(pod) == {name}, (name, provider)
         (job,) = _render("storage_init_job.yaml.j2", SPDK_PROXY_TLS_SECRET=name)
         assert _tls_secret_names(job) == {name}, name
+
+
+def test_a_long_node_label_with_a_suffix_stays_one_dns_label():
+    """A label of up to 63 characters plus a member's suffix would exceed what
+    one DNS label carries. It is cut and carries an eight-character digest of
+    the whole label, the rule atlas-lib's WorkloadNames.Hostname applies on the
+    operator's side, so both build the same hostname."""
+    import hashlib
+    long = "w" * 60 + "-one"
+    api_host, rpc_host = _hosts(_tls_node(hostname=f"{long}_8080", **NAMES))
+
+    label = "w" * 50 + "-" + hashlib.sha256(long.encode()).hexdigest()[:8] + "-abc"
+    assert len(label) == 63
+    assert api_host == f"{label}.sb-prod-node-api.storage.svc.cluster.local:50001"
+    assert rpc_host == f"{label}.sb-prod-spdk-proxy.storage.svc.cluster.local"

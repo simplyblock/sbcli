@@ -1,3 +1,4 @@
+import hashlib
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar
@@ -30,6 +31,11 @@ if TYPE_CHECKING:
     from simplyblock_core.models.cluster import Cluster
 
 logger = utils.get_logger(__name__)
+
+# One DNS label, which a hostname in a headless Service is, and the digest a
+# label cut to fit it carries.
+_MAX_DNS_LABEL = 63
+_HOSTNAME_DIGEST = 8
 
 
 class StorageNode(BaseNodeObject):
@@ -333,9 +339,21 @@ class StorageNode(BaseNodeObject):
         return self.hostname.removesuffix(f"_{self.rpc_port}")
 
     def _k8s_service_host(self, service: str) -> str:
-        """The node's hostname in one of its cluster's headless Services."""
-        label = f"{self._k8s_node_label()}{self.node_label_suffix}"
-        return f"{label}.{service}.{self.cr_namespace}.svc.cluster.local"
+        """The node's hostname in one of its cluster's headless Services.
+
+        A label too long to take the suffix within the 63 characters of one
+        DNS label is cut and carries an eight-character digest of the whole
+        label, which is the rule the operator publishes the hostname under
+        (atlas-lib kube.WorkloadNames.Hostname): both sides have to build the
+        same name.
+        """
+        label = self._k8s_node_label()
+        suffix = self.node_label_suffix
+        if len(label) + len(suffix) > _MAX_DNS_LABEL:
+            keep = _MAX_DNS_LABEL - len(suffix) - _HOSTNAME_DIGEST - 1
+            digest = hashlib.sha256(label.encode()).hexdigest()[:_HOSTNAME_DIGEST]
+            label = f"{label[:keep].rstrip('-')}-{digest}"
+        return f"{label}{suffix}.{service}.{self.cr_namespace}.svc.cluster.local"
 
     def record_workload_names(self, cluster: "Cluster") -> None:
         """Copy the cluster's workload names onto this node."""
