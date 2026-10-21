@@ -849,6 +849,13 @@ OS_K8S_ENDPOINT = "http://opensearch-cluster-master:9200"
 WEBAPI_K8S_ENDPOINT = "http://simplyblock-webappapi:5000/api/v2"
 
 K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
+# The names a cluster's workload is reached by when its record names none: a
+# cluster created before the record existed, and the first cluster in a
+# namespace. A storage node's hostname is <node>.<service>.<namespace>.svc, so
+# these are part of every such node's identity.
+K8S_SNODE_API_SERVICE = "simplyblock-storage-node-api"
+K8S_SPDK_PROXY_SERVICE = "simplyblock-spdk-proxy"
+K8S_SPDK_PROXY_TLS_SECRET = "simplyblock-spdk-proxy-tls"
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"

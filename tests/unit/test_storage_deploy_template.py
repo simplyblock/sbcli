@@ -37,6 +37,7 @@ def _render_storage_deploy(tls_provider: str) -> str:
         MEM2_MEGA=1024,
         TLS_ENABLED=True,
         TLS_PROVIDER=tls_provider,
+        SPDK_PROXY_TLS_SECRET="simplyblock-spdk-proxy-tls",
     )
 
 
