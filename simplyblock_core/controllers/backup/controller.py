@@ -28,6 +28,7 @@ from simplyblock_core.models.backup_config import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger()
 
@@ -999,23 +1000,32 @@ def delete_backup(backup_id):
     that nothing chains against any more (a pruned group generation's leaf
     copy, design-consistency-group-backup.md §9).
 
-    Refused while another backup names this one as its predecessor: deleting
-    the base of an incremental chain would make every descendant unrestorable.
-    Such a base is merged into its successor first (``trigger_merge``),
-    after which it is MERGED, not deleted, and its objects are the survivor's.
-
-    Returns (success, error_message).
+    Raises:
+        KeyError: no backup has this id.
+        PreconditionError: another backup names this one as its predecessor,
+            so deleting it would make every descendant unrestorable -- merge it
+            into its successor instead (``trigger_merge``), after which it is
+            MERGED, not deleted, and its objects are the survivor's; or it is a
+            member of a group backup that still exists, which deleting it would
+            tear.
     """
-    try:
-        backup = db_controller.get_backup_by_id(backup_id)
-    except KeyError as e:
-        return False, str(e)
+    backup = db_controller.get_backup_by_id(backup_id)
     dependents = [b.uuid for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
                   if b.prev_backup_id == backup.uuid]
     if dependents:
-        return False, (f"backup {backup.uuid} is the predecessor of "
-                       f"{', '.join(d[:8] for d in dependents)}; merge it into its "
-                       "successor instead of deleting it")
+        raise PreconditionError(
+            f"backup {backup.uuid} is the predecessor of "
+            f"{', '.join(d[:8] for d in dependents)}; merge it into its "
+            "successor instead of deleting it")
+    if backup.group_backup_id:
+        try:
+            db_controller.get_group_backup_by_id(backup.group_backup_id)
+        except KeyError:
+            pass        # its group backup is gone: an orphaned member copy
+        else:
+            raise PreconditionError(
+                f"backup {backup.uuid} is a member of group backup "
+                f"{backup.group_backup_id}; delete the group backup instead")
 
     _cleanup_backup_kms_keys([backup])
     if backup.status == Backup.STATUS_COMPLETED:
@@ -1026,11 +1036,12 @@ def delete_backup(backup_id):
         if snode is not None and snode.status == StorageNode.STATUS_ONLINE:
             try:
                 snode.rpc_client().bdev_lvol_s3_delete([backup.s3_id])
-            except Exception as e:                           # noqa: BLE001 - best effort, as delete_backups
+            except RPCException as e:
+                # Best effort, as delete_backups: the data plane does not
+                # implement the S3 delete yet, and the record goes regardless.
                 logger.error(f"Error deleting S3 objects of backup {backup.uuid}: {e}")
     backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
     backup.remove(db_controller.kv_store)
-    return True, None
 
 
 def list_backups(cluster_id=None, show_all=False):

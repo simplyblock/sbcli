@@ -570,14 +570,15 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
         for old in sorted(orphans, key=lambda b: (b.created_at, b.uuid)):
             successor = by_prev.get(old.uuid)
             if successor is None:
-                ok, err = backup_controller.delete_backup(old.uuid)
-                if ok:
-                    deleted += 1
-                    logger.info("Retired orphaned member backup %s of volume %s: "
-                                "nothing chains against it, deleted", old.uuid[:8], lvol_id[:8])
-                else:
+                try:
+                    backup_controller.delete_backup(old.uuid)
+                except (KeyError, PreconditionError) as e:
                     logger.warning("Orphaned member backup %s of volume %s not deleted: %s",
-                                   old.uuid[:8], lvol_id[:8], err)
+                                   old.uuid[:8], lvol_id[:8], e)
+                    continue
+                deleted += 1
+                logger.info("Retired orphaned member backup %s of volume %s: "
+                            "nothing chains against it, deleted", old.uuid[:8], lvol_id[:8])
                 continue
             if successor.status != Backup.STATUS_COMPLETED:
                 break           # let it finish; the next cycle merges
