@@ -147,50 +147,6 @@ class TestKubeletTopologyHelpers(unittest.TestCase):
         self.assertIn("worker-1", msg)
 
 
-class TestReservedSystemCpus(unittest.TestCase):
-    """reservedSystemCPUs is the complement of the SPDK cores: the static CPU
-    manager hands exclusive cores out of everything that is not reserved,
-    so the SPDK pod only lands on its own cores when those are the only
-    non-reserved CPUs on the host."""
-
-    def test_cpu_list_syntax(self):
-        self.assertEqual(k8s_node._cpu_list([0, 1, 2, 3, 12, 13, 14, 15]), '0-3,12-15')
-        self.assertEqual(k8s_node._cpu_list([5]), '5')
-        self.assertEqual(k8s_node._cpu_list([7, 5, 5, 3]), '3,5,7')
-        self.assertEqual(k8s_node._cpu_list([]), '')
-
-    def test_one_socket(self):
-        node_info = {"isolated_cores": [4, 5, 6, 7, 8, 9, 10, 11]}
-        self.assertEqual(k8s_node._reserved_system_cpus(node_info, {0: list(range(16))}), '0-3,12-15')
-
-    def test_two_sockets_reserve_the_leftovers_of_both(self):
-        """Two slots, one per socket: the union of their isolated cores is
-        what the node config carries, and the reserved set is the rest of
-        both sockets -- the kubelet has one list for the whole host."""
-        node_info = {"isolated_cores": [2, 3, 4, 5, 10, 11, 12, 13]}
-        cores_by_numa = {0: list(range(8)), 1: list(range(8, 16))}
-        self.assertEqual(k8s_node._reserved_system_cpus(node_info, cores_by_numa), '0-1,6-9,14-15')
-
-    def test_an_unused_socket_is_reserved_whole(self):
-        node_info = {"isolated_cores": [2, 3, 4, 5, 6, 7]}
-        cores_by_numa = {0: list(range(8)), 1: list(range(8, 16))}
-        self.assertEqual(k8s_node._reserved_system_cpus(node_info, cores_by_numa), '0-1,8-15')
-
-    def test_unconfigured_node_is_refused(self):
-        with self.assertRaisesRegex(ValueError, 'sn configure'):
-            k8s_node._reserved_system_cpus({"nodes": []}, {0: list(range(8))})
-        with self.assertRaisesRegex(ValueError, 'sn configure'):
-            k8s_node._reserved_system_cpus({"isolated_cores": []}, {0: list(range(8))})
-
-    def test_stale_config_is_refused(self):
-        with self.assertRaisesRegex(ValueError, r'\[8, 9\] are not CPUs of this host'):
-            k8s_node._reserved_system_cpus({"isolated_cores": [4, 5, 8, 9]}, {0: list(range(8))})
-
-    def test_nothing_left_to_reserve_is_refused(self):
-        with self.assertRaisesRegex(ValueError, 'at least one reserved CPU'):
-            k8s_node._reserved_system_cpus({"isolated_cores": list(range(8))}, {0: list(range(8))})
-
-
 class TestSizingHelpers(unittest.TestCase):
 
     def test_pages_per_numa_is_the_apply_config_sizing(self):
@@ -554,49 +510,32 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
         self.assertIn('without the CPU topology settings', error)
         self.core.create_namespaced_pod.assert_not_called()
 
-    def test_reserved_set_is_derived_from_the_node_config_when_not_stated(self):
-        """No RESERVED_SYSTEM_CPUS: the reserved set is every CPU that is not
-        an SPDK core, from the node config's isolated_cores and the host's
-        topology, and the patch (and the configured check) carry it."""
-        env = self._topology_env()
-        del env['RESERVED_SYSTEM_CPUS']
-        node_info = {"nodes": [{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}],
-                     "isolated_cores": [2, 3, 4, 5]}
-        self.core.connect_get_node_proxy_with_path.side_effect = [
-            STATIC_KUBELET,  # reserved 0,1: not the derived set, so it is patched
-            json.dumps({"kubeletconfig": dict(json.loads(STATIC_KUBELET)["kubeletconfig"], reservedSystemCPUs="0-1,6-7")})]
-        with patch.object(k8s_node.core_utils, 'load_config', return_value=node_info), \
-                patch.object(k8s_node.core_utils, 'get_numa_cores', return_value={0: list(range(8))}):
-            data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=env)
-        self.assertIsNone(error, error)
-        [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-kubelet-config')]
-        patch_arg = json.loads(job['spec']['template']['spec']['containers'][0]['args'][8])
-        self.assertEqual(patch_arg['machine']['kubelet']['extraConfig']['reservedSystemCPUs'], '0-1,6-7')
-        self.core.create_namespaced_pod.assert_called()
-
-    def test_a_stated_reserved_set_wins_over_the_derivation(self):
+    def test_a_changed_reserved_set_is_applied(self):
+        """The operator changed reservedSystemCPU on the StorageCluster: the
+        kubelet still says 0,1, so the checkpoint is removed and the new set
+        patched in; the configured check then accepts the new set only."""
         self.core.connect_get_node_proxy_with_path.side_effect = [
             STATIC_KUBELET,
             json.dumps({"kubeletconfig": dict(json.loads(STATIC_KUBELET)["kubeletconfig"], reservedSystemCPUs="0-3")})]
-        with patch.object(k8s_node.core_utils, 'get_numa_cores') as topology:
-            data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
-                                      env=self._topology_env(RESERVED_SYSTEM_CPUS='0-3'))
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                  env=self._topology_env(RESERVED_SYSTEM_CPUS='0-3'))
         self.assertIsNone(error, error)
-        topology.assert_not_called()
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-state-worker-1',
+                                              'snode-talos-kubelet-config-worker-1'])
         [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-kubelet-config')]
         patch_arg = json.loads(job['spec']['template']['spec']['containers'][0]['args'][8])
         self.assertEqual(patch_arg['machine']['kubelet']['extraConfig']['reservedSystemCPUs'], '0-3')
 
-    def test_an_unconfigured_node_cannot_derive_the_reserved_set(self):
+    def test_no_stated_reserved_set_means_the_default(self):
+        """Nothing in the environment: the kubelet keeps 0,1 -- the reserved
+        set is never derived from the SPDK core layout (see spdk_process_start)."""
         env = self._topology_env()
         del env['RESERVED_SYSTEM_CPUS']
-        with patch.object(k8s_node.core_utils, 'get_numa_cores', return_value={0: list(range(8))}):
+        with patch.object(k8s_node.core_utils, 'get_numa_cores') as topology:
             data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=env)
-        self.assertFalse(data)
-        self.assertIn("cannot derive the kubelet's reserved CPUs", error)
-        self.assertIn('sn configure', error)
-        self.assertEqual(self._talos_jobs(), [])
-        self.core.create_namespaced_pod.assert_not_called()
+        self.assertIsNone(error, error)
+        topology.assert_not_called()
+        self.assertEqual(self._talos_jobs(), [])  # configz already says 0,1
 
     def test_strict_cpu_reservation_fails_the_add_before_any_job(self):
         self.core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {

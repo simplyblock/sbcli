@@ -75,24 +75,25 @@ down while this runs, and the kubelet rebuilds the state from the pods it finds.
 
 ### Which CPUs are reserved
 
-The static CPU manager knows two sets: `reservedSystemCPUs`, which it never
-hands out exclusively, and all the rest, from which it picks the exclusive CPUs
-of every integer-CPU Guaranteed container, any of them. There is no way to name
-the CPUs a pod must get, so the SPDK pod lands on the cores `sbcli sn configure`
-laid out for it only when those are the *only* non-reserved CPUs. The node
-therefore derives `reservedSystemCPUs` as every CPU of the host that is not an
-SPDK core (the complement of the node config's `isolated_cores`, across every
-socket), unless the StorageCluster states a reserved set, which is passed as
-`RESERVED_SYSTEM_CPUS` and wins. On OpenShift the value lands in the pool-wide
-KubeletConfig, so a pool must be homogeneous or state the set.
+`reservedSystemCPUs` is the StorageCluster's `reservedSystemCPU` (default `0,1`),
+passed to the node as `RESERVED_SYSTEM_CPUS`. It is not derived from the SPDK
+core layout. The static CPU manager picks the SPDK pod's exclusive cores from
+the non-reserved CPUs, any of them, and the restart path follows that pick; the
+only way to force the pick would be to reserve everything but the SPDK cores,
+and the kubelet also sizes the node's allocatable CPU as capacity minus the
+reserved list, so the SPDK pod and every other pod with a CPU request would
+then have to fit into the SPDK core count (worker-4 went from 22 to 4
+allocatable and the pod sat Pending on "Insufficient cpu", 2026-10-21). Size
+the reserved set with that in mind: every reserved CPU is one less schedulable
+CPU on the node, even though normal pods still run on the reserved CPUs.
 
-Normal pods lose nothing: the kubelet runs Burstable and BestEffort pods on the
-reserved CPUs as well. The exception is the `strict-cpu-reservation` policy
-option, which keeps every pod off the reserved CPUs; with the SPDK cores the
-only non-reserved CPUs nothing else could run, so a kubelet that has it on is
-refused with a message naming it. The SPDK pod's proxy container requests a
-fractional CPU (requests equal to limits, so the pod stays Guaranteed) and runs
-in the shared pool; only the SPDK container holds exclusive cores.
+The exception to "normal pods still run there" is the `strict-cpu-reservation`
+policy option, which keeps every pod off the reserved CPUs; a kubelet that has
+it on is refused with a message naming it. The SPDK pod's proxy container
+requests a fractional CPU (requests equal to limits, so the pod stays
+Guaranteed) and runs in the shared pool; only the SPDK container holds
+exclusive cores, so a changed `reservedSystemCPU` or a hyperthreaded host with
+`full-pcpus-only` never costs a second core per pod.
 
 Core isolation (`isolcpus`, `nohz_full`, `rcu_nocbs`) is not applied on Talos:
 those are kernel arguments, which on Talos live in
