@@ -9,6 +9,7 @@ import requests
 from pydantic import BaseModel
 
 import simplyblock_core.utils.pci as pci_utils
+from simplyblock_core.utils import host_network
 from simplyblock_core.utils import shell as shell_utils
 from simplyblock_core.utils.pci import PCIAddress
 
@@ -312,7 +313,6 @@ def get_block_devices_info() -> list[dict]:
     unique per partition. Partitions without a PARTUUID get a synthetic id.
     """
     import hashlib
-    import socket
 
     logger.debug("function:get_block_devices_info start")
     out, err, rc = shell_utils.run_command(
@@ -327,7 +327,7 @@ def get_block_devices_info() -> list[dict]:
         return []
 
     root_disks = _root_disk_names()
-    hostname = socket.gethostname()
+    hostname = host_network.node_hostname()
     # Read once for the whole host: every device's links sit in the same two
     # directories, so a reading per device would walk them again for each disk.
     persistent = read_persistent_links()
