@@ -754,15 +754,10 @@ GroupBackupExportDTO = GroupBackupExport
 GroupBackupManifestDTO = GroupBackupManifest
 
 
-class GroupBackupMemberDTO(BaseModel):
-    """One member of a group backup: the source volume and its own backup.
-
-    ``backup_id`` is the member ``Backup``'s composite ``cluster_id/uuid`` id and
-    ``lvol_id`` the source volume's id, kept as strings rather than UUIDs because
-    the member id is composite (design §4.1).
-    """
-    lvol_id: str
-    backup_id: str
+def _bare_uuid(composite_id: str) -> UUID:
+    """The UUID of a ``cluster_id/uuid`` record id. A DTO names the cluster once,
+    in ``cluster_id``, and every other object by its bare UUID."""
+    return UUID(composite_id.split('/')[-1])
 
 
 class GroupBackupDTO(BaseModel):
@@ -770,16 +765,20 @@ class GroupBackupDTO(BaseModel):
     all-or-nothing unit (design §4.1)."""
     id: UUID
     cluster_id: UUID
-    #: Composite ``cluster_id/uuid`` of the source consistency group.
-    consistency_group_id: str
+    #: The consistency group the generation was taken from.
+    consistency_group_id: UUID
     consistency_group_name: str
     group_seq: int
     status: str
-    members: list[GroupBackupMemberDTO]
+    #: The member backups, one per member volume of the generation. Each member
+    #: backup carries its own volume; GET .../members/ returns the records.
+    member_backup_ids: list[UUID]
     encrypted: bool
     size: int
-    created_at: int
-    completed_at: int
+    created_at: datetime
+    #: When the group backup committed: every member completed and the group
+    #: manifest was published. None until then.
+    completed_at: datetime | None = None
     error_message: str = ""
 
     @staticmethod
@@ -787,16 +786,16 @@ class GroupBackupDTO(BaseModel):
         return GroupBackupDTO(
             id=UUID(model.uuid),
             cluster_id=UUID(model.cluster_id),
-            consistency_group_id=model.consistency_group_id,
+            consistency_group_id=_bare_uuid(model.consistency_group_id),
             consistency_group_name=model.consistency_group_name,
             group_seq=model.group_seq,
             status=model.status,
-            members=[GroupBackupMemberDTO(lvol_id=m["lvol_id"], backup_id=m["backup_id"])
-                     for m in model.members],
+            member_backup_ids=[_bare_uuid(m["backup_id"]) for m in model.members],
             encrypted=model.encrypted,
             size=model.size,
-            created_at=model.created_at,
-            completed_at=model.completed_at,
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            completed_at=(datetime.fromtimestamp(model.completed_at, tz=UTC)
+                          if model.completed_at else None),
             error_message=model.error_message,
         )
 

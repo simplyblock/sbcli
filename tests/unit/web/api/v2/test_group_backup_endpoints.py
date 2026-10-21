@@ -5,6 +5,7 @@ controller) and the database are mocked, so these assert the HTTP contract: whic
 controller call a request makes, and how a controller result or error maps to a
 status code.
 """
+from datetime import UTC, datetime
 from typing import Any
 
 from simplyblock_core.controllers.backup.manifest import GroupBackupExport
@@ -80,13 +81,30 @@ class TestListGroupBackups:
 
 
 class TestGetGroupBackup:
-    def test_returns_the_group_backup_with_its_members(self, client, db, group_backup):
+    def test_returns_the_group_backup_with_its_member_backup_ids(self, client, db, group_backup):
+        """The members are named by their backup ids only. Each member backup
+        carries its own volume, and GET .../members/ returns the records. Ids are
+        bare UUIDs, as on every other DTO: the cluster is cluster_id."""
         response = client.get(f'{BASE}/{GROUP_BACKUP_ID}/')
         assert response.status_code == 200
         body = response.json()
         assert body['id'] == GROUP_BACKUP_ID
         assert body['group_seq'] == 7
-        assert body['members'][0]['lvol_id'] == VOLUME_ID
+        assert body['consistency_group_id'] == CONSISTENCY_GROUP_ID
+        assert body['member_backup_ids'] == [BACKUP_ID]
+        assert 'members' not in body
+
+    def test_times_are_utc_datetimes_and_an_uncommitted_one_has_no_completion(
+            self, client, db, group_backup):
+        body = client.get(f'{BASE}/{GROUP_BACKUP_ID}/').json()
+        assert datetime.fromisoformat(body['created_at']) == datetime.fromtimestamp(1700000000, tz=UTC)
+        assert body['completed_at'] is None
+
+    def test_a_committed_group_backup_reports_when_it_completed(self, client, db, cluster):
+        db.get_group_backup_by_id.return_value = factories.make_group_backup(
+            status='completed', completed_at=1700000100)
+        body = client.get(f'{BASE}/{GROUP_BACKUP_ID}/').json()
+        assert datetime.fromisoformat(body['completed_at']) == datetime.fromtimestamp(1700000100, tz=UTC)
 
     def test_404_when_the_group_backup_belongs_to_another_cluster(self, client, db, cluster):
         other = factories.make_group_backup(cluster_id='00000000-0000-0000-0000-000000000000')
