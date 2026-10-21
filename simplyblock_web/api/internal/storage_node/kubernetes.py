@@ -312,46 +312,6 @@ _KUBELET_TOPOLOGY = {
 }
 
 
-def _cpu_list(cpu_ids):
-    """``cpu_ids`` in the kubelet's CPU-list syntax ('0-3,12-15')."""
-    ranges: list[list[int]] = []
-    for cpu in sorted({int(c) for c in cpu_ids}):
-        if ranges and cpu == ranges[-1][1] + 1:
-            ranges[-1][1] = cpu
-        else:
-            ranges.append([cpu, cpu])
-    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in ranges)
-
-
-def _reserved_system_cpus(node_info, cores_by_numa):
-    """The kubelet's reservedSystemCPUs for this host: every CPU that is not
-    an SPDK core.
-
-    The static CPU manager knows two sets: the reserved CPUs, which it never
-    hands out exclusively, and all the rest, from which it picks the
-    exclusive CPUs of every integer-CPU Guaranteed container -- any of them,
-    topology permitting. There is no way to name the CPUs a pod must get.
-    So the SPDK pod lands on the cores sn configure laid out for it only
-    when those are the ONLY non-reserved CPUs: the reserved set is the
-    complement of the host's isolated cores (the list isolcpus is built
-    from, across every socket), not a fixed '0,1'. Normal pods lose nothing:
-    the kubelet runs them on the reserved CPUs as well, unless
-    strict-cpu-reservation is on, which _strict_cpu_reservation refuses.
-    Raises ValueError when the node config cannot answer.
-    """
-    isolated = {int(c) for c in node_info.get("isolated_cores") or []}
-    if not isolated:
-        raise ValueError("the node config carries no isolated cores; run 'sbcli sn configure' first")
-    all_cpus = {int(cpu) for cpus in cores_by_numa.values() for cpu in cpus}
-    unknown = isolated - all_cpus
-    if unknown:
-        raise ValueError(f"isolated cores {sorted(unknown)} are not CPUs of this host; the node config is stale")
-    reserved = all_cpus - isolated
-    if not reserved:
-        raise ValueError("every CPU of the host is an SPDK core; the kubelet needs at least one reserved CPU")
-    return _cpu_list(reserved)
-
-
 def _talos_kubelet_patch(reserved_system_cpus):
     """The strategic-merge machine-config patch that gives the kubelet the
     CPU topology settings. machine.kubelet.extraConfig is merged into the
@@ -390,19 +350,19 @@ def _kubelet_topology_configured(cfg, reserved_system_cpus):
     is what makes the step idempotent: Talos restarts the kubelet on every
     machine-config change, and a restart per SPDK restart would be a
     regression, so the patch is only sent when the kubelet does not have
-    the settings yet -- or has them with another reserved set, which
-    changes with the node's SPDK core layout."""
+    the settings yet -- or has them with another reserved set, which the
+    operator may change on the StorageCluster."""
     want = dict(_KUBELET_TOPOLOGY, reservedSystemCPUs=str(reserved_system_cpus))
     return all(str(cfg.get(k, "")) == v for k, v in want.items())
 
 
 def _strict_cpu_reservation(cfg, node_name):
     """The message to refuse the node with when its kubelet runs the static
-    policy with the strict-cpu-reservation option, else None. The reserved
-    set here is everything but the SPDK cores, which only works because the
-    kubelet runs normal pods on the reserved CPUs too; that option keeps
-    them off, and once SPDK holds its cores nothing else on the host would
-    have a CPU to run on."""
+    policy with the strict-cpu-reservation option, else None. The kubelet
+    runs normal pods on the reserved CPUs too, which is what the reserved
+    set is sized against; that option keeps them off, so the host's other
+    pods would be squeezed onto the CPUs SPDK is about to take
+    exclusively."""
     options = cfg.get("cpuManagerPolicyOptions") or {}
     if str(options.get("strict-cpu-reservation", "")).strip().lower() == "true":
         return (f"the kubelet on '{node_name}' runs with cpuManagerPolicyOptions strict-cpu-reservation, "
@@ -820,20 +780,16 @@ def spdk_process_start(body: SPDKParams):
     skip_kubelet_configuration = os.environ.get("SKIP_KUBELET_CONFIGURATION", False)
     if isinstance(skip_kubelet_configuration, str):
        skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
-    # The kubelet's reserved CPUs: what the operator states (RESERVED_SYSTEM_CPUS,
-    # from the StorageCluster), else derived from the node config as every CPU
-    # that is not an SPDK core -- see _reserved_system_cpus for why that, and
-    # not a fixed '0,1', is what puts the SPDK pod on its own cores.
-    reserved_system_cpus = (os.environ.get("RESERVED_SYSTEM_CPUS") or "").strip()
-    if cpu_topology_enabled and not skip_kubelet_configuration and not reserved_system_cpus:
-        try:
-            reserved_system_cpus = _reserved_system_cpus(
-                core_utils.load_config(constants.NODES_CONFIG_FILE), core_utils.get_numa_cores())
-        except (OSError, ValueError) as e:
-            msg = f"cannot derive the kubelet's reserved CPUs for '{node_name}': {e}"
-            logger.error(msg)
-            return utils.get_response(False, msg)
-        logger.info("Kubelet reserved CPUs on '%s', derived from the node config: %s", node_name, reserved_system_cpus)
+    # The kubelet's reserved CPUs are the operator's choice (RESERVED_SYSTEM_CPUS,
+    # from the StorageCluster), not derived from the SPDK core layout. Deriving
+    # them as "everything but the SPDK cores" would put the SPDK pod on exactly
+    # its planned cores, but the kubelet also sizes the node's allocatable CPU
+    # as capacity minus that list, so the SPDK pod (its cores plus the proxy)
+    # and every other pod's request would have to fit into the SPDK core count
+    # -- worker-4 went from 22 to 4 allocatable and the pod sat Pending on
+    # "Insufficient cpu" (lab, 2026-10-21). Which cores the pod gets is the
+    # kubelet's pick from the non-reserved set; the restart path follows it.
+    reserved_system_cpus = (os.environ.get("RESERVED_SYSTEM_CPUS") or "").strip() or "0,1"
     # Initial storage-MCP maxUnavailable when it's first created for CPU-topology
     # apply = the configured parallel-add count, so the first-time,
     # pre-activation reboots roll in one wave instead of a one-at-a-time queue.
