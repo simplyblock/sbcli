@@ -1454,9 +1454,14 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                     # child can join an earlier parent. Record it against the
                     # subsystem it actually joined rather than the one we asked
                     # for, or parent_to_children reports the wrong topology.
-                    self.logger.warning(
-                        f"[namespace] child {child} joined {child_nqn}, not the parent "
-                        f"subsystem {parent_nqn} we just created"
+                    # Not a fault: namespace=True asks for a shared subsystem,
+                    # not for THIS parent's. Logged at info so it stops reading
+                    # like a defect -- it happens on every run, and treating it
+                    # as one sent us looking at the control plane when the gap
+                    # was that we never connected the subsystem it chose.
+                    self.logger.info(
+                        f"[namespace] child {child} joined {child_nqn} rather than "
+                        f"the parent subsystem {parent_nqn}; connecting it there"
                     )
                 # Resolving without a usable NSID would hand back "any head on
                 # this NQN" -- in a shared subsystem that is very likely the
@@ -1473,10 +1478,52 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 sleep_n_sec(3)
                 device = self.ssh_obj.get_nvme_device_for_nqn(
                     client_node, child_nqn, ns_id=child_ns)
+
+                # A rescan only re-reads controllers the client is ALREADY
+                # connected to, so it can never reveal a subsystem nobody has
+                # connected. Asking for namespace=True does not promise the
+                # parent's subsystem -- the control plane places the child
+                # wherever it likes, and children regularly form a subsystem
+                # of their own headed by the first of them. When that happens
+                # the parent's connection is no help and the child has to be
+                # connected on its own terms.
+                #
+                # Every run since at least 2026-10-17 placed children outside
+                # the parent subsystem; it only stopped surfacing devices once
+                # enough of them landed in a subsystem the client had never
+                # connected (2 children -> 0 lost, 6 -> all 6 lost), which is
+                # what failed run 20261020-052956 at bootstrap.
+                #
+                # get_lvol_connect_str asks the control plane for THIS lvol's
+                # connect command, so it targets the right subsystem whatever
+                # that turned out to be. Only run it when no device is already
+                # there, so a child sharing an open subsystem does not get a
+                # second controller.
+                if not device:
+                    self.logger.info(
+                        f"[namespace] child {child} not reachable yet; connecting "
+                        f"its own subsystem {child_nqn[-28:]}"
+                    )
+                    try:
+                        for c in self.sbcli_utils.get_lvol_connect_str(lvol_name=child):
+                            _, err = self.ssh_obj.exec_command(node=client_node, command=c)
+                            if err:
+                                self.logger.warning(
+                                    f"[namespace] connect failed for child {child}: {err}")
+                    except Exception as exc:                      # noqa: BLE001
+                        self.logger.warning(
+                            f"[namespace] could not build a connect string for "
+                            f"child {child}: {exc}")
+                    self.ssh_obj.rescan_live_nvme_controllers(client_node)
+                    sleep_n_sec(3)
+                    device = self.ssh_obj.get_nvme_device_for_nqn(
+                        client_node, child_nqn, ns_id=child_ns)
+
                 if not device:
                     self.logger.warning(
                         f"[namespace] no device surfaced for child {child} "
-                        f"(nqn={child_nqn} nsid={child_ns}); skipping"
+                        f"(nqn={child_nqn} nsid={child_ns}) even after connecting; "
+                        f"skipping"
                     )
                     continue
 
