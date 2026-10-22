@@ -12,7 +12,10 @@ they never share nodes, so the source/target path sets never overlap — the ANA
 choreography is the simple "no-overlap" case (target primary → optimized, other
 target paths → non_optimized, all source paths → inaccessible).
 """
-from simplyblock_core import db_controller, utils, xfer_timing
+import uuid as uuid_lib
+
+from simplyblock_core import constants, db_controller, utils, xfer_timing
+from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
 
@@ -158,12 +161,83 @@ def _transfer_hub_live(tgt_node):
     return True
 
 
-def ensure_hub_attached(src_rpc, tgt_node):
-    """Ensure the target's transfer-hub lvol is NVMe-oF attached on the source.
+def _peer_transfer_hub(node, lvs_primary):
+    """The transfer hub *node* receives through for *lvs_primary*'s lvstore
+    when *node* is a non-primary member of it. Derived, never persisted: the
+    hub blob is in-memory in SPDK, so the record could only ever go stale.
 
-    The hub lvol is the gateway the source pushes the final delta through.
+    The name carries the node because the SOURCE keys its attached controller
+    by it (ensure_hub_attached reuses an attachment by name): a hub named like
+    the primary's would be taken for the primary's attachment, and the delta
+    would keep going to the old primary.
+    """
+    lvs = lvs_primary.lvstore
+    name = f"transferhub_{node.get_id()[:8]}"
+    ident = uuid_lib.uuid5(uuid_lib.NAMESPACE_URL, f"transferhub:{lvs}:{node.get_id()}")
+    return HubLVol({
+        'nqn': f"{constants.CLUSTER_NQN}:{node.cluster_id}:transferhub:{lvs}:{node.get_id()}",
+        'bdev_name': f"{lvs}/{name}",
+        # The target lvstore's hub port: a member already listens on it for
+        # that lvstore, and failover port blocks cover it with the lvstore.
+        'nvmf_port': lvs_primary.hublvol.nvmf_port,
+        'model_number': str(ident),
+        'nguid': ident.hex,
+        'hublvol_name': name,
+    })
+
+
+def receiving_hub(node, lvs_primary=None):
+    """The hub *node* receives transfers into *lvs_primary*'s lvstore through:
+    its own transfer hub when it is that lvstore's primary (or no lvstore is
+    named), else its per-lvstore peer hub."""
+    if lvs_primary is None or lvs_primary.get_id() == node.get_id():
+        return node.transfer_hublvol
+    return _peer_transfer_hub(node, lvs_primary)
+
+
+def _ensure_peer_transfer_hub(node, lvs_primary):
+    """Create and expose *node*'s hub on *lvs_primary*'s lvstore; (hub, error).
+
+    SPDK demuxes hub IO by map id in the hub's OWN lvstore
+    (vbdev_hublvol_submit_request), so a member receiving for an lvstore it is
+    not primary of needs a hub IN that lvstore -- its regular transfer hub sits
+    on the lvstore it is primary of. Idempotent: an existing hub is reused and
+    expose_bdev skips what is already there, which also heals a restart.
+    """
+    hub = _peer_transfer_hub(node, lvs_primary)
+    rpc_client = node.rpc_client()
+    try:
+        existing = rpc_client.bdev_get(hub.bdev_name)
+        if existing:
+            hub_uuid = existing.get('uuid', '') if isinstance(existing, dict) else ''
+        else:
+            hub_uuid = rpc_client.bdev_lvol_create_hublvol(
+                lvs_primary.lvstore, name=hub.hublvol_name)
+            if not hub_uuid:
+                return None, (f"Failed to create transfer hub {hub.bdev_name} "
+                              f"on {node.get_id()}")
+            logger.info("Created transfer hub %s on %s", hub.bdev_name, node.get_id())
+        node.expose_bdev(nqn=hub.nqn, bdev_name=hub.bdev_name,
+                         model_number=hub.model_number, uuid=hub_uuid,
+                         nguid=hub.nguid, port=hub.nvmf_port, ana_state="optimized")
+    except Exception as e:                                # noqa: BLE001
+        return None, f"Failed to provide transfer hub {hub.bdev_name} on {node.get_id()}: {e}"
+    return hub, None
+
+
+def ensure_hub_attached(src_rpc, tgt_node, lvs_primary=None):
+    """Ensure the hub *tgt_node* receives through is NVMe-oF attached on the source.
+
+    The hub lvol is the gateway the source pushes the transfer through. With
+    *lvs_primary* naming a target lvstore *tgt_node* is not primary of (an
+    acting secondary leader), the hub is *tgt_node*'s per-lvstore peer hub.
     Returns (hub_bdev_name, remote_bdev_name, error_string|None).
     """
+    if lvs_primary is not None and lvs_primary.get_id() != tgt_node.get_id():
+        hub, err = _ensure_peer_transfer_hub(tgt_node, lvs_primary)
+        if err:
+            return None, None, err
+        return _attach_hub(src_rpc, tgt_node, hub)
     # Trusting the DB record here is what broke every fail-back into a restarted
     # node (215 attach failures, labs 2026-08-17/18): a restart wipes SPDK's
     # bdevs and subsystems while ``transfer_hublvol`` survives in the DB, so this
@@ -183,7 +257,12 @@ def ensure_hub_attached(src_rpc, tgt_node):
             return None, None, (f"Transfer hublvol still absent on {tgt_node.get_id()} "
                                 f"after recreation")
 
-    hub = tgt_node.transfer_hublvol
+    return _attach_hub(src_rpc, tgt_node, tgt_node.transfer_hublvol)
+
+
+def _attach_hub(src_rpc, tgt_node, hub):
+    """Attach *hub* (exposed on *tgt_node*) on the source; the
+    (hub_bdev_name, remote_bdev_name, error) triple of ensure_hub_attached."""
     # Already attached (prior iteration or crash recovery).
     if src_rpc.bdev_get(hub.get_remote_bdev_name()):
         return hub.bdev_name, hub.get_remote_bdev_name(), None

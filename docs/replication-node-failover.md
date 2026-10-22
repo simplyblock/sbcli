@@ -124,64 +124,61 @@ Moves during a run:
 - **Moves in the idle window.** These are covered because the leader is
   resolved before every transfer.
 
-### Target: only the primary receives, for now
+### Target: the primary or the secondary receives, never the tertiary
 
 A settled leader is necessary, but it is not sufficient. The transfer reaches
-the target through the receiving node's **transfer hublvol**. Two facts make
-any member other than the primary a wrong receiver:
+the target through a **transfer hub**. These facts decide which hub, and which
+member may receive:
 
 | Fact | Where |
 |---|---|
 | SPDK demuxes hub IO by map id in the **hub's own** lvstore: `lvol->lvol_store->lvol_map.lvol[EXTRACT_ID(offset)]`. The leader gate checks the same lvstore. | `vbdev_hublvol_submit_request`, spdk `module/bdev/lvol/vbdev_lvol.c` |
-| A node creates its transfer hublvol on `self.lvstore`, the lvstore that node is **primary** of. | `StorageNode.create_transfer_hublvol` |
+| A node's regular transfer hub lives on `self.lvstore`, the lvstore that node is **primary** of. | `StorageNode.create_transfer_hublvol` |
+| A hub blob is in-memory: `spdk_bs_create_hubblob` uses blob id `UINT64_MAX`, starts CLEAN, and writes no metadata. Any member can create one on any lvstore it hosts. | spdk `lib/blob/blobstore.c` |
 | On a tertiary, hub IO is never demuxed: the branch requires `lvs->node_role != NODE_TERTIARY`. | `vbdev_lvol_submit_request` |
+| A non-leading secondary forwards hub IO to the leader with the map-id offset intact (`is_hublvol_io`). | `vbdev_redirect_request_to_hublvol` |
 
-A secondary that leads the target lvstore therefore resolves the landing
-volume's map id in its own lvstore, and its own lvstore's leader gate passes.
-If no volume there has that map id, the IO fails ("orglvol is none"). If one
-does, the snapshot is written into **an unrelated volume**. A tertiary does not
-demux the IO at all.
+**The rule (`process_snap_replicate_start`):**
 
-The receiving side existed before this change: `_receiving_leader_node` also
-chose a non-primary leader. Until the fix below lands,
-`process_snap_replicate_start` sends only when the settled leader **is** the
-landing volume's primary (`remote_lv.node_id`). Otherwise it waits with
-backoff, and the wait is not counted. The cost is that RPO grows while the
-target primary is down. The source side and the finish are unchanged: a
-convert is a metadata operation on the leader and does not touch the hub.
+- **Primary leads:** it receives through its own transfer hub, as before.
+- **Secondary leads:** it receives through a **per-lvstore hub** that it
+  creates in the target lvstore, `<lvs>/transferhub_<node8>`. The hub has its
+  own NQN, `…:transferhub:<lvs>:<node uuid>`, and listens on the target
+  lvstore's hub port (`replication_final_step.receiving_hub` and
+  `ensure_hub_attached(src_rpc, node, lvs_primary)`).
+  - The name has to be distinct, because the source reuses an attached
+    controller by name. A shared name would keep sending to the old primary.
+  - The hub is derived, not persisted. Creating and exposing it is idempotent,
+    which also heals it after a restart.
+  - If the secondary loses leadership mid-transfer, SPDK forwards its hub IO to
+    the new leader.
+- **Tertiary leads:** the start waits with backoff, and the wait is not
+  counted. This is reached only when the primary and the secondary are both
+  out.
+- **Detach:** the controller the source attached is recorded on the task as
+  `hub_ctrl`. Both detach paths close exactly that controller.
+
+**Before this change** the receiving node always used its regular transfer hub
+(`_receiving_leader_node`, and #1441 after it). A secondary that led the target
+lvstore therefore resolved the landing volume's map id in **its own** lvstore,
+whose leader gate it passes. If no volume there has that map id, the IO fails
+("orglvol is none"). If one does, the snapshot is written into an unrelated
+volume.
 
 **To check on beds:**
 
-- Target SPDK logs containing `FAILED - orglvol is none` or
-  `receive io for hublvol in nonleader mode`.
-- Replication tasks whose `target_node_id` is not the landing volume's
+- Target SPDK logs containing `FAILED - orglvol is none`.
+- Older replication tasks whose `target_node_id` is not the landing volume's
   `node_id`.
 
-Any match means some data reached a target through the wrong lvstore. Check
-the volumes on that member's own lvstore that have the same map id.
+**Still open:**
 
-**Proposed full fix (not implemented):**
-
-1. **Per-lvstore transfer hub on secondaries (sbcli only).** A hub blob is
-   in-memory: `spdk_bs_create_hubblob` uses blob id `UINT64_MAX`, starts
-   CLEAN, and writes no metadata. So any member can create one on any lvstore
-   it hosts, the way `create_secondary_hublvol` already creates the HA hub.
-   The member creates `<target lvs>/transferhub_<node8>` under its own NQN,
-   `…:transferhub:<lvs>:<node uuid>`. The name has to be distinct: the source
-   reuses an attached controller by name (`ensure_hub_attached`), so a shared
-   name would silently resend to the old primary.
-   - `ensure_hub_attached(src_rpc, node, lvs_name)` selects the hub for
-     `(node, lvs)`.
-   - Every detach path uses the same key.
-   - The liveness check recreates the hub after a restart.
-2. **Tertiary (SPDK fork).** Allow hub demux on a tertiary that leads, for
-   example `lvol->hublvol && (lvs->node_role != NODE_TERTIARY || lvs->leader)`.
-   This needs review by the SPDK owners, because the tertiary redirect path
-   sits just above it.
-3. **Then lift the gate.** Receive on any settled leader that holds a hub on
-   the target lvstore. The cross-cluster cutover's final step
-   (`replication_final_step`) gets the same receiver and drops its
-   primary-only rule.
+1. **Tertiary demux (SPDK fork).** Allow hub demux on a tertiary that leads,
+   for example `lvol->hublvol && (lvs->node_role != NODE_TERTIARY || lvs->leader)`.
+   This needs review by the SPDK owners. After that, drop the tertiary wait.
+2. **Cross-cluster cutover.** `replication_final_step.run_cutover` still
+   receives on the target primary only. With `receiving_hub` it can take the
+   acting secondary too (branch `feat/online-migration-gaps`).
 
 ### Retry bounds
 

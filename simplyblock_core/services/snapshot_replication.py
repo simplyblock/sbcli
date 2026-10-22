@@ -643,20 +643,24 @@ def process_snap_replicate_start(task, snapshot):
                                  f"({lead_why}), retrying",
                            backoff=True, count=_switches_exhausted(task))
         return
-    if remote_lv_node.get_id() != remote_lv.node_id:
-        # The transfer goes through the receiving node's transfer hublvol, and
-        # SPDK demuxes hub writes by map id in the HUB's OWN lvstore
-        # (vbdev_hublvol_submit_request: lvol->lvol_store->lvol_map). A node's
-        # transfer hub lives on the lvstore it is primary of, so a secondary
-        # leader would resolve the map id in ITS lvstore -- failing the IO or,
-        # with a colliding map id, writing into an unrelated volume -- and a
-        # tertiary never demuxes hub IO at all. Until each member carries a
-        # transfer hub on the target lvstore, only the target primary receives;
-        # the wait is not the transfer's fault and is not counted.
-        _suspend_for_retry(task, f"target lvstore {remote_lv.lvs_name} is led by "
-                                 f"{remote_lv_node.get_id()}, not its target primary "
-                                 f"{remote_lv.node_id}; waiting for the primary",
-                           backoff=True, count=_switches_exhausted(task))
+    # Who may receive. The transfer goes through a hub, and SPDK demuxes hub IO
+    # by map id in the HUB's own lvstore (vbdev_hublvol_submit_request): the
+    # primary receives through its own transfer hub, an acting SECONDARY
+    # through its per-lvstore hub on the target lvstore
+    # (replication_final_step.receiving_hub). A TERTIARY never demuxes hub IO
+    # (the node_role check in vbdev_lvol_submit_request), so while one leads,
+    # the start waits -- not the transfer's fault, not counted.
+    try:
+        lvs_primary = db.get_storage_node_by_id(remote_lv.node_id)
+    except KeyError:
+        _suspend_for_retry(task, f"target lvstore primary {remote_lv.node_id} unknown, "
+                                 f"retrying", backoff=True)
+        return
+    if remote_lv_node.get_id() not in (lvs_primary.get_id(), lvs_primary.secondary_node_id):
+        _suspend_for_retry(task, f"target lvstore {remote_lv.lvs_name} is led by its "
+                                 f"tertiary {remote_lv_node.get_id()}, which cannot "
+                                 f"receive a transfer; waiting for the primary or "
+                                 f"secondary", backoff=True, count=_switches_exhausted(task))
         return
     _note_switch(task, "target_node_id", remote_lv_node.get_id(), "target leader")
 
@@ -672,7 +676,10 @@ def process_snap_replicate_start(task, snapshot):
     with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
                            lvol=snapshot.lvol.get_id(),
                            tgt=remote_lv_node.get_id()):
-        _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
+        _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(
+            snode.rpc_client(), remote_lv_node, lvs_primary)
+    if not hub_err:
+        task.function_params["hub_ctrl"] = _hub_ctrl
     if hub_err:
         logger.error(f"Transfer hub attach failed: {hub_err}")
         _suspend_for_retry(task, f"transfer hub attach failed: {hub_err}, retrying",
@@ -1050,6 +1057,17 @@ def _stable_target_leader(remote_lv):
                       f"{', '.join(n.get_id()[:8] for n in second) or 'none'})")
     _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
     return second[0], ""
+
+
+def _attached_hub_ctrl(task, hub_node):
+    """The hub controller this task attached on the source: recorded at attach
+    (a secondary's per-lvstore hub has its own name), else -- tasks from before
+    the record -- the node's own transfer hub."""
+    ctrl = task.function_params.get("hub_ctrl")
+    if ctrl:
+        return ctrl
+    hub = getattr(hub_node, "transfer_hublvol", None)
+    return hub.bdev_name if hub and hub.bdev_name else ""
 
 
 def _note_switch(task, key, new_id, label):
@@ -1704,15 +1722,15 @@ def process_snap_replicate_finish(task, snapshot):
             hub_node = remote_snode
     _src_node = (_transfer_source_node(task, snapshot)
                  or db.get_storage_node_by_id(snapshot.lvol.node_id))
-    if hub_node.transfer_hublvol and hub_node.transfer_hublvol.bdev_name:
+    hub_ctrl = _attached_hub_ctrl(task, hub_node)
+    if hub_ctrl:
         if not _other_active_transfers_to_node(task, hub_node.get_id()):
             xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
                               lvol=snapshot.lvol.get_id())
             # Non-fatal: a resumed finish (see _resume_finish) finds the hub
             # already detached by the first attempt.
             try:
-                _src_node.rpc_client().bdev_nvme_detach_controller(
-                    hub_node.transfer_hublvol.bdev_name)
+                _src_node.rpc_client().bdev_nvme_detach_controller(hub_ctrl)
             except Exception as e:                        # noqa: BLE001
                 logger.warning("Transfer hub detach on %s failed (non-fatal): %s",
                                _src_node.get_id(), e)
@@ -1995,11 +2013,10 @@ def task_runner(task: JobSchedule):
             _rl_node = db.get_storage_node_by_id(
                 task.function_params.get("target_node_id") or remote_lv.node_id)
             snode = _transfer_source_node(task, snapshot)
-            if (snode is not None and _rl_node.transfer_hublvol
-                    and _rl_node.transfer_hublvol.bdev_name
+            _ctrl = _attached_hub_ctrl(task, _rl_node)
+            if (snode is not None and _ctrl
                     and not _other_active_transfers_to_node(task, _rl_node.get_id())):
-                snode.rpc_client().bdev_nvme_detach_controller(
-                    _rl_node.transfer_hublvol.bdev_name)
+                snode.rpc_client().bdev_nvme_detach_controller(_ctrl)
         except Exception as e:
             logger.warning("Abort-path hub detach failed (non-fatal): %s", e)
         try:

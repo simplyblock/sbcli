@@ -295,29 +295,3 @@ def test_a_leaderless_target_runs_the_recovery_then_requires_it_settled():
     src.rpc_client().bdev_lvol_transfer.assert_not_called()
     assert "moving" in task.function_result
 
-
-def test_start_never_transfers_into_a_non_primary_target_leader():
-    """The transfer goes through the receiving node's transfer hublvol, which
-    lives on the lvstore THAT node is primary of; SPDK demuxes hub writes by
-    map id in the hub's own lvstore (and a tertiary never demuxes at all). A
-    settled leader that is not the target primary would put the snapshot into
-    the wrong lvstore -- possibly an unrelated volume with the same map id.
-    The start waits instead, without spending a retry."""
-    task = _task(source_node_id="P", remote_lvol_id="R", replicate_to_source=False)
-    task.status = JobSchedule.STATUS_SUSPENDED
-    src = _node("P")
-    ts = _node("TS")
-    db = MagicMock()
-    db.get_lvol_by_id.return_value = _remote()
-    with patch.object(sr, "db", db), \
-            patch.object(sr, "_lvs_transfer_hold", return_value=None), \
-            patch.object(sr, "_select_source_node", return_value=(src, "primary P")), \
-            patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_stable_target_leader", return_value=(ts, "")), \
-            patch("simplyblock_core.services.replication_final_step.ensure_hub_attached") as hub:
-        sr.process_snap_replicate_start(task, _snapshot())
-    hub.assert_not_called()
-    src.rpc_client().bdev_lvol_transfer.assert_not_called()
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-    assert task.retry == 0
-    assert "target primary" in task.function_result
