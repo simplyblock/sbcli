@@ -13,7 +13,7 @@ This document closes the gaps that remained in it.
 | # | Gap | Before | After |
 |---|-----|--------|-------|
 | G1 | Bulk selection | Every volume needed its own `replication-start` and `replication-commit`. | One **migration plan** covers a cluster, a pool, or a list of volumes. |
-| G2 | Node loss at cutover | The freeze ran only on the source primary recorded at commit. If the source primary was offline, its peers were not fenced at all, which left the volume writable on two sides. | The freeze runs on the source LVS **leader**. Every reachable source member is fenced. The target still has to be its leading primary, see *Target* below. |
+| G2 | Node loss at cutover | The freeze ran only on the source primary, and the delta went only into the target primary, both as recorded at commit. If the source primary was offline, its peers were not fenced at all, which left the volume writable on two sides. | The freeze runs on the source LVS **leader**. Every reachable source member is fenced. The delta goes to the settled target primary **or secondary**; while a tertiary leads, the task waits. |
 | G3 | Forecast | None. | Each volume gets bytes remaining and an ETA. The plan gets an ETA from per-source-LVS queues. A dry run shows the forecast before anything starts. |
 | G4 | Delete source | `--delete-source` per commit. | Unchanged, and also carried by the plan. |
 | G5 | Target placement | A weighted-random pick by subsystem count. It ignored size and the other volumes already headed to the same node. | Deterministic least-loaded placement that counts the replicas already assigned to each node. |
@@ -152,27 +152,22 @@ the source still serves IO, so waiting is safe.
 
 ### Target
 
-The final delta can only be received by the target **primary**, and only while
-it is the settled leader of the target lvstore. If the primary is down, or
-another member leads, the task defers and is not counted. The source keeps
-serving meanwhile, so waiting has no client impact.
-
-The reason is in SPDK. The delta goes through the receiving node's transfer
-hublvol. SPDK demuxes hub writes by map id in the **hub's own** lvstore
-(`vbdev_lvol.c`: `lvol->lvol_store->lvol_map.lvol[offset >> 48]`). A node
-creates its transfer hublvol on `self.lvstore`, the lvstore that node is
-primary of. A secondary or tertiary member of the target lvstore therefore
-holds a hub on a *different* lvstore, and the map id would resolve in the wrong
-lvstore.
-
-A target-side fallback needs a transfer hublvol per lvstore on every member.
-That is out of scope here.
-
-> **Open issue, already on main:** snapshot replication (#1441,
-> `snapshot_replication.process_snap_replicate_start`) sends to the settled
-> target leader through that leader's own transfer hub. When the leader is not
-> the target primary, this has the same wrong-lvstore demux. It needs a bed
-> check and a fix: either gate on the primary, or add a per-lvstore hub.
+- **Before the clone exists:** the cutover waits for the target primary. The
+  clone is created through the primary, and the source is still serving, so
+  the wait has no client impact.
+- **After the clone exists:** the final delta goes to the **settled leader** of
+  the target lvstore, the same rule snapshot replication follows
+  (`docs/replication-node-failover.md`).
+  - **Primary leads:** it receives through its own transfer hub.
+  - **Secondary leads:** it receives through its per-lvstore hub on the target
+    lvstore (`replication_final_step.receiving_hub`). SPDK demuxes hub IO by
+    map id in the hub's own lvstore, so the secondary's regular transfer hub,
+    which sits on its own lvstore, would resolve the map id in the wrong place.
+  - `add_clone` runs on the other online members.
+  - ANA makes the receiving leader optimized and the other online members
+    non-optimized.
+- **Tertiary leads**, or leadership is unsettled: the task defers and is not
+  counted. SPDK never demuxes hub IO on a tertiary.
 
 A node lost **during** the freeze makes `bdev_lvol_transfer_final_step` fail,
 or return something other than `Done`. The source paths are restored, so the
@@ -255,7 +250,8 @@ spreads them evenly.
   - with no leader, the task defers;
   - fencing covers the peers when the primary is offline;
   - restore re-optimizes the executing leader;
-  - the target is never a non-primary member, even when it leads;
+  - an acting target secondary receives through its hub on the target lvstore;
+  - a tertiary target leader is never sent to;
   - before prepare, an offline target primary still defers;
   - the target is unsettled, so the task defers.
 - **`test_replication_placement.py`:**

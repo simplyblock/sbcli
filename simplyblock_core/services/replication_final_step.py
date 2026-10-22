@@ -357,7 +357,9 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     # snapshot replication (which passes the n1 bdev) kept working. This matches
     # tasks_runner_lvol_migration, which uses the second element for the same RPC.
     with xfer_timing.phase("final_hub_attach", lvol=lvol.get_id()):
-        _ctrl_name, hub_bdev, err = ensure_hub_attached(src_rpc, tgt_exec)
+        # tgt_node is the target lvstore's primary: an acting secondary
+        # receives through its own hub ON that lvstore (receiving_hub).
+        _ctrl_name, hub_bdev, err = ensure_hub_attached(src_rpc, tgt_exec, tgt_node)
     if err:
         return False, err
 

@@ -462,10 +462,10 @@ def task_runner(task: JobSchedule, tasks):
     except KeyError:
         pass
 
-    # The target clone is created through the target PRIMARY, and the final
-    # delta can only land through the primary's transfer hub (_cutover_target),
-    # so the primary has to be up. The source still serves the volume
-    # meanwhile, so the wait costs the client nothing.
+    # The target clone is created through the target PRIMARY, so until it exists
+    # the primary has to be up. The source still serves the volume meanwhile,
+    # so the wait costs the client nothing. Once the clone exists the final
+    # delta goes to the settled primary or secondary leader (_cutover_target).
     if ("tgt_lvol_composite" not in params
             and tgt_node.status != StorageNode.STATUS_ONLINE):
         logger.warning("cutover for lvol %s waiting: target node %s is %s",
@@ -631,18 +631,14 @@ def _cutover_source(lvol):
 def _cutover_target(params, tgt_node):
     """The target member that receives the final delta, and why; (None, why).
 
-    Only the target PRIMARY, and only while it settled as the lvstore's leader.
-    The delta goes through the receiving node's transfer hublvol, and SPDK
-    demuxes hub writes by map id in the HUB's own lvstore
-    (lvol->lvol_store->lvol_map): a non-primary member's transfer hub lives on
-    the lvstore THAT node is primary of, so routing the delta through it would
-    resolve the map id in the wrong lvstore. Until a per-lvstore transfer hub
-    exists on every member, a cutover whose target primary is down or not
-    leading waits -- the source keeps serving meanwhile.
+    The settled leader of the target lvstore -- the receive side of snapshot
+    replication follows the same rule (snapshot_replication's start gate):
+    the primary receives through its own transfer hub, an acting SECONDARY
+    through its per-lvstore hub on the target lvstore
+    (replication_final_step.receiving_hub). SPDK never demuxes hub IO on a
+    TERTIARY, so while one leads the cutover waits; the source keeps serving.
     """
     from simplyblock_core.services import snapshot_replication
-    if tgt_node.status != StorageNode.STATUS_ONLINE:
-        return None, f"target primary {tgt_node.get_id()[:8]} is {tgt_node.status}"
     tgt_lvol = None
     tgt_lvol_id = params.get("tgt_lvol_id")
     if not tgt_lvol_id and params.get("replication_id"):
@@ -657,13 +653,16 @@ def _cutover_target(params, tgt_node):
         except KeyError:
             tgt_lvol = None
     if tgt_lvol is None:
-        return tgt_node, ""
+        # An older task without the clone on record: only the primary is known.
+        if tgt_node.status == StorageNode.STATUS_ONLINE:
+            return tgt_node, ""
+        return None, f"target primary {tgt_node.get_id()[:8]} is {tgt_node.status}"
     leader, why = snapshot_replication._stable_target_leader(tgt_lvol)
     if leader is None:
         return None, why
-    if leader.get_id() != tgt_node.get_id():
-        return None, (f"target lvstore is led by {leader.get_id()[:8]}, not the "
-                      f"primary {tgt_node.get_id()[:8]}")
+    if leader.get_id() not in (tgt_node.get_id(), tgt_node.secondary_node_id):
+        return None, (f"target lvstore is led by its tertiary {leader.get_id()[:8]}, "
+                      f"which cannot receive a transfer")
     return leader, ""
 
 

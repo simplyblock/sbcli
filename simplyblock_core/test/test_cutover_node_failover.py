@@ -79,14 +79,21 @@ def test_run_cutover_freezes_on_the_source_leader_into_the_target_leader(monkeyp
     tsec = _Node("T2", events, "t2", "lvs_tgt")
     tter = _Node("T3", events, "t3", "lvs_tgt")
     _install_nodes(monkeypatch, {"S1": src, "S2": sec, "T1": tgt, "T2": tsec, "T3": tter})
+    # What the acting secondary needs to provide its hub on the target lvstore.
+    tgt.hublvol = type("Hub", (), {"nvmf_port": 4430})()
+    tsec.cluster_id = "CL2"
+    tsec.expose_bdev = lambda **kw: None
 
     ok, err = rfs.run_cutover(src, tgt, _Lvol(), "lvs_tgt/LVOL_1", 42, "lvs_tgt/SNAP1",
                               src_exec=sec, tgt_exec=tsec)
 
     assert ok is True and err is None
-    # The freeze ran on the acting source leader, through the RECEIVING
-    # leader's hub -- never on the offline primaries.
-    assert sec.rpc_client().final_step_gateways == [tsec.transfer_hublvol.get_remote_bdev_name()]
+    # The freeze ran on the acting source leader, through the receiving
+    # secondary's hub ON THE TARGET LVSTORE -- not its own transfer hub, whose
+    # lvstore would resolve the map id wrongly -- never on the offline primaries.
+    peer_hub = rfs.receiving_hub(tsec, tgt)
+    assert peer_hub.bdev_name == "lvs_tgt/transferhub_T2"
+    assert sec.rpc_client().final_step_gateways == [peer_hub.get_remote_bdev_name()]
     assert src.rpc_client().final_step_gateways == []
     # add_clone on the other ONLINE target members only.
     assert [e[1] for e in events if e[0] == "add_clone"] == ["T3"]
@@ -264,20 +271,27 @@ def test_runner_freezes_on_the_source_leader_into_the_target_primary(monkeypatch
     assert rep.state == LVolReplication.STATE_CUTOVER_DONE
 
 
-def test_runner_never_receives_through_a_non_primary_target(monkeypatch, _no_db_writes):
-    """A non-primary member's transfer hub lives on the lvstore THAT member is
-    primary of; SPDK demuxes hub writes by map id in the hub's own lvstore, so
-    the delta would land in the wrong lvstore. The cutover waits instead."""
+def test_runner_receives_on_an_acting_secondary(monkeypatch, _no_db_writes):
+    """With the target primary down the settled secondary leader receives,
+    through its own hub on the target lvstore (receiving_hub)."""
     nodes = {"S1": _node("S1"), "S2": _node("S2"),
              "T1": _node("T1", StorageNode.STATUS_OFFLINE), "T2": _node("T2")}
-    _, calls = _install_runner(monkeypatch, nodes, "T2")
+    nodes["T1"].secondary_node_id = "T2"
+    rep, calls = _install_runner(monkeypatch, nodes, "T2")
 
-    with pytest.raises(TaskDefer, match="target primary"):
-        runner.task_runner(_task().frozen_view(), [])
-    assert calls == []
+    assert runner.task_runner(_task().frozen_view(), []) is None
+    assert calls == [("S1", "T1", "S2", "T2")]
 
-    nodes["T1"].status = StorageNode.STATUS_ONLINE          # up, but T2 still leads
-    with pytest.raises(TaskDefer, match="led by"):
+
+def test_runner_never_receives_through_a_tertiary(monkeypatch, _no_db_writes):
+    """SPDK never demuxes hub IO on a tertiary: the cutover waits."""
+    nodes = {"S1": _node("S1"), "S2": _node("S2"),
+             "T1": _node("T1", StorageNode.STATUS_OFFLINE), "T2": _node("T2"), "T3": _node("T3")}
+    nodes["T1"].secondary_node_id = "T2"
+    nodes["T1"].tertiary_node_id = "T3"
+    _, calls = _install_runner(monkeypatch, nodes, "T3")
+
+    with pytest.raises(TaskDefer, match="tertiary"):
         runner.task_runner(_task().frozen_view(), [])
     assert calls == []
 
