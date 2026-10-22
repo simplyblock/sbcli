@@ -157,13 +157,19 @@ i.e. the second instance, waits for `revoked`. The 3 s failover budget is untouc
 On `two_node_host_fencing` clusters a partition (both nodes report each other, both reachable)
 no longer fences both. The arbiter picks a winner deterministically:
 
-1. the node that leads more LVS (more volumes keep their optimized path);
-2. tie: the node whose Kubernetes node is `Ready` (operator report), the other one not;
+1. a node whose data rebuild is pending never wins (arbitration contract, section 7.10); both
+   pending: `fence_both`;
+2. the node that leads more LVS (more volumes keep their optimized path);
 3. tie: the lower node id.
 
 Raise the epoch, `jc_fence` the loser for every LVS and wait for its acknowledgement (both are
-reachable, so the fence is required, not best effort), grant the winner, then host-fence the
-loser (section 3.2). Clusters without `two_node_host_fencing` keep `fence_both`.
+reachable, so the fence is required, not best effort: a failed fence withholds the grant and is
+re-sent), grant the winner, mark the loser for its data rebuild, then host-fence the loser
+(section 3.2). The cluster is then `degraded`, and the heal re-admits the loser through the
+restart flow. Clusters without `two_node_host_fencing` keep `fence_both`.
+
+Planned refinement: prefer the node whose Kubernetes node is `Ready` once the operator reports
+it (between rules 2 and 3).
 
 ### 3.4 Operator (mode `witness`)
 

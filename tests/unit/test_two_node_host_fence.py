@@ -391,3 +391,43 @@ def test_pacemaker_authority_writes_no_planned_loss_and_queues_no_events():
         assert len(seen) == 1
     finally:
         ev.queue_event = orig
+
+
+def test_partition_with_host_fencing_has_a_winner(hfenv):
+    """Contract section 3.3: the loser is fenced (required, acknowledged),
+    the winner granted, then the loser's host is revoked on the winner."""
+    a, db, nodes, clock, cluster = hfenv
+    a.renew_all()
+    db.events = [event(A, 1, "remote_jm_unhealthy", 3, ha_state="holding"),
+                 event(B, 1, "remote_jm_unhealthy", 3, ha_state="holding")]
+    v = a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    # each node leads its own LVS: the tie goes to the lower node id
+    assert v.kind == "degraded" and v.winner == A and v.loser == B and v.host_fence
+    assert calls(nodes[B], "jc_fence") and calls(nodes[A], "jc_grant_solo")
+    assert not calls(nodes[A], "jc_fence") and not calls(nodes[B], "jc_grant_solo")
+    assert db.rec.state == "degraded" and B in (db.rec.rebuild or {})
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert db.revokes == [(A, HOST_B)] and _fence(db)["state"] == HF_REVOKED
+
+
+def test_partition_winner_grant_waits_for_the_losers_fence(hfenv):
+    a, db, nodes, clock, cluster = hfenv
+    a.renew_all()
+    nodes[B].errors["jc_fence"] = RuntimeError("busy")
+    db.events = [event(A, 1, "remote_jm_unhealthy", 3, ha_state="holding"),
+                 event(B, 1, "remote_jm_unhealthy", 3, ha_state="holding")]
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert not calls(nodes[A], "jc_grant_solo") and CL in a.undelivered
+    nodes[B].errors.clear()
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert calls(nodes[A], "jc_grant_solo") and CL not in a.undelivered
+
+
+def test_partition_without_host_fencing_still_fences_both(hfenv):
+    a, db, nodes, clock, cluster = hfenv
+    cluster.two_node_host_fencing = False
+    a.renew_all()
+    db.events = [event(A, 1, "remote_jm_unhealthy", 3, ha_state="holding"),
+                 event(B, 1, "remote_jm_unhealthy", 3, ha_state="holding")]
+    v = a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert v.kind == "partition" and not calls(nodes[A], "jc_grant_solo")

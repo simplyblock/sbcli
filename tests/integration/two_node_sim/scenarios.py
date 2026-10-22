@@ -137,9 +137,10 @@ class Scenario:
     notes: str = ""
     extra: dict = field(default_factory=dict)
     # kubernetes-fencing contract (mode witness): host fencing on the cluster,
-    # and the nodes whose host must be fenced in the run (() = none). None: not checked.
+    # and the nodes whose host must be fenced in the run (() = none; an int: that
+    # many, whichever they are). None: not checked.
     host_fencing: bool = False
-    host_fenced: tuple | None = None
+    host_fenced: tuple | int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -350,8 +351,8 @@ BED = [
 
 #: docs/design/two-node-kubernetes-fencing.md, mode witness. A host is fenced
 #: (revoked on the winner, then StorageFenced and the out-of-service taint) only
-#: when its state is unknown; never for an SPDK-only or planned loss, never on a
-#: partition while its policy is fence_both. Every fence is released and every
+#: when its state is unknown; never for an SPDK-only or planned loss. A partition
+#: has a winner (contract 3.3): the other node's host is fenced. Every fence is released and every
 #: subsystem restored without a manual step (the operator actor releases a
 #: releasable fence once the node runs again).
 KUBE = [
@@ -361,8 +362,8 @@ KUBE = [
              host_fencing=True, host_fenced=(), grant_within_s=2.2),
     Scenario("K3-no-host-fence-shutdown-sn2", ("k8s",), shutdown_then_restart("sn2"),
              host_fencing=True, host_fenced=(), grant_within_s=2.2),
-    Scenario("K4-no-host-fence-partition", ("k8s",), partition(), io_errors_ok=True,
-             stall_limit_s=None, heal_s=300, host_fencing=True, host_fenced=()),
+    Scenario("K4-host-fence-partition-winner", ("k8s",), partition(), io_errors_ok=True,
+             stall_limit_s=None, heal_s=300, host_fencing=True, host_fenced=1),
     Scenario("K5-host-fence-hang-sn2", ("k8s",), hang("sn2"), aborts_ok=("sn2",),
              host_fencing=True, host_fenced=("sn2",), grant_within_s=2.6),
 ]

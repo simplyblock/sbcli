@@ -98,7 +98,10 @@ def run(world, sc, stop_on_failure: bool = False, heal_s: float | None = None) -
             out.failures.append("grant after %.2f s > %.1f s" % (out.grant_after_s, sc.grant_within_s))
     if sc.host_fenced is not None:
         seen = sorted({fenced for _, fenced, _w in world.host_fences_seen})
-        if seen != sorted(sc.host_fenced):
+        if isinstance(sc.host_fenced, int):
+            if len(seen) != sc.host_fenced:
+                out.failures.append("host fenced %s, expected %d node(s)" % (seen, sc.host_fenced))
+        elif seen != sorted(sc.host_fenced):
             out.failures.append("host fenced %s, expected %s" % (seen, sorted(sc.host_fenced)))
     if world.unknown_rpcs:
         out.failures.append("RPCs the simulated node does not implement: %s" % sorted(world.unknown_rpcs))

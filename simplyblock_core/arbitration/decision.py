@@ -29,6 +29,13 @@ V_HEAL = "heal"            # both healthy and stable: run the healing flow
 V_DONE = "done"            # healing finished: back to steady
 V_UNAVAILABLE = "unavailable"  # the only up-to-date node is lost: grant nobody (F10)
 
+#: Partition policies. ``fence_both`` (default, campaign c1): IO stops.
+#: ``winner`` (docs/design/two-node-kubernetes-fencing.md, section 3.3, only
+#: with host fencing): one node continues, the other is fenced and its host
+#: remediated by Kubernetes.
+PARTITION_FENCE_BOTH = "fence_both"
+PARTITION_WINNER = "winner"
+
 
 @dataclass
 class NodeView:
@@ -83,6 +90,8 @@ class Snapshot:
     #: (campaign c3, F10): they may lack writes their peer took alone, so they
     #: are never granted solo. Empty when the pair is fully redundant.
     stale_nodes: tuple = ()
+    #: What a partition does (``PARTITION_FENCE_BOTH`` or ``PARTITION_WINNER``).
+    partition_policy: str = PARTITION_FENCE_BOTH
 
 
 @dataclass
@@ -144,12 +153,48 @@ def _partition_verdict(snap: Snapshot) -> Verdict:
     Policy ``fence_both`` (user decision, campaign c1): IO stops on a
     partition. Every LVS is fenced on BOTH nodes and nobody is granted; there
     is no preferred node and no leader-wins rule. Healing (section 8) brings
-    the pair back once the link is healthy again."""
+    the pair back once the link is healthy again.
+
+    Policy ``winner`` (kubernetes-fencing contract, section 3.3; clusters with
+    host fencing only): ``_partition_winner``."""
+    if snap.partition_policy == PARTITION_WINNER:
+        verdict = _partition_winner(snap)
+        if verdict is not None:
+            return verdict
     vuids = _all_lvs(snap)
     fence_all = {v: [snap.a.node_id, snap.b.node_id] for v in vuids}
     return Verdict(V_PARTITION, ARB_PARTITIONED, raise_epoch=True,
                    fence_all=fence_all,
                    reason="both nodes report each other; both reachable: fence_both")
+
+
+def _partition_winner(snap: Snapshot) -> Verdict | None:
+    """One node continues through a partition: the one that leads more LVS
+    (more volumes keep their optimized path), on a tie the lower node id. A
+    node whose data rebuild is pending never wins (campaign c3, F10); with
+    both pending, None (fence_both).
+
+    Both nodes are reachable, so the loser's fence is required, not best
+    effort: ``send`` withholds the grant until the loser acknowledged it. The
+    loser's host is then fenced on the winner (``host_fence``) before
+    Kubernetes restarts its VMs there."""
+    counts = {snap.a.node_id: 0, snap.b.node_id: 0}
+    for leader in snap.leaders.values():
+        if leader in counts:
+            counts[leader] += 1
+    candidates = [n for n in (snap.a, snap.b) if n.node_id not in snap.stale_nodes]
+    if not candidates:
+        return None
+    winner = min(candidates, key=lambda n: (-counts[n.node_id], n.node_id))
+    loser = snap.b if winner is snap.a else snap.a
+    vuids = _all_lvs(snap)
+    return Verdict(V_DEGRADED, ARB_DEGRADED, raise_epoch=True, winner=winner.node_id,
+                   loser=loser.node_id, grant={v: winner.node_id for v in vuids},
+                   fence={v: loser.node_id for v in vuids}, host_fence=True,
+                   reason="both nodes report each other; both reachable: partition, winner "
+                          "policy: %s leads %d LVS, %s %d" % (
+                              winner.node_id, counts[winner.node_id], loser.node_id,
+                              counts[loser.node_id]))
 
 
 def _degraded_verdict(snap: Snapshot, survivor: NodeView, dead: NodeView, reason: str) -> Verdict:

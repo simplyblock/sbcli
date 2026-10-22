@@ -305,7 +305,7 @@ class Arbiter:
             planned_loss=nid in (rec.planned_loss or {}),
         )
 
-    def snapshot(self, rec: ClusterArbitration, nodes: list) -> dec.Snapshot:
+    def snapshot(self, rec: ClusterArbitration, nodes: list, cluster=None) -> dec.Snapshot:
         a, b = (self.node_view(n, rec) for n in nodes)
         cid = rec.cluster_id
         return dec.Snapshot(
@@ -318,6 +318,10 @@ class Arbiter:
             winner=(rec.verdicts[-1].get("winner", "")
                     if rec.state == ARB_DEGRADED and rec.verdicts else ""),
             stale_nodes=tuple(sorted(rec.rebuild or {})),
+            # kubernetes-fencing contract, 3.3: with host fencing a partition
+            # has a winner; every other cluster keeps fence_both.
+            partition_policy=(dec.PARTITION_WINNER if host_fencing_on(cluster)
+                              else dec.PARTITION_FENCE_BOTH),
         )
 
     # ---- node configuration and leases ---------------------------------------
@@ -1573,10 +1577,10 @@ class Arbiter:
                 self.undelivered.pop(cluster_id, None)
             return pending
 
-        snap = self.snapshot(rec, nodes)
+        snap = self.snapshot(rec, nodes, cluster)
         self._track_health(rec, snap)
         rec = self.db.get_cluster_arbitration(cluster_id)
-        snap = self.snapshot(rec, nodes)
+        snap = self.snapshot(rec, nodes, cluster)
         verdict = dec.decide(snap)
 
         if verdict.kind in (dec.V_PARTITION, dec.V_DEGRADED):
