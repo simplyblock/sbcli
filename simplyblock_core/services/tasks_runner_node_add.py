@@ -1,4 +1,6 @@
+import logging
 import socket
+import threading
 import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
@@ -86,14 +88,35 @@ def _wait_node_reachable(task):
     return True
 
 
+class _LastError(logging.Handler):
+    """Remembers the last error the creating thread logged. add_node says why it
+    failed only by logging an error and returning False, so this is where the
+    reason can be read. Adds run concurrently, hence the thread."""
+
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self._thread = threading.get_ident()
+        self.message = ""
+
+    def emit(self, record):
+        if record.thread == self._thread:
+            self.message = record.getMessage()
+
+
 def process_task(task):
+    reason = _LastError()
+    logging.getLogger().addHandler(reason)
     try:
         res = storage_node_ops.add_node(**task.function_params)
         msg = f"Node add result: {res}"
+        if not res and reason.message:
+            msg += f": {reason.message}"
         logger.info(msg)
     except Exception as e:
         logger.error(e)
         res, msg = False, f"Node add raised: {e}"
+    finally:
+        logging.getLogger().removeHandler(reason)
 
     if res:
         set_result(task, msg)
