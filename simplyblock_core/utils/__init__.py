@@ -1500,25 +1500,76 @@ def aio_bdev_name_for_serial(serial: str) -> str:
     return f"aio_{sanitized}"
 
 
+def _busy_block_device(dev):
+    """Whether a live block device is one a node must never be built on: it is
+    mounted, held by another layer (LVM/md/dm-crypt), or backs the root
+    filesystem. Configure-time eligibility refuses all three, so a stored entry
+    can never legitimately resolve onto such a device."""
+    return bool(dev.get("mounted_in_subtree") or dev.get("holders")
+                or dev.get("is_root_disk"))
+
+
 def resolve_lblk_entries(configured_entries, host_devices):
     """Match the node's configured lblk devices against the live host
-    inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
-    name is only a fallback for devices without a resolvable serial. Partition
-    entries additionally resolve by PARTUUID — it survives a parent-disk
-    serial change (e.g. a hypervisor re-exposing the volume) while the
-    derived partition serial would not. Returns ``(resolved, missing)``
-    where resolved entries carry the CURRENT name/path/by-id."""
+    inventory. Kernel names shift across reboots and across hosts, so the
+    persistent identities come first and the stored name is the last resort.
+
+    Per entry, in order: SERIAL; PARTUUID (partition entries only: it survives
+    a parent-disk serial change, which the derived partition serial would not);
+    the stored persistent BY-ID path; the stored kernel NAME. The last two
+    identify a device by where it sits rather than by what it is, so they are
+    taken only for a device that could be the entry's own: the same size, and
+    never a mounted, held, or root disk. That is what a node restarted onto
+    another host depends on. Its synthetic serials are hashed with the old
+    hostname and match nothing, and the same kernel name there can be the boot
+    disk.
+
+    A live device resolves for at most one entry, and a serial or PARTUUID match
+    is settled for every entry before any positional one is tried, so a
+    positional match can never take the disk another entry owns by identity.
+    Returns ``(resolved, missing)`` where resolved entries carry the CURRENT
+    name/path/by-id."""
     by_serial = {d["serial"]: d for d in host_devices}
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
                    if d.get("partuuid")}
-    resolved, missing = [], []
-    for entry in configured_entries:
+    by_id: dict[str, dict] = {}
+    for dev in host_devices:
+        for path in (dev.get("by_id_paths") or [dev.get("by_id_path")]):
+            if path:
+                by_id.setdefault(path, dev)
+
+    def same_size(entry, live):
+        stored = int(entry.get("size") or 0)
+        return not stored or stored == int(live.get("size") or 0)
+
+    def positional(entry, live):
+        return (live is not None and same_size(entry, live)
+                and not _busy_block_device(live))
+
+    matched = {}
+    claimed = set()
+
+    def claim(index, live):
+        if live is not None and live["name"] not in claimed:
+            matched[index] = live
+            claimed.add(live["name"])
+
+    for index, entry in enumerate(configured_entries):
         live = by_serial.get(entry.get("serial"))
         if live is None and entry.get("partuuid"):
             live = by_partuuid.get(entry["partuuid"].lower())
-        if live is None:
-            live = by_name.get(entry.get("name"))
+        claim(index, live)
+
+    for lookup, key in ((by_id, "by_id"), (by_name, "name")):
+        for index, entry in enumerate(configured_entries):
+            if index not in matched:
+                live = lookup.get(entry.get(key))
+                claim(index, live if positional(entry, live) else None)
+
+    resolved, missing = [], []
+    for index, entry in enumerate(configured_entries):
+        live = matched.get(index)
         if live is None:
             missing.append(entry)
             continue
