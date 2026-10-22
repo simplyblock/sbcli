@@ -43,20 +43,22 @@ spec:
               KC_LABEL="storage-cpumanager-{{ CLUSTER_ID }}"
               HOSTNAME="{{ HOSTNAME }}"
 
+              # ---- Order --------------------------------------------------
+              # A pool renders from the MachineConfigs that exist when it is
+              # evaluated. A host joined to a pool created a moment earlier, before
+              # its MachineConfig and KubeletConfig, is sent to a render without
+              # the kubelet settings and reboots into it, then reboots again when
+              # the complete render arrives, which is usually byte-identical to the
+              # one it started on. So the pool is created selecting no host, the
+              # MachineConfig and KubeletConfig are added, and the host joins only
+              # once the pool's render carries the generated kubelet config: a host
+              # whose config already has the same content then moves without a
+              # reboot.
+              PENDING_HOST="pending-storage-pool"
+
               # ---- MachineConfigPool ----------------------------------------
-              if kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
-                echo "[INFO] MCP $MCP_NAME already exists — appending $HOSTNAME to nodeSelector"
-                EXISTING=$(kubectl get machineconfigpool "$MCP_NAME" \
-                  -o jsonpath='{.spec.nodeSelector.matchExpressions[?(@.key=="kubernetes.io/hostname")].values}')
-                if echo "$EXISTING" | grep -q "$HOSTNAME"; then
-                  echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
-                else
-                  kubectl patch machineconfigpool "$MCP_NAME" --type=json \
-                    -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"
-                  echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
-                fi
-              else
-                echo "[INFO] Creating MCP $MCP_NAME for $HOSTNAME"
+              if ! kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
+                echo "[INFO] Creating MCP $MCP_NAME, selecting no host until it has rendered"
                 cat <<MCPEOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfigPool
@@ -80,13 +82,89 @@ spec:
                     - key: kubernetes.io/hostname
                       operator: In
                       values:
-                        - $HOSTNAME
+                        - $PENDING_HOST
                 # Wide during initial node-add so first-time CPU-topology
                 # reboots roll in parallel (nodes are empty pre-activation);
                 # cluster_activate narrows this to the fault tolerance once the
                 # cluster serves IO.
                 maxUnavailable: {{ MCP_MAX_UNAVAILABLE }}
               MCPEOF
+              fi
+
+              # ---- MachineConfig --------------------------------------------
+              # Role matches MCP name so MCO-generated KubeletConfig MC is also picked up.
+              if kubectl get machineconfig "$MC_NAME" > /dev/null 2>&1; then
+                echo "[INFO] MC $MC_NAME already exists — skipping"
+              else
+                echo "[INFO] Creating MC $MC_NAME"
+                cat <<MCEOF | kubectl apply -f -
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: MachineConfig
+              metadata:
+                name: $MC_NAME
+                labels:
+                  machineconfiguration.openshift.io/role: $MCP_NAME
+              spec:
+                config:
+                  ignition:
+                    version: 3.2.0
+              MCEOF
+              fi
+
+              # ---- KubeletConfig --------------------------------------------
+              if kubectl get kubeletconfig "$KC_NAME" > /dev/null 2>&1; then
+                echo "[INFO] KubeletConfig $KC_NAME already exists — skipping"
+              else
+                echo "[INFO] Creating KubeletConfig $KC_NAME"
+                cat <<KCEOF | kubectl apply -f -
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: KubeletConfig
+              metadata:
+                name: $KC_NAME
+              spec:
+                machineConfigPoolSelector:
+                  matchLabels:
+                    custom-kubelet: $KC_LABEL
+                kubeletConfig:
+                  cpuManagerPolicy: static
+                  cpuManagerReconcilePeriod: 5s
+                  topologyManagerPolicy: single-numa-node
+                  reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
+              KCEOF
+              fi
+
+              # ---- Wait for the complete render -----------------------------
+              # The render controller names the generated kubelet config
+              # 99-<pool>-generated-kubelet. The pool's target render is complete
+              # once its sources carry it and the MachineConfig. A render that
+              # does not complete in time is not waited on forever: the host joins
+              # anyway, and costs the reboot this ordering exists to avoid.
+              KC_GENERATED="99-${MCP_NAME}-generated-kubelet"
+              RENDER_WAIT=0
+              while [ $RENDER_WAIT -lt 60 ]; do
+                SOURCES=$(kubectl get machineconfigpool "$MCP_NAME" \
+                  -o jsonpath='{range .spec.configuration.source[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
+                if echo "$SOURCES" | grep -qx "$KC_GENERATED" && echo "$SOURCES" | grep -qx "$MC_NAME"; then
+                  echo "[INFO] MCP $MCP_NAME has rendered $MC_NAME and $KC_GENERATED"
+                  break
+                fi
+                RENDER_WAIT=$((RENDER_WAIT + 1))
+                echo "[INFO] Waiting for MCP $MCP_NAME to render $MC_NAME and $KC_GENERATED ($RENDER_WAIT/60)..."
+                sleep 5
+              done
+              if [ $RENDER_WAIT -ge 60 ]; then
+                echo "[WARN] MCP $MCP_NAME did not render its kubelet config in 5 minutes; joining $HOSTNAME anyway"
+              fi
+
+              # ---- Join -----------------------------------------------------
+              EXISTING=$(kubectl get machineconfigpool "$MCP_NAME" \
+                -o jsonpath='{range .spec.nodeSelector.matchExpressions[?(@.key=="kubernetes.io/hostname")].values[*]}{@}{"\n"}{end}')
+              if echo "$EXISTING" | grep -qx "$HOSTNAME"; then
+                echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
+              else
+                kubectl patch machineconfigpool "$MCP_NAME" --type=json \
+                  -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"
+                echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
               fi
 
               # ---- Enforce single storage-pool membership -------------------
@@ -133,48 +211,6 @@ spec:
                   sleep 2
                 done
               done
-
-              # ---- MachineConfig --------------------------------------------
-              # Role matches MCP name so MCO-generated KubeletConfig MC is also picked up.
-              if kubectl get machineconfig "$MC_NAME" > /dev/null 2>&1; then
-                echo "[INFO] MC $MC_NAME already exists — skipping"
-              else
-                echo "[INFO] Creating MC $MC_NAME"
-                cat <<MCEOF | kubectl apply -f -
-              apiVersion: machineconfiguration.openshift.io/v1
-              kind: MachineConfig
-              metadata:
-                name: $MC_NAME
-                labels:
-                  machineconfiguration.openshift.io/role: $MCP_NAME
-              spec:
-                config:
-                  ignition:
-                    version: 3.2.0
-              MCEOF
-              fi
-
-              # ---- KubeletConfig --------------------------------------------
-              if kubectl get kubeletconfig "$KC_NAME" > /dev/null 2>&1; then
-                echo "[INFO] KubeletConfig $KC_NAME already exists — skipping"
-              else
-                echo "[INFO] Creating KubeletConfig $KC_NAME"
-                cat <<KCEOF | kubectl apply -f -
-              apiVersion: machineconfiguration.openshift.io/v1
-              kind: KubeletConfig
-              metadata:
-                name: $KC_NAME
-              spec:
-                machineConfigPoolSelector:
-                  matchLabels:
-                    custom-kubelet: $KC_LABEL
-                kubeletConfig:
-                  cpuManagerPolicy: static
-                  cpuManagerReconcilePeriod: 5s
-                  topologyManagerPolicy: single-numa-node
-                  reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
-              KCEOF
-              fi
 
               # MCP membership + MC + KubeletConfig are ensured on every run above,
               # so a stale marker can never leave this node off the pool config.
