@@ -37,40 +37,58 @@ def _get_transfer_nic(node):
     return trtype, node.mgmt_ip
 
 
-def _online_peers(node):
-    """Return the online secondary/tertiary nodes of *node* (HA peers)."""
-    peers = []
-    for peer_id in [node.secondary_node_id, node.tertiary_node_id]:
+# Statuses in which a member may still be serving the volume and must be
+# asked to fence: a suspended or down node's SPDK keeps its listeners.
+_FENCEABLE = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+              StorageNode.STATUS_DOWN)
+
+
+def _lvs_members(primary_node):
+    """The members of *primary_node*'s lvstore in role order, any status."""
+    members = [primary_node]
+    for peer_id in [primary_node.secondary_node_id, primary_node.tertiary_node_id]:
         if not peer_id:
             continue
         try:
-            peer = db.get_storage_node_by_id(peer_id)
+            members.append(db.get_storage_node_by_id(peer_id))
         except KeyError:
             continue
-        if peer.status == StorageNode.STATUS_ONLINE:
-            peers.append(peer)
-    return peers
+    return members
 
 
-def _node_paths(primary_node, lvstore):
-    """Build ordered ANA path entries for *primary_node* and its online peers.
+def _online_peers(primary_node, lead=None):
+    """Return the online members of *primary_node*'s lvstore other than *lead*
+    (the primary by default). Membership is always read from the PRIMARY: an
+    acting leader's own secondary/tertiary fields describe the lvstore IT is
+    primary of, not this one."""
+    lead_id = (lead or primary_node).get_id()
+    return [m for m in _lvs_members(primary_node)
+            if m.get_id() != lead_id and m.status == StorageNode.STATUS_ONLINE]
 
-    Each entry: {'node_id', 'rpc', 'ip', 'trtype', 'port'}. The primary is first.
+
+def _path_entry(node, lvstore):
+    trtype, ip = _get_transfer_nic(node)
+    return {
+        'node_id': node.get_id(),
+        'rpc': node.rpc_client(),
+        'ip': ip,
+        'trtype': trtype,
+        'port': node.get_lvol_subsys_port(lvstore),
+    }
+
+
+def _node_paths(primary_node, lvstore, lead=None, statuses=(StorageNode.STATUS_ONLINE,)):
+    """Build ordered ANA path entries for the members of *primary_node*'s lvstore.
+
+    Each entry: {'node_id', 'rpc', 'ip', 'trtype', 'port'}. *lead* -- the
+    member serving or receiving the IO, the primary by default -- is first;
+    members whose status is not in *statuses* are left out (*lead* only when
+    it is not in *statuses* itself).
     """
-    def _entry(node):
-        trtype, ip = _get_transfer_nic(node)
-        return {
-            'node_id': node.get_id(),
-            'rpc': node.rpc_client(),
-            'ip': ip,
-            'trtype': trtype,
-            'port': node.get_lvol_subsys_port(lvstore),
-        }
-
-    paths = [_entry(primary_node)]
-    for peer in _online_peers(primary_node):
-        paths.append(_entry(peer))
-    return paths
+    lead = lead or primary_node
+    members = [m for m in _lvs_members(primary_node) if m.get_id() != lead.get_id()]
+    ordered = [lead] + members
+    return [_path_entry(m, lvstore) for m in ordered if m.status in statuses]
 
 
 def _flip(path, state, nqn, label, ns_id=None):
@@ -90,7 +108,7 @@ def _flip(path, state, nqn, label, ns_id=None):
         logger.error(f"ANA flip {label} failed (non-fatal): {e}")
 
 
-def fence_source_paths(src_node, src_lvstore, nqn, ns_id=None):
+def fence_source_paths(src_node, src_lvstore, nqn, ns_id=None, executing=None):
     """Make EVERY source path inaccessible BEFORE the freeze/final transfer.
 
     Once the final delta is taken, the source must not receive IO by any means:
@@ -99,34 +117,38 @@ def fence_source_paths(src_node, src_lvstore, nqn, ns_id=None):
     optimized creates a dual-writable window. Client IO queues on all-dark
     paths (NVMe multipath semantics) and drains to the target when it is
     enabled — the dark window is bounded by freeze + residual delta, which the
-    shrink rounds keep to seconds. Peers first, primary last.
+    shrink rounds keep to seconds. Peers first, the executing member last.
 
-    Source may be entirely gone (fail-over after a cluster failure); flips are
-    best-effort and skipped when the source node is unreachable.
+    Every member that may still serve is fenced, whatever the PRIMARY's state:
+    skipping the whole source because the primary was offline left its peers
+    optimized while the target lit up. Members that are gone are skipped --
+    fail-over after a cluster failure has nothing left to fence.
     """
-    if src_node is not None and src_node.status in [
-            StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        paths = _node_paths(src_node, src_lvstore)
-        for src in paths[1:] + paths[:1]:      # peers first, primary last
-            _flip(src, "inaccessible", nqn, f"SRC-{src['node_id'][:8]}", ns_id)
-
-
-def restore_source_paths(src_node, src_lvstore, nqn, ns_id=None):
-    """Failure path: re-enable the fenced source (primary optimized, peers
-    non_optimized) — the cutover did not happen, the source remains the
-    authoritative copy and must serve again."""
     if src_node is None:
         return
-    paths = _node_paths(src_node, src_lvstore)
+    paths = _node_paths(src_node, src_lvstore, lead=executing, statuses=_FENCEABLE)
+    for src in paths[1:] + paths[:1]:      # peers first, executing member last
+        _flip(src, "inaccessible", nqn, f"SRC-{src['node_id'][:8]}", ns_id)
+
+
+def restore_source_paths(src_node, src_lvstore, nqn, ns_id=None, executing=None):
+    """Failure path: re-enable the fenced source (the executing member --
+    primary by default -- optimized, other members non_optimized) — the
+    cutover did not happen, the source remains the authoritative copy and must
+    serve again."""
+    if src_node is None:
+        return
+    paths = _node_paths(src_node, src_lvstore, lead=executing, statuses=_FENCEABLE)
     for i, src in enumerate(paths):
         _flip(src, "optimized" if i == 0 else "non_optimized", nqn,
               f"SRC-{src['node_id'][:8]}(restore)", ns_id)
 
 
-def enable_target_paths(tgt_node, tgt_lvstore, nqn, ns_id=None):
-    """Bring the target paths live AFTER the final transfer: primary optimized,
-    peers non_optimized. Queued client IO drains here."""
-    tgt_paths = _node_paths(tgt_node, tgt_lvstore)
+def enable_target_paths(tgt_node, tgt_lvstore, nqn, ns_id=None, receiving=None):
+    """Bring the target paths live AFTER the final transfer: the receiving
+    member (primary by default) optimized, other online members
+    non_optimized. Queued client IO drains here."""
+    tgt_paths = _node_paths(tgt_node, tgt_lvstore, lead=receiving)
     for i, tgt in enumerate(tgt_paths):
         _flip(tgt, "optimized" if i == 0 else "non_optimized", nqn,
               f"TGT-{tgt['node_id'][:8]}", ns_id)
@@ -292,7 +314,8 @@ def _attach_hub(src_rpc, tgt_node, hub):
 
 
 def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
-                tgt_snap_composite, operation="replicate"):
+                tgt_snap_composite, operation="replicate", src_exec=None,
+                tgt_exec=None):
     """Perform the cross-cluster cutover for *lvol*.
 
     Args:
@@ -305,11 +328,25 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         tgt_snap_composite:  composite name on the target of the last replicated
                              snapshot (the final lvol is chained onto it)
         operation:          ``"replicate"`` for cross-cluster (metadata + data)
+        src_exec:            the source member that serves the volume's IO and
+                             therefore runs the freeze -- the LVS leader;
+                             defaults to *src_node*
+        tgt_exec:            the target member that receives the final delta
+                             -- the settled LVS leader; defaults to *tgt_node*
 
     Returns (ok: bool, error: str|None). The IO-freeze window is bounded by the
     synchronous ``bdev_lvol_transfer_final_step`` call.
     """
-    src_rpc = src_node.rpc_client()
+    # The freeze must run where the IO is served, and the delta must land where
+    # the target lvstore accepts receive IO: the leaders, which are the
+    # primaries unless one of them is down (docs/online-migration.md, G2).
+    src_exec = src_exec or src_node
+    tgt_exec = tgt_exec or tgt_node
+    if src_exec.get_id() != src_node.get_id() or tgt_exec.get_id() != tgt_node.get_id():
+        logger.info("cutover lvol=%s: freezing on %s, receiving on %s "
+                    "(primaries %s / %s)", lvol.get_id(), src_exec.get_id(),
+                    tgt_exec.get_id(), src_node.get_id(), tgt_node.get_id())
+    src_rpc = src_exec.rpc_client()
     src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
 
     # The gateway must be the attached NAMESPACE bdev ("<lvstore>/transferhubn1"),
@@ -320,7 +357,7 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     # snapshot replication (which passes the n1 bdev) kept working. This matches
     # tasks_runner_lvol_migration, which uses the second element for the same RPC.
     with xfer_timing.phase("final_hub_attach", lvol=lvol.get_id()):
-        _ctrl_name, hub_bdev, err = ensure_hub_attached(src_rpc, tgt_node)
+        _ctrl_name, hub_bdev, err = ensure_hub_attached(src_rpc, tgt_exec)
     if err:
         return False, err
 
@@ -334,7 +371,8 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     xfer_timing.stamp("freeze_begin", lvol=lvol.get_id(), nqn=lvol.nqn,
                       nsid=lvol.ns_id)
     with xfer_timing.phase("fence_source", lvol=lvol.get_id()):
-        fence_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id)
+        fence_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id,
+                           executing=src_exec)
 
     logger.info(
         f"[IO-FREEZE] bdev_lvol_transfer_final_step starting: lvol={lvol.uuid} "
@@ -360,7 +398,8 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
             f"bdev_lvol_transfer_final_step: transfer_state={transfer_state!r} "
             f"(expected 'Done'): {ret!r} lvol={lvol.uuid}")
         with xfer_timing.phase("restore_source_paths", lvol=lvol.get_id()):
-            restore_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id)
+            restore_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id,
+                                 executing=src_exec)
         xfer_timing.gap("freeze_total", _freeze_started, lvol=lvol.get_id(),
                         aborted=1)
         return False, (
@@ -370,9 +409,10 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     logger.info(f"[IO-RESUME] final step Done: lvol={lvol.uuid} io now live on target")
 
     # Link the final lvol to its predecessor snapshot on the target peers.
-    # bdev_lvol_transfer_final_step handles the primary internally; peers need an
-    # explicit add_clone. Non-fatal — a missing peer link self-heals on rejoin.
-    for peer in _online_peers(tgt_node):
+    # bdev_lvol_transfer_final_step handles the receiving member internally;
+    # the other online members need an explicit add_clone. Non-fatal — a
+    # missing peer link self-heals on rejoin.
+    for peer in _online_peers(tgt_node, lead=tgt_exec):
       with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
                              peer=peer.get_id()):
         try:
@@ -387,7 +427,8 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
 
     # Light the target: queued client IO drains here.
     with xfer_timing.phase("enable_target_paths", lvol=lvol.get_id()):
-        enable_target_paths(tgt_node, tgt_node.lvstore, lvol.nqn, lvol.ns_id)
+        enable_target_paths(tgt_node, tgt_node.lvstore, lvol.nqn, lvol.ns_id,
+                            receiving=tgt_exec)
     # The whole client-visible window, fence -> paths live. Compare against the
     # client's fast_io_fail_tmo: anything longer surfaces as IO errors, not
     # just latency.

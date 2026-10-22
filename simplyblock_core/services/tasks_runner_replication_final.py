@@ -458,7 +458,12 @@ def task_runner(task: JobSchedule, tasks):
     except KeyError:
         pass
 
-    if tgt_node.status != StorageNode.STATUS_ONLINE:
+    # The target clone is created through the target PRIMARY, so until it exists
+    # the primary has to be up. The source still serves the volume meanwhile,
+    # so the wait costs the client nothing. Once the clone exists the final
+    # delta goes to whichever member settled as leader (_cutover_target).
+    if ("tgt_lvol_composite" not in params
+            and tgt_node.status != StorageNode.STATUS_ONLINE):
         logger.warning("cutover for lvol %s waiting: target node %s is %s",
                        lvol_id, tgt_node.get_id(), tgt_node.status)
         _record(task, last_error=(
@@ -497,6 +502,15 @@ def task_runner(task: JobSchedule, tasks):
         # outstanding delta, and _prepare_cutover will surface a proper error if
         # there is truly no base to chain onto. Only block when lag is a real
         # number that exceeds the gate.
+        if lag is None and params.get("require_baseline"):
+            # A fresh volume (a migration plan's) has not shipped its initial
+            # copy yet. "No measurement" must not read as "caught up" here: the
+            # endgame would take the lvstore and hold it through the whole
+            # initial copy, queueing every other volume of the LVS behind it.
+            _record(task, shrink_deadline=(
+                int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
+            raise TaskDefer("waiting for the initial copy to replicate before "
+                            "the endgame")
         if lag is not None and lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC:
             xfer_timing.stamp("await_catchup", lvol=lvol_id, ms=lag * 1000.0)
             # Not a failure: no retry burned, and the deadline is pushed out
@@ -548,13 +562,27 @@ def task_runner(task: JobSchedule, tasks):
 
     _await_cutover_proceed(task, params)
 
+    # Who freezes and who receives is resolved right before the freeze, on
+    # every attempt: a member lost since the last pass is skipped, and one lost
+    # DURING the freeze fails it -- the source paths are restored and the next
+    # attempt resolves both sides again.
+    src_exec, why = _cutover_source(lvol)
+    if src_exec is None:
+        _record(task, last_error=f"no source member to freeze on: {why}")
+        raise TaskDefer(f"waiting for a source LVS leader ({why})")
+    tgt_exec, why = _cutover_target(params, tgt_node)
+    if tgt_exec is None:
+        _record(task, last_error=f"no target member to receive on: {why}")
+        raise TaskDefer(f"waiting for a settled target LVS leader ({why})")
+
     try:
         with xfer_timing.phase("run_cutover", lvol=lvol_id):
             ok, err = replication_final_step.run_cutover(
                 src_node, tgt_node, lvol,
                 params["tgt_lvol_composite"], params["tgt_map_id"],
                 params["tgt_snap_composite"],
-                operation=params.get("operation", "replicate"))
+                operation=params.get("operation", "replicate"),
+                src_exec=src_exec, tgt_exec=tgt_exec)
     except Exception as e:
         logger.exception(f"Cutover raised: {e}")
         _cutover_failed(task, str(e))
@@ -563,6 +591,67 @@ def task_runner(task: JobSchedule, tasks):
         _cutover_failed(task, err)
 
     _record_cutover_done(task)
+
+
+def _cutover_source(lvol):
+    """The source member the freeze runs on, and why; (None, why).
+
+    The freeze has to stop the IO where it is served, which is the lvstore's
+    LEADER: the primary normally, the acting secondary or tertiary while the
+    primary is down. Freezing a member that does not lead stops nothing. The
+    first online member, in role order, that reports leadership wins -- the
+    same rule the intra-cluster migration applies with active_source_node_id.
+    """
+    from simplyblock_core.controllers import lvol_controller
+    skipped = []
+    order = []
+    for node_id in [lvol.node_id] + list(getattr(lvol, "nodes", None) or []):
+        if node_id and node_id not in order:
+            order.append(node_id)
+    for node_id in order:
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            skipped.append(f"{node_id[:8]} unknown")
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            skipped.append(f"{node_id[:8]} {node.status}")
+            continue
+        if not lvol_controller.is_node_leader(node, lvol.lvs_name):
+            skipped.append(f"{node_id[:8]} not leader")
+            continue
+        return node, "; ".join(skipped)
+    return None, "; ".join(skipped) or "no members"
+
+
+def _cutover_target(params, tgt_node):
+    """The target member that receives the final delta, and why; (None, why).
+
+    Only the lvstore's leader accepts receive IO on its hub, and only once the
+    leadership has settled -- the same rule snapshot replication follows
+    (snapshot_replication._stable_target_leader). The cutover clone is the
+    lvol-like the probe needs: it lives on the target lvstore. Without one on
+    record (an older task) the probe falls back to the primary when online.
+    """
+    from simplyblock_core.services import snapshot_replication
+    tgt_lvol = None
+    tgt_lvol_id = params.get("tgt_lvol_id")
+    if not tgt_lvol_id and params.get("replication_id"):
+        try:
+            rep = db.get_lvol_replication_by_id(params["replication_id"])
+            tgt_lvol_id = rep.target_lvol.get_id() if rep.target_lvol else ""
+        except KeyError:
+            tgt_lvol_id = ""
+    if tgt_lvol_id:
+        try:
+            tgt_lvol = db.get_lvol_by_id(tgt_lvol_id)
+        except KeyError:
+            tgt_lvol = None
+    if tgt_lvol is None:
+        if tgt_node.status == StorageNode.STATUS_ONLINE:
+            return tgt_node, ""
+        return None, f"target primary {tgt_node.get_id()[:8]} is {tgt_node.status}"
+    return snapshot_replication._stable_target_leader(tgt_lvol)
 
 
 def _replication_lag_sec(lvol):
@@ -841,6 +930,7 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
 
     prepared.update({
         "tgt_lvol_composite": new_lvol.top_bdev,
+        "tgt_lvol_id": new_lvol.get_id(),
         "tgt_map_id": tgt_map_id,
         "tgt_snap_composite": snapshot.snap_bdev,
         "replication_id": rep.get_id(),
