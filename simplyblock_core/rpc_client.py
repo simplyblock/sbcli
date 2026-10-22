@@ -833,8 +833,16 @@ class RPCClient:
         return self._request("accel_crypto_key_create", cipher="AES_XTS",
                               key=key, key2=key2, name=name)
 
-    def lvol_crypto_delete(self, name):
-        return self._request("bdev_crypto_delete", name=name)
+    def lvol_crypto_delete(self, name, *, idempotent=False):
+        """``idempotent=True``: a retried delete against a bdev already
+        removed on a prior pass gets -ENODEV here, not a fresh failure —
+        treat it as the no-op it is instead of raising (SFAM-2826)."""
+        try:
+            return self._request("bdev_crypto_delete", name=name)
+        except RPCRemoteError as e:
+            if idempotent and e.code == -errno.ENODEV:
+                return None
+            raise
 
     def lvol_compress_delete(self, name):
         return self._request("bdev_compress_delete", name=name)
@@ -1654,8 +1662,19 @@ class RPCClient:
     def nvmf_subsystem_get_controllers(self, nqn):
         return self._request("nvmf_subsystem_get_controllers", nqn=nqn)
 
-    def lvol_crypto_key_delete(self, name):
-        return self._request("accel_crypto_key_destroy", key_name=name)
+    def lvol_crypto_key_delete(self, name, *, idempotent=False):
+        """``idempotent=True``: unlike ``bdev_crypto_delete``, a missing key
+        does not answer -ENODEV -- ``accel_crypto_key_destroy`` rejects it as
+        ``invalid_params`` with message "No key object found" (checked live
+        against SPDK), so that is what a retried delete must recognize as
+        the no-op it is instead of raising (SFAM-2826)."""
+        try:
+            return self._request("accel_crypto_key_destroy", key_name=name)
+        except RPCRemoteError as e:
+            if (idempotent and e.code == RPCErrorCode.invalid_params
+                    and "No key object found" in str(e)):
+                return None
+            raise
 
     def bdev_lvol_snapshot_register(self, lvol_name, snapshot_name, registered_uuid, blobid):
         params = {
