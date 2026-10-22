@@ -1527,7 +1527,15 @@ def resolve_lblk_entries(configured_entries, host_devices):
     reboots, so the stored name is only a fallback for devices without a
     resolvable serial. Partition entries additionally resolve by PARTUUID —
     it survives a parent-disk serial change (e.g. a hypervisor re-exposing
-    the volume) while the derived partition serial would not."""
+    the volume) while the derived partition serial would not.
+
+    Resolved entries carry the CURRENT serial: the live serial wins whenever
+    one is reported, even when the match was made by name or partuuid, so a
+    device that only *looks* like the configured one (same slot, different
+    hardware, e.g. this node restarted on a brand-new host) is reported as
+    having a new identity instead of silently inheriting the old serial.
+    Callers rely on that to tell "same device, renamed" from "different
+    device, coincidentally in the same slot"."""
     by_path = _index_by_selector(host_devices)
     by_serial = {d["serial"]: d for d in host_devices}
     by_name = {d["name"]: d for d in host_devices}
@@ -1550,7 +1558,7 @@ def resolve_lblk_entries(configured_entries, host_devices):
         resolved_entry = {
             "name": live["name"],
             "current_path": live["device_path"],
-            "serial": entry.get("serial") or live["serial"],
+            "serial": live.get("serial") or entry.get("serial"),
             "by_id": path or live.get("by_id_path") or entry.get("by_id", ""),
             "size": int(live.get("size") or entry.get("size") or 0),
             "numa": int(live.get("numa_node", entry.get("numa", -1))),

@@ -324,6 +324,22 @@ class TestResolvePartitionEntries(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(resolved[0]["name"], "sdz1")
         self.assertEqual(resolved[0]["type"], "part")
+        # The match survived via PARTUUID, but the reported identity must be
+        # the device actually sitting there now, not the stale configured one.
+        self.assertEqual(resolved[0]["serial"], "NEW-part-aaaa")
+
+    def test_name_fallback_reports_live_serial_not_stale_one(self):
+        # Node restarted on a brand-new host: same kernel device name
+        # (nvme0n1), genuinely different physical hardware with a different
+        # serial. Matching falls back to name, but the resolved identity
+        # must reflect the NEW hardware's real serial -- not echo back the
+        # old host's serial -- so the restart path correctly recognizes this
+        # as unknown/new storage instead of treating it as already-initialized.
+        configured = [_entry("nvme0n1", serial="OLD-921")]
+        live = [_inv("nvme0n1", serial="NEW-871")]
+        resolved, missing = utils.resolve_lblk_entries(configured, live)
+        self.assertEqual(missing, [])
+        self.assertEqual(resolved[0]["serial"], "NEW-871")
 
     def test_journal_flag_carried_through_resolution(self):
         configured = [_entry("sdb1", serial="S1", dtype="part",
