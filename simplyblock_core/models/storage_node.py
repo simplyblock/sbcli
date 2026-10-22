@@ -368,7 +368,7 @@ class StorageNode(BaseNodeObject):
             keep = _MAX_DNS_LABEL - len(suffix) - _HOSTNAME_DIGEST - 1
             digest = hashlib.sha256(label.encode()).hexdigest()[:_HOSTNAME_DIGEST]
             label = f"{label[:keep].rstrip('-')}-{digest}"
-        return f"{label}{suffix}.{service}.{self.cr_namespace}.svc.cluster.local"
+        return f"{label}{suffix}.{service}.{self.cr_namespace}.svc"
 
     def record_workload_names(self, cluster: "Cluster") -> None:
         """Copy the cluster's workload names onto this node."""
