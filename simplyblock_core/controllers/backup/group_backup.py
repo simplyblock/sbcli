@@ -189,13 +189,12 @@ def create_group_backup(consistency_group_id, group_seq=None):
         except (KeyError, IndexError):
             return None, "group snapshot was taken but its generation is unreadable"
 
-    member_snaps = [
-        s for s in db.get_snapshots(cluster_id)
-        if s.group_id == group.get_id() and s.group_seq == group_seq
-    ]
-    if not member_snaps:
-        return None, (f"consistency group {consistency_group_id} has no member "
-                      f"snapshots at generation {group_seq}")
+    # A torn generation is refused rather than backed up as a group that
+    # silently lacks a volume (§5).
+    try:
+        member_snaps = cg.resolve_complete_generation(group, group_seq)
+    except cg.ConsistencyGroupError as e:
+        return None, str(e)
 
     try:
         location = db.get_cluster_by_id(cluster_id).get_backup_config().location()

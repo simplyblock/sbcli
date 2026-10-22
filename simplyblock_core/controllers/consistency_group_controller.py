@@ -51,6 +51,11 @@ class ConsistencyGroupError(Exception):
     pass
 
 
+class IncompleteGenerationError(ConsistencyGroupError):
+    """A generation lacks an online snapshot of a volume that was a member at
+    that sequence."""
+
+
 # --------------------------------------------------------------------------- #
 # Group lifecycle (driven by the policy controller)
 # --------------------------------------------------------------------------- #
@@ -1281,9 +1286,11 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 # --------------------------------------------------------------------------- #
 
 def _group_snapshots(group):
-    """Every member snapshot that belongs to this group, any generation."""
-    return [s for s in db.get_snapshots(group.cluster_id)
-            if s.group_id == group.get_id() and s.group_seq]
+    """Every member snapshot that belongs to this group, any generation, on the
+    group's own cluster. A replicated copy on the peer cluster carries the same
+    group id and is not one of this group's snapshots."""
+    return [s for s in db.get_group_snapshots(group.get_id())
+            if s.group_seq and s.cluster_id == group.cluster_id]
 
 
 def list_members(group):
@@ -1311,6 +1318,40 @@ def list_members(group):
             "online": online,
         })
     return rows
+
+
+def generation_snapshots(group, seq):
+    """The member snapshots of generation ``seq`` of ``group``, in any status.
+
+    The one lookup of a generation's snapshots. It does not check that the
+    generation is whole; :func:`resolve_complete_generation` does.
+    """
+    return [s for s in _group_snapshots(group) if s.group_seq == seq]
+
+
+def resolve_complete_generation(group, seq):
+    """Resolve generation ``seq`` of ``group`` to its member snapshots, requiring
+    it whole: an ONLINE snapshot of every volume that was a member at ``seq``
+    (the membership epochs, ``included_in_seq``). Returns those snapshots.
+
+    Raises:
+        ConsistencyGroupError: the generation has no member snapshots.
+        IncompleteGenerationError: a member at ``seq`` has no online snapshot in
+            it; the error names the missing volumes.
+    """
+    snaps = generation_snapshots(group, seq)
+    if not snaps:
+        raise ConsistencyGroupError(
+            f"consistency group {group.get_id()} has no member snapshots at generation {seq}")
+    online = [s for s in snaps if s.status == SnapShot.STATUS_ONLINE and s.lvol]
+    present = {s.lvol.get_id() for s in online}
+    expected = {lvol_id for lvol_id in (group.members or {}) if group.included_in_seq(lvol_id, seq)}
+    missing = sorted(expected - present)
+    if missing:
+        raise IncompleteGenerationError(
+            f"generation {seq} of consistency group {group.get_id()} has no online "
+            f"snapshot of member(s) {', '.join(missing)}")
+    return online
 
 
 def list_generations(group):
@@ -1355,7 +1396,7 @@ def delete_generation(group, seq):
         replication_recovery_points,
         snapshot_controller,
     )
-    targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
+    targets = generation_snapshots(group, seq)
     if not targets:
         return None, f"generation {seq} of group {group.uuid[:8]} not found"
     newest_seq, _, _ = replication_recovery_points.newest_group_generation(group.get_id(), db=db)
@@ -1385,7 +1426,7 @@ def clone_generation(group, seq, into_name=None):
     :func:`add_member_to_group`. Returns (new_lvol_ids, None) or (None, error).
     """
     from simplyblock_core.controllers import snapshot_controller
-    targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
+    targets = generation_snapshots(group, seq)
     if not targets:
         return None, f"generation {seq} of group {group.uuid[:8]} not found"
     new_group = ensure_group(group.cluster_id, into_name) if into_name else None

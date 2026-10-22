@@ -38,6 +38,8 @@ def db():
 
 @pytest.fixture
 def node(db):
+    """An online node whose RPC client is patched: the node has no reachable
+    address, and the S3 delete is the only call made to it."""
     n = StorageNode()
     n.uuid = str(uuid_mod.uuid4())
     n.cluster_id = CLUSTER
@@ -45,7 +47,9 @@ def node(db):
     n.hostname = "delete-backup-host"
     n.mgmt_ip = "127.0.0.1"
     n.write_to_db(db.kv_store)
-    return n
+    with patch.object(StorageNode, "rpc_client") as rpc:
+        n.rpc = rpc
+        yield n
 
 
 def _backup(db, node, name, prev="", group_backup_id=""):
@@ -115,7 +119,6 @@ def test_an_unknown_backup_raises(db):
 def test_a_failed_s3_delete_still_deletes_the_record(db, node):
     """The S3 delete is best effort: the data plane does not implement it yet."""
     leaf = _backup(db, node, "leaf")
-    with patch.object(StorageNode, "rpc_client") as rpc:
-        rpc.return_value.bdev_lvol_s3_delete.side_effect = RPCException("no such method")
-        backup_controller.delete_backup(leaf.uuid)
+    node.rpc.return_value.bdev_lvol_s3_delete.side_effect = RPCException("no such method")
+    backup_controller.delete_backup(leaf.uuid)
     assert not _exists(db, leaf)

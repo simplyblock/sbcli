@@ -510,6 +510,17 @@ class DBController(metaclass=Singleton):
                 hostnames.append(lv.hostname)
         return hostnames
 
+    def get_group_snapshots(self, group_id: str, group_seq: int | None = None) -> list[SnapShot]:
+        """A consistency group's member snapshots, of every generation or of
+        ``group_seq`` only. A blank group id names no group, so it has none:
+        return empty rather than querying the index, which rejects a blank
+        component."""
+        if not group_id:
+            return []
+        if group_seq is None:
+            return self.query(SnapShot, 'group_id+group_seq', group_id)
+        return self.query(SnapShot, 'group_id+group_seq', group_id, group_seq)
+
     def get_snapshots(self, cluster_id: str | None = None) -> list[SnapShot]:
         start_time = time.time()
         snaps = (self.query(SnapShot, 'cluster_id', cluster_id) if cluster_id

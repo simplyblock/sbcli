@@ -19,6 +19,10 @@ class SnapShot(BaseModel):
             [(snap.lvol.get_id(),)] if snap.lvol else []
         )),
         Unique(('cluster_id', 'snap_name')),
+        # A consistency group's member snapshots, and one generation's by
+        # prefix. A snapshot outside any group has a blank group_id, which the
+        # index drops, so only group snapshots are indexed.
+        Index(('group_id', 'group_seq')),
         # Creation order within one lvol: the tail is the chain predecessor,
         # found by a reverse range read of limit 1. Ordered, so its segments
         # are the fixed-width encoding `encode_value` reserves for that.
