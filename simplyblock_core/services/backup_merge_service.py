@@ -37,13 +37,9 @@ def main():
                 # schedule, and its generations are pruned per the policy (§7.1, §9).
                 for group in db.get_consistency_groups(cl.get_id()):
                     try:
-                        backup_policy.evaluate_group_policy(group)
+                        backup_policy.evaluate_group_backups(group)
                     except Exception as e:
-                        logger.error(f"Error evaluating group policy for {group.get_id()}: {e}")
-                    try:
-                        backup_policy.evaluate_group_schedule(group)
-                    except Exception as e:
-                        logger.error(f"Error evaluating group schedule for {group.get_id()}: {e}")
+                        logger.error(f"Error applying the backup policy of group {group.get_id()}: {e}")
             except Exception as e:
                 logger.error(f"Error processing cluster {cl.get_id()}: {e}")
 

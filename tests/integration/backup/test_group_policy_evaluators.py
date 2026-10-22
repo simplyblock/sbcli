@@ -1,17 +1,17 @@
-"""The consistency-group backup-policy evaluators against real FoundationDB
+"""A consistency group's backup policy applied against real FoundationDB
 (design-consistency-group-backup.md §9).
 
 These are the integration-tier counterpart of the pure-logic
 ``tests/unit/backup/test_group_retention.py``: there the retention arithmetic is
-tested in isolation, here the whole flow runs -- policy resolution through the
-``BackupPolicyAttachment`` index, the group-backup listing, and the schedule /
-retention decision -- for real against FDB.
+tested in isolation, here the whole flow of ``evaluate_group_backups`` runs --
+policy resolution through the ``BackupPolicyAttachment`` index, the group-backup
+listing, and the take / prune decision -- for real against FDB.
 
 The database is real; nothing here mocks the DB layer. The only boundary patched
 is the data plane: ``group_backup.create_group_backup`` and
 ``group_backup.delete_group_backup`` are what reach snapshots, the backup runner,
-and S3, which the integration tier never drives to a real endpoint. Both return a
-``(result, error)`` tuple, so the mocks return one too -- the evaluators unpack it.
+and S3, which the integration tier never drives to a real endpoint. The create
+returns a ``(result, error)`` tuple, so its mock returns one too.
 """
 import time
 import zlib
@@ -95,15 +95,15 @@ def _group_backup(db, group, name, age_seconds, status=GroupBackup.STATUS_COMPLE
 
 
 class TestGroupSchedule:
-    """evaluate_group_schedule: take a generation when due, prune the excess."""
+    """A schedule: take a generation when due, prune each tier's excess."""
 
     def test_no_prior_group_backup_takes_one(self, db):
         group = _group(db)
         _attach(db, group, _policy(db, schedule="15m,4 60m,11"))
 
         with patch(CREATE, return_value=(None, None)) as create, \
-                patch(DELETE, return_value=(True, None)) as delete:
-            policy.evaluate_group_schedule(group)
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
 
         create.assert_called_once_with(group.get_id())
         delete.assert_not_called()
@@ -116,8 +116,8 @@ class TestGroupSchedule:
         _group_backup(db, group, "gb-recent", age_seconds=60)
 
         with patch(CREATE, return_value=(None, None)) as create, \
-                patch(DELETE, return_value=(True, None)) as delete:
-            policy.evaluate_group_schedule(group)
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
 
         create.assert_not_called()
         delete.assert_not_called()
@@ -131,8 +131,8 @@ class TestGroupSchedule:
                       status=GroupBackup.STATUS_IN_PROGRESS)
 
         with patch(CREATE, return_value=(None, None)) as create, \
-                patch(DELETE, return_value=(True, None)) as delete:
-            policy.evaluate_group_schedule(group)
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
 
         create.assert_not_called()
         delete.assert_not_called()
@@ -141,7 +141,7 @@ class TestGroupSchedule:
         group = _group(db)
         # Smallest tier keeps 2; its age band is [0, 3600). Four generations all
         # under a minute old sit in that band -- the latest is recent enough that
-        # nothing is due, so the evaluator reaches the pruning pass.
+        # nothing is due, and the pruning pass runs.
         _attach(db, group, _policy(db, schedule="15m,2 60m,11"))
         oldest = _group_backup(db, group, "gb-1", age_seconds=400)
         _group_backup(db, group, "gb-2", age_seconds=300)
@@ -149,8 +149,8 @@ class TestGroupSchedule:
         _group_backup(db, group, "gb-4", age_seconds=100)
 
         with patch(CREATE, return_value=(None, None)) as create, \
-                patch(DELETE, return_value=(True, None)) as delete:
-            policy.evaluate_group_schedule(group)
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
 
         create.assert_not_called()
         # One delete per cycle, and it is the oldest generation in the tier.
@@ -158,7 +158,7 @@ class TestGroupSchedule:
 
 
 class TestGroupPolicy:
-    """evaluate_group_policy: count/age retention, whole generations deleted."""
+    """Count/age retention: the generations over the count or past the age are deleted."""
 
     def test_over_max_versions_deletes_the_oldest_excess(self, db):
         group = _group(db)
@@ -169,8 +169,8 @@ class TestGroupPolicy:
         _group_backup(db, group, "gb-d", age_seconds=100)
 
         with patch(CREATE, return_value=(None, None)) as create, \
-                patch(DELETE, return_value=(True, None)) as delete:
-            policy.evaluate_group_policy(group)
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
 
         create.assert_not_called()
         # Keep the newest two of four: the two oldest are deleted, oldest first.
@@ -183,17 +183,17 @@ class TestGroupPolicy:
         _group_backup(db, group, "gb-recent", age_seconds=10)
 
         with patch(CREATE, return_value=(None, None)) as create, \
-                patch(DELETE, return_value=(True, None)) as delete:
-            policy.evaluate_group_policy(group)
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
 
         create.assert_not_called()
         delete.assert_called_once_with(old.get_id())
 
 
 class TestNoAttachedPolicy:
-    """A group with no attached policy: both evaluators are a no-op."""
+    """A group with no attached policy is neither backed up nor pruned."""
 
-    def test_neither_evaluator_acts(self, db):
+    def test_nothing_is_taken_or_pruned(self, db):
         group = _group(db)
         # A policy exists in the cluster but is NOT attached to this group, and
         # there are generations that would be pruned if one were.
@@ -202,9 +202,60 @@ class TestNoAttachedPolicy:
         _group_backup(db, group, "gb-2", age_seconds=100)
 
         with patch(CREATE, return_value=(None, None)) as create, \
-                patch(DELETE, return_value=(True, None)) as delete:
-            policy.evaluate_group_schedule(group)
-            policy.evaluate_group_policy(group)
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
 
         create.assert_not_called()
         delete.assert_not_called()
+
+
+class TestBothRules:
+    """A policy with a count limit and a schedule is applied as one: one pass
+    prunes what either rule selects, and none in the pass that takes."""
+
+    def test_one_pass_prunes_the_union_of_both_rules(self, db):
+        group = _group(db)
+        # The schedule keeps 3 in [0, 3600) and so selects nothing; the count
+        # keeps 2 of 3 and selects the oldest. The newest is recent: nothing due.
+        _attach(db, group, _policy(db, max_versions=2, schedule="15m,3 60m,11"))
+        oldest = _group_backup(db, group, "gb-1", age_seconds=300)
+        _group_backup(db, group, "gb-2", age_seconds=200)
+        _group_backup(db, group, "gb-3", age_seconds=100)
+
+        with patch(CREATE, return_value=(None, None)) as create, \
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
+
+        create.assert_not_called()
+        delete.assert_called_once_with(oldest.get_id())
+
+    def test_a_generation_both_rules_select_is_deleted_once(self, db):
+        group = _group(db)
+        _attach(db, group, _policy(db, max_versions=2, schedule="15m,2 60m,11"))
+        oldest = _group_backup(db, group, "gb-1", age_seconds=300)
+        _group_backup(db, group, "gb-2", age_seconds=200)
+        _group_backup(db, group, "gb-3", age_seconds=100)
+
+        with patch(CREATE, return_value=(None, None)), patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
+
+        delete.assert_called_once_with(oldest.get_id())
+
+    def test_the_pass_that_takes_a_generation_prunes_none(self, db):
+        group = _group(db)
+        # Due (the newest is an hour old against a 15m interval) and over the
+        # count: the take goes first, and pruning waits for it to commit.
+        _attach(db, group, _policy(db, max_versions=1, schedule="15m,4 60m,11"))
+        _group_backup(db, group, "gb-1", age_seconds=7200)
+        _group_backup(db, group, "gb-2", age_seconds=3600)
+
+        with patch(CREATE, return_value=(None, None)) as create, \
+                patch(DELETE) as delete:
+            policy.evaluate_group_backups(group)
+
+        create.assert_called_once_with(group.get_id())
+        delete.assert_not_called()
+
+    def test_the_old_pair_is_gone(self):
+        assert not hasattr(policy, "evaluate_group_policy")
+        assert not hasattr(policy, "evaluate_group_schedule")

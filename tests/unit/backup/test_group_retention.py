@@ -1,7 +1,7 @@
 """Which group backups a count/age policy prunes (design-consistency-group-backup.md §9).
 
-Pure logic -- the schedule and retention evaluators around it touch the database
-and the data plane and are the integration tier's. Retention is per generation: a
+Pure logic -- ``evaluate_group_backups`` around it touches the database and the
+data plane and is the integration tier's. Retention is per generation: a
 group backup is the unit kept or deleted. Its member copies are retired under
 it: merged into the next generation's copy while that chains against them,
 deleted once nothing does (TestOrphanedMemberBackups).
@@ -31,22 +31,22 @@ class TestMaxVersions:
     def test_keeps_the_newest_and_prunes_the_oldest(self):
         completed = [_gb("a", NOW - 400), _gb("b", NOW - 300),
                      _gb("c", NOW - 200), _gb("d", NOW - 100)]
-        doomed = policy._group_backups_to_prune(completed, _policy(max_versions=2), NOW)
+        doomed = policy._group_backups_to_prune(completed, _policy(max_versions=2), [], NOW)
         assert [g.uuid for g in doomed] == ["a", "b"]
 
     def test_within_the_limit_prunes_nothing(self):
         completed = [_gb("a", NOW - 200), _gb("b", NOW - 100)]
-        assert policy._group_backups_to_prune(completed, _policy(max_versions=2), NOW) == []
+        assert policy._group_backups_to_prune(completed, _policy(max_versions=2), [], NOW) == []
 
     def test_zero_versions_is_no_count_limit(self):
         completed = [_gb("a", NOW - 200), _gb("b", NOW - 100)]
-        assert policy._group_backups_to_prune(completed, _policy(max_versions=0), NOW) == []
+        assert policy._group_backups_to_prune(completed, _policy(max_versions=0), [], NOW) == []
 
 
 class TestMaxAge:
     def test_prunes_those_older_than_the_age(self):
         completed = [_gb("old", NOW - 1000), _gb("recent", NOW - 10)]
-        doomed = policy._group_backups_to_prune(completed, _policy(max_age_seconds=100), NOW)
+        doomed = policy._group_backups_to_prune(completed, _policy(max_age_seconds=100), [], NOW)
         assert [g.uuid for g in doomed] == ["old"]
 
 
@@ -57,7 +57,30 @@ class TestBoth:
         completed = [_gb("a", NOW - 1000), _gb("b", NOW - 300),
                      _gb("c", NOW - 200), _gb("d", NOW - 100)]
         doomed = policy._group_backups_to_prune(
-            completed, _policy(max_versions=2, max_age_seconds=500), NOW)
+            completed, _policy(max_versions=2, max_age_seconds=500), [], NOW)
+        assert [g.uuid for g in doomed] == ["a", "b"]
+
+
+class TestTiers:
+    """A schedule's tiers keep ``keep_count`` per age band. One generation per
+    pass: the oldest of the first band over its count."""
+
+    TIERS = ((900, 2), (3600, 11))          # "15m,2 60m,11"
+
+    def test_the_oldest_of_a_band_over_its_count(self):
+        completed = [_gb("a", NOW - 400), _gb("b", NOW - 300), _gb("c", NOW - 200)]
+        doomed = policy._group_backups_to_prune(completed, _policy(), self.TIERS, NOW)
+        assert [g.uuid for g in doomed] == ["a"]
+
+    def test_a_band_within_its_count_selects_nothing(self):
+        completed = [_gb("a", NOW - 300), _gb("b", NOW - 200)]
+        assert policy._group_backups_to_prune(completed, _policy(), self.TIERS, NOW) == []
+
+    def test_the_tiers_and_the_count_are_one_union(self):
+        # The band keeps 2 of 3 (selects a); the count keeps 1 of 3 (a and b).
+        completed = [_gb("a", NOW - 400), _gb("b", NOW - 300), _gb("c", NOW - 200)]
+        doomed = policy._group_backups_to_prune(
+            completed, _policy(max_versions=1), self.TIERS, NOW)
         assert [g.uuid for g in doomed] == ["a", "b"]
 
 

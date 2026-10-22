@@ -301,114 +301,75 @@ def evaluate_schedule(lvol):
             return  # One merge per cycle to avoid conflicts
 
 
-def evaluate_group_policy(group):
-    """Enforce a consistency group's count/age retention (design §9).
+def evaluate_group_backups(group):
+    """Back up and prune a consistency group per its backup policy (design §9).
 
-    Retention is per generation: a group backup is the unit, so the oldest group
-    backups beyond ``max_versions``, and those older than ``max_age``, are deleted
-    whole rather than merged. The member backups a deleted group backup alone
-    holds follow through ``delete_group_backup``; a member a later generation
-    still chains against is left by the per-volume chain retention.
+    One pass, three steps. Member copies orphaned by a delete from before group
+    backups retired their own members are swept. A generation is taken when the
+    schedule's smallest interval has elapsed since the last one, and the pass
+    ends there so the take commits before anything is pruned. Otherwise the
+    generations either retention rule selects are deleted: the count/age rule
+    (``max_versions``, ``max_age``) and the schedule's tiers (``keep_count`` per
+    age band). A group backup is the retention unit, so the rules count
+    generations, and the delete retires each one's member backups.
     """
     policy = db_controller.get_policy_for_group(group)
     if not policy:
         return
 
-    completed = _completed_group_backups(group)
-    if not completed:
-        return
+    try:
+        tiers = _parse_schedule(policy.backup_schedule) if policy.backup_schedule else []
+    except ValueError:
+        tiers = []
     now = int(time.time())
+    group_backups = db_controller.get_group_backups_by_consistency_group(group.get_id())
+    completed = [g for g in group_backups if g.status == GroupBackup.STATUS_COMPLETED]
+    in_flight = [g for g in group_backups
+                 if g.status in (GroupBackup.STATUS_PENDING, GroupBackup.STATUS_IN_PROGRESS)]
 
-    for gb in _group_backups_to_prune(completed, policy, now):
+    group_backup.retire_orphaned_member_backups(
+        [lid for lid, m in (group.members or {}).items() if m.get("removed_seq", 0) == 0])
+
+    # One group backup at a time: none while one is still committing, the same
+    # gate the single-volume schedule keeps.
+    if tiers and not in_flight:
+        latest = max((g.created_at for g in completed), default=None)
+        if latest is None or now - latest >= tiers[0][0]:
+            _, err = group_backup.create_group_backup(group.get_id())
+            if err:
+                logger.warning("Scheduled group backup skipped for group %s: %s",
+                               group.uuid, err)
+            return
+
+    for gb in _group_backups_to_prune(completed, policy, tiers, now):
         try:
             group_backup.delete_group_backup(gb.get_id())
         except (KeyError, PreconditionError, ManifestError) as e:
             logger.warning("Group retention could not delete group backup %s: %s", gb.uuid, e)
 
 
-def evaluate_group_schedule(group):
-    """Take a scheduled group backup when due and prune old generations (design §9).
+def _group_backups_to_prune(completed, policy, tiers, now):
+    """The completed group backups either retention rule deletes, oldest first.
 
-    The group analog of :func:`evaluate_schedule`: it takes one crash-consistent
-    generation and backs it up when the smallest tier's interval has elapsed since
-    the last group backup, then enforces each tier's ``keep_count`` by deleting the
-    excess oldest generations in that age band -- generations are pruned whole, not
-    merged, because a group backup is the retention unit.
+    The count/age rule selects every generation beyond ``max_versions`` and every
+    one older than ``max_age``. The tiers select one generation per pass: the
+    oldest of the first age band holding more than its ``keep_count``.
     """
-    policy = db_controller.get_policy_for_group(group)
-    if not policy or not policy.backup_schedule:
-        return
-
-    try:
-        tiers = _parse_schedule(policy.backup_schedule)
-    except ValueError:
-        return
-    if not tiers:
-        return
-
-    now = int(time.time())
-    smallest_interval = tiers[0][0]
-    group_backups = db_controller.get_group_backups_by_consistency_group(group.get_id())
-    completed = [g for g in group_backups if g.status == GroupBackup.STATUS_COMPLETED]
-    in_flight = [g for g in group_backups
-                 if g.status in (GroupBackup.STATUS_PENDING, GroupBackup.STATUS_IN_PROGRESS)]
-
-    # Member copies of pruned generations: merge each into the next generation's
-    # copy, or delete a leaf (design §9). Every cycle, so a retirement that could
-    # not run when its generation was pruned is picked up, and so copies orphaned
-    # before retirement existed are swept.
-    group_backup.retire_orphaned_member_backups(
-        [lid for lid, m in (group.members or {}).items() if m.get("removed_seq", 0) == 0])
-
-    # One group backup at a time: do not start another while one is still
-    # committing, the same gate the single-volume schedule keeps.
-    if not in_flight:
-        needs_backup = True
-        if completed:
-            latest = max(completed, key=lambda g: g.created_at)
-            if now - latest.created_at < smallest_interval:
-                needs_backup = False
-        if needs_backup:
-            _, err = group_backup.create_group_backup(group.get_id())
-            if err:
-                logger.warning("Scheduled group backup skipped for group %s: %s",
-                               group.uuid, err)
-            return  # let it commit before pruning this cycle
-
-    # Tiered pruning: keep keep_count generations per age band, deleting the
-    # excess oldest. One delete per cycle to avoid racing the data plane.
-    completed.sort(key=lambda g: g.created_at)
-    for tier_idx, (interval, keep_count) in enumerate(tiers):
-        lower_age = 0 if tier_idx == 0 else tiers[tier_idx - 1][0]
-        upper_age = tiers[tier_idx + 1][0] if tier_idx + 1 < len(tiers) else float('inf')
-        tier_backups = [g for g in completed
-                        if lower_age <= (now - g.created_at) < upper_age]
-        if len(tier_backups) > keep_count:
-            oldest = tier_backups[0]
-            try:
-                group_backup.delete_group_backup(oldest.get_id())
-            except (KeyError, PreconditionError, ManifestError) as e:
-                logger.warning("Group schedule could not prune group backup %s: %s",
-                               oldest.uuid, e)
-            return
-
-
-def _completed_group_backups(group):
-    return [g for g in db_controller.get_group_backups_by_consistency_group(group.get_id())
-            if g.status == GroupBackup.STATUS_COMPLETED]
-
-
-def _group_backups_to_prune(completed, policy, now):
-    """The completed group backups a count/age policy would delete, oldest first."""
     completed = sorted(completed, key=lambda g: g.created_at)
     doomed = []
     if policy.max_versions > 0 and len(completed) > policy.max_versions:
         doomed.extend(completed[:len(completed) - policy.max_versions])
     if policy.max_age_seconds > 0:
-        for gb in completed:
-            if gb not in doomed and (now - gb.created_at) > policy.max_age_seconds:
-                doomed.append(gb)
-    return doomed
+        doomed.extend(gb for gb in completed if (now - gb.created_at) > policy.max_age_seconds)
+    for tier_idx, (_interval, keep_count) in enumerate(tiers):
+        lower_age = 0 if tier_idx == 0 else tiers[tier_idx - 1][0]
+        upper_age = tiers[tier_idx + 1][0] if tier_idx + 1 < len(tiers) else float('inf')
+        band = [g for g in completed if lower_age <= (now - g.created_at) < upper_age]
+        if len(band) > keep_count:
+            doomed.append(band[0])
+            break
+    unique = {gb.uuid: gb for gb in doomed}
+    return sorted(unique.values(), key=lambda g: g.created_at)
 
 
 def _auto_backup_lvol(lvol):
