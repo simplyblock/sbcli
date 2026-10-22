@@ -359,3 +359,30 @@ def test_the_plan_name_does_not_clobber_the_db_key():
     plan.cluster_id = "C1"
     plan.plan_name = "replicationops/ns/op/uid"
     assert plan.get_db_id() == "object/MigrationPlan/C1/P"
+
+
+class _PrefixKV:
+    """Just enough of the FDB store for read_from_db's single-scan path."""
+
+    def __init__(self):
+        self.data = {}
+
+    def get_range_startswith(self, prefix, limit=0, reverse=False):
+        return [(k, v) for k, v in sorted(self.data.items()) if k.startswith(prefix)]
+
+
+def test_get_plan_finds_a_plan_stored_under_its_cluster_prefix():
+    """Plans are keyed <cluster>/<uuid>. Reading "all" with an empty id built
+    the prefix object/MigrationPlan// (the blank object's own id), which
+    matches nothing: every status read after a create answered 'not found'
+    (EKS bed 2026-10-22, POST /migration-plans -> 500)."""
+    import json
+    plan = MigrationPlan()
+    plan.uuid = "P1"
+    plan.cluster_id = "C1"
+    kv = _PrefixKV()
+    kv.data[plan.get_db_id().encode()] = json.dumps(plan.to_dict()).encode()
+    db = type("DB", (), {"kv_store": kv})()
+
+    assert mpc.get_plan("P1", db).uuid == "P1"
+    assert [p.uuid for p in MigrationPlan().read_from_db(kv, id="C1")] == ["P1"]

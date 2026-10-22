@@ -375,7 +375,10 @@ def forecast_only(plan, db=None):
 
 def get_plan(plan_id, db=None):
     db = db or DBController()
-    for plan in MigrationPlan().read_from_db(db.kv_store):
+    # " ", not "": an empty id makes read_from_db fall back to the blank
+    # object's own id ("/"), a prefix no plan is stored under. A blank id
+    # strips to the class prefix, which is every cluster's plans.
+    for plan in MigrationPlan().read_from_db(db.kv_store, id=" "):
         if plan.uuid == plan_id.split("/")[-1]:
             return plan
     raise KeyError(f"migration plan {plan_id} not found")
