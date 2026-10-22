@@ -547,7 +547,7 @@ def advance_group_backup_delete(group_backup_id) -> DeleteState:
         return DeleteState.PENDING
 
     if group_backup.manifest_published():
-        backup_manifest.delete_group(config, UUID(group_backup.uuid))
+        backup_manifest.delete_retired_group(config, UUID(group_backup.uuid))
     group_backup.remove(db.kv_store)
     logger.info("Group backup %s deleted: every member retired", group_backup.uuid)
     return DeleteState.DONE

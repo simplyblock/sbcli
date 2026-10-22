@@ -8,10 +8,14 @@ removed. A delete that fails before any member was touched restores the group
 backup as it was; one that fails after says so, by marking it broken, in the
 record and in the bucket.
 
-The database is real. The bucket is the one boundary faked: the group manifest
-reads, writes, and deletes go to an in-memory dict.
+The database is real. The bucket is the one boundary faked: the S3 client the
+group manifest functions use is an in-memory one.
 """
+import io
+from uuid import UUID
+
 import pytest
+from botocore.exceptions import ClientError
 
 from simplyblock_core.controllers.backup import group_backup
 from simplyblock_core.controllers.backup import manifest as backup_manifest
@@ -44,27 +48,48 @@ def db():
     return db
 
 
+class _GroupManifests:
+    """An in-memory bucket, behind the three object calls the group manifest
+    functions make, read and written by group backup uuid."""
+
+    def __init__(self):
+        self.objects: dict = {}
+
+    def put_object(self, Bucket, Key, Body, **_):
+        self.objects[Key] = Body
+
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {"Body": io.BytesIO(self.objects[Key])}
+
+    def delete_object(self, Bucket, Key):
+        self.objects.pop(Key, None)
+
+    @staticmethod
+    def _key(uuid):
+        return backup_manifest.group_manifest_key(UUID(uuid))
+
+    def __getitem__(self, uuid):
+        return backup_manifest._parse_group(self.objects[self._key(uuid)], self._key(uuid))
+
+    def __setitem__(self, uuid, manifest):
+        self.objects[self._key(uuid)] = manifest.model_dump_json().encode()
+
+    def __contains__(self, uuid):
+        return self._key(uuid) in self.objects
+
+    def __len__(self):
+        return len(self.objects)
+
+
 @pytest.fixture
 def bucket(monkeypatch):
-    """The group manifests in the bucket, by group backup uuid."""
-    objects: dict = {}
-
-    def read_group(config, group_backup_id):
-        try:
-            return objects[str(group_backup_id)]
-        except KeyError:
-            raise backup_manifest.ManifestError(f"no group manifest {group_backup_id}")
-
-    def write_group(config, manifest):
-        objects[str(manifest.group_backup_id)] = manifest
-
-    def delete_group(config, group_backup_id):
-        objects.pop(str(group_backup_id), None)
-
-    monkeypatch.setattr(backup_manifest, "read_group", read_group)
-    monkeypatch.setattr(backup_manifest, "write_group", write_group)
-    monkeypatch.setattr(backup_manifest, "delete_group", delete_group)
-    return objects
+    """The group manifests in the bucket. The manifest functions run for real
+    over it; only the S3 client is faked."""
+    b = _GroupManifests()
+    monkeypatch.setattr(backup_manifest, "s3_client", lambda config: b)
+    return b
 
 
 def _backup_uuid(gen, lvol):
@@ -231,7 +256,7 @@ class TestRetireMembers:
         state = group_backup.advance_group_backup_delete(gb.get_id())
 
         assert state == group_backup.DeleteState.DONE
-        assert bucket == {}
+        assert len(bucket) == 0
         assert _status(db, member) is None
 
 

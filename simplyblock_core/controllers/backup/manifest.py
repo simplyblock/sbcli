@@ -59,6 +59,7 @@ from pydantic import (
     TypeAdapter,
 )
 
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMS
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.utils.secrets import unwrap_secret
@@ -644,12 +645,62 @@ def list_all_groups(config: BackupConfig) -> list[GroupBackupManifest]:
     return manifests
 
 
-def delete_group(config: BackupConfig, group_backup_id: UUID) -> None:
-    """Remove a group manifest.
+def delete_retired_group(config: BackupConfig, group_backup_id: UUID) -> None:
+    """Remove the group manifest of a group backup whose delete has retired
+    every member: the last bucket step of deleting a group backup (design §9).
 
-    The last step of deleting a group backup, once every member is retired: the
-    manifest is marked ``deleting`` first, so it is never absent while members
-    it names still exist (design §9).
+    The group manifest is not a link in any backup chain. A member manifest
+    names its own predecessor, never a group manifest, so removing one breaks
+    no chain. What it does is un-commit the group backup: the bucket stops
+    naming its members as one restorable generation, and that cannot be undone
+    from the bucket. So only a manifest a delete has marked ``deleting``
+    (``GroupManifestState.DELETING``) is removed. The delete marks it before it
+    touches any member and calls this once every member is retired, which the
+    control plane's records, not the bucket, can tell (a deleted member's
+    manifest stays in the bucket as the only record of its objects). A
+    committed or broken manifest is refused and left in place. An absent one
+    is already removed, which is what a retried delete pass finds.
+
+    Raises:
+        PreconditionError: the manifest is not marked ``deleting``.
+        ManifestError: the manifest could not be read, parsed, or removed.
+    """
+    manifest = _read_group_if_present(config, group_backup_id)
+    if manifest is None:
+        return
+    if manifest.state != GroupManifestState.DELETING:
+        raise PreconditionError(
+            f"Group manifest of group backup {group_backup_id} is {manifest.state}, "
+            f"not {GroupManifestState.DELETING}; only a group backup whose delete "
+            f"has retired its members may lose its manifest")
+    _delete_group_object(config, group_backup_id)
+
+
+def _read_group_if_present(config: BackupConfig, group_backup_id: UUID) -> GroupBackupManifest | None:
+    """:func:`read_group`, but None for a manifest the bucket does not hold."""
+    try:
+        body = s3_client(config).get_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(group_backup_id))["Body"].read()
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise ManifestError(
+            f"Failed to read group manifest for group backup {group_backup_id} "
+            f"from {config.bucket_name}") from e
+    except BotoCoreError as e:
+        raise ManifestError(
+            f"Failed to read group manifest for group backup {group_backup_id} "
+            f"from {config.bucket_name}") from e
+    return _parse_group(body, group_manifest_key(group_backup_id))
+
+
+def _delete_group_object(config: BackupConfig, group_backup_id: UUID) -> None:
+    """Remove a group manifest object, unconditionally.
+
+    Private: removing a group manifest un-commits its group backup, and nothing
+    here checks that may happen. :func:`delete_retired_group` is the only
+    caller, after it has.
     """
     try:
         s3_client(config).delete_object(
