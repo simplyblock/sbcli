@@ -287,8 +287,9 @@ def _transfer_progress(db, lvol_id, used_bytes):
     return sum(s.used_size for s in outstanding), samples
 
 
-def _refresh(db, plan):
-    """Re-derive volume states and the forecast; persist a status change."""
+def _refresh(db, plan, persist=True):
+    """Re-derive volume states and the forecast; persist a status change
+    (never for a dry run, whose plan does not exist)."""
     samples_by_lvs: dict = {}
     cutover_durations = []
     for vol in plan.volumes:
@@ -319,7 +320,7 @@ def _refresh(db, plan):
     for vol in plan.volumes:
         vol["eta_seconds"] = per_volume.get(vol["lvol_id"], 0)
 
-    if plan.status not in MigrationPlan.TERMINAL_STATUSES and all(
+    if persist and plan.status not in MigrationPlan.TERMINAL_STATUSES and all(
             v["state"] in MigrationPlan.VOL_TERMINAL for v in plan.volumes):
         done = [v for v in plan.volumes if v["state"] == MigrationPlan.VOL_DONE]
         plan.status = (MigrationPlan.STATUS_DONE if len(done) == len(plan.volumes)
@@ -328,6 +329,11 @@ def _refresh(db, plan):
         plan.finished_at = int(time.time())
         plan.write_to_db(db.kv_store)
     return overall
+
+
+def forecast_only(plan, db=None):
+    """The forecast of a plan that build_plan returned (a dry run)."""
+    return _refresh(db or DBController(), plan, persist=False)
 
 
 def get_plan(plan_id, db=None):

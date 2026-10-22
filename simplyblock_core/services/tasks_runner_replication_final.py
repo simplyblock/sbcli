@@ -51,8 +51,9 @@ db = db_controller.DBController()
 def _lvs_cutover_owner(task, lvs_name, tasks):
     """Return the task that should own the active cutover slot, or None if *task* wins.
 
-    Serializes all cutovers globally: only one may run at a time across all
-    volumes and lvstores.  Deterministic: the earliest-created claimant wins
+    Serializes cutovers per SOURCE lvstore: only one endgame may run at a time
+    on an lvstore (consistency-group siblings join the owner); distinct
+    lvstores cut over in parallel.  Deterministic: the earliest-created claimant wins
     (sorted by create_dt then id), so two tasks that both wrote a claim agree on
     the same winner regardless of interleaving.
 

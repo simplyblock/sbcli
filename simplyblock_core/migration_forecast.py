@@ -80,14 +80,14 @@ def forecast(volumes, throughput_by_lvs, cutover_seconds, now):
         for vol in ordered:
             transferred_at += max(0, vol.get("bytes_remaining") or 0) / rate
             cutover_free_at = max(cutover_free_at, transferred_at) + cutover_seconds
-            per_volume[vol["lvol_id"]] = int(round(cutover_free_at))
+            per_volume[vol["lvol_id"]] = round(cutover_free_at)
         eta = max(eta, cutover_free_at)
 
     bytes_remaining = sum(max(0, v.get("bytes_remaining") or 0)
                           for queue in by_lvs.values() for v in queue)
     overall = {
         "bytes_remaining": bytes_remaining,
-        "eta_seconds": int(round(eta)),
+        "eta_seconds": round(eta),
         "completes_at": int(now + eta),
         "throughput_bytes_per_sec": int(
             sum(measured_rates) / len(measured_rates) if measured_rates else default_rate),

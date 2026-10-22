@@ -18,6 +18,7 @@ from simplyblock_core.controllers import (
     health_controller,
     lvol_controller,
     migration_controller,
+    migration_plan_controller,
     pool_controller,
     qos_controller,
     replication_policy_controller,
@@ -742,6 +743,61 @@ class CLIWrapperBase:
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
         return True
+
+    @staticmethod
+    def _migration_plan_output(plan, forecast, as_json, dry_run=False):
+        volumes = [{
+            "Volume": v.get("name") or v["lvol_id"],
+            "State": v["state"],
+            "Target node": v.get("target_node_id", ""),
+            "Remaining": utils.humanbytes(v.get("bytes_remaining", 0)),
+            "ETA": utils.strfdelta_seconds(v.get("eta_seconds", 0)),
+            "Error": v.get("error", ""),
+        } for v in plan.volumes]
+        if as_json:
+            return _format_json({"id": None if dry_run else plan.uuid, "status": plan.status,
+                                 "volumes": plan.volumes, "forecast": forecast})
+        rate = utils.humanbytes(forecast["throughput_bytes_per_sec"]) + "/s"
+        if not forecast["throughput_measured"]:
+            rate += " (default, not yet measured)"
+        header = (f"Plan {'(dry run)' if dry_run else plan.uuid}: {plan.status}, "
+                  f"{utils.humanbytes(forecast['bytes_remaining'])} remaining, "
+                  f"ETA {utils.strfdelta_seconds(forecast['eta_seconds'])} at {rate}")
+        return header + "\n" + utils.print_table(volumes)
+
+    def cluster__migrate(self, sub_command, args):
+        lvol_ids = [i.strip() for i in args.lvol_ids.split(",") if i.strip()] if args.lvol_ids else None
+        kwargs = dict(pool_id=args.pool_id, lvol_ids=lvol_ids, delete_source=args.delete_source,
+                      interval_min=args.interval_min)
+        try:
+            if args.dry_run:
+                plan = migration_plan_controller.build_plan(
+                    args.cluster_id, args.target_cluster_id, **kwargs)
+                forecast = migration_plan_controller.forecast_only(plan)
+                return self._migration_plan_output(plan, forecast, args.json, dry_run=True)
+            plan = migration_plan_controller.start_plan(
+                args.cluster_id, args.target_cluster_id, **kwargs)
+        except migration_plan_controller.MigrationPlanError as e:
+            return f"Error: {e}"
+        plan, forecast = migration_plan_controller.plan_status(plan.uuid)
+        return self._migration_plan_output(plan, forecast, args.json)
+
+    def cluster__migrate_status(self, sub_command, args):
+        plan, forecast = migration_plan_controller.plan_status(args.plan_id)
+        return self._migration_plan_output(plan, forecast, args.json)
+
+    def cluster__migrate_list(self, sub_command, args):
+        return utils.print_table([{
+            "ID": p.uuid,
+            "Target cluster": p.target_cluster_id,
+            "Status": p.status,
+            "Volumes": len(p.volumes),
+            "Created": _format_timestamp(p.created_at),
+        } for p in migration_plan_controller.list_plans(args.cluster_id)])
+
+    def cluster__migrate_cancel(self, sub_command, args):
+        plan = migration_plan_controller.cancel_plan(args.plan_id)
+        return f"Plan {plan.uuid}: {plan.status}"
 
     def cluster__add_replication(self, sub_command, args):
         return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)

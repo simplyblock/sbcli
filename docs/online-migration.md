@@ -98,7 +98,7 @@ CLI, in the `cluster` group:
 
 ```
 sbctl cluster migrate <source-cluster-id> --target-cluster-id <id>
-        [--pool <pool>] [--lvol <id> ...] [--delete-source]
+        [--pool <pool-id>] [--lvols <id,id,...>] [--delete-source]
         [--interval-min N] [--dry-run]
 sbctl cluster migrate-status <plan-id> [--json]
 sbctl cluster migrate-list <cluster-id>

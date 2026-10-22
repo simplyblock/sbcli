@@ -14,11 +14,10 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import replication_final_step as rfs
 from simplyblock_core.services import tasks_runner_replication_final as runner
 from simplyblock_core.services.task_runner_base import TaskDefer
-
 from simplyblock_core.test.test_replication_final_step import (
+    _install_nodes,
     _Lvol,
     _Node,
-    _install_nodes,
 )
 
 

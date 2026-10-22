@@ -314,3 +314,12 @@ def test_cancel_spares_cutovers_that_prepared_their_clone(db, monkeypatch):
     assert db.tasks["ta"].canceled is True
     assert not db.tasks["tb"].canceled
     assert plan.status == MigrationPlan.STATUS_RUNNING
+
+
+def test_dry_run_forecast_never_persists(db):
+    db.lvols = {"a": _lvol("a", 2 * GIB)}
+    plan = mpc.build_plan("C1", "C2", db=db)
+    plan.volumes[0]["state"] = MigrationPlan.VOL_FAILED     # terminal: would persist
+    overall = mpc.forecast_only(plan, db=db)
+    assert "written" not in db.__dict__
+    assert overall["eta_seconds"] == 0
