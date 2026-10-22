@@ -607,7 +607,7 @@ jobs:
             echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
             sleep 3
 
-            MINIO_ENDPOINT="http://minio.minio.svc.cluster.local:9000"
+            MINIO_ENDPOINT="http://minio.minio.svc:9000"
             echo "MINIO_SOURCE=in-cluster" >> "$GITHUB_ENV"
           fi
 

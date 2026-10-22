@@ -240,7 +240,7 @@ class StorageNode(BaseNodeObject):
         host = self.api_endpoint
         if Settings().tls_connect != "disabled":
             port = self.api_endpoint.rsplit(":", 1)[1]
-            host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
+            host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc:{port}"
         return SNodeClient(host, **kwargs)
 
     def from_dict(self, data):
@@ -291,7 +291,7 @@ class StorageNode(BaseNodeObject):
             kwargs.setdefault("retry", retry)
         host = self.mgmt_ip
         if Settings().tls_connect != "disabled":
-            host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
+            host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc"
         return RPCClient(
             host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
