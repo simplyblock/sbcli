@@ -4083,8 +4083,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if lblk_mode:
             # No driver rebind in lblk mode — the AIO bdev needs the device
             # on its kernel driver. Resolve the configured selection against
-            # the live host (serial-first), then --force-format wipes
-            # partitioned disks (re-validated host-side: busy => refused).
+            # the live host (by the stable path it was selected by, serial-first
+            # otherwise), then --force-format wipes partitioned disks
+            # (re-validated host-side: busy => refused).
             blk_inventory, err = snode_api.get_blockdevices()
             if not blk_inventory:
                 logger.error(f"Failed to list block devices on {node_addr}: {err}")
@@ -4094,7 +4095,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             if missing:
                 logger.error(
                     f"Configured block device(s) not found on host: "
-                    f"{[(e.get('name'), e.get('serial')) for e in missing]}")
+                    f"{[(e.get('path') or e.get('name'), e.get('serial')) for e in missing]}")
                 return False
             for blk_info in lblk_resolved:
                 if blk_info.get("has_partitions"):
@@ -8795,11 +8796,13 @@ def _restart_storage_node_impl(
 
     node_info, _ = snode_api.info()
     if lblk_mode:
-        # Re-resolve the persisted selection against the live host,
-        # SERIAL-FIRST (kernel names shift across reboots; the stored name
-        # is only the fallback for serial-less devices), then rebuild the
-        # AIO bdevs. A missing device degrades to STATUS_REMOVED in the
-        # reconcile below — same semantics as a missing NVMe controller.
+        # Re-resolve the persisted selection against the live host, then
+        # rebuild the AIO bdevs. A device selected by a stable path is looked
+        # up by that path alone; any other SERIAL-FIRST (kernel names shift
+        # across reboots; the stored name is only the fallback for
+        # serial-less devices). A missing device degrades to STATUS_REMOVED
+        # in the reconcile below — same semantics as a missing NVMe
+        # controller.
         blk_inventory, blk_err = snode_api.get_blockdevices()
         if not blk_inventory:
             logger.error(f"Failed to list block devices: {blk_err}")
@@ -8807,7 +8810,7 @@ def _restart_storage_node_impl(
         lblk_resolved, lblk_missing = utils.resolve_lblk_entries(
             snode.lblk_devices, blk_inventory)
         for entry in lblk_missing:
-            logger.warning(f"Configured block device {entry.get('name')} "
+            logger.warning(f"Configured block device {entry.get('path') or entry.get('name')} "
                            f"(serial {entry.get('serial')}) not found on host")
         nvme_devs = utils.addAioDevices(rpc_client, snode, lblk_resolved)
         if not nvme_devs:
