@@ -643,6 +643,21 @@ def process_snap_replicate_start(task, snapshot):
                                  f"({lead_why}), retrying",
                            backoff=True, count=_switches_exhausted(task))
         return
+    if remote_lv_node.get_id() != remote_lv.node_id:
+        # The transfer goes through the receiving node's transfer hublvol, and
+        # SPDK demuxes hub writes by map id in the HUB's OWN lvstore
+        # (vbdev_hublvol_submit_request: lvol->lvol_store->lvol_map). A node's
+        # transfer hub lives on the lvstore it is primary of, so a secondary
+        # leader would resolve the map id in ITS lvstore -- failing the IO or,
+        # with a colliding map id, writing into an unrelated volume -- and a
+        # tertiary never demuxes hub IO at all. Until each member carries a
+        # transfer hub on the target lvstore, only the target primary receives;
+        # the wait is not the transfer's fault and is not counted.
+        _suspend_for_retry(task, f"target lvstore {remote_lv.lvs_name} is led by "
+                                 f"{remote_lv_node.get_id()}, not its target primary "
+                                 f"{remote_lv.node_id}; waiting for the primary",
+                           backoff=True, count=_switches_exhausted(task))
+        return
     _note_switch(task, "target_node_id", remote_lv_node.get_id(), "target leader")
 
     # 2 attach the TARGET NODE'S TRANSFER HUBLVOL on the source. Transfers must

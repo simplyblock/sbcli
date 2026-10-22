@@ -124,6 +124,65 @@ Moves during a run:
 - **Moves in the idle window.** These are covered because the leader is
   resolved before every transfer.
 
+### Target: only the primary receives, for now
+
+A settled leader is necessary, but it is not sufficient. The transfer reaches
+the target through the receiving node's **transfer hublvol**. Two facts make
+any member other than the primary a wrong receiver:
+
+| Fact | Where |
+|---|---|
+| SPDK demuxes hub IO by map id in the **hub's own** lvstore: `lvol->lvol_store->lvol_map.lvol[EXTRACT_ID(offset)]`. The leader gate checks the same lvstore. | `vbdev_hublvol_submit_request`, spdk `module/bdev/lvol/vbdev_lvol.c` |
+| A node creates its transfer hublvol on `self.lvstore`, the lvstore that node is **primary** of. | `StorageNode.create_transfer_hublvol` |
+| On a tertiary, hub IO is never demuxed: the branch requires `lvs->node_role != NODE_TERTIARY`. | `vbdev_lvol_submit_request` |
+
+A secondary that leads the target lvstore therefore resolves the landing
+volume's map id in its own lvstore, and its own lvstore's leader gate passes.
+If no volume there has that map id, the IO fails ("orglvol is none"). If one
+does, the snapshot is written into **an unrelated volume**. A tertiary does not
+demux the IO at all.
+
+The receiving side existed before this change: `_receiving_leader_node` also
+chose a non-primary leader. Until the fix below lands,
+`process_snap_replicate_start` sends only when the settled leader **is** the
+landing volume's primary (`remote_lv.node_id`). Otherwise it waits with
+backoff, and the wait is not counted. The cost is that RPO grows while the
+target primary is down. The source side and the finish are unchanged: a
+convert is a metadata operation on the leader and does not touch the hub.
+
+**To check on beds:**
+
+- Target SPDK logs containing `FAILED - orglvol is none` or
+  `receive io for hublvol in nonleader mode`.
+- Replication tasks whose `target_node_id` is not the landing volume's
+  `node_id`.
+
+Any match means some data reached a target through the wrong lvstore. Check
+the volumes on that member's own lvstore that have the same map id.
+
+**Proposed full fix (not implemented):**
+
+1. **Per-lvstore transfer hub on secondaries (sbcli only).** A hub blob is
+   in-memory: `spdk_bs_create_hubblob` uses blob id `UINT64_MAX`, starts
+   CLEAN, and writes no metadata. So any member can create one on any lvstore
+   it hosts, the way `create_secondary_hublvol` already creates the HA hub.
+   The member creates `<target lvs>/transferhub_<node8>` under its own NQN,
+   `…:transferhub:<lvs>:<node uuid>`. The name has to be distinct: the source
+   reuses an attached controller by name (`ensure_hub_attached`), so a shared
+   name would silently resend to the old primary.
+   - `ensure_hub_attached(src_rpc, node, lvs_name)` selects the hub for
+     `(node, lvs)`.
+   - Every detach path uses the same key.
+   - The liveness check recreates the hub after a restart.
+2. **Tertiary (SPDK fork).** Allow hub demux on a tertiary that leads, for
+   example `lvol->hublvol && (lvs->node_role != NODE_TERTIARY || lvs->leader)`.
+   This needs review by the SPDK owners, because the tertiary redirect path
+   sits just above it.
+3. **Then lift the gate.** Receive on any settled leader that holds a hub on
+   the target lvstore. The cross-cluster cutover's final step
+   (`replication_final_step`) gets the same receiver and drops its
+   primary-only rule.
+
 ### Retry bounds
 
 A node switch is not the transfer's fault, so it does not spend retries. Both
