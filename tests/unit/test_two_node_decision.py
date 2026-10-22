@@ -139,3 +139,41 @@ def test_unfence_and_solo_helpers():
     b = d.NodeView(B, lvs_state={3: LVS_FENCED, 4: LVS_FENCED})
     assert d.lvs_needing_unfence(a, b) == {B: [3, 4]}
     assert d.solo_lvs(a) == [3]
+
+
+# docs/design/two-node-kubernetes-fencing.md, section 3.3: winner policy
+
+def _partitioned(**kw):
+    return snap(nv(A, unhealthy=True, state=LVS_HOLDING), nv(B, unhealthy=True, state=LVS_HOLDING),
+                **kw)
+
+
+def test_winner_policy_keeps_the_node_that_leads_more_lvs():
+    s = _partitioned(leaders={3: B, 4: B, 5: A})
+    s.partition_policy = d.PARTITION_WINNER
+    v = d.decide(s)
+    assert (v.kind, v.new_state, v.winner, v.loser) == (d.V_DEGRADED, ARB_DEGRADED, B, A)
+    assert v.raise_epoch and v.host_fence and not v.fence_best_effort
+    assert v.grant == {3: B, 4: B, 5: B} and v.fence == {3: A, 4: A, 5: A}
+    assert not v.fence_all
+
+
+def test_winner_policy_tie_goes_to_the_lower_node_id():
+    s = _partitioned(leaders={3: A, 4: B})
+    s.partition_policy = d.PARTITION_WINNER
+    assert d.decide(s).winner == min(A, B)
+
+
+def test_winner_policy_never_picks_a_node_still_rebuilding():
+    s = _partitioned(leaders={3: A, 4: A})
+    s.partition_policy = d.PARTITION_WINNER
+    s.stale_nodes = (A,)
+    assert d.decide(s).winner == B
+    s.stale_nodes = (A, B)
+    v = d.decide(s)
+    assert v.kind == d.V_PARTITION and v.fence_all       # nobody may win: fence_both
+
+
+def test_default_policy_is_still_fence_both():
+    v = d.decide(_partitioned(leaders={3: A, 4: A}))
+    assert v.kind == d.V_PARTITION and not v.winner and not v.host_fence

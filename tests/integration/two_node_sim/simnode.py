@@ -146,6 +146,9 @@ class SimNode:
         self.devices: dict[str, bool] = {}    # alceml bdev -> present
         self.blocked: dict[int, str] = {}     # port -> owner tag
         self.ana: dict[tuple, str] = {}       # (port, grp) -> state
+        # nvmf host access (kubernetes-fencing contract, section 3.2):
+        # nqn -> {"allow_any_host": bool, "hosts": [host nqns]}
+        self.subsystems: dict[str, dict] = {}
         self._reset_ha()
 
     # ---- lifecycle ------------------------------------------------------------
@@ -205,6 +208,10 @@ class SimNode:
         for d in self.devices:
             self.devices[d] = True
         self.blocked = {}
+        # the restart flow recreates every subsystem as the volume defines it
+        # (no allowed_hosts: any host)
+        for sub in self.subsystems.values():
+            sub["allow_any_host"], sub["hosts"] = True, []
 
     # ---- events -----------------------------------------------------------------
 
@@ -597,3 +604,42 @@ class SimNode:
                 self._err(errno.ENODEV)
             return [{"name": name}]
         self._err(errno.ENODEV)
+
+    # ---- nvmf host access (kubernetes-fencing contract, section 3.2) -----------------
+
+    def admits(self, nqn: str, host: str) -> bool:
+        sub = self.subsystems[nqn]
+        return sub["allow_any_host"] or host in sub["hosts"]
+
+    def _subsystem(self, nqn):
+        if nqn not in self.subsystems:
+            self._err(errno.ENODEV)
+        return self.subsystems[nqn]
+
+    def rpc_nvmf_get_subsystems(self, nqn=None, **_):
+        names = [nqn] if nqn else sorted(self.subsystems)
+        return [{"nqn": n, "allow_any_host": self._subsystem(n)["allow_any_host"],
+                 "hosts": [{"nqn": h} for h in self._subsystem(n)["hosts"]]} for n in names]
+
+    def rpc_nvmf_subsystem_get_controllers(self, nqn, **_):
+        self._subsystem(nqn)
+        return [{"hostnqn": h} for h in self.world.connected_hosts(self, nqn)]
+
+    def rpc_nvmf_subsystem_add_host(self, nqn, host, **_):
+        sub = self._subsystem(nqn)
+        if host in sub["hosts"]:
+            self._err(errno.EINVAL, "Internal error")
+        sub["hosts"].append(host)
+        return True
+
+    def rpc_nvmf_subsystem_remove_host(self, nqn, host, **_):
+        # SPDK: an unlisted host is an error and nothing is disconnected
+        sub = self._subsystem(nqn)
+        if host not in sub["hosts"]:
+            self._err(errno.ENOENT, "Internal error")
+        sub["hosts"].remove(host)
+        return True
+
+    def rpc_nvmf_subsystem_allow_any_host(self, nqn, allow_any_host, **_):
+        self._subsystem(nqn)["allow_any_host"] = bool(allow_any_host)
+        return True

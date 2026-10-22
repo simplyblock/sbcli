@@ -261,6 +261,13 @@ class Cluster(BaseModel):
     # Two-node arbitration (docs/design/two-node-arbitration.md). Off by default:
     # a dual-node cluster then keeps today's tolerance without the hold.
     two_node_arbitration: bool = False
+    # Who decides on a two-node cluster (docs/design/two-node-kubernetes-fencing.md):
+    # "witness" (the arbiter) or "pacemaker" (the nodes follow Pacemaker's fence;
+    # the arbiter does not act on the cluster).
+    two_node_fencing_authority: str = "witness"
+    # Mode witness: revoke a lost node's client host NQN on the winner and let
+    # Kubernetes remediate it (StorageFenced condition, out-of-service taint).
+    two_node_host_fencing: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
     # operator-supplied failure_domain tag (rack/cabinet/DC) and placement
     # spreads data/parity chunks, HA journal copies and secondary/tertiary

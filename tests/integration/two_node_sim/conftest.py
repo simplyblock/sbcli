@@ -18,11 +18,11 @@ def make_world(monkeypatch):
     logging.getLogger("two_node_sim").setLevel(logging.INFO)
     created = []
 
-    def make(bugs=(), conditions=(), seed=1, caps=None):
+    def make(bugs=(), conditions=(), seed=1, caps=None, host_fencing=False):
         db = DBController()
         if db.kv_store is None:
             pytest.skip("FoundationDB is not available")
-        world = World(db, seed=seed, bugs=set(bugs), caps=caps)
+        world = World(db, seed=seed, bugs=set(bugs), caps=caps, host_fencing=host_fencing)
         world.conditions = set(conditions)
         world.install(monkeypatch)
         # The heal's stable window only delays the heal; no finding depends on
