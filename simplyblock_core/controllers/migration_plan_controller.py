@@ -46,8 +46,14 @@ def _used_bytes(db, lvol):
     return int(lvol.size)
 
 
-def _skip_reason(db, lvol, target_cluster_id, cutover_done_ids):
-    """Why *lvol* cannot join a plan to *target_cluster_id*, or ''."""
+def _skip_reason(db, lvol, target_cluster_id, cutover_done_ids, listed=False):
+    """Why *lvol* cannot join a plan to *target_cluster_id*, or ''.
+
+    A volume that already replicates to the target in failover (DR) mode is
+    skipped by a broad selection -- a whole-cluster move must not rewire DR
+    by accident --, but taken when it is named explicitly: that is how a
+    policy-driven caller (the operator's ReplicationOps) asks for it.
+    """
     if lvol.status in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED):
         return "volume is being deleted"
     if lvol.lvol_name.startswith("REP_"):
@@ -58,7 +64,7 @@ def _skip_reason(db, lvol, target_cluster_id, cutover_done_ids):
         current = _target_cluster_of(db, lvol)
         if current and current != target_cluster_id:
             return f"replicates to cluster {current}; stop that replication first"
-        if lvol.replication_mode != "migration":
+        if lvol.replication_mode != "migration" and not listed:
             return ("replicates in failover (DR) mode; a migration plan does not "
                     "rewire a DR relationship")
     elif lvol.replication_policy_id:
@@ -88,7 +94,8 @@ def select_volumes(db, cluster_id, target_cluster_id, pool_id=None, lvol_ids=Non
 
     selected, skipped = [], []
     for lv in lvols:
-        reason = _skip_reason(db, lv, target_cluster_id, cutover_done_ids)
+        reason = _skip_reason(db, lv, target_cluster_id, cutover_done_ids,
+                              listed=bool(lvol_ids))
         if reason:
             skipped.append({"lvol_id": lv.get_id(), "name": lv.lvol_name,
                             "size": lv.size, "error": reason})
@@ -149,16 +156,37 @@ def _validate_clusters(db, cluster_id, target_cluster_id):
             raise MigrationPlanError(f"cluster not found: {cid}")
 
 
+def _infer_target_cluster(db, cluster_id, lvol_ids):
+    """The one cluster the listed volumes already replicate to, for a caller
+    that knows the volumes but not the destination's id."""
+    if not lvol_ids:
+        raise MigrationPlanError("a target cluster is required unless volumes are listed")
+    targets = set()
+    for lv in db.get_lvols(cluster_id):
+        if lv.get_id() in lvol_ids:
+            targets.add(_target_cluster_of(db, lv) if lv.do_replicate else "")
+    targets.discard("")
+    if len(targets) != 1:
+        raise MigrationPlanError(
+            "cannot infer the target cluster: the listed volumes replicate to "
+            + (", ".join(sorted(targets)) if targets else "no cluster"))
+    return targets.pop()
+
+
 def build_plan(cluster_id, target_cluster_id, pool_id=None, lvol_ids=None,
-               delete_source=False, interval_min=None, db=None):
+               delete_source=False, interval_min=None, db=None, name=""):
     """The plan a start would execute, with placement and forecast; nothing is
-    written (a dry run returns exactly this)."""
+    written (a dry run returns exactly this). Without *target_cluster_id* the
+    destination is the one the listed volumes already replicate to."""
     db = db or DBController()
+    if not target_cluster_id:
+        target_cluster_id = _infer_target_cluster(db, cluster_id, lvol_ids)
     _validate_clusters(db, cluster_id, target_cluster_id)
     selected, skipped = select_volumes(db, cluster_id, target_cluster_id, pool_id, lvol_ids)
 
     plan = MigrationPlan()
     plan.uuid = str(uuid_lib.uuid4())
+    plan.plan_name = name or ""
     plan.cluster_id = cluster_id
     plan.target_cluster_id = target_cluster_id
     plan.pool_id = pool_id or ""
@@ -192,11 +220,20 @@ def build_plan(cluster_id, target_cluster_id, pool_id=None, lvol_ids=None,
 
 
 def start_plan(cluster_id, target_cluster_id, pool_id=None, lvol_ids=None,
-               delete_source=False, interval_min=None):
-    """Build, persist and start a plan. Returns the plan."""
+               delete_source=False, interval_min=None, name=""):
+    """Build, persist and start a plan. Returns the plan.
+
+    *name* makes the create idempotent: an unfinished plan of the same name
+    on this cluster is returned instead of starting a second one -- a caller
+    that died after its request reached us (the operator) finds its plan.
+    """
     db = DBController()
+    if name:
+        for existing in MigrationPlan().read_from_db(db.kv_store, id=cluster_id):
+            if existing.plan_name == name and not existing.is_finished():
+                return existing
     plan = build_plan(cluster_id, target_cluster_id, pool_id, lvol_ids,
-                      delete_source, interval_min, db=db)
+                      delete_source, interval_min, db=db, name=name)
     plan.write_to_db(db.kv_store)
 
     load = lvol_controller._replication_node_load(db, target_cluster_id)

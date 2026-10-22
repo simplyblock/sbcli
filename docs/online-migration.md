@@ -109,7 +109,7 @@ REST API, under `/api/v2/clusters/{cluster_id}/migration-plans`:
 
 | Method | Path | Body or result |
 |---|---|---|
-| POST | `/` | Body: `{target_cluster_id, pool_id?, lvol_ids?, delete_source?, interval_min?, dry_run?}`. Returns `201` with the `MigrationPlanDTO`. A dry run returns `200` with the DTO and `id: null`. |
+| POST | `/` | Body: `{target_cluster_id?, name?, pool_id?, lvol_ids?, delete_source?, interval_min?, dry_run?}`. `target_cluster_id` may be omitted when `lvol_ids` already replicate to one cluster. `name` is an idempotency key: an unfinished plan with that name is returned instead of creating a second one. Explicitly listed volumes may be in failover mode, which a broad selection skips. Returns `201` with the `MigrationPlanDTO`. A dry run returns `200` with the DTO and `id: null`. |
 | GET | `/` | A list of `MigrationPlanDTO` |
 | GET | `/{plan_id}` | `MigrationPlanDTO`, with live state and forecast |
 | DELETE | `/{plan_id}` | Cancel. Returns `204`. |

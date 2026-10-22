@@ -35,6 +35,9 @@ class MigrationPlan(BaseModel):
     VOL_TERMINAL = (VOL_SKIPPED, VOL_DONE, VOL_FAILED, VOL_CANCELED)
 
     cluster_id: str = ""
+    # Caller-chosen, unique among the cluster's unfinished plans; makes a
+    # create idempotent (start_plan).
+    plan_name: str = ""
     target_cluster_id: str = ""
     pool_id: str = ""
     delete_source: bool = False

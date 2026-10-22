@@ -1279,6 +1279,7 @@ class MigrationForecastDTO(BaseModel):
 class MigrationPlanDTO(BaseModel):
     """A bulk online migration to another cluster. ``id`` is null for a dry run."""
     id: str | None
+    name: str = ""
     status: str
     cluster_id: str
     target_cluster_id: str
@@ -1292,6 +1293,7 @@ class MigrationPlanDTO(BaseModel):
     def from_model(plan, forecast, dry_run=False):
         return MigrationPlanDTO(
             id=None if dry_run else plan.uuid,
+            name=plan.plan_name,
             status=plan.status,
             cluster_id=plan.cluster_id,
             target_cluster_id=plan.target_cluster_id,

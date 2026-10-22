@@ -78,3 +78,14 @@ def test_another_clusters_plan_is_404(client, db, cluster, controller):
 def test_list(client, db, cluster, controller):
     controller.list_plans.return_value = [_plan()]
     assert [p["id"] for p in client.get(f'{BASE}/').json()] == [PLAN_ID]
+
+
+def test_name_and_an_omitted_target_reach_the_controller(client, db, cluster, controller):
+    plan = _plan()
+    plan.plan_name = "replicationops/ns/op/uid"
+    controller.start_plan.return_value = plan
+    controller.plan_status.return_value = (plan, FORECAST)
+    resp = client.post(f'{BASE}/', json={"name": "replicationops/ns/op/uid", "lvol_ids": [PLAN_ID]})
+    assert resp.status_code == 201 and resp.json()["name"] == "replicationops/ns/op/uid"
+    args, kwargs = controller.start_plan.call_args
+    assert args[1] == "" and kwargs["name"] == "replicationops/ns/op/uid"

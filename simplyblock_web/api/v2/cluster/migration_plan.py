@@ -19,13 +19,20 @@ api = APIRouter(tags=['migration-plans'])
 
 
 class PlanParams(BaseModel):
-    target_cluster_id: UUID
+    #: Omitted: the cluster the listed volumes already replicate to.
+    target_cluster_id: UUID | None = None
+    #: Idempotency key: an unfinished plan of this name is returned, not doubled.
+    name: str = ""
     pool_id: UUID | None = None
     lvol_ids: list[UUID] | None = None
     delete_source: bool = False
     interval_min: util.OptionalUnsigned = None
     #: Plan and forecast only: nothing is started or written.
     dry_run: bool = False
+
+
+def _target(parameters):
+    return str(parameters.target_cluster_id) if parameters.target_cluster_id else ""
 
 
 def _plan_of(cluster, plan_id):
@@ -59,12 +66,12 @@ def create_plan(cluster: Cluster, parameters: PlanParams):
     try:
         if parameters.dry_run:
             plan = migration_plan_controller.build_plan(
-                cluster.get_id(), str(parameters.target_cluster_id), **kwargs)
+                cluster.get_id(), _target(parameters), name=parameters.name, **kwargs)
             forecast = migration_plan_controller.forecast_only(plan)
             dto = MigrationPlanDTO.from_model(plan, forecast, dry_run=True)
             return JSONResponse(status_code=200, content=dto.model_dump(mode='json'))
         plan = migration_plan_controller.start_plan(
-            cluster.get_id(), str(parameters.target_cluster_id), **kwargs)
+            cluster.get_id(), _target(parameters), name=parameters.name, **kwargs)
     except MigrationPlanError as e:
         raise HTTPException(400, str(e))
     plan, forecast = migration_plan_controller.plan_status(plan.uuid)

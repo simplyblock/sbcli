@@ -323,3 +323,39 @@ def test_dry_run_forecast_never_persists(db):
     overall = mpc.forecast_only(plan, db=db)
     assert "written" not in db.__dict__
     assert overall["eta_seconds"] == 0
+
+
+def test_listed_failover_volume_is_taken_but_not_by_a_broad_selection(db):
+    db.lvols = {"dr": _lvol("dr", do_replicate=True, replication_mode="failover",
+                            replication_node_id="T1"), "x": _lvol("x")}
+    assert "failover (DR) mode" in _states(mpc.build_plan("C1", "C2", db=db))["dr"][1]
+    listed = _states(mpc.build_plan("C1", "C2", lvol_ids=["dr"], db=db))
+    assert listed["dr"] == (MigrationPlan.VOL_REPLICATING, "")
+
+
+def test_target_is_inferred_from_the_listed_volumes(db):
+    db.lvols = {"a": _lvol("a", do_replicate=True, replication_mode="failover",
+                           replication_node_id="T1"), "b": _lvol("b")}
+    assert mpc.build_plan("C1", "", lvol_ids=["a"], db=db).target_cluster_id == "C2"
+    with pytest.raises(mpc.MigrationPlanError, match="cannot infer"):
+        mpc.build_plan("C1", "", lvol_ids=["b"], db=db)
+    with pytest.raises(mpc.MigrationPlanError, match="unless volumes are listed"):
+        mpc.build_plan("C1", "", db=db)
+
+
+def test_a_named_create_is_idempotent(db, monkeypatch):
+    existing = MigrationPlan()
+    existing.uuid = "P0"
+    existing.cluster_id = "C1"
+    existing.plan_name = "replicationops/ns/op/uid"
+    monkeypatch.setattr(MigrationPlan, "read_from_db", lambda self, kv, id="", **k: [existing])
+    assert mpc.start_plan("C1", "C2", name="replicationops/ns/op/uid") is existing
+
+
+def test_the_plan_name_does_not_clobber_the_db_key():
+    """BaseModel keys records by its own `name` (the class name)."""
+    plan = MigrationPlan()
+    plan.uuid = "P"
+    plan.cluster_id = "C1"
+    plan.plan_name = "replicationops/ns/op/uid"
+    assert plan.get_db_id() == "object/MigrationPlan/C1/P"
