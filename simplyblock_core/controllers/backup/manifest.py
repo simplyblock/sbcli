@@ -42,6 +42,7 @@ for where the two genuinely differ and where they should be collapsed.
 import json
 import logging
 from collections.abc import Iterable
+from enum import StrEnum
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
@@ -509,6 +510,21 @@ class GroupManifestSource(BaseModel):
     cluster_name: str | None = None
 
 
+class GroupManifestState(StrEnum):
+    """Whether a group manifest's member backups can be relied on (design §9).
+
+    A group manifest is written ``committed``, at the commit barrier. A delete
+    marks it ``deleting`` before it touches any member, and removes it only once
+    every member is retired. A delete that ended after retiring a member marks it
+    ``broken``: some members are gone, so the group backup cannot restore, and
+    the bucket says so rather than presenting it as whole. Only a ``committed``
+    group backup is restorable or importable.
+    """
+    COMMITTED = "committed"
+    DELETING = "deleting"
+    BROKEN = "broken"
+
+
 class GroupBackupManifest(BaseModel):
     """The self-describing document for one consistency-group backup."""
     model_config = ConfigDict(extra="forbid")
@@ -527,6 +543,11 @@ class GroupBackupManifest(BaseModel):
     #: about a member -- its volume, s3 id, chain link, key -- is in its own
     #: manifest, ``manifests/<backup_id>.json``.
     member_backup_ids: list[UUID]
+
+    #: Whether the member backups can be relied on; see GroupManifestState. A
+    #: manifest written before deletes marked it reads as committed, which is
+    #: what it was.
+    state: GroupManifestState = GroupManifestState.COMMITTED
 
     #: Whether the members are encrypted. Homogeneous (design §3.4): every member
     #: shares this disposition. The actual per-member keys are NOT here -- each
@@ -626,8 +647,9 @@ def list_all_groups(config: BackupConfig) -> list[GroupBackupManifest]:
 def delete_group(config: BackupConfig, group_backup_id: UUID) -> None:
     """Remove a group manifest.
 
-    Deleting it un-commits the group backup as a unit; the member manifests and
-    objects follow retention per member (design §9).
+    The last step of deleting a group backup, once every member is retired: the
+    manifest is marked ``deleting`` first, so it is never absent while members
+    it names still exist (design §9).
     """
     try:
         s3_client(config).delete_object(

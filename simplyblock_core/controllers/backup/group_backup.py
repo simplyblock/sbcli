@@ -484,45 +484,208 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     return group.get_id(), members_out, None
 
 
+class DeleteState(Enum):
+    """Where one pass of a group backup's delete left it."""
+    #: A member is still being retired: a merge in flight, or a successor or
+    #: the member itself not yet completed. The task comes back.
+    PENDING = "pending"
+    #: Every member is retired and the manifest and record are gone, or the
+    #: group backup is no longer being deleted.
+    DONE = "done"
+
+
 def delete_group_backup(group_backup_id):
-    """Delete a group backup: its group manifest and its record, then retire
-    its member backups (design §9).
+    """Start deleting a group backup (design §9), metadata first.
 
-    A group backup is the unit of the group manifest, not of the member objects,
-    which a later generation may still chain against: a member backup that is
-    the predecessor of the next generation's copy is MERGED into it (the chain
-    stays restorable and the base's objects fold into the survivor), and one
-    that nothing chains against is deleted. Without this, every pruned
-    generation left its member copies in the bucket and in ``backup list`` for
-    good: with a `5m,2` schedule the oldest generation's three full copies
-    outlived their group backup while the chain grew under them (live
-    2026-10-20). Best-effort on the manifest -- a bucket that cannot be reached
-    does not block removing the record, which would otherwise strand the group
-    backup as permanently un-deletable; and retirement is retried by the group
-    schedule each cycle (:func:`retire_orphaned_member_backups`), so a merge
-    that cannot start now is not lost.
+    A group backup is created data first and committed last; it is deleted the
+    other way round. This marks the group manifest and then the record as being
+    deleted, before any member is touched, and queues the task that retires the
+    members (:func:`advance_group_backup_delete`). The manifest and the record
+    are removed only once every member is retired. A member backup that the next
+    generation chains against is MERGED into it, so that generation stays
+    restorable; one nothing chains against is deleted.
 
-    Returns ``(True, None)`` or ``(False, error_message)``.
+    Deleting a group backup already being deleted re-queues its task if none is
+    open, and deleting a broken one resumes the retirement where it stopped.
+
+    Raises:
+        KeyError: no group backup has this id.
+        PreconditionError: the group backup is still committing, or the bucket
+            its members live in is not the cluster's configured one.
+        ManifestError: the group manifest could not be marked; nothing changed.
+    """
+
+    db = db_controller.DBController()
+    group_backup = db.get_group_backup_by_id(group_backup_id)
+    if group_backup.status in (GroupBackup.STATUS_PENDING, GroupBackup.STATUS_IN_PROGRESS):
+        raise PreconditionError(
+            f"Group backup {group_backup.uuid} is still committing; delete it once "
+            f"it has completed or failed")
+
+    if group_backup.status != GroupBackup.STATUS_DELETING:
+        # The bucket first: a crash after it leaves a manifest that says
+        # deleting over a record that does not, which the next delete repairs,
+        # rather than a record nothing will ever finish deleting.
+        if group_backup.manifest_published():
+            _mark_manifest(group_backup, _config_for_deleting(db, group_backup),
+                           backup_manifest.GroupManifestState.DELETING)
+        group_backup.status = GroupBackup.STATUS_DELETING
+        group_backup.error_message = ""
+        group_backup.write_to_db()
+    tasks_controller.add_group_backup_delete_task(group_backup)
+
+
+def advance_group_backup_delete(group_backup_id) -> DeleteState:
+    """One pass of a group backup's delete: retire what members can be retired
+    now, and once all are, remove the group manifest and then the record.
+
+    Idempotent, so the delete task re-runs it until it answers ``DONE``.
+
+    Raises:
+        ManifestError, PreconditionError: the group manifest could not be
+            removed, or a member could not be retired; retryable.
     """
 
     db = db_controller.DBController()
     try:
         group_backup = db.get_group_backup_by_id(group_backup_id)
-    except KeyError as e:
-        return False, str(e)
+    except KeyError:
+        return DeleteState.DONE
+    if group_backup.status != GroupBackup.STATUS_DELETING:
+        return DeleteState.DONE
 
-    group_backup.status = GroupBackup.STATUS_DELETING
-    group_backup.write_to_db()
-    try:
-        backup_manifest.delete_group(
-            _config_for_group(group_backup), UUID(group_backup.uuid))
-    except (backup_manifest.ManifestError, PreconditionError) as e:
-        logger.warning("Group backup %s: could not delete group manifest: %s",
-                       group_backup.uuid, e)
+    # Resolved before this pass retires anything: a leaf deleted below takes the
+    # record the bucket is found by with it.
+    config = _config_for_deleting(db, group_backup)
+    if not _retire_members(db, group_backup):
+        return DeleteState.PENDING
+
+    if group_backup.manifest_published():
+        backup_manifest.delete_group(config, UUID(group_backup.uuid))
     group_backup.remove(db.kv_store)
-    retire_orphaned_member_backups(
-        [m["lvol_id"] for m in (group_backup.members or []) if m.get("lvol_id")], db=db)
-    return True, None
+    logger.info("Group backup %s deleted: every member retired", group_backup.uuid)
+    return DeleteState.DONE
+
+
+def abandon_group_backup_delete(group_backup_id, reason: str) -> None:
+    """Settle a group backup whose delete task ended unfinished: a timeout, the
+    retry ceiling, or a cancellation, none of which the task's handler sees.
+
+    If no member was touched, the group backup is restored as it was, completed
+    with its manifest committed again. If one was, what is left cannot restore as
+    a group: it is marked broken, in the record and in the bucket, and deleting
+    it again resumes the retirement. Best effort on the manifest: the record is
+    written regardless, and a manifest left saying ``deleting`` is never read as
+    committed.
+    """
+
+    db = db_controller.DBController()
+    try:
+        group_backup = db.get_group_backup_by_id(group_backup_id)
+    except KeyError:
+        return
+    if group_backup.status != GroupBackup.STATUS_DELETING:
+        return
+
+    published = group_backup.manifest_published()
+    if not published:
+        group_backup.status = GroupBackup.STATUS_FAILED
+    elif _members_touched(db, group_backup):
+        group_backup.status = GroupBackup.STATUS_BROKEN
+    else:
+        group_backup.status = GroupBackup.STATUS_COMPLETED
+    group_backup.error_message = f"delete did not finish: {reason}"
+
+    if published:
+        state = (backup_manifest.GroupManifestState.BROKEN
+                 if group_backup.status == GroupBackup.STATUS_BROKEN
+                 else backup_manifest.GroupManifestState.COMMITTED)
+        try:
+            _mark_manifest(group_backup, _config_for_deleting(db, group_backup), state)
+        except (backup_manifest.ManifestError, PreconditionError) as e:
+            logger.error("Group backup %s is %s, but its manifest could not be marked "
+                         "%s and still says deleting: %s",
+                         group_backup.uuid, group_backup.status, state, e)
+    group_backup.write_to_db()
+    logger.warning("Group backup %s delete abandoned (%s): now %s",
+                   group_backup.uuid, reason, group_backup.status)
+
+
+def _mark_manifest(group_backup, config, state) -> None:
+    """Rewrite the group manifest in the bucket with ``state``, from the copy
+    the bucket holds, so a broken group backup's manifest keeps naming the
+    members it was committed with."""
+    manifest = backup_manifest.read_group(config, UUID(group_backup.uuid))
+    if manifest.state != state:
+        backup_manifest.write_group(config, manifest.model_copy(update={"state": state}))
+
+
+def _config_for_deleting(db, group_backup):
+    """Credentials for a group backup's bucket while it is deleted.
+
+    Its members' bucket, as :func:`_config_for_group` resolves it, while any
+    member record is left. Retiring the last leaf removes the last record, and
+    then it is the cluster's configured bucket: the one every member was checked
+    against when the delete was marked.
+    """
+    for backup_id in group_backup.member_backup_ids():
+        try:
+            db.get_backup_by_id(backup_id)
+        except KeyError:
+            continue
+        return _config_for_group(group_backup)
+    return db.get_cluster_by_id(group_backup.cluster_id).get_backup_config()
+
+
+def _members_touched(db, group_backup) -> bool:
+    """Whether retiring a member has begun: a member deleted, merging, or merged."""
+    for backup_id in group_backup.member_backup_ids():
+        try:
+            member = db.get_backup_by_id(backup_id)
+        except KeyError:
+            return True
+        if member.status in (Backup.STATUS_MERGING, Backup.STATUS_MERGED):
+            return True
+    return False
+
+
+def _retire_members(db, group_backup) -> bool:
+    """Retire what members of a deleting group backup can be retired now.
+
+    A member nothing chains against is deleted. One the next generation's copy
+    chains against is merged into it once both are completed, one merge per
+    volume chain at a time, as the single-volume retention keeps it. Returns
+    whether every member is retired (deleted or merged).
+    """
+
+    retired = True
+    for backup_id in group_backup.member_backup_ids():
+        try:
+            member = db.get_backup_by_id(backup_id)
+        except KeyError:
+            continue                    # deleted
+        if member.status == Backup.STATUS_MERGED:
+            continue
+        chain = db.get_backups_by_lvol_id(member.lvol_id)
+        successor = next((b for b in chain if b.prev_backup_id == member.uuid), None)
+        busy = (member.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)
+                or any(b.status == Backup.STATUS_MERGING for b in chain))
+        if successor is None and not busy:
+            try:
+                backup_controller.delete_backup(member.uuid)
+            except KeyError:
+                pass                    # deleted concurrently
+            logger.info("Group backup %s: member %s deleted, nothing chains against it",
+                        group_backup.uuid, member.uuid[:8])
+            continue
+        retired = False
+        if (successor is not None and not busy
+                and member.status == Backup.STATUS_COMPLETED
+                and successor.status == Backup.STATUS_COMPLETED):
+            backup_controller.trigger_merge(successor, member)
+            logger.info("Group backup %s: member %s merging into its successor %s",
+                        group_backup.uuid, member.uuid[:8], successor.uuid[:8])
+    return retired
 
 
 def retire_orphaned_member_backups(lvol_ids, db=None):
@@ -538,10 +701,10 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
       as the single-volume schedule keeps it; the next cycle takes the rest.
     * A backup nothing chains against is deleted outright.
 
-    Called by :func:`delete_group_backup` for the generation just deleted and by
-    the group schedule every cycle, so a retirement that could not run (a
-    successor still uploading, a merge in flight) is picked up later, and so
-    member copies orphaned before this existed are swept too.
+    Called by the group schedule every cycle, for member copies orphaned before
+    a group backup's delete retired its own members (:func:`delete_group_backup`).
+    A member of a group backup being deleted is not an orphan: its group backup
+    still exists, and its delete task retires it.
 
     Returns ``(merges_started, deleted)``.
     """
@@ -717,6 +880,14 @@ def import_group_backup(export, cluster_id=None):
     uuid = str(group_manifest.group_backup_id)
     composite_id = f"{target_cluster}/{uuid}"
 
+    # Only a committed group backup is whole. One being deleted on its source,
+    # or broken by a delete that did not finish, has members that are retired
+    # or about to be.
+    if group_manifest.state != backup_manifest.GroupManifestState.COMMITTED:
+        raise PreconditionError(
+            f"Group backup {uuid} is {group_manifest.state} in its bucket, not "
+            f"committed; it cannot be imported")
+
     # Reject a group id collision before writing anything -- the group analog of
     # import_backups' per-backup collision check. Group-backup lookups resolve by
     # uuid, so a reused uuid would make either record unaddressable.
@@ -808,6 +979,12 @@ def import_group_backup_from_bucket(config, cluster_id=None):
 
     imported = []
     for group_manifest in group_manifests:
+        # A bucket holds group backups being deleted on their source too; they
+        # are not part of what it can restore, so they are left, not refused.
+        if group_manifest.state != backup_manifest.GroupManifestState.COMMITTED:
+            logger.info("Group backup %s is %s in the bucket; not importing it",
+                        group_manifest.group_backup_id, group_manifest.state)
+            continue
         # Each named member's whole chain, gathered from the bucket's member
         # manifests. Walked rather than taking every manifest in the bucket, which
         # would pull in other group backups' and standalone backups' chains.

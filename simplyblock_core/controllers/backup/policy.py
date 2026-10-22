@@ -11,6 +11,7 @@ import uuid
 
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import group_backup
+from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import (
@@ -319,9 +320,10 @@ def evaluate_group_policy(group):
     now = int(time.time())
 
     for gb in _group_backups_to_prune(completed, policy, now):
-        _, err = group_backup.delete_group_backup(gb.get_id())
-        if err:
-            logger.warning("Group retention could not delete group backup %s: %s", gb.uuid, err)
+        try:
+            group_backup.delete_group_backup(gb.get_id())
+        except (KeyError, PreconditionError, ManifestError) as e:
+            logger.warning("Group retention could not delete group backup %s: %s", gb.uuid, e)
 
 
 def evaluate_group_schedule(group):
@@ -383,10 +385,11 @@ def evaluate_group_schedule(group):
                         if lower_age <= (now - g.created_at) < upper_age]
         if len(tier_backups) > keep_count:
             oldest = tier_backups[0]
-            _, err = group_backup.delete_group_backup(oldest.get_id())
-            if err:
+            try:
+                group_backup.delete_group_backup(oldest.get_id())
+            except (KeyError, PreconditionError, ManifestError) as e:
                 logger.warning("Group schedule could not prune group backup %s: %s",
-                               oldest.uuid, err)
+                               oldest.uuid, e)
             return
 
 

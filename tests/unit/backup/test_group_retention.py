@@ -142,30 +142,3 @@ class TestOrphanedMemberBackups:
                   _backup("b9", "v2", created_at=1)], group_backups={"kept"})
         _, merged, deleted = self._retire(monkeypatch, db, lvols=("v1", "v2"))
         assert merged == [("a9", "a10")] and deleted == ["b9"]
-
-
-def test_deleting_a_group_backup_retires_its_members(monkeypatch):
-    from simplyblock_core import db_controller
-    gb = GroupBackup()
-    gb.uuid = "9b000000-0000-4000-8000-000000000009"    # a real uuid: the delete parses it
-    gb.cluster_id, gb.status = "cl", GroupBackup.STATUS_COMPLETED
-    gb.members = [{"lvol_id": "v1", "backup_id": "b1"}, {"lvol_id": "v2", "backup_id": "b2"}]
-    removed, retired = [], []
-
-    class _GroupDB:
-        kv_store = None
-
-        def get_group_backup_by_id(self, _id):
-            return gb
-
-    monkeypatch.setattr(GroupBackup, "write_to_db", lambda self, kv=None: None)
-    monkeypatch.setattr(GroupBackup, "remove", lambda self, kv=None: removed.append(self.uuid))
-    monkeypatch.setattr(db_controller, "DBController", lambda: _GroupDB())
-    monkeypatch.setattr(group_backup, "_config_for_group", lambda g: None)
-    monkeypatch.setattr(group_backup.backup_manifest, "delete_group", lambda cfg, uid: None)
-    monkeypatch.setattr(group_backup, "retire_orphaned_member_backups",
-                        lambda lvol_ids, db=None: retired.append(sorted(lvol_ids)) or (0, 0))
-
-    assert group_backup.delete_group_backup("cl/" + gb.uuid) == (True, None)
-    assert removed == [gb.uuid]
-    assert retired == [["v1", "v2"]], "the deleted generation's member volumes must be retired"

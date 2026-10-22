@@ -19,7 +19,7 @@ from simplyblock_core.kms import (
     lvol_dek_path,
     pool_kek_name,
 )
-from simplyblock_core.models.backup import Backup
+from simplyblock_core.models.backup import Backup, GroupBackup
 from simplyblock_core.models.backup_config import (
     BackupConfig,
     BackupLocation,
@@ -1019,10 +1019,11 @@ def delete_backup(backup_id):
             "successor instead of deleting it")
     if backup.group_backup_id:
         try:
-            db_controller.get_group_backup_by_id(backup.group_backup_id)
+            owner = db_controller.get_group_backup_by_id(backup.group_backup_id)
         except KeyError:
-            pass        # its group backup is gone: an orphaned member copy
-        else:
+            owner = None    # its group backup is gone: an orphaned member copy
+        # A group backup being deleted retires its own members.
+        if owner is not None and owner.status != GroupBackup.STATUS_DELETING:
             raise PreconditionError(
                 f"backup {backup.uuid} is a member of group backup "
                 f"{backup.group_backup_id}; delete the group backup instead")

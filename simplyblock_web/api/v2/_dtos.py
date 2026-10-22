@@ -135,6 +135,7 @@ TaskFunctionName = Literal[
     "s3_backup_restore",
     "s3_backup_merge",
     "group_backup_commit",
+    "group_backup_delete",
     "cluster_expand",
     "replication_final",
     "fdb_backup",

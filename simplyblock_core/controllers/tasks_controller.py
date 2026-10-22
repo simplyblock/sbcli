@@ -1282,6 +1282,32 @@ def add_backup_task(backup):
     )
 
 
+def add_group_backup_delete_task(group_backup):
+    """Create the task that retires a deleting group backup's members, unless
+    one is already open for it.
+
+    Like the commit task it does no data-plane RPC of its own (a member's merge
+    is its own FN_BACKUP_MERGE task), so it carries no node. Returns the task
+    id, or False when one is already open.
+    """
+    for task in db.get_job_tasks_by_function(group_backup.cluster_id,
+                                            JobSchedule.FN_GROUP_BACKUP_DELETE):
+        if ((task.function_params or {}).get("group_backup_id") == group_backup.uuid
+                and not task.canceled and task.status != JobSchedule.STATUS_DONE):
+            logger.info(f"Task found, skip adding new task: {task.uuid}")
+            return False
+    return _add_task(
+        JobSchedule.FN_GROUP_BACKUP_DELETE,
+        group_backup.cluster_id,
+        "",
+        "",
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        function_params={
+            "group_backup_id": group_backup.uuid,
+        },
+    )
+
+
 def add_group_backup_commit_task(group_backup):
     """Create the task that commits a consistency-group backup.
 

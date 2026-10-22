@@ -152,7 +152,12 @@ class GroupBackup(BaseModel):
     STATUS_IN_PROGRESS = 'in_progress'
     STATUS_COMPLETED = 'completed'
     STATUS_FAILED = 'failed'
+    #: Being deleted: its members are being retired, the group manifest says
+    #: so, and it is no longer restorable (design §9).
     STATUS_DELETING = 'deleting'
+    #: A delete ended after retiring some members: what is left cannot restore
+    #: as a group. Deleting it again resumes the retirement.
+    STATUS_BROKEN = 'broken'
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_PENDING: 0,
@@ -160,6 +165,7 @@ class GroupBackup(BaseModel):
         STATUS_COMPLETED: 2,
         STATUS_FAILED: 3,
         STATUS_DELETING: 4,
+        STATUS_BROKEN: 5,
     }
 
     cluster_id: str = ""
@@ -184,6 +190,12 @@ class GroupBackup(BaseModel):
 
     def watch_scope(self):
         return (self.cluster_id,)
+
+    def manifest_published(self) -> bool:
+        """Whether the group manifest was written: at the commit, which is the
+        only place ``completed_at`` is set, or at an import, of a committed one.
+        A group backup that failed before committing has none."""
+        return bool(self.completed_at)
 
     def member_backup_ids(self) -> list:
         """The ``Backup.get_id()`` of every member, in record order."""

@@ -440,11 +440,36 @@ def _run_group_backup_commit(task):
     set_result(task, "Group backup completed")
 
 
+def _run_group_backup_delete(task):
+    """Retire a deleting group backup's members, then remove its manifest and
+    record (design §9).
+
+    Does no data-plane RPC of its own: a member's merge is its own
+    FN_BACKUP_MERGE task, which this waits on. Defers while a member is still
+    being retired, and treats a manifest or member failure as retryable; a task
+    that ends unfinished settles the group backup in :func:`finalize_resource`.
+    """
+    group_backup_id = task.function_params.get("group_backup_id")
+    if not group_backup_id:
+        raise TaskAbort("Missing group_backup_id")
+
+    try:
+        state = group_backup.advance_group_backup_delete(group_backup_id)
+    except (ManifestError, PreconditionError) as e:
+        raise TaskRetry(f"Could not finish deleting the group backup: {e}")
+
+    if state == group_backup.DeleteState.PENDING:
+        raise TaskDefer("Group backup members still being retired")
+
+    set_result(task, "Group backup deleted")
+
+
 _HANDLERS = {
     JobSchedule.FN_BACKUP: _run_backup,
     JobSchedule.FN_BACKUP_RESTORE: _run_restore,
     JobSchedule.FN_BACKUP_MERGE: _run_merge,
     JobSchedule.FN_GROUP_BACKUP_COMMIT: _run_group_backup_commit,
+    JobSchedule.FN_GROUP_BACKUP_DELETE: _run_group_backup_delete,
 }
 
 
@@ -526,6 +551,14 @@ def finalize_resource(task):
             gb.error_message = reason
             gb.write_to_db()
 
+    elif task.function_name == JobSchedule.FN_GROUP_BACKUP_DELETE:
+        group_backup_id = task.function_params.get("group_backup_id")
+        if not group_backup_id:
+            return
+        # Restored if no member was touched, marked broken if one was; a no-op
+        # once the delete finished and the record is gone.
+        group_backup.abandon_group_backup_delete(group_backup_id, reason)
+
 
 SPEC = RunnerSpec(
     name="tasks-runner-backup",
@@ -542,7 +575,8 @@ SPEC = RunnerSpec(
 #: "max retry reached (8/8)" and would end any other task older than the
 #: backup timeout (2026-09-29).
 BACKUP_FUNCTIONS = (JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE,
-                    JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_GROUP_BACKUP_COMMIT)
+                    JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_GROUP_BACKUP_COMMIT,
+                    JobSchedule.FN_GROUP_BACKUP_DELETE)
 
 
 def main():

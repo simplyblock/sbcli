@@ -1450,10 +1450,14 @@ class CLIWrapperBase:
 
     def group_backup__delete(self, sub_command, args):
         from simplyblock_core.controllers.backup import group_backup
-        success, err = group_backup.delete_group_backup(args.group_backup_id)
-        if err:
-            return f"Delete failed: {err}"
-        return f"Group backup {args.group_backup_id} deleted"
+        try:
+            group_backup.delete_group_backup(args.group_backup_id)
+        except KeyError:
+            return f"Delete failed: group backup {args.group_backup_id} not found"
+        except (PreconditionError, ManifestError) as e:
+            return f"Delete failed: {e}"
+        return (f"Group backup {args.group_backup_id} is being deleted; its "
+                f"member backups are retired in the background")
 
     def group_backup__export(self, sub_command, args):
         from simplyblock_core.controllers.backup import group_backup

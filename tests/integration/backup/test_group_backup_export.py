@@ -226,6 +226,21 @@ class TestExportImportRoundTrip:
         with pytest.raises(KeyError):
             db.get_group_backup_by_id(f"{TARGET_CLUSTER}/{GROUP_BACKUP_UUID}")
 
+    @pytest.mark.parametrize("state", [backup_manifest.GroupManifestState.DELETING,
+                                       backup_manifest.GroupManifestState.BROKEN])
+    def test_a_group_backup_being_deleted_or_broken_is_refused(
+            self, db, source_cluster, state):
+        """Its members are, or may already be, retired on the source: importing it
+        would land a group backup that cannot restore."""
+        export = self._export_and_wipe(db)
+        export.group_manifest = export.group_manifest.model_copy(update={"state": state})
+
+        with pytest.raises(PreconditionError, match=str(state)):
+            group_backup.import_group_backup(export, cluster_id=TARGET_CLUSTER)
+
+        with pytest.raises(KeyError):
+            db.get_group_backup_by_id(f"{TARGET_CLUSTER}/{GROUP_BACKUP_UUID}")
+
     def test_a_torn_export_is_refused(self, db, source_cluster):
         """The group names a member whose manifest the export does not carry."""
         export = self._export_and_wipe(db)
@@ -276,6 +291,26 @@ class TestDiscoverAndImportFromBucket:
         restored = db.get_group_backup_by_id(f"{TARGET_CLUSTER}/{GROUP_BACKUP_UUID}")
         assert {m["backup_id"] for m in restored.members} == {
             f"{TARGET_CLUSTER}/{_backup_id(1)}", f"{TARGET_CLUSTER}/{_backup_id(2)}"}
+
+    def test_import_from_bucket_skips_a_group_backup_being_deleted(self, db, source_cluster):
+        """A bucket can hold a group backup whose deletion is in flight on its
+        source; the disaster-recovery import leaves it and imports the rest."""
+        export = group_backup.export_group_backup(
+            _seed_two_member_group(db)[0].get_id(), cluster_id=SOURCE_CLUSTER)
+        member_manifests = [m for group in export.members.groups for m in group.manifests]
+        for record in db.get_backups():
+            record.remove(db.kv_store)
+        db.get_group_backup_by_id(f"{SOURCE_CLUSTER}/{GROUP_BACKUP_UUID}").remove(db.kv_store)
+        deleting = export.group_manifest.model_copy(
+            update={"state": backup_manifest.GroupManifestState.DELETING})
+
+        with patch.object(backup_manifest, "list_all_groups", return_value=[deleting]), \
+                patch.object(backup_manifest, "list_all", return_value=member_manifests):
+            imported = group_backup.import_group_backup_from_bucket(
+                _config(), cluster_id=TARGET_CLUSTER)
+
+        assert imported == []
+        assert db.get_backups() == []
 
     def test_import_from_bucket_refuses_a_group_missing_its_members(
             self, db, source_cluster):

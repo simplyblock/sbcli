@@ -8,7 +8,11 @@ status code.
 from datetime import UTC, datetime
 from typing import Any
 
-from simplyblock_core.controllers.backup.manifest import GroupBackupExport
+from simplyblock_core.controllers.backup.manifest import (
+    GroupBackupExport,
+    ManifestError,
+)
+from simplyblock_core.exceptions import PreconditionError
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
     BACKUP_ID,
@@ -161,15 +165,27 @@ class TestRestoreGroupBackup:
 
 
 class TestDeleteGroupBackup:
-    def test_deletes_the_group_backup(self, client, db, group_backup, group_backup_controller):
-        group_backup_controller.delete_group_backup.return_value = (True, None)
+    def test_a_delete_is_accepted_and_finishes_in_the_background(
+            self, client, db, group_backup, group_backup_controller):
+        """The record and manifest are marked deleting; a task retires the
+        members and removes both, so the answer is 202, not 204."""
+        group_backup_controller.delete_group_backup.return_value = None
         response = client.delete(f'{BASE}/{GROUP_BACKUP_ID}/')
-        assert response.status_code == 204
+        assert response.status_code == 202
         group_backup_controller.delete_group_backup.assert_called_once_with(
             group_backup.get_id())
 
-    def test_a_delete_error_is_400(self, client, db, group_backup, group_backup_controller):
-        group_backup_controller.delete_group_backup.return_value = (False, 'bucket unreachable')
+    def test_a_group_backup_still_committing_is_409(
+            self, client, db, group_backup, group_backup_controller):
+        group_backup_controller.delete_group_backup.side_effect = PreconditionError(
+            'still committing')
+        response = client.delete(f'{BASE}/{GROUP_BACKUP_ID}/')
+        assert response.status_code == 409
+
+    def test_a_manifest_that_cannot_be_marked_is_400(
+            self, client, db, group_backup, group_backup_controller):
+        group_backup_controller.delete_group_backup.side_effect = ManifestError(
+            'bucket unreachable')
         response = client.delete(f'{BASE}/{GROUP_BACKUP_ID}/')
         assert response.status_code == 400
 

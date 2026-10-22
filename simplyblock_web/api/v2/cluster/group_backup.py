@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 from simplyblock_core.controllers.backup import group_backup as group_backup_controller
 from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup_config import S3Credentials
 
 from .._dependencies import Cluster, GroupBackupResource
@@ -208,14 +209,19 @@ def restore_group_backup(cluster: Cluster, group_backup: GroupBackupResource,
 
 
 @instance_api.delete('/', name='clusters:backups:groups:delete',
-                     status_code=204, responses={204: {"content": None}})
+                     status_code=202, responses={202: {"content": None}})
 def delete_group_backup(cluster: Cluster, group_backup: GroupBackupResource) -> Response:
-    """Delete a group backup: its group manifest and its record. The member
-    backups follow per-volume retention (design §9)."""
-    success, error = group_backup_controller.delete_group_backup(group_backup.get_id())
-    if error:
-        raise HTTPException(400, error)
-    return Response(status_code=204)
+    """Start deleting a group backup (design §9). Its record and manifest are
+    marked deleting, and a task retires its member backups and then removes
+    both; the record reads ``deleting`` until then, and ``broken`` if the delete
+    could not finish after retiring a member."""
+    try:
+        group_backup_controller.delete_group_backup(group_backup.get_id())
+    except PreconditionError as e:
+        raise HTTPException(409, str(e)) from e
+    except ManifestError as e:
+        raise HTTPException(400, str(e)) from e
+    return Response(status_code=202)
 
 
 api.include_router(instance_api)

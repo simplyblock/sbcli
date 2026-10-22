@@ -248,7 +248,8 @@ class TestBackupRunnerOwnsOnlyBackupTasks(unittest.TestCase):
         self.assertEqual(
             set(tasks_runner_backup.SPEC.function_names),
             {JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE,
-             JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_GROUP_BACKUP_COMMIT},
+             JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_GROUP_BACKUP_COMMIT,
+             JobSchedule.FN_GROUP_BACKUP_DELETE},
         )
 
 
