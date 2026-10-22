@@ -11,7 +11,7 @@ ARG UV_VERSION=0.12.22
 # does for dnf packages. go.mod's `go 1.24` line is an unrelated minimum
 # language-version requirement, not a toolchain pin, so any newer toolchain
 # here keeps building it fine.
-ARG GO_VERSION=1.27.2
+ARG GO_VERSION=1.27.3
 
 # The application interpreter, free-threaded ("t" suffix). Managed by uv rather
 # than dnf: UBI carries no free-threaded build, and tying the runtime to the
