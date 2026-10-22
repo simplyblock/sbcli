@@ -202,6 +202,12 @@ class ClusterDTO(BaseModel):
     tls_enabled: bool
     max_fault_tolerance: int
     backup_enabled: bool
+    # Sync replication: whether the cluster spans two sites, and the site the
+    # storage-node monitor records as out ("" = both in service) with how far
+    # its drain or fence got. Read by the operators of a stretched cluster.
+    sync_replication: bool = False
+    lost_site: str = ""
+    lost_site_state: str = ""
     capacity: CapacityStatDTO
 
     @field_serializer('secret', when_used='json')
@@ -238,6 +244,9 @@ class ClusterDTO(BaseModel):
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
             backup_enabled=bool(model.backup_config),
+            sync_replication=model.sync_replication,
+            lost_site=model.lost_site,
+            lost_site_state=model.lost_site_state,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -464,6 +473,8 @@ class StorageNodeDTO(BaseModel):
     device_count: int
     online_device_count: int
     failure_domain: int
+    # Sync replication: the site the node was added to ("" off a sync cluster).
+    site: str = ""
     capacity: CapacityStatDTO
 
     @staticmethod
@@ -495,6 +506,7 @@ class StorageNodeDTO(BaseModel):
             device_count=len(model.nvme_devices),
             online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
             failure_domain=model.failure_domain,
+            site=model.site,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
