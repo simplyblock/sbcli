@@ -103,6 +103,11 @@ class Verdict:
     #: control plane: only ESTALE withholds the grant, any other failure of
     #: the fence does not (planned loss, F3).
     fence_best_effort: bool = False
+    #: The loser's host state is unknown: on clusters with host fencing its
+    #: client host is revoked on the winner and Kubernetes remediates it
+    #: (docs/design/two-node-kubernetes-fencing.md, section 2). False when the
+    #: host is known to be alive (SPDK-only loss, planned loss).
+    host_fence: bool = False
     reason: str = ""
 
 
@@ -163,6 +168,7 @@ def _degraded_verdict(snap: Snapshot, survivor: NodeView, dead: NodeView, reason
     vuids = _all_lvs(snap)
     verdict = Verdict(V_DEGRADED, ARB_DEGRADED, raise_epoch=True, winner=survivor.node_id,
                       loser=dead.node_id, grant={v: survivor.node_id for v in vuids},
+                      host_fence=not (dead.spdk_lost or dead.planned_loss),
                       reason=reason)
     if dead.planned_loss and dead.reachable:
         # The node is still up until the control plane stops it: fence it

@@ -1138,6 +1138,19 @@ TWO_NODE_LEADERSHIP_RETRY_MS = 3000
 #: Campaign c5: a port-allow task open longer than this no longer holds back
 #: the arbiter's leadership restoration (it targets the same primary).
 TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
+#: Who decides which node of a two-node cluster continues alone
+#: (docs/design/two-node-kubernetes-fencing.md): the arbiter on the control
+#: plane, or Pacemaker on the nodes (the arbiter then stays out entirely).
+TWO_NODE_AUTHORITY_WITNESS = "witness"
+TWO_NODE_AUTHORITY_PACEMAKER = "pacemaker"
+TWO_NODE_AUTHORITIES = (TWO_NODE_AUTHORITY_WITNESS, TWO_NODE_AUTHORITY_PACEMAKER)
+#: Host fencing (kubernetes-fencing contract, section 3.2): a revocation is
+#: applied again this often, covering subsystems recreated with allow_any_host.
+TWO_NODE_HOST_FENCE_REASSERT_S = 10
+#: Timeout of each subsystem RPC of a host-fence revocation or release.
+TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S = 5
+#: Node condition the operator sets on a host-fenced node's Kubernetes Node.
+TWO_NODE_STORAGE_FENCED_CONDITION = "StorageFenced"
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60

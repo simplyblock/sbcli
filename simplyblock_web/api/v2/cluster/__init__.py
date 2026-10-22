@@ -178,6 +178,10 @@ class UpdatableClusterParameters(BaseModel):
     name: str | None = None
     #: Two-node arbitration (docs/design/two-node-arbitration.md); off by default.
     two_node_arbitration: bool | None = None
+    #: docs/design/two-node-kubernetes-fencing.md: "witness" or "pacemaker".
+    two_node_fencing_authority: Literal["witness", "pacemaker"] | None = None
+    #: Host fencing + Kubernetes integration (mode witness).
+    two_node_host_fencing: bool | None = None
 
 
 @instance_api.put('/', name='clusters:update')
@@ -187,6 +191,12 @@ def update(cluster: Cluster, parameters: UpdatableClusterParameters):
     if parameters.two_node_arbitration is not None:
         flag = parameters.two_node_arbitration
         db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_arbitration", flag))
+    if parameters.two_node_fencing_authority is not None:
+        authority = parameters.two_node_fencing_authority
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_fencing_authority", authority))
+    if parameters.two_node_host_fencing is not None:
+        host_fencing = parameters.two_node_host_fencing
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_host_fencing", host_fencing))
 
     return Response(status_code=204)
 
