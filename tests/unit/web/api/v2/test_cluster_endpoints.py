@@ -230,7 +230,13 @@ class TestDeleteCluster:
         response = client.delete(f'/api/v2/clusters/{CLUSTER_ID}/')
 
         assert response.status_code == 204
-        cluster_ops.delete_cluster.assert_called_once_with(CLUSTER_ID)
+        cluster_ops.delete_cluster.assert_called_once_with(CLUSTER_ID, force=False)
+
+    def test_force_brings_the_cluster_down(self, client, cluster, cluster_ops):
+        response = client.delete(f'/api/v2/clusters/{CLUSTER_ID}/?force=true')
+
+        assert response.status_code == 204
+        cluster_ops.delete_cluster.assert_called_once_with(CLUSTER_ID, force=True)
 
     def test_conflict_maps_to_409(self, client, cluster, cluster_ops):
         cluster_ops.delete_cluster.side_effect = ValueError('cluster is not empty')
