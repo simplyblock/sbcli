@@ -133,28 +133,32 @@ def build_group_manifest(group_backup, member_backups: dict):
 
 
 def _config_for_group(group_backup):
-    """Credentials for a group backup's bucket (design §3.4).
+    """Credentials for the bucket a group backup's members live in (design §3.4).
 
-    Like the single-volume ``_config_for``: the location comes from the group
-    backup record, and only the credentials come from the cluster, because a
-    manifest must never carry them.
+    The group record keeps no location of its own: each member backup records
+    one, and they share it, so the group manifest's bucket is theirs. Each member
+    goes through the single-volume ``_config_for``, so one outside the cluster's
+    configured bucket is refused exactly as it would be on its own.
 
     Raises:
-        PreconditionError: the cluster's configured bucket is not the one this
-            group backup lives in, so its credentials cannot be assumed to reach
-            it -- the cluster's backup configuration was repointed while the
-            group backup was in flight.
+        PreconditionError: no member backup record is left to locate the group
+            backup by, or a member lives in a bucket other than the cluster's
+            configured one -- the cluster's backup configuration was repointed
+            while the group backup was in flight.
     """
 
     db = db_controller.DBController()
-    config = db.get_cluster_by_id(group_backup.cluster_id).get_backup_config()
-    location = group_backup.get_location()
-    if config.location() != location:
+    config = None
+    for backup_id in group_backup.member_backup_ids():
+        try:
+            member = db.get_backup_by_id(backup_id)
+        except KeyError:
+            continue
+        config = backup_controller._config_for(member)
+    if config is None:
         raise PreconditionError(
-            f"Group backup {group_backup.uuid} lives in bucket "
-            f"{location.bucket_name}, but cluster {group_backup.cluster_id} is "
-            f"configured for {config.bucket_name}; supply credentials for the "
-            f"group backup's bucket")
+            f"Group backup {group_backup.uuid} has no member backup left to "
+            f"locate its bucket by")
     return config
 
 
@@ -221,7 +225,6 @@ def create_group_backup(consistency_group_id, group_seq=None):
     # group_name, not name: BaseModel.name is the class name (replication.py).
     group_backup.consistency_group_name = group.group_name
     group_backup.group_seq = group_seq
-    group_backup.location = location_dict
     group_backup.encrypted = any(f["encrypted"] for f in member_facts)
     group_backup.created_at = int(time.time())
     group_backup.status = GroupBackup.STATUS_IN_PROGRESS
@@ -676,24 +679,6 @@ def discover_group_backups(config):
     return backup_manifest.list_all_groups(config)
 
 
-def _group_location(export) -> dict:
-    """Where a group export's members live, as a serialized ``BackupLocation``.
-
-    A group backup is homogeneous: its members share one location (design §3.4),
-    which is also where its group manifest lives. The group manifest never records
-    it -- a manifest describes objects, not where they are -- so it is recovered
-    from the member export, which does.
-
-    Raises:
-        ValueError: the export carries no member manifests, so there is no
-            location to recover.
-    """
-    for group in export.members.groups:
-        if group.manifests:
-            return group.location.model_dump(mode="json")
-    raise ValueError("group export carries no member manifests")
-
-
 def import_group_backup(export, cluster_id=None):
     """Register a group backup described by a ``GroupBackupExport`` into this
     cluster, preserving ids and all-or-nothing across the group (design §6.5).
@@ -758,10 +743,6 @@ def import_group_backup(export, cluster_id=None):
             "group export is missing member manifests for "
             + ", ".join(str(b) for b in missing))
 
-    # The homogeneous members' location, recovered before anything is written so a
-    # malformed export is refused up front.
-    location = _group_location(export)
-
     # Land the member backups all-or-nothing (chains, id collisions) on the
     # single-volume path. Nothing above this wrote a record, so a refusal here
     # leaves the import empty.
@@ -790,7 +771,6 @@ def import_group_backup(export, cluster_id=None):
     group_backup.consistency_group_name = group_manifest.source.consistency_group_name
     group_backup.group_seq = group_manifest.source.generation
     group_backup.members = members
-    group_backup.location = location
     group_backup.encrypted = group_manifest.encrypted
     group_backup.size = group_manifest.size
     group_backup.created_at = int(group_manifest.created_at.timestamp())

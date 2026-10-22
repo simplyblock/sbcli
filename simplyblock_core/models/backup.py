@@ -172,10 +172,8 @@ class GroupBackup(BaseModel):
     #: The member backups, one per member snapshot of the generation. Each entry
     #: is ``{"lvol_id": <member lvol id>, "backup_id": <Backup.get_id()>}``.
     members: list = default_factory(list)
-    #: Homogeneous across members (design §3.4): a serialized ``BackupLocation``
-    #: (never credentials), read through :meth:`get_location`, and one encryption
-    #: disposition shared by every member.
-    location: dict = default_factory(dict)
+    #: One encryption disposition shared by every member (design §3.4). Where
+    #: the members live is not repeated here: each member Backup records it.
     encrypted: bool = False
     size: int = 0
     created_at: int = 0
@@ -187,16 +185,6 @@ class GroupBackup(BaseModel):
 
     def watch_scope(self):
         return (self.cluster_id,)
-
-    def get_location(self) -> BackupLocation:
-        """Where the member backups live, shared by all members (design §3.4).
-
-        Raises:
-            ValueError: no location was recorded.
-        """
-        if not self.location:
-            raise ValueError(f"GroupBackup {self.uuid} has no recorded location")
-        return BackupLocation.model_validate(self.location)
 
     def member_backup_ids(self) -> list:
         """The ``Backup.get_id()`` of every member, in record order."""

@@ -101,7 +101,6 @@ def _group_backup(db, members, cluster=SOURCE_CLUSTER,
     gb.group_seq = 7
     gb.status = status
     gb.members = [{"lvol_id": m.lvol_id, "backup_id": m.get_id()} for m in members]
-    gb.location = _config().location().model_dump(mode="json")
     gb.encrypted = False
     gb.size = sum(m.size for m in members)
     gb.created_at = 100
@@ -178,7 +177,9 @@ class TestExportImportRoundTrip:
         assert restored.consistency_group_name == "gitea"
         assert {m["backup_id"] for m in restored.members} == {
             f"{TARGET_CLUSTER}/{_backup_id(1)}", f"{TARGET_CLUSTER}/{_backup_id(2)}"}
-        assert restored.get_location().bucket_name == BUCKET
+        # Where the group lives is its members': each imported member records it.
+        for member_id in restored.member_backup_ids():
+            assert db.get_backup_by_id(member_id).get_location().bucket_name == BUCKET
 
     def test_member_ids_and_group_stamp_are_preserved(self, db, source_cluster):
         export = self._export_and_wipe(db)

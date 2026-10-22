@@ -20,7 +20,6 @@ def _group_backup():
         {"lvol_id": "lv-db", "backup_id": "cl-1/b-db"},
         {"lvol_id": "lv-data", "backup_id": "cl-1/b-data"},
     ]
-    gb.location = {"bucket_name": "backups", "region": "us-east-1"}
     gb.encrypted = False
     gb.size = 3 * 1024 ** 3
     return gb
