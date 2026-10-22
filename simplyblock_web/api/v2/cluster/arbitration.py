@@ -1,6 +1,7 @@
 """Two-node arbitration endpoints (docs/design/two-node-arbitration.md, section 7.4)."""
 
 import time
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -61,7 +62,7 @@ def get(cluster: Cluster) -> dict:
     out["fencing_authority"] = cluster.two_node_fencing_authority or constants.TWO_NODE_AUTHORITY_WITNESS
     out["host_fencing"] = bool(cluster.two_node_host_fencing)
     out["storage_fenced_condition"] = constants.TWO_NODE_STORAGE_FENCED_CONDITION
-    out["client_hosts"] = {n.get_id(): n.client_host_nqn for n in _members(cluster.get_id())}
+    out["client_hosts"] = {n.get_id(): list(n.client_host_nqns) for n in _members(cluster.get_id())}
     return out
 
 
@@ -117,21 +118,22 @@ def set_remediation(cluster: Cluster, body: _Remediation) -> None:
 
 class _ClientHost(BaseModel):
     node_id: str
-    host_nqn: str = Field(min_length=0, max_length=223)
+    host_nqns: list[Annotated[str, Field(max_length=223)]] = Field(default_factory=list, max_length=8)
 
 
 @api.put('/client-host', name='clusters:arbitration:client-host', status_code=204)
 def set_client_host(cluster: Cluster, body: _ClientHost) -> None:
-    """The operator reports the kernel NVMe host NQN of the Kubernetes node a
-    storage node runs on; a host fence revokes it on the peer
-    (docs/design/two-node-kubernetes-fencing.md, section 3.1). Empty clears it."""
+    """The operator reports the kernel NVMe host NQNs of the Kubernetes node a
+    storage node runs on (the kernel default and the simplyblock form); a host
+    fence revokes all of them on the peer
+    (docs/design/two-node-kubernetes-fencing.md, section 3.1). Empty clears them."""
     node = next((n for n in _members(cluster.get_id()) if n.get_id() == body.node_id), None)
     if node is None:
         raise HTTPException(422, "node_id is not a member of this cluster")
-    nqn = body.host_nqn.strip()
-    if nqn and not nqn.startswith("nqn."):
-        raise HTTPException(422, "host_nqn is not an NVMe qualified name")
-    db.atomic_update(node, lambda fresh: setattr(fresh, "client_host_nqn", nqn))
+    nqns = sorted({h.strip() for h in body.host_nqns if h.strip()})
+    if any(not h.startswith("nqn.") for h in nqns):
+        raise HTTPException(422, "every host NQN must be an NVMe qualified name")
+    db.atomic_update(node, lambda fresh: setattr(fresh, "client_host_nqns", nqns))
 
 
 class _HostFenceRelease(BaseModel):

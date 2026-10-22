@@ -102,9 +102,17 @@ running through the winner's path and must not be restarted:
 |---|---|---|
 | `two_node_fencing_authority` | Cluster | `witness` (default) |
 | `two_node_host_fencing` | Cluster | `true` enables host fencing and the Kubernetes integration |
-| `client_host_nqn` | StorageNode | kernel NVMe host NQN of the Kubernetes node co-located with this storage node; reported by the operator (`PUT .../arbitration/client-host`) |
+| `client_host_nqns` | StorageNode | every kernel NVMe host NQN of the Kubernetes node co-located with this storage node; reported by the operator (`PUT .../arbitration/client-host`) |
 
-Without `client_host_nqn` for the loser nothing is revoked, `host_fences[<loser>].state` is
+A Kubernetes node presents two host NQNs: the kernel default (`/etc/nvme/hostnqn`, written by the
+CSI node plugin from a random host id, used by plain volumes) and the simplyblock form
+`nqn.2014-08.io.simplyblock:uuid:<node UID>` (access-controlled and DH-HMAC-CHAP volumes). Both
+are revoked. The CSI node plugin publishes the kernel default as the Node annotation
+`storage.simplyblock.io/nvme-host-nqn`; the operator derives the other from the node's UID. A
+new identity reported while a fence is in force puts it back to `revoking` until it is revoked
+too.
+
+Without any `client_host_nqns` for the loser nothing is revoked, `host_fences[<loser>].state` is
 `unavailable` and `StorageFenced` is never set: Kubernetes is not told to act on an unverified
 fence. Logged as `TWO_NODE_HOST_FENCE_UNAVAILABLE`.
 
@@ -113,10 +121,10 @@ fence. Logged as `TWO_NODE_HOST_FENCE_UNAVAILABLE`.
 Record field `ClusterArbitration.host_fences`, keyed by the fenced node:
 
 ```json
-{"<loser>": {"state": "revoked", "on": "<winner>", "host_nqn": "nqn.2014-08.org.nvmexpress:uuid:...",
+{"<loser>": {"state": "revoked", "on": "<winner>", "host_nqns": ["nqn.2014-08.org.nvmexpress:uuid:..."],
              "epoch": 12, "since": 1761130000000, "revoked_at": 1761130000412,
              "reasserted_at": 1761130010412, "release_requested": false,
-             "subsystems": {"<nqn>": {"mode": "any", "added": ["<winner host nqn>"]}},
+             "subsystems": {"<nqn>": {"mode": "any", "added": ["<winner host nqn>"], "removed": []}},
              "error": ""}}
 ```
 
@@ -135,7 +143,7 @@ NQN: the returning peer's SPDK needs them to resync, campaign c1 B2):
 - **Allow-list subsystem** (`allow_any_host: false`): `nvmf_subsystem_remove_host(loser)` if the
   loser is listed. SPDK disconnects the host's controllers as part of the call.
 - **Allow-any subsystem**: add every host that should keep access (the winner's
-  `client_host_nqn` and every other host connected to that subsystem except the loser, from
+  `client_host_nqns` and every other host connected to that subsystem except the loser's, from
   `nvmf_subsystem_get_controllers`), switch the subsystem to an allow-list
   (`nvmf_subsystem_allow_any_host false`), then `nvmf_subsystem_add_host(loser)` followed by
   `nvmf_subsystem_remove_host(loser)`: the remove is what disconnects the loser's live
@@ -173,7 +181,7 @@ it (between rules 2 and 3).
 
 ### 3.4 Operator (mode `witness`)
 
-- Reports `client_host_nqn` per storage node at deployment and whenever it changes.
+- Reports `client_host_nqns` per storage node (section 3.1) at deployment and whenever they change.
 - Polls `GET /clusters/{id}/arbitration` every second on each node's agent.
 - `host_fences[<n>].state == revoked`: set `StorageFenced=True` (reason `WitnessVerdict`,
   epoch) on node `<n>`.
@@ -187,7 +195,7 @@ it (between rules 2 and 3).
 
 | Method | Path | Body | Use |
 |---|---|---|---|
-| PUT | `/api/v2/clusters/{id}/arbitration/client-host` | `{"node_id", "host_nqn"}` | operator: host NQN of the co-located Kubernetes node |
+| PUT | `/api/v2/clusters/{id}/arbitration/client-host` | `{"node_id", "host_nqns": [...]}` | operator: host NQNs of the co-located Kubernetes node |
 | POST | `/api/v2/clusters/{id}/arbitration/host-fence/release` | `{"node_id"}` | operator: node is clean, give its host access back |
 | GET | `/api/v2/clusters/{id}/arbitration` | | adds `host_fences`, `fencing_authority`, `host_fencing` |
 | PUT | `/api/v2/clusters/{id}` | `{"two_node_fencing_authority", "two_node_host_fencing"}` | settings |
@@ -290,14 +298,14 @@ Read-only; the agent never asks Pacemaker to fence. In order of preference:
 
 | Repo | Package | Mode |
 |---|---|---|
-| sbcli | settings, `client_host_nqn`, `host_fences`, API (section 3.5) | both |
+| sbcli | settings, `client_host_nqns`, `host_fences`, API (section 3.5) | both |
 | sbcli | host fence lifecycle in the arbiter (section 3.2) | witness |
 | sbcli | winner policy for partitions (section 3.3) | witness |
 | sbcli | `pacemaker` gates: arbiter, Go collector, event queue, planned loss (section 4.2) | pacemaker |
 | operator | fence agent DaemonSet, `StorageFenced`, `StorageFenceRemediation(Template)` CRDs + controller, NHC sample, release protocol | both |
 | operator | node agent duties of section 4.3, Pacemaker readers of section 4.5 | pacemaker |
 | ultra + SPDK fork | grant lifts a self-fence (section 4.4) | pacemaker |
-| CSI | forward keep-alive and fast_io_fail (arbitration contract 9.1, still open) | both |
+| CSI | forward keep-alive and fast_io_fail when the connect entry says `two-node` (arbitration contract 9.1); publish the kernel host NQN annotation | both |
 | test | simulator scenarios for every row of section 2; bed: OpenShift two-node with arbiter + KubeVirt (witness), two-node with fencing (pacemaker) | both |
 
 ## 7. Open questions

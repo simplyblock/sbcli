@@ -166,6 +166,7 @@ class TestClusterFlag:
 
 # docs/design/two-node-kubernetes-fencing.md, section 3.5
 HOST_B = 'nqn.2014-08.org.nvmexpress:uuid:host-b'
+HOST_B2 = 'nqn.2014-08.io.simplyblock:uuid:host-b-uid'
 
 
 class TestKubernetesFencing:
@@ -179,17 +180,18 @@ class TestKubernetesFencing:
         assert body['host_fences'] == {}
 
     def test_client_host_is_stored_on_the_member(self, client, db, two_nodes):
-        response = client.put(f'{BASE}/client-host', json={'node_id': NODE_B, 'host_nqn': HOST_B})
+        response = client.put(f'{BASE}/client-host',
+                              json={'node_id': NODE_B, 'host_nqns': [HOST_B, ' ' + HOST_B, HOST_B2]})
         assert response.status_code == 204
         node = StorageNode()
         _applied(db, node)
-        assert node.client_host_nqn == HOST_B
+        assert node.client_host_nqns == sorted([HOST_B, HOST_B2])
 
     def test_client_host_rejects_non_members_and_non_nqns(self, client, db, two_nodes):
         assert client.put(f'{BASE}/client-host',
-                          json={'node_id': 'other', 'host_nqn': HOST_B}).status_code == 422
+                          json={'node_id': 'other', 'host_nqns': [HOST_B]}).status_code == 422
         assert client.put(f'{BASE}/client-host',
-                          json={'node_id': NODE_B, 'host_nqn': 'host-b'}).status_code == 422
+                          json={'node_id': NODE_B, 'host_nqns': ['host-b']}).status_code == 422
         db.atomic_update.assert_not_called()
 
     def test_release_is_refused_until_releasable(self, client, db, record, audit):

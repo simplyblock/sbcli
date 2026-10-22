@@ -357,7 +357,7 @@ class World:
             n.lvstore_stack = [{"type": "bdev_distr", "name": "distr_%s_0" % lvs,
                                 "params": {"name": "distr_%s_0" % lvs}}]
             n.health_check = True
-            n.client_host_nqn = client_host(name)
+            n.client_host_nqns = [client_host(name)]
             n.is_secondary_node = False
             n.lvstore_ports = {k: {"lvol_subsys_port": v[0], "hublvol_port": v[1]}
                                for k, v in LVS_PORTS.items()}

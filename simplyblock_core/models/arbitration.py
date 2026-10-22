@@ -83,9 +83,10 @@ class ClusterArbitration(BaseModel):
     leadership_restored: dict = default_factory(dict)
     #: Host fences (docs/design/two-node-kubernetes-fencing.md, section 3.2):
     #: {fenced node id: {"state": revoking|revoked|releasable|restoring|unavailable,
-    #: "on": winner id, "host_nqn": str, "epoch": int, "since": ms,
+    #: "on": winner id, "host_nqns": [str], "epoch": int, "since": ms,
     #: "revoked_at": ms, "reasserted_at": ms, "release_requested": bool,
-    #: "subsystems": {nqn: {"mode": "any"|"list", "added": [host nqns]}},
+    #: "subsystems": {nqn: {"mode": "any"|"list", "added": [host nqns],
+    #: "removed": [host nqns]}},
     #: "error": str}}. The operator sets StorageFenced on a node whose entry is
     #: ``revoked``; an entry is removed once its release is done.
     host_fences: dict = default_factory(dict)
