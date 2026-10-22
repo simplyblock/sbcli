@@ -325,11 +325,15 @@ def _resume_finish(task, snapshot):
 
 
 def _cutover_owns(lvol_id, cluster_id):
-    """True while a final cutover is running for this volume.
+    """True while a final cutover is in its endgame for this volume.
 
     Such a volume already holds its lvstore and every other transfer on it is
     held, so waiting inline for its transfer starves nothing -- and this is the
-    window the client's IO freeze is paying for.
+    window the client's IO freeze is paying for. A cutover that is merely
+    queued (a migration plan queues every volume's up front, waiting for the
+    initial copy) holds nothing yet: counting it made each initial copy block
+    the runner for the long inline budget while the other volumes' transfers
+    were not even submitted.
     """
     if not lvol_id:
         return False
@@ -342,7 +346,8 @@ def _cutover_owns(lvol_id, cluster_id):
             continue
         if other.status == JobSchedule.STATUS_DONE or other.canceled:
             continue
-        if (other.function_params or {}).get("lvol_id") == lvol_id:
+        params = other.function_params or {}
+        if params.get("lvol_id") == lvol_id and params.get("cutover_lvs"):
             return True
     return False
 
