@@ -20,7 +20,6 @@ def _group_backup():
         {"lvol_id": "lv-db", "backup_id": "cl-1/b-db"},
         {"lvol_id": "lv-data", "backup_id": "cl-1/b-data"},
     ]
-    gb.encrypted = False
     gb.size = 3 * 1024 ** 3
     return gb
 
@@ -34,7 +33,12 @@ def test_group_backup_round_trips():
     assert restored.group_seq == 7
     assert restored.members == gb.members
     assert restored.member_backup_ids() == ["cl-1/b-db", "cl-1/b-data"]
-    assert restored.encrypted is False
+
+
+def test_the_group_record_does_not_repeat_its_members_encryption():
+    """Each member Backup records whether it is encrypted; the group record does
+    not keep a copy that would have to agree with them."""
+    assert "encrypted" not in GroupBackup().get_attrs_map()
 
 
 def test_group_backup_members_default_is_not_shared():

@@ -773,7 +773,6 @@ class GroupBackupDTO(BaseModel):
     #: The member backups, one per member volume of the generation. Each member
     #: backup carries its own volume; GET .../members/ returns the records.
     member_backup_ids: list[UUID]
-    encrypted: bool
     size: int
     created_at: datetime
     #: When the group backup committed: every member completed and the group
@@ -792,7 +791,6 @@ class GroupBackupDTO(BaseModel):
             group_seq=model.group_seq,
             status=model.status,
             member_backup_ids=[_bare_uuid(m["backup_id"]) for m in model.members],
-            encrypted=model.encrypted,
             size=model.size,
             created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
             completed_at=(datetime.fromtimestamp(model.completed_at, tz=UTC)

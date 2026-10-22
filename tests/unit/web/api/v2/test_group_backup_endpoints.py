@@ -92,6 +92,13 @@ class TestGetGroupBackup:
         assert body['member_backup_ids'] == [BACKUP_ID]
         assert 'members' not in body
 
+    def test_encryption_is_reported_by_the_member_backups_not_the_group(
+            self, client, db, group_backup):
+        """Each member backup carries its own ``encrypted``; the group does not
+        repeat it."""
+        body = client.get(f'{BASE}/{GROUP_BACKUP_ID}/').json()
+        assert 'encrypted' not in body
+
     def test_times_are_utc_datetimes_and_an_uncommitted_one_has_no_completion(
             self, client, db, group_backup):
         body = client.get(f'{BASE}/{GROUP_BACKUP_ID}/').json()

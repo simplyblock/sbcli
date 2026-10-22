@@ -225,7 +225,6 @@ def create_group_backup(consistency_group_id, group_seq=None):
     # group_name, not name: BaseModel.name is the class name (replication.py).
     group_backup.consistency_group_name = group.group_name
     group_backup.group_seq = group_seq
-    group_backup.encrypted = any(f["encrypted"] for f in member_facts)
     group_backup.created_at = int(time.time())
     group_backup.status = GroupBackup.STATUS_IN_PROGRESS
     group_backup.write_to_db()
@@ -771,7 +770,6 @@ def import_group_backup(export, cluster_id=None):
     group_backup.consistency_group_name = group_manifest.source.consistency_group_name
     group_backup.group_seq = group_manifest.source.generation
     group_backup.members = members
-    group_backup.encrypted = group_manifest.encrypted
     group_backup.size = group_manifest.size
     group_backup.created_at = int(group_manifest.created_at.timestamp())
     group_backup.completed_at = int(group_manifest.completed_at.timestamp())

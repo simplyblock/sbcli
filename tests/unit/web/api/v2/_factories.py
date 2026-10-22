@@ -191,7 +191,6 @@ def make_group_backup(**attrs) -> GroupBackup:
     group_backup.group_seq = 7
     group_backup.status = GroupBackup.STATUS_IN_PROGRESS
     group_backup.members = [{'lvol_id': VOLUME_ID, 'backup_id': f'{CLUSTER_ID}/{BACKUP_ID}'}]
-    group_backup.encrypted = False
     group_backup.size = 1024 ** 3
     group_backup.created_at = 1700000000
     group_backup.completed_at = 0

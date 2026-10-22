@@ -172,9 +172,8 @@ class GroupBackup(BaseModel):
     #: The member backups, one per member snapshot of the generation. Each entry
     #: is ``{"lvol_id": <member lvol id>, "backup_id": <Backup.get_id()>}``.
     members: list = default_factory(list)
-    #: One encryption disposition shared by every member (design §3.4). Where
-    #: the members live is not repeated here: each member Backup records it.
-    encrypted: bool = False
+    #: Where the members live and whether they are encrypted is not repeated
+    #: here: each member Backup records both, and they agree (design §3.4).
     size: int = 0
     created_at: int = 0
     completed_at: int = 0

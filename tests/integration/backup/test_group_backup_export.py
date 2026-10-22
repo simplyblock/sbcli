@@ -101,7 +101,6 @@ def _group_backup(db, members, cluster=SOURCE_CLUSTER,
     gb.group_seq = 7
     gb.status = status
     gb.members = [{"lvol_id": m.lvol_id, "backup_id": m.get_id()} for m in members]
-    gb.encrypted = False
     gb.size = sum(m.size for m in members)
     gb.created_at = 100
     gb.completed_at = 200

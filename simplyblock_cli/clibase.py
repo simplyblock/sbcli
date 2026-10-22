@@ -1417,7 +1417,6 @@ class CLIWrapperBase:
             "Gen": gb.group_seq,
             "Status": gb.status,
             "Members": len(gb.members),
-            "Encrypted": "yes" if gb.encrypted else "no",
             "Size": utils.humanbytes(gb.size),
         }
 
