@@ -8,6 +8,9 @@ import simplyblock_core.controllers.consistency_group_controller as cgc
 from simplyblock_core.controllers.consistency_group_controller import (
     ConsistencyGroupError,
 )
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
 from tests.unit.web.api.v2 import _factories as factories
 
 BASE = (f'/api/v2/clusters/{factories.CLUSTER_ID}'
@@ -50,6 +53,21 @@ class TestGroupReplicationEnableDisable:
         resp = client.put(f'{BASE}/replication',
                           json={"replication_policy_id": factories.REPLICATION_POLICY_ID})
         assert resp.status_code == 409
+
+    def test_a_member_that_cannot_start_replicating_is_mapped_to_409(
+            self, client, db, cluster, consistency_group_controller):
+        # A member refused by replication_start (a policy whose target is the
+        # group's own cluster: #1502) surfaces from attach_group_policy as a
+        # ReplicationConfigError, not a ConsistencyGroupError. Unmapped, it was
+        # an unhandled 500 with a traceback and no access-log line (run
+        # 20261020-1300-ebs, test 2). Regression: 2026-10-20-attach-500.
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        consistency_group_controller.attach_group_policy.side_effect = \
+            ReplicationConfigError("Could not start replication of m1 to target t")
+        resp = client.put(f'{BASE}/replication',
+                          json={"replication_policy_id": factories.REPLICATION_POLICY_ID})
+        assert resp.status_code == 409
+        assert "Could not start replication" in resp.json()["detail"]
 
 
 class TestGroupDelete:

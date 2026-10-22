@@ -276,8 +276,10 @@ def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
     """Enable or disable group replication (design-csi-addons-replication.md
     §14.4): a policy id attaches the whole group to that group replication
     policy; ``null`` detaches it (the group and its members stay grouped by
-    label). A refused attach (not a consistency-group policy, missing policy) is
-    a 409.
+    label). A refused attach is a 409: not a consistency-group policy, a missing
+    policy, or a member that cannot start replicating under it (a policy whose
+    target is the group's own cluster, refused by replication_start). Unmapped,
+    the last was an unhandled 500 (run 20261020-1300-ebs, test 2).
     """
     if body.replication_policy_id is None:
         consistency_group_controller.detach_group_policy(group)
@@ -285,7 +287,8 @@ def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
         try:
             consistency_group_controller.attach_group_policy(
                 group, str(body.replication_policy_id))
-        except ConsistencyGroupError as e:
+        except (ConsistencyGroupError,
+                replication_policy_controller.ReplicationConfigError) as e:
             raise HTTPException(409, str(e))
     return Response(status_code=204)
 

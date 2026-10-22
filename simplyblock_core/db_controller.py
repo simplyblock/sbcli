@@ -137,6 +137,9 @@ class _NoTxnStore:
     def set(self, key, value):
         self._kv.set(key, value)
 
+    def __setitem__(self, key, value):
+        self.set(key, value)
+
     def clear(self, key):
         self._kv.clear(key)
 
@@ -1182,13 +1185,20 @@ class DBController(metaclass=Singleton):
 
         Returns the fresh, post-mutation object, or ``None`` if the object no
         longer exists in the DB.
+
+        A store without transactions (the unit-tier fdb stub and the fake
+        stores in tests) gets the same read-modify-write over ``_NoTxnStore``,
+        not atomic, as ``claim_lvol_ns_slot`` does.
         """
-        if not self.kv_store:
+        kv = self.kv_store
+        if not kv:
             return None
         key = obj.get_db_id().encode()
-        transactional = fdb.transactional(DBController._atomic_update_tx)
-        return transactional(self, self.kv_store, key, type(obj), mutate_fn,
-                             type(obj).active_indexes(self.kv_store))
+        index_list = type(obj).active_indexes(kv)
+        if hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._atomic_update_tx)
+            return transactional(self, kv, key, type(obj), mutate_fn, index_list)
+        return self._atomic_update_tx(_NoTxnStore(kv), key, type(obj), mutate_fn, index_list)
 
     # ---- vuid allocation (monotonic sequence) ----
     #
