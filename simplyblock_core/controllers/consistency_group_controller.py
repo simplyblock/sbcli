@@ -911,20 +911,14 @@ def demote_group(group):
                     lvol_controller.replication_failback(m.get_id())
 
         group = db.get_consistency_group_by_id(group.get_id())
-        created_ids, err = create_group_snapshot_for_group(group)
+        group_seq, err = create_group_snapshot_for_group(group)
         if err:
             return {"demoted": False, "error": err,
                     "members": [{"lvol_id": m.get_id(), "demoted": False, "error": err}
                                 for m in members]}
 
-        by_lvol = {}
-        for sid in created_ids or []:
-            try:
-                s = db.get_snapshot_by_id(sid)
-            except KeyError:
-                continue
-            if s.lvol:
-                by_lvol[s.lvol.get_id()] = sid
+        by_lvol = {s.lvol.get_id(): s.get_id()
+                   for s in generation_snapshots(group, group_seq) if s.lvol}
         for m in members:
             sid = by_lvol.get(m.get_id())
             if not sid:
@@ -1056,22 +1050,24 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
 
 
 def generation_for_request(group, request_id):
-    """The member snapshot ids of the generation taken with ``request_id``.
+    """The sequence of the generation taken with ``request_id``.
 
-    Empty when no generation of this group carries the id, and always empty for
+    None when no generation of this group carries the id, and always None for
     an empty id, so a take without an id never matches one.
     """
     if not request_id:
-        return []
-    return [s.get_id() for s in _group_snapshots(group)
-            if s.group_request_id == request_id]
+        return None
+    return next((s.group_seq for s in _group_snapshots(group)
+                 if s.group_request_id == request_id), None)
 
 
 def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, lock=True,
                                     request_id=""):
     """Take ONE crash-consistent snapshot of every group member.
 
-    Returns (list_of_snapshot_ids, None) or (None, error). All-or-nothing:
+    Returns (group_seq, None) or (None, error): the generation is what was
+    taken, and generation_snapshots(group, group_seq) its member snapshots.
+    All-or-nothing:
     a failure anywhere rolls back every snapshot bdev of this tick (SPDK
     already GC'd if the failure was inside the RPC; registration/record
     failures are rolled back here) and the generation counter does not move.
@@ -1079,10 +1075,10 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
     ``request_id`` makes the take idempotent for a caller that may retry it
     after losing the answer: it is stamped on every member snapshot, and a take
     with an id some generation of this group already carries returns that
-    generation's snapshot ids without taking another.
+    generation without taking another.
     """
     taken = generation_for_request(group, request_id)
-    if taken:
+    if taken is not None:
         return taken, None
 
     members, precheck_err = _precheck_members(group)
@@ -1130,7 +1126,7 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
         # Checked again under the lock: a concurrent take with the same id may
         # have committed between the check above and acquiring it.
         taken = generation_for_request(group, request_id)
-        if taken:
+        if taken is not None:
             return taken, None
         group_seq = group.last_group_seq + 1
         now_ts = int(time.time())
@@ -1278,7 +1274,7 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 
         logger.info("Consistency group %s: generation %d complete (%d snapshots)",
                     group.uuid[:8], group_seq, len(created_ids))
-        return created_ids, None
+        return group_seq, None
 
 
 # --------------------------------------------------------------------------- #

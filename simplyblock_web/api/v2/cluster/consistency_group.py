@@ -254,11 +254,10 @@ def take_generation(cluster: Cluster, group: ConsistencyGroupResource,
     generation already taken under that id.
     """
     request_id = body.request_id if body is not None else ''
-    ids, err = consistency_group_controller.create_group_snapshot_for_group(
+    seq, err = consistency_group_controller.create_group_snapshot_for_group(
         group, request_id=request_id)
     if err is not None:
         raise HTTPException(422, err)
-    seq = db.get_snapshot_by_id(ids[0]).group_seq
     fresh = db.get_consistency_group_by_id(group.get_id())
     for row in consistency_group_controller.list_generations(fresh):
         if row["group_seq"] == seq:

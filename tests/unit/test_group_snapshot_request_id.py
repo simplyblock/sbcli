@@ -5,7 +5,8 @@ call and recording its sequence) retries with the same request id. The take
 must answer with the generation it already took rather than freeze the group
 and take another, which would leave one unused generation behind per lost
 answer. The id is stamped on every member snapshot of the generation, so the
-lookup reads the snapshots the take wrote and needs no other record.
+lookup reads the snapshots the take wrote and needs no other record. A take
+answers with its generation's sequence, the one identifier of what it took.
 """
 import pytest
 
@@ -52,14 +53,14 @@ def group(db):
 
 
 def test_the_generation_a_request_id_took_is_found(group):
-    assert sorted(cgc.generation_for_request(group, "req-1")) == ["s-3a", "s-3b"]
-    assert cgc.generation_for_request(group, "req-2") == ["s-4a"]
+    assert cgc.generation_for_request(group, "req-1") == 3
+    assert cgc.generation_for_request(group, "req-2") == 4
 
 
 def test_an_unknown_or_empty_request_id_finds_nothing(group):
-    assert cgc.generation_for_request(group, "req-9") == []
+    assert cgc.generation_for_request(group, "req-9") is None
     # Generation 5 carries no id; an empty id must never match it.
-    assert cgc.generation_for_request(group, "") == []
+    assert cgc.generation_for_request(group, "") is None
 
 
 def test_a_retried_take_answers_with_the_generation_it_took(group, monkeypatch):
@@ -68,7 +69,7 @@ def test_a_retried_take_answers_with_the_generation_it_took(group, monkeypatch):
         raise AssertionError("a retried take must not take another generation")
     monkeypatch.setattr(cgc, '_precheck_members', no_take)
 
-    ids, err = cgc.create_group_snapshot_for_group(group, request_id="req-1", lock=False)
+    seq, err = cgc.create_group_snapshot_for_group(group, request_id="req-1", lock=False)
 
     assert err is None
-    assert sorted(ids) == ["s-3a", "s-3b"]
+    assert seq == 3

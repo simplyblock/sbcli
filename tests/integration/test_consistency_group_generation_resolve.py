@@ -142,3 +142,17 @@ def test_a_replicated_copy_on_the_peer_cluster_is_not_a_member_snapshot(db):
     copy.write_to_db(db.kv_store)
 
     assert _ids(cgc.generation_snapshots(group, 3)) == _ids([mine])
+
+
+def test_a_group_backup_backs_up_the_generation_its_take_answered(db, monkeypatch):
+    """Without a sequence, the backup takes a generation and backs up the one
+    the take answers with, not one read back off a snapshot it created."""
+    a, _ = _lvol(db, "lv-a"), _lvol(db, "lv-b")
+    group = _group(db, {"lv-a": (1, 0), "lv-b": (1, 0)})
+    _snap(db, group, a, 3)
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group", lambda g: (3, None))
+
+    group_backup_id, err = group_backup.create_group_backup(group.get_id())
+
+    assert group_backup_id is None
+    assert "lv-b" in err

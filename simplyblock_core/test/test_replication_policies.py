@@ -1089,7 +1089,7 @@ def test_group_demote_leaves_the_serving_peer_untouched_on_reprotect(monkeypatch
 
     def _record_group_snapshot(group, **kwargs):
         snapped.append(group.uuid)
-        return [], None
+        return 1, None
     monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _record_group_snapshot)
 
     def _record_demote(lvol_id):
@@ -1255,13 +1255,18 @@ def test_group_demote_resolves_to_peer_primary_and_ships_home(monkeypatch):
     monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
     monkeypatch.setattr(rfs, "fence_source_paths", lambda *a, **k: None)
 
+    cut = []
+
     def _group_snap_cut(group, **kw):
-        ids = []
         for src, sid in (("PB1", "DEMOTE_PB1"), ("PB2", "DEMOTE_PB2")):
-            db._snapshots.append(_snap(sid, db.get_lvol_by_id(src)))
-            ids.append(sid)
-        return ids, None
+            snap = _snap(sid, db.get_lvol_by_id(src))
+            db._snapshots.append(snap)
+            cut.append(snap)
+        return 7, None
     monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _group_snap_cut)
+    # The fake has no group-snapshot lookup; the cut is generation 7.
+    monkeypatch.setattr(cgc, "generation_snapshots",
+                        lambda group, seq: cut if seq == 7 else [])
 
     result = cgc.demote_group(local)
 

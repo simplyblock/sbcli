@@ -361,8 +361,7 @@ class TestTakeGeneration:
 
     def _setup(self, db, consistency_group_controller, seq_taken):
         db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
-        db.get_snapshot_by_id.return_value = factories.make_snapshot(group_seq=seq_taken)
-        consistency_group_controller.create_group_snapshot_for_group.return_value = (["s-1"], None)
+        consistency_group_controller.create_group_snapshot_for_group.return_value = (seq_taken, None)
         consistency_group_controller.list_generations.return_value = [self._row(3), self._row(4)]
 
     def test_the_request_id_is_passed_and_its_generation_answered(

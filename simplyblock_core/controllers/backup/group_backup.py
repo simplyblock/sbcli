@@ -181,13 +181,9 @@ def create_group_backup(consistency_group_id, group_seq=None):
 
     cluster_id = group.cluster_id
     if group_seq is None:
-        snapshot_ids, err = cg.create_group_snapshot_for_group(group)
+        group_seq, err = cg.create_group_snapshot_for_group(group)
         if err is not None:
             return None, err
-        try:
-            group_seq = db.get_snapshot_by_id(snapshot_ids[0]).group_seq
-        except (KeyError, IndexError):
-            return None, "group snapshot was taken but its generation is unreadable"
 
     # A torn generation is refused rather than backed up as a group that
     # silently lacks a volume (§5).

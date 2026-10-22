@@ -785,11 +785,13 @@ class CLIWrapperBase:
 
     def cluster__replication_policy_snapshot(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller
-        snap_ids, err = consistency_group_controller.create_group_snapshot(
+        group_seq, err = consistency_group_controller.create_group_snapshot(
             args.policy_id)
         if err:
             return f"Group snapshot failed: {err}"
-        return utils.print_table([{"Snapshot": s} for s in snap_ids])
+        group = db_controller.DBController().get_consistency_group_for_policy(
+            args.policy_id)
+        return self._cg_generation_table(group, group_seq)
 
     def cluster__replication_policy_list(self, sub_command, args):
         data = [{
@@ -1299,6 +1301,13 @@ class CLIWrapperBase:
                     return g
             raise
 
+    def _cg_generation_table(self, group, group_seq):
+        """The member snapshots of the generation a take answered with."""
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        return utils.print_table([
+            {"Gen": group_seq, "Snapshot": s.get_id(), "Volume": s.lvol.get_id()}
+            for s in cgc.generation_snapshots(group, group_seq)])
+
     def consistency_group__list(self, sub_command, args):
         db = db_controller.DBController()
         data = [{
@@ -1359,10 +1368,11 @@ class CLIWrapperBase:
 
     def consistency_group__snapshot_take(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller as cgc
-        ids, err = cgc.create_group_snapshot_for_group(self._cg_resolve(args.group_id))
+        group = self._cg_resolve(args.group_id)
+        group_seq, err = cgc.create_group_snapshot_for_group(group)
         if err:
             return f"Group snapshot failed: {err}"
-        return utils.print_table([{"Snapshot": s} for s in ids])
+        return self._cg_generation_table(group, group_seq)
 
     def consistency_group__snapshot_list(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller as cgc
