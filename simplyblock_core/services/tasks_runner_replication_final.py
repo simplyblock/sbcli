@@ -396,7 +396,10 @@ def _acquire_lvs_claim(task, lvol, tasks):
                       round=params.get("shrink_round"))
     # Committed immediately: the claim has to be visible to the other hosts'
     # scans for the whole cutover, not only once the task next changes state.
-    return _record(task, cutover_lvs=lvs_name, cutover_group=own_group)
+    # endgame_started_at survives a released-and-retaken claim: the plan
+    # forecast measures a cutover from its FIRST claim to done.
+    extra = {} if params.get("endgame_started_at") else {"endgame_started_at": time.time()}
+    return _record(task, cutover_lvs=lvs_name, cutover_group=own_group, **extra)
 
 
 def _await_cutover_proceed(task, params):

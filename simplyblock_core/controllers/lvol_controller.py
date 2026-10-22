@@ -6092,7 +6092,7 @@ def _resolve_target_map_id(target_node, lvol_bdev):
     return None
 
 
-def replication_commit(lvol_id, delete_source=False):
+def replication_commit(lvol_id, delete_source=False, plan_id="", require_baseline=False):
     """Planned cutover for migration mode (and the final step of fail-back).
 
     Enqueues the FN_REPLICATION_FINAL task, which performs an iterative
@@ -6108,6 +6108,10 @@ def replication_commit(lvol_id, delete_source=False):
     The first shrink snapshot is taken here so the pipeline starts immediately;
     the runner owns the rest. Returns a dict describing the queued cutover, or
     (False, error).
+
+    ``plan_id`` ties the task to a migration plan; ``require_baseline`` keeps
+    the endgame from starting before the volume's initial copy has replicated
+    (a plan queues every commit up front -- docs/online-migration.md).
     """
     db_controller = DBController()
     try:
@@ -6154,6 +6158,8 @@ def replication_commit(lvol_id, delete_source=False):
             # Migration semantics on request: retire the source volume once
             # the cutover state is durable (see _finalize in the final runner).
             "delete_source": bool(delete_source),
+            "plan_id": plan_id,
+            "require_baseline": bool(require_baseline),
         })
     if not task:
         logger.error("Failed to enqueue replication-final task")
