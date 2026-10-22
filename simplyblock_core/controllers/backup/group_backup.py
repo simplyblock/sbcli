@@ -385,26 +385,12 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
         return None, None, "a restored consistency group needs a name"
 
     cluster_id = group_backup.cluster_id
-    existing = db.get_consistency_group_by_name(cluster_id, into_group_name)
-    if existing is not None:
-        # A group record outlives its members: the last member out resets the
-        # generation, it does not remove the group. So the name of an earlier
-        # restore whose claims were since deleted is still taken by an EMPTY
-        # record, and refusing it blocked every repeat restore into the same
-        # name (live 2026-10-20, restored-cg). An empty leftover is reclaimed --
-        # deleted, so the restore mints a fresh, correctly pinned group rather
-        # than inheriting a stale node pin -- while a group with live members
-        # is refused as before: a group restore always produces a new group.
-        try:
-            cg.delete_group(existing)
-        except cg.ConsistencyGroupError as e:
-            return None, None, (
-                f"consistency group {into_group_name} already exists in cluster "
-                f"{cluster_id} and is in use ({e}); a group restore always "
-                "produces a new group")
-        logger.info("Reclaimed the empty leftover consistency group %s (%s) for "
-                    "the restore of group backup %s", into_group_name,
-                    existing.uuid[:8], group_backup.uuid)
+    # A group restore always produces a new group, and never deletes one that
+    # holds the name: an empty group is not known to be meant for replacing.
+    if db.get_consistency_group_by_name(cluster_id, into_group_name) is not None:
+        return None, None, (
+            f"consistency group {into_group_name} already exists in cluster "
+            f"{cluster_id}; a group restore always produces a new group")
 
     # Resolve the member backups and validate every chain BEFORE creating any
     # volume, so a doomed restore leaves nothing behind (design §6.2). The
