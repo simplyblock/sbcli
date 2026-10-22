@@ -63,6 +63,15 @@ def test_plan_never_touches_hublvol_or_foreign_subsystems():
     assert steps == []
 
 
+def test_plan_covers_volume_subsystems_the_db_did_not_list():
+    """A DB read that misses a volume must not leave the loser admitted while
+    the fence reports revoked (sim K1: volumes without a pool)."""
+    prefix = "nqn.2023-02.io.simplyblock:cl:lvol:"
+    steps = hf.plan_revoke([_sub(VOL1, True), _sub(HUB, True)], set(), HOST_B, {HOST_A}, {},
+                           volume_prefix=prefix)
+    assert [s.nqn for s in steps] == [VOL1]
+
+
 def test_plan_is_idempotent_after_a_revocation():
     steps = hf.plan_revoke([_sub(VOL1, False, [HOST_A])], {VOL1}, HOST_B, {HOST_A}, {})
     assert steps == []

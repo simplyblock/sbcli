@@ -1795,7 +1795,9 @@ def default_host_fence_revoke(db, winner: StorageNode, host_nqn: str) -> dict:
     from simplyblock_core.arbitration import host_fence
     keep = {winner.client_host_nqn} if winner.client_host_nqn else set()
     rpc = winner.rpc_client(timeout=int(constants.TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S), retry=0)
-    return host_fence.revoke(rpc, _volume_nqns(db, winner.cluster_id), host_nqn, keep)
+    cluster_nqn = getattr(db.get_cluster_by_id(winner.cluster_id), "nqn", "") or ""
+    prefix = cluster_nqn + ":lvol:" if cluster_nqn else ""
+    return host_fence.revoke(rpc, _volume_nqns(db, winner.cluster_id), host_nqn, keep, prefix)
 
 
 def default_host_fence_release(db, winner: StorageNode, subsystems: dict, host_nqn: str) -> None:

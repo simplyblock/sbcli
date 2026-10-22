@@ -39,12 +39,18 @@ def _hosts(subsystem: dict) -> set:
     return {h.get("nqn", "") for h in subsystem.get("hosts") or [] if h.get("nqn")}
 
 
-def fenceable(nqn: str, volume_nqns: set) -> bool:
-    return bool(nqn) and nqn in volume_nqns and HUBLVOL_MARK not in nqn
+def fenceable(nqn: str, volume_nqns: set, volume_prefix: str = "") -> bool:
+    """A volume subsystem: listed in the DB, or named like a volume of the
+    cluster (``<cluster nqn>:lvol:``). Both, so that neither a DB read that
+    misses a volume nor a subsystem named otherwise (namespaced subsystems)
+    leaves the loser admitted while the fence reports ``revoked``."""
+    if not nqn or HUBLVOL_MARK in nqn:
+        return False
+    return nqn in volume_nqns or bool(volume_prefix and nqn.startswith(volume_prefix))
 
 
 def plan_revoke(subsystems: list, volume_nqns: set, loser: str, keep: set,
-                connected: dict) -> list:
+                connected: dict, volume_prefix: str = "") -> list:
     """What to change so that ``loser`` cannot reach any volume subsystem.
 
     ``subsystems``: ``nvmf_get_subsystems`` of the winner. ``keep``: hosts that
@@ -54,7 +60,7 @@ def plan_revoke(subsystems: list, volume_nqns: set, loser: str, keep: set,
     steps = []
     for sub in subsystems:
         nqn = sub.get("nqn", "")
-        if not fenceable(nqn, volume_nqns):
+        if not fenceable(nqn, volume_nqns, volume_prefix):
             continue
         hosts = _hosts(sub)
         if sub.get("allow_any_host"):
@@ -65,7 +71,7 @@ def plan_revoke(subsystems: list, volume_nqns: set, loser: str, keep: set,
     return steps
 
 
-def revoke(rpc, volume_nqns: set, loser: str, keep: set, timeout_note: str = "") -> dict:
+def revoke(rpc, volume_nqns: set, loser: str, keep: set, volume_prefix: str = "") -> dict:
     """Apply ``plan_revoke`` on one node. Returns {nqn: {"mode", "added"}} for
     every subsystem changed. Raises on the first failed RPC: the caller keeps
     the fence in ``revoking`` and tries again (every step is idempotent)."""
@@ -73,11 +79,11 @@ def revoke(rpc, volume_nqns: set, loser: str, keep: set, timeout_note: str = "")
     connected: dict = {}
     for sub in subsystems:
         nqn = sub.get("nqn", "")
-        if sub.get("allow_any_host") and fenceable(nqn, volume_nqns):
+        if sub.get("allow_any_host") and fenceable(nqn, volume_nqns, volume_prefix):
             ctrls = rpc.nvmf_subsystem_get_controllers(nqn) or []
             connected[nqn] = {c.get("hostnqn", "") for c in ctrls if c.get("hostnqn")}
     changed = {}
-    for step in plan_revoke(subsystems, volume_nqns, loser, keep, connected):
+    for step in plan_revoke(subsystems, volume_nqns, loser, keep, connected, volume_prefix):
         if step.mode == MODE_ANY:
             for host in step.add:
                 rpc.subsystem_add_host(step.nqn, host)
@@ -88,7 +94,7 @@ def revoke(rpc, volume_nqns: set, loser: str, keep: set, timeout_note: str = "")
             rpc.subsystem_add_host(step.nqn, loser)
         rpc.subsystem_remove_host(step.nqn, loser)
         changed[step.nqn] = {"mode": step.mode, "added": list(step.add)}
-        logger.warning("Host fence%s: %s revoked on %s (%s)", timeout_note, loser, step.nqn, step.mode)
+        logger.warning("Host fence: %s revoked on %s (%s)", loser, step.nqn, step.mode)
     return changed
 
 
