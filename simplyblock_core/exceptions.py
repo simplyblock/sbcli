@@ -82,6 +82,19 @@ class SyncSiteOfflineError(PreconditionError):
     on not online; only a forced promote may fail it over."""
 
 
+class SyncSiteConflictError(PreconditionError):
+    """A volume create asked for one site (``site``) and named an owner node
+    (``node_id``) on another (``node_site``): a contradiction the backend
+    refuses rather than resolves - the explicit node is a deliberate
+    override, and silently moving it is worse than refusing it."""
+
+    def __init__(self, message: str, *, node_id: str, node_site: str, site: str):
+        self.node_id = node_id
+        self.node_site = node_site
+        self.site = site
+        super().__init__(message)
+
+
 class SyncGroupMemberError(PreconditionError):
     """A member of a consistency group could not be resolved to a live volume;
     the group operation is refused as a whole. ``volumes`` lists the ids."""
