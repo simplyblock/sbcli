@@ -356,3 +356,36 @@ def test_shrink_deadline_proceeds_to_cutover(monkeypatch):
                         "shrink_deadline": 1})
     # Returning (rather than raising) is what hands over to the freeze.
     _shrink(runner, task)
+
+
+def _install_raising(monkeypatch, nodes, rep, exc):
+    db = _FakeDB(nodes, rep)
+    monkeypatch.setattr(runner, "db", db)
+
+    def _run_cutover(*_args, **_kwargs):
+        raise exc
+    monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)
+
+
+def test_a_dropped_connection_waits_without_burning_a_retry(monkeypatch):
+    from simplyblock_core.rpc_client import RPCConnectionError
+    rep = LVolReplication()
+    rep.cutover_proceed = True
+    _install_raising(monkeypatch, {"S1": _node("S1"), "T1": _node("T1")}, rep,
+                     RPCConnectionError("Could not reach remote"))
+
+    with pytest.raises(TaskDefer, match="Could not reach remote"):
+        runner.task_runner(_task().frozen_view(), [])
+
+
+def test_an_error_the_target_answered_burns_a_retry(monkeypatch):
+    """A JSON-RPC error proves the server was reached: it fails the same way
+    on every attempt and is not waited out."""
+    from simplyblock_core.rpc_client import RPCRemoteError
+    rep = LVolReplication()
+    rep.cutover_proceed = True
+    _install_raising(monkeypatch, {"S1": _node("S1"), "T1": _node("T1")}, rep,
+                     RPCRemoteError("Invalid parameters", code=-32602))
+
+    with pytest.raises(TaskRetry, match="Invalid parameters"):
+        runner.task_runner(_task().frozen_view(), [])

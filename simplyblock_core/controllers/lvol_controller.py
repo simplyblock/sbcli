@@ -35,6 +35,7 @@ from simplyblock_core.kms import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -4421,8 +4422,13 @@ def replication_start_error(lvol_id, replication_cluster_id=None, replication_po
 
 def requested_destination_pool(db_controller, lvol, cluster_id):
     """The pool the caller of replication start named for *lvol*, when it is a
-    pool of *cluster_id*, the destination now in question; otherwise ""."""
-    pool_uuid = getattr(lvol, "replication_pool_uuid", "")
+    pool of *cluster_id*, the destination now in question, and no policy
+    manages the volume; otherwise an empty string."""
+    # A policy owns the volume's replication once attached, and its target
+    # names the pool; one named by an earlier start by hand no longer applies.
+    if lvol.replication_policy_id:
+        return ""
+    pool_uuid = lvol.replication_pool_uuid
     if not pool_uuid:
         return ""
     try:
@@ -6137,9 +6143,23 @@ def replication_commit(lvol_id, delete_source=False):
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    # A caller that cannot tell whether its commit arrived sends it again. The
-    # repeat names the cutover already queued, running, or done rather than
-    # queuing a second one, which would build a second clone.
+    # A caller that cannot tell whether its commit arrived sends it again, and
+    # may send it to another API replica. The lookup and the enqueue happen
+    # under the volume's lock, so two commits cannot both find nothing and
+    # both enqueue; a repeat names the cutover already queued, running, or
+    # done rather than queuing a second one, which would build a second clone.
+    try:
+        with DbLock(f"replication_commit/{lvol_id}", timeout=constants.REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC):
+            return _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source)
+    except DbLockBusyError:
+        existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+        if existing:
+            return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
+        return False, "another commit of this volume is being queued"
+
+
+def _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source):
+    """replication_commit's lookup and enqueue, under the volume's lock."""
     existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
     if existing:
         return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
@@ -6182,6 +6202,11 @@ def replication_commit(lvol_id, delete_source=False):
             "delete_source": bool(delete_source),
         })
     if not task:
+        # The enqueue refuses a cutover already queued, which a writer that
+        # took no lock may have queued since the lookup.
+        existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+        if existing:
+            return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
         logger.error("Failed to enqueue replication-final task")
         return False, "Failed to enqueue cutover task"
 

@@ -1028,6 +1028,9 @@ REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
 # waited out without burning a task.retry. One window per task: a burned retry
 # does not open another, so the window and max_retry do not multiply.
 REPL_CUTOVER_TRANSIENT_WINDOW_SEC = 600
+# How long a commit waits for another commit of the same volume to finish
+# queuing its cutover: a couple of database round trips.
+REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC = 10
 # Delete the superseded original volume BEFORE building the fail-back clone
 # (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
 # original's blob id while its parent snapshot's clone registry is already

@@ -35,8 +35,9 @@ def _pool(uuid, cluster_id, status=Pool.STATUS_ACTIVE):
     return pool
 
 
-def _lvol(crypto="", replication_node_id="", pool_uuid=""):
+def _lvol(crypto="", replication_node_id="", pool_uuid="", policy=""):
     lvol = LVol()
+    lvol.replication_policy_id = policy
     lvol.uuid = "LV1"
     lvol.node_id = "N_SRC"
     lvol.crypto_bdev = crypto
@@ -140,3 +141,12 @@ def test_a_requested_pool_of_another_cluster_is_not_used(db):
     db(lvol)
 
     assert sr._destination_pool_uuid(_node("N_OTHER", OTHER), lvol=lvol, source_cluster_id=SRC) == "P_OTHER"
+
+
+def test_a_policy_overrides_a_pool_named_before_it(db):
+    """Started by hand into one pool, stopped, then attached to a policy: the
+    policy's pool wins, and the earlier pool is not consulted."""
+    lvol = _lvol(pool_uuid="P_TGT_B", policy="POLICY-1")
+    db(lvol)
+
+    assert lvol_controller.requested_destination_pool(lvol_controller.DBController(), lvol, TGT) == ""

@@ -30,6 +30,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCConnectionError
 from simplyblock_core.services import replication_final_step
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
@@ -236,7 +237,7 @@ def _reconstitute_group(rep):
 def _cutover_failed(task, err, transient=False) -> NoReturn:
     """Turn a failed cutover attempt into the driver's retry semantics.
 
-    A transient failure -- the target unreachable, or an RPC that raised --
+    A transient failure -- the target unreachable, or an RPC without an answer --
     raises :class:`TaskDefer` behind a cooldown without burning a retry, for
     REPL_CUTOVER_TRANSIENT_WINDOW_SEC from the first one, and indefinitely
     while the target node is not online. The window is the task's, not the
@@ -559,10 +560,14 @@ def task_runner(task: JobSchedule, tasks):
                 operation=params.get("operation", "replicate"))
     except replication_final_step.CutoverUnreachable as e:
         _cutover_failed(task, str(e), transient=True)
-    except Exception as e:
-        # An RPC that raised is as likely a dropped connection as anything.
-        logger.exception(f"Cutover raised: {e}")
+    except RPCConnectionError as e:
+        # Unreachable, or no answer within the timeout: waited out.
         _cutover_failed(task, str(e), transient=True)
+    except Exception as e:
+        # Anything else was answered, an RPC error included: it fails the
+        # same way next time, and burns a retry.
+        logger.exception(f"Cutover raised: {e}")
+        _cutover_failed(task, str(e))
 
     if not ok:
         _cutover_failed(task, err)
