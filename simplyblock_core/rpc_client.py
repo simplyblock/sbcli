@@ -1,5 +1,6 @@
 import errno
 import hashlib
+import http.client
 import json
 import threading
 from collections import OrderedDict
@@ -189,6 +190,21 @@ class RPCRemoteError(RPCException):
         self.data = data
 
 
+def request_reached_remote(err: BaseException) -> bool:
+    """True when a failed RPC provably reached SPDK: it answered with an
+    error, answered garbage, or was still working when the read timed out.
+    False for "never connected" / "dropped before any response", where the
+    request may never have been executed.
+
+    Callers that probe a transfer's state after a raise need this: a
+    ``transfer_state`` of "No process" means "finished and cleaned up" only
+    if the final step actually ran.
+    """
+    if isinstance(err, (RPCRemoteError, RPCProtocolError)):
+        return True
+    return isinstance(err, RPCConnectionError) and isinstance(err.__cause__, ReadTimeout)
+
+
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
 
 
@@ -208,6 +224,32 @@ JC_REMOVE_JM_STILL_IN_USE = -22
 #: 2026-09-02 on spdk R26.3: replacing the JM out of every vuid on a node also
 #: drops it from JC, so the follow-up release finds nothing left to do.
 JC_REMOVE_JM_NOT_USED = -13
+
+
+#: Socket-level failures meaning the peer dropped the connection before
+#: sending any part of a response (stale keep-alive socket). RemoteDisconnected
+#: is a ConnectionResetError subclass; listed for clarity.
+_DROPPED_BEFORE_RESPONSE = (http.client.RemoteDisconnected, ConnectionResetError,
+                            BrokenPipeError, ConnectionAbortedError)
+
+
+def _is_dropped_before_response(exc: BaseException) -> bool:
+    """True when a requests ``ConnectionError`` was caused by the peer
+    dropping the connection before replying. requests wraps the urllib3
+    ``ProtocolError('Connection aborted.', <OSError>)`` in ``args``, so walk
+    args as well as the cause/context chain."""
+    seen = set()
+    stack: list = [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, _DROPPED_BEFORE_RESPONSE):
+            return True
+        stack.extend(a for a in getattr(e, "args", ()) if isinstance(a, BaseException))
+        stack.extend((e.__cause__, e.__context__))
+    return False
 
 
 def _build_session(host, port, username, password: SecretStr, retry: int,
@@ -343,9 +385,7 @@ class RPCClient:
         # param of the same name landing in **kwargs.
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            response = self.session.post(
-                self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
-                headers={"X-RPC-Timeout": str(effective_timeout)})
+            response = self._post_with_stale_retry(method, wire_payload, effective_timeout)
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
@@ -368,6 +408,42 @@ class RPCClient:
             raise RPCRemoteError(**error)
 
         return data['result']
+
+    def _post_with_stale_retry(self, method, wire_payload, effective_timeout):
+        """POST once; on a connection that died before ANY response byte
+        came back, rebuild the session and POST exactly once more.
+
+        urllib3 never resends a POST after the request was written (see
+        DEFAULT_ALLOWED_METHODS), and pooled keep-alive connections outlive
+        the peer: a restarted SPDK/proxy, or a network outage that swallowed
+        the FIN, leaves sockets in the pool that look open until the next
+        write is answered with RST. That RPC then fails although SPDK never
+        saw it (SFAM-2834: bdev_alceml_create during a node restart).
+
+        Only "dropped with no response" is retried (RemoteDisconnected,
+        reset, broken pipe, aborted). A read timeout is NOT: there the
+        request is known to have been delivered and may be executing.
+        The whole pooled session for this host is evicted first, because
+        every other idle socket in it is very likely just as dead.
+        """
+        for attempt in (1, 2):
+            try:
+                return self.session.post(
+                    self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
+                    headers={"X-RPC-Timeout": str(effective_timeout)})
+            except ConnectionError as e:
+                if attempt == 2 or not _is_dropped_before_response(e):
+                    raise
+                logger.warning(
+                    "RPC %s to %s:%s: connection dropped before any response (%s); "
+                    "retrying once on a fresh connection", method, self.host, self.port, e)
+                self._refresh_session()
+        raise AssertionError("unreachable")
+
+    def _refresh_session(self):
+        _session_pool.evict(self.host, self.port)
+        self.session = _session_pool.get(
+            self.host, self.port, self.username, self.password, self.retry, Settings())
 
 
     def get_version(self):

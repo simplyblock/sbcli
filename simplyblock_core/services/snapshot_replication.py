@@ -20,6 +20,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
@@ -248,7 +249,14 @@ def _finish_completed_transfer(task, snapshot, offset):
                     bytes=offset)
     with xfer_timing.phase("replicate_finish", snap=snapshot.get_id(),
                            lvol=snapshot.lvol.get_id()):
-        new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+        try:
+            new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+        except RPCException as e:
+            # RPC failures raise; without this they skipped the counted,
+            # backed-off retry below and re-ran the finish on every pass
+            # forever (SFAM-2834).
+            logger.error("Replication finish for snapshot %s failed: %s", snapshot.get_id(), e)
+            new_snapshot_uuid = None
     if new_snapshot_uuid:
         task.function_result = new_snapshot_uuid
         task.status = JobSchedule.STATUS_DONE
@@ -257,6 +265,16 @@ def _finish_completed_transfer(task, snapshot, offset):
     else:
         _suspend_for_retry(task, "complete repl failed, retrying", backoff=True)
     return True
+
+
+def _rpc_or_none(fn, *args):
+    """Call an RPC whose failure the caller handles itself; a raise is
+    logged and reported as None so the caller's failure branch runs."""
+    try:
+        return fn(*args)
+    except RPCException as e:
+        logger.error("%s%s failed: %s", getattr(fn, "__name__", fn), args, e)
+        return None
 
 
 def _backoff_seconds(retry):
@@ -1792,7 +1810,8 @@ def process_snap_replicate_finish(task, snapshot):
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
             with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
                                    lvol=snapshot.lvol.get_id(), node="secondary"):
-                ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+                ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_add_clone,
+                                   remote_lv.top_bdev, target_prev_snap['snap_bdev'])
             if not ret:
                 if _secondary_lacks_bdev(sec_node, target_prev_snap['snap_bdev']) or                         _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
                     # The secondary does not hold the base (-19 No such
@@ -1818,7 +1837,7 @@ def process_snap_replicate_finish(task, snapshot):
         # convert to snapshot on secondary
         with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
                                lvol=snapshot.lvol.get_id(), node="secondary"):
-            ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+            ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_convert, remote_lv.top_bdev)
         if not ret:
             if _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
                 # The landing volume never reached the secondary (its
@@ -2120,6 +2139,16 @@ def main():
                                 logger.error("Replication task %s failed: %s",
                                              task.get_id(), e)
                                 res = False
+                                # Spend a retry: a raise used to leave the task
+                                # as it was, so the same failure re-ran on every
+                                # pass and max_retry was never reached.
+                                try:
+                                    task = db.get_task_by_id(task.uuid)
+                                    if task.status != JobSchedule.STATUS_DONE and not task.canceled:
+                                        _suspend_for_retry(task, f"task raised: {e}", backoff=True)
+                                except Exception as e2:
+                                    logger.error("Could not record retry for task %s: %s",
+                                                 task.get_id(), e2)
                             if not res:
                                 time.sleep(3)
 
