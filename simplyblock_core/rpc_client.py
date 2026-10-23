@@ -2203,6 +2203,14 @@ class RPCClient:
                                name)
         return self._request("bdev_lvol_transfer", **params)
 
+    def bdev_lvol_merge_base(self, name):
+        """After a partial transfer into the landing volume *name*: fill every
+        block the transfer did not write from the volume's base (its parent),
+        before it is converted. Raises RPCRemoteError; ``-ESTALE`` means the
+        node no longer knows what arrived (it restarted) and the transfer must
+        be repeated into a fresh landing volume."""
+        return self._request("bdev_lvol_merge_base", lvol_name=name)
+
     def bdev_lvol_dirty_bitmap_info(self, name):
         """The dirty-tracking state of *name*'s blob and the lvstore's count of
         writes executed locally while not leading (replication_delta.py)."""

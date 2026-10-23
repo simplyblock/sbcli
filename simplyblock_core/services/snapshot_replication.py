@@ -1,3 +1,4 @@
+import errno
 import logging
 import time
 import uuid
@@ -22,7 +23,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
@@ -1748,6 +1749,44 @@ def _prechained_nodes_for(task, remote_lv):
     return set(task.function_params.get("prechained_node_ids") or [])
 
 
+def _merge_landing(task, remote_lv, remote_snode):
+    """Fill the landing volume from its base after a delta transfer.
+
+    The destination pre-allocates every cluster the delta touches and receives
+    only the delta's blocks; the rest of each such cluster must come from the
+    base the landing volume is chained onto, once, before the convert. Returns
+    "ok", "retry" (try the finish again later) or "restart" (the target lost
+    the record of what arrived: transfer again into a fresh landing volume).
+    Only transfers that named a base (partial_base) need it; for any other the
+    landing volume holds every block already.
+    """
+    if not task.function_params.get("partial_base"):
+        return "ok"
+    if task.function_params.get("merged_landing") == remote_lv.get_id():
+        return "ok"
+    try:
+        with xfer_timing.phase("landing_merge", lvol=remote_lv.get_id()):
+            ret = remote_snode.rpc_client().bdev_lvol_merge_base(remote_lv.top_bdev)
+    except RPCRemoteError as e:
+        if e.code == -errno.ESTALE or "stale" in str(e).lower():
+            logger.error("Replication task %s: %s on %s no longer knows which blocks the "
+                         "transfer wrote (%s); the transfer is repeated", task.uuid,
+                         remote_lv.top_bdev, remote_snode.get_id(), e)
+            return "restart"
+        logger.error("Replication task %s: merge of %s with its base failed on %s: %s",
+                     task.uuid, remote_lv.top_bdev, remote_snode.get_id(), e)
+        return "retry"
+    except Exception as e:                                # noqa: BLE001
+        logger.error("Replication task %s: merge of %s failed on %s: %s",
+                     task.uuid, remote_lv.top_bdev, remote_snode.get_id(), e)
+        return "retry"
+    logger.info("Landing volume %s merged with its base on %s: %s", remote_lv.top_bdev,
+                remote_snode.get_id(), ret)
+    task.function_params["merged_landing"] = remote_lv.get_id()
+    task.write_to_db()
+    return "ok"
+
+
 def process_snap_replicate_finish(task, snapshot):
 
     # Close the transfer session — but ONLY when this was the last active
@@ -1855,6 +1894,24 @@ def process_snap_replicate_finish(task, snapshot):
                     "the transfer; skipping the redundant add_clone",
                     remote_lv.top_bdev, target_prev_snap['snap_bdev'],
                     remote_snode.get_id())
+
+    # A delta landed only its own blocks in pre-allocated clusters: fill the
+    # rest from the base before the convert makes the volume a snapshot.
+    if remote_snode.get_id() not in converted:
+        merge = _merge_landing(task, remote_lv, remote_snode)
+        if merge == "restart":
+            try:
+                lvol_controller.delete_lvol(remote_lv, force_delete=True)
+            except Exception as e:                        # noqa: BLE001
+                logger.error("Failed to discard landing volume %s: %s", remote_lv.get_id(), e)
+            for key in ("remote_lvol_id", "converted_nodes", "offset", "transfer_done",
+                        "merged_landing"):
+                task.function_params.pop(key, None)
+            _suspend_for_retry(task, f"landing volume {remote_lv.top_bdev} lost the record of "
+                                     f"its delta; discarded, retrying", backoff=True)
+            return False
+        if merge == "retry":
+            return False
 
     # convert to snapshot on primary
     if remote_snode.get_id() not in converted:
