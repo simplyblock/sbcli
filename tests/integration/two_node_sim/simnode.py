@@ -209,9 +209,13 @@ class SimNode:
             self.devices[d] = True
         self.blocked = {}
         # the restart flow recreates every subsystem as the volume defines it
-        # (no allowed_hosts: any host)
-        for sub in self.subsystems.values():
-            sub["allow_any_host"], sub["hosts"] = True, []
+        # (any host, listing the hosts the volumes authorize)
+        stale = self.world.stale_host_lists
+        from .world import client_host
+        for nqn, sub in self.subsystems.items():
+            sub["allow_any_host"] = True
+            sub["hosts"] = [client_host(n.name) for n in self.world.nodes] \
+                if stale and ":lvol:" in nqn else []
 
     # ---- events -----------------------------------------------------------------
 

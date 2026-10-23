@@ -183,10 +183,11 @@ class StorageNode(BaseNodeObject):
     # Lets the arbiter grant the peer solo operation even when THIS node is the
     # preferred one (docs/design/two-node-arbitration.md, invariant 3).
     remediation_fenced: bool = False
-    # Kernel NVMe host NQN of the Kubernetes node this storage node runs on,
-    # reported by the operator; revoked on the peer by a host fence
+    # Kernel NVMe host NQNs of the Kubernetes node this storage node runs on
+    # (the kernel default and the simplyblock form), reported by the operator;
+    # revoked on the peer by a host fence
     # (docs/design/two-node-kubernetes-fencing.md, section 3.2).
-    client_host_nqn: str = ""
+    client_host_nqns: list[str] = default_factory(list)
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: list[str] = default_factory(list)

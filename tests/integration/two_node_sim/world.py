@@ -136,13 +136,17 @@ VUIDS = {"LVS_1": 1, "LVS_6": 6}
 
 class World:
     def __init__(self, db, seed: int = 1, bugs: set | None = None, caps=None,
-                 host_fencing: bool = False):
+                 host_fencing: bool = False, stale_host_lists: bool = False):
         from .simnode import DEPLOYED_CAPS
         self.db = db
         # kubernetes-fencing contract, mode witness: host fencing on the cluster,
         # and the host fences the operator saw revoked: [(t, fenced, winner)]
         self.host_fencing = host_fencing
         self.host_fences_seen: list = []
+        # review on #1527: volume subsystems that allow any host AND list both
+        # client hosts (add_host_to_lvol lists a host without switching
+        # allow_any_host off); the volumes authorize both hosts in the DB.
+        self.stale_host_lists = stale_host_lists
         self.seed = seed
         self.bugs = set(bugs or ())
         self.caps = frozenset(DEPLOYED_CAPS if caps is None else caps)
@@ -317,6 +321,7 @@ class World:
         from simplyblock_core.models.iface import IFace
         from simplyblock_core.models.lvol_model import LVol
         from simplyblock_core.models.nvme_device import NVMeDevice
+        from simplyblock_core.models.pool import Pool
         from simplyblock_core.models.storage_node import StorageNode
 
         db = self.db
@@ -357,7 +362,7 @@ class World:
             n.lvstore_stack = [{"type": "bdev_distr", "name": "distr_%s_0" % lvs,
                                 "params": {"name": "distr_%s_0" % lvs}}]
             n.health_check = True
-            n.client_host_nqn = client_host(name)
+            n.client_host_nqns = [client_host(name)]
             n.is_secondary_node = False
             n.lvstore_ports = {k: {"lvol_subsys_port": v[0], "hublvol_port": v[1]}
                                for k, v in LVS_PORTS.items()}
@@ -378,6 +383,15 @@ class World:
         for n in recs:
             n.write_to_db(db.kv_store)
 
+        # The volumes belong to a pool, as real ones do: the database reads a
+        # cluster's volumes through its pools (host fencing reads them).
+        pool = Pool()
+        pool.uuid = str(_uuid.uuid4())
+        pool.cluster_id = cl.uuid
+        pool.pool_name = "pool0"
+        pool.status = Pool.STATUS_ACTIVE
+        pool.write_to_db(db.kv_store)
+
         # One volume per LVS; vol1 (the bed's fio target) lives on LVS_6 / sn2.
         # LVS_6's subsystem carries a second namespace (ANA group 2, F18).
         self.vols = {}
@@ -393,6 +407,9 @@ class World:
             lv.ha_type = "ha"
             lv.nqn = cl.nqn + ":lvol:" + lvs
             lv.ns_id = ns
+            lv.pool_uuid = pool.uuid
+            if self.stale_host_lists:
+                lv.allowed_hosts = [{"nqn": client_host(n.hostname)} for n in recs]
             lv.fabric = "tcp"
             lv.size = 1 << 30
             lv.top_bdev = "%s/%s" % (lvs, vname)
@@ -421,7 +438,9 @@ class World:
                 sim.devices[dev.alceml_bdev] = True
             for lvs in LVS_PORTS:
                 for nqn in (cl.nqn + ":lvol:" + lvs, StorageNode.hublvol_nqn_for_lvstore(cl.nqn, lvs)):
-                    sim.subsystems[nqn] = {"allow_any_host": True, "hosts": []}
+                    hosts = [client_host(r.hostname) for r in recs] \
+                        if self.stale_host_lists and ":lvol:" in nqn else []
+                    sim.subsystems[nqn] = {"allow_any_host": True, "hosts": hosts}
             for v in VUIDS.values():
                 from .simnode import LvsHa
                 sim.ha[v] = LvsHa(since_ms=self.vt.ms())
@@ -673,6 +692,12 @@ class World:
                 for nqn, sub in sorted(n.subsystems.items()):
                     if not sub["allow_any_host"]:
                         out.append("%s %s not restored to any host" % (n.name, nqn.rsplit(":", 1)[-1]))
+                    if self.stale_host_lists and ":lvol:" in nqn and n.up:
+                        missing = [h.name for h in self.nodes
+                                   if client_host(h.name) not in sub["hosts"]]
+                        if missing:
+                            out.append("%s %s lost the listed hosts of %s"
+                                       % (n.name, nqn.rsplit(":", 1)[-1], missing))
         return out
 
     def mark_fault(self):

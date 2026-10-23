@@ -58,7 +58,8 @@ def test_kubernetes_fencing_scenario(make_world, sc):
     """docs/design/two-node-kubernetes-fencing.md, mode witness: the bed's
     criteria plus which hosts are fenced, that a revoked host is locked out on
     the winner, and that every fence is released without a manual step."""
-    world = make_world(conditions=sc.conditions, host_fencing=sc.host_fencing)
+    world = make_world(conditions=sc.conditions, host_fencing=sc.host_fencing,
+                       stale_host_lists=sc.stale_host_lists)
     out = run(world, sc)
     assert out.passed, out.report()
 

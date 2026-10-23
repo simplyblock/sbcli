@@ -45,21 +45,21 @@ def _sub(nqn, any_host, hosts=()):
 
 def test_plan_converts_allow_any_and_keeps_every_other_connected_host():
     other = "nqn.2014-08.org.nvmexpress:uuid:external"
-    steps = hf.plan_revoke([_sub(VOL1, True)], {VOL1}, HOST_B, {HOST_A},
+    steps = hf.plan_revoke([_sub(VOL1, True)], {VOL1}, [HOST_B], {HOST_A},
                            {VOL1: {HOST_B, other}})
     assert [(s.nqn, s.mode, s.add) for s in steps] == [(VOL1, hf.MODE_ANY, sorted([HOST_A, other]))]
 
 
 def test_plan_removes_the_loser_from_an_allow_list_only_if_listed():
     steps = hf.plan_revoke([_sub(VOL1, False, [HOST_A, HOST_B]), _sub(VOL2, False, [HOST_A])],
-                           {VOL1, VOL2}, HOST_B, {HOST_A}, {})
+                           {VOL1, VOL2}, [HOST_B], {HOST_A}, {})
     assert [(s.nqn, s.mode) for s in steps] == [(VOL1, hf.MODE_LIST)]
 
 
 def test_plan_never_touches_hublvol_or_foreign_subsystems():
     """Campaign c1, B2: the returning peer resyncs through its hublvol."""
     steps = hf.plan_revoke([_sub(HUB, True), _sub("nqn.2014-08.org.nvmexpress.discovery", True)],
-                           {HUB, VOL1}, HOST_B, {HOST_A}, {})
+                           {HUB, VOL1}, [HOST_B], {HOST_A}, {})
     assert steps == []
 
 
@@ -67,13 +67,13 @@ def test_plan_covers_volume_subsystems_the_db_did_not_list():
     """A DB read that misses a volume must not leave the loser admitted while
     the fence reports revoked (sim K1: volumes without a pool)."""
     prefix = "nqn.2023-02.io.simplyblock:cl:lvol:"
-    steps = hf.plan_revoke([_sub(VOL1, True), _sub(HUB, True)], set(), HOST_B, {HOST_A}, {},
+    steps = hf.plan_revoke([_sub(VOL1, True), _sub(HUB, True)], set(), [HOST_B], {HOST_A}, {},
                            volume_prefix=prefix)
     assert [s.nqn for s in steps] == [VOL1]
 
 
 def test_plan_is_idempotent_after_a_revocation():
-    steps = hf.plan_revoke([_sub(VOL1, False, [HOST_A])], {VOL1}, HOST_B, {HOST_A}, {})
+    steps = hf.plan_revoke([_sub(VOL1, False, [HOST_A])], {VOL1}, [HOST_B], {HOST_A}, {})
     assert steps == []
 
 
@@ -114,8 +114,8 @@ class SubsysRPC:
 
 def test_revoke_cuts_the_loser_off_an_allow_any_subsystem():
     rpc = SubsysRPC([_sub(VOL1, True), _sub(HUB, True)], connected={VOL1: {HOST_A, HOST_B}})
-    changed = hf.revoke(rpc, {VOL1, HUB}, HOST_B, {HOST_A})
-    assert changed == {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A]}}
+    changed = hf.revoke(rpc, {VOL1, HUB}, [HOST_B], {HOST_A})
+    assert changed == {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []}}
     # allow-list first, then list + remove the loser: the remove disconnects it
     assert rpc.log == [("add", VOL1, HOST_A), ("any", VOL1, False),
                        ("add", VOL1, HOST_B), ("remove", VOL1, HOST_B)]
@@ -124,21 +124,21 @@ def test_revoke_cuts_the_loser_off_an_allow_any_subsystem():
     assert rpc.subs[HUB]["allow_any_host"] is True
     # a second pass changes nothing
     rpc.log.clear()
-    assert hf.revoke(rpc, {VOL1, HUB}, HOST_B, {HOST_A}) == {} and rpc.log == []
+    assert hf.revoke(rpc, {VOL1, HUB}, [HOST_B], {HOST_A}) == {} and rpc.log == []
 
 
 def test_release_restores_exactly_what_was_changed():
     rpc = SubsysRPC([_sub(VOL1, False, [HOST_A]), _sub(VOL2, False, [HOST_A])])
     readded = []
 
-    def readd(nqn):
+    def readd(nqn, host):
         readded.append(nqn)
-        rpc.subsystem_add_host(nqn, HOST_B)
-    changes = {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A]},
-               VOL2: {"mode": hf.MODE_LIST, "added": []},
-               "nqn.gone": {"mode": hf.MODE_ANY, "added": []}}
-    done = hf.release(rpc, changes, HOST_B, readd)
-    assert sorted(done) == sorted(changes)
+        rpc.subsystem_add_host(nqn, host)
+        return True
+    changes = {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []},
+               VOL2: {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B]},
+               "nqn.gone": {"mode": hf.MODE_ANY, "added": [], "removed": []}}
+    assert hf.release(rpc, changes, readd) == []         # nothing left out
     assert rpc.subs[VOL1]["allow_any_host"] is True
     assert rpc.subs[VOL1]["hosts"] == [HOST_A]           # added hosts stay listed
     assert readded == [VOL2] and HOST_B in rpc.subs[VOL2]["hosts"]
@@ -158,18 +158,18 @@ class HFCluster:
 @pytest.fixture
 def hfenv(env):  # noqa: F811
     a, db, nodes, clock, readmitted = env
-    nodes[A].client_host_nqn, nodes[B].client_host_nqn = HOST_A, HOST_B
+    nodes[A].client_host_nqns, nodes[B].client_host_nqns = [HOST_A], [HOST_B]
     db.revokes, db.releases, db.notes = [], [], []
-    db.revoke_result = {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A]}}
+    db.revoke_result = {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []}}
 
-    def revoke(_db, winner, host_nqn):
-        db.revokes.append((winner.get_id(), host_nqn))
+    def revoke(_db, winner, host_nqns):
+        db.revokes.append((winner.get_id(), ",".join(host_nqns)))
         if isinstance(db.revoke_result, Exception):
             raise db.revoke_result
         return dict(db.revoke_result)
 
-    def release(_db, winner, subsystems, host_nqn):
-        db.releases.append((winner.get_id(), dict(subsystems), host_nqn))
+    def release(_db, winner, subsystems):
+        db.releases.append((winner.get_id(), dict(subsystems)))
     a.host_fence_revoke, a.host_fence_release = revoke, release
     a.notify = lambda cid, node, code, msg: db.notes.append(code)
     return a, db, nodes, clock, HFCluster()
@@ -197,8 +197,8 @@ def test_silent_loser_is_host_fenced_on_the_winner_after_the_grant(hfenv):
     assert calls(nodes[A], "jc_grant_solo")             # the grant is not held up
     assert db.revokes == [(A, HOST_B)]
     fence = _fence(db)
-    assert fence["state"] == HF_REVOKED and fence["on"] == A and fence["host_nqn"] == HOST_B
-    assert fence["subsystems"] == {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A]}}
+    assert fence["state"] == HF_REVOKED and fence["on"] == A and fence["host_nqns"] == [HOST_B]
+    assert fence["subsystems"] == {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []}}
     assert fence["revoked_at"] == clock.t and "TWO_NODE_HOST_FENCED" in db.notes
 
 
@@ -208,7 +208,7 @@ def test_revocation_is_reasserted_and_merged(hfenv):
     a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
     assert len(db.revokes) == 1                         # not due yet
     clock.t += constants.TWO_NODE_HOST_FENCE_REASSERT_S * 1000
-    db.revoke_result = {VOL2: {"mode": hf.MODE_LIST, "added": []}}
+    db.revoke_result = {VOL2: {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B]}}
     a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
     assert len(db.revokes) == 2
     assert set(_fence(db)["subsystems"]) == {VOL1, VOL2}
@@ -272,13 +272,13 @@ def test_precautionary_grant_waits_until_the_winner_loses_the_peer(hfenv):
 
 def test_unknown_client_host_is_unavailable_until_reported(hfenv):
     a, db, nodes, clock, cluster = hfenv
-    nodes[B].client_host_nqn = ""
+    nodes[B].client_host_nqns = []
     _lose_b_by_lease(a, db, nodes, clock, cluster)
     assert _fence(db)["state"] == HF_UNAVAILABLE and db.revokes == []
     assert db.notes.count("TWO_NODE_HOST_FENCE_UNAVAILABLE") == 1
     a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
     assert db.notes.count("TWO_NODE_HOST_FENCE_UNAVAILABLE") == 1   # once per episode
-    nodes[B].client_host_nqn = HOST_B
+    nodes[B].client_host_nqns = [HOST_B]
     a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
     assert _fence(db)["state"] == HF_REVOKED and db.revokes == [(A, HOST_B)]
 
@@ -308,7 +308,7 @@ def test_release_only_after_heal_and_the_operator_request(hfenv):
     db.rec.host_fences = fences
     clock.t += 1000
     a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
-    assert db.releases == [(A, {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A]}}, HOST_B)]
+    assert db.releases == [(A, {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []}})]
     assert B not in db.rec.host_fences
     assert db.rec.verdicts[-1]["kind"] == "host_fence_released"
 
@@ -431,3 +431,71 @@ def test_partition_without_host_fencing_still_fences_both(hfenv):
                  event(B, 1, "remote_jm_unhealthy", 3, ha_state="holding")]
     v = a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
     assert v.kind == "partition" and not calls(nodes[A], "jc_grant_solo")
+
+
+
+# ---- several host identities per node (kernel default + simplyblock form) --------
+
+HOST_B2 = "nqn.2014-08.io.simplyblock:uuid:host-b-uid"
+
+
+def test_every_identity_of_the_loser_is_revoked():
+    rpc = SubsysRPC([_sub(VOL1, True), _sub(VOL2, False, [HOST_A, HOST_B2])],
+                    connected={VOL1: {HOST_A, HOST_B, HOST_B2}})
+    changed = hf.revoke(rpc, {VOL1, VOL2}, [HOST_B, HOST_B2], {HOST_A})
+    assert changed[VOL1] == {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []}
+    assert changed[VOL2] == {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B2]}
+    assert rpc.subs[VOL1]["hosts"] == [HOST_A] and rpc.subs[VOL2]["hosts"] == [HOST_A]
+    assert not rpc.connected[VOL1] & {HOST_B, HOST_B2}
+
+
+def test_merge_keeps_every_pass_for_the_release():
+    first = {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []},
+             VOL2: {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B]}}
+    later = {VOL2: {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B2]}}
+    merged = hf.merge(first, later)
+    assert merged[VOL1]["mode"] == hf.MODE_ANY
+    assert merged[VOL2]["removed"] == sorted([HOST_B, HOST_B2])
+
+
+def test_release_gives_back_exactly_the_removed_identities():
+    rpc = SubsysRPC([_sub(VOL2, False, [HOST_A])])
+    back = []
+
+    def readd(nqn, host):
+        back.append(host)
+        rpc.subsystem_add_host(nqn, host)
+        return True
+    hf.release(rpc, {VOL2: {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B, HOST_B2]}}, readd)
+    assert sorted(back) == sorted([HOST_B, HOST_B2])
+
+
+def test_a_newly_reported_identity_reopens_the_fence(hfenv):
+    a, db, nodes, clock, cluster = hfenv
+    _lose_b_by_lease(a, db, nodes, clock, cluster)
+    assert _fence(db)["state"] == HF_REVOKED
+    nodes[B].client_host_nqns = [HOST_B, HOST_B2]
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    clock.t += 1000
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert db.revokes[-1] == (A, ",".join(sorted([HOST_B, HOST_B2])))
+    assert _fence(db)["state"] == HF_REVOKED and _fence(db)["host_nqns"] == sorted([HOST_B, HOST_B2])
+
+
+# ---- review on #1527, point 6: an NQN both nodes report ------------------------------
+
+def test_a_host_nqn_shared_with_the_winner_is_never_revoked(hfenv):
+    """A cloned image's kernel hostnqn, or a wrong report: revoking it would cut
+    the survivor off, leaving it leaves the loser in. Not a fence: Kubernetes
+    is not told to act."""
+    a, db, nodes, clock, cluster = hfenv
+    nodes[B].client_host_nqns = [HOST_A, HOST_B2]
+    _lose_b_by_lease(a, db, nodes, clock, cluster)
+    fence = _fence(db)
+    assert fence["state"] == HF_UNAVAILABLE and HOST_A in fence["error"]
+    assert db.revokes == [] and "TWO_NODE_HOST_FENCE_UNAVAILABLE" in db.notes
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert db.notes.count("TWO_NODE_HOST_FENCE_UNAVAILABLE") == 1
+    nodes[B].client_host_nqns = [HOST_B, HOST_B2]           # report corrected
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert _fence(db)["state"] == HF_REVOKED and db.revokes == [(A, ",".join(sorted([HOST_B, HOST_B2])))]
