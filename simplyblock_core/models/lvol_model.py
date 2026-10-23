@@ -124,6 +124,10 @@ class LVol(BaseModel):
     delete_snap_on_lvol_delete: bool = False
     do_replicate: bool = False
     replication_node_id: str = ""
+    # The pool on the destination cluster the copies land in, when the caller
+    # of replication start named one. Used only while the destination is that
+    # pool's cluster; otherwise the destination's pool is resolved as before.
+    replication_pool_uuid: str = ""
     from_source: bool = True
     # Declared intent, NOT a behaviour switch: this field is only ever copied
     # onto the LVolReplication record (lvol_controller, tasks_runner_replication

@@ -55,6 +55,7 @@ def _cluster(uuid, target_cluster="", target_pool=""):
 
 def _lvol(policy_id=""):
     return type("LV", (), {"uuid": "LV1", "replication_policy_id": policy_id,
+                           "replication_pool_uuid": "",
                            "get_id": lambda self: "LV1"})()
 
 

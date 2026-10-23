@@ -35,6 +35,7 @@ from simplyblock_core.kms import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -4403,8 +4404,84 @@ def is_lvol_removal_deferred_for_pending_failover(db_controller, lvol):
     return age <= constants.LVOL_DEMOTE_FAILOVER_HOLD_SEC
 
 
+def replication_start_error(lvol_id, replication_cluster_id=None, replication_pool_id=None,
+                            mode=None):
+    """Why a replication start of *lvol_id* to this destination is refused, or
+    None. The destination is checked here rather than discovered by the
+    replication tasks, which fail on it later and retry without end:
+
+      * the cluster must exist and must not be the volume's own;
+      * a named pool must belong to that cluster and be active;
+      * a volume already replicating to one cluster keeps that destination,
+        because a stop does not clear it, so another cluster is refused rather
+        than silently ignored;
+      * an encrypted volume is not moved: a migration commit deletes the
+        source, and with it the only copy of the key, which no replication
+        carries to the target.
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return f"volume {lvol_id} does not exist"
+
+    if lvol.crypto_bdev and (mode or lvol.replication_mode) == "migration":
+        return (f"volume {lvol_id} is encrypted: a migration deletes the source and its key, "
+                f"and replication does not carry the key to the target")
+
+    if replication_pool_id and not replication_cluster_id:
+        return "a replication pool needs replication_cluster_id naming its cluster"
+
+    if replication_cluster_id:
+        try:
+            db_controller.get_cluster_by_id(replication_cluster_id)
+        except KeyError:
+            return f"replication cluster {replication_cluster_id} does not exist"
+        source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        if source_node.cluster_id == replication_cluster_id:
+            return f"replication cluster {replication_cluster_id} is the volume's own cluster"
+        if lvol.replication_node_id:
+            try:
+                current = db_controller.get_storage_node_by_id(lvol.replication_node_id).cluster_id
+            except KeyError:
+                current = ""
+            if current and current != replication_cluster_id:
+                return (f"volume {lvol_id} already replicates to cluster {current}; "
+                        f"it cannot be started towards {replication_cluster_id}")
+
+    if replication_pool_id:
+        try:
+            pool = db_controller.get_pool_by_id(replication_pool_id)
+        except KeyError:
+            return f"replication pool {replication_pool_id} does not exist"
+        if pool.cluster_id != replication_cluster_id:
+            return (f"replication pool {replication_pool_id} belongs to cluster {pool.cluster_id}, "
+                    f"not {replication_cluster_id}")
+        if pool.status != Pool.STATUS_ACTIVE:
+            return f"replication pool {replication_pool_id} is not active"
+    return None
+
+
+def requested_destination_pool(db_controller, lvol, cluster_id):
+    """The pool the caller of replication start named for *lvol*, when it is a
+    pool of *cluster_id*, the destination now in question, and no policy
+    manages the volume; otherwise an empty string."""
+    # A policy owns the volume's replication once attached, and its target
+    # names the pool; one named by an earlier start by hand no longer applies.
+    if lvol.replication_policy_id:
+        return ""
+    pool_uuid = lvol.replication_pool_uuid
+    if not pool_uuid:
+        return ""
+    try:
+        pool = db_controller.get_pool_by_id(pool_uuid)
+    except KeyError:
+        return ""
+    return pool_uuid if pool.cluster_id == cluster_id else ""
+
+
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
-                      from_policy=False):
+                      from_policy=False, replication_pool_id=None):
     """Enable replication for a volume and pick its destination node.
 
     This is the step a replication POLICY performs for you: attaching a policy
@@ -4442,9 +4519,16 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                      lvol.get_id(), replication_cluster_id)
         return False
 
+    refused = replication_start_error(lvol_id, replication_cluster_id, replication_pool_id, mode)
+    if refused:
+        logger.error(refused)
+        return False
+
     lvol.do_replicate = True
     if mode in ("failover", "migration"):
         lvol.replication_mode = mode
+    if replication_pool_id:
+        lvol.replication_pool_uuid = replication_pool_id
     if interval_min is not None and interval_min >= 0:
         lvol.replication_interval_min = interval_min
     # Persist do_replicate/mode/interval regardless of whether a replication
@@ -5614,6 +5698,10 @@ def resolve_replication_destination(db_controller, lvol, target_node, source_nod
     """
     target_cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
 
+    requested = requested_destination_pool(db_controller, lvol, target_node.cluster_id)
+    if requested:
+        return target_cluster, requested
+
     policy = db_controller.get_replication_policy_for_lvol(lvol)
     if policy is not None:
         try:
@@ -6095,6 +6183,29 @@ def replication_commit(lvol_id, delete_source=False):
         logger.error(e)
         return False
 
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    # A caller that cannot tell whether its commit arrived sends it again, and
+    # may send it to another API replica. The lookup and the enqueue happen
+    # under the volume's lock, so two commits cannot both find nothing and
+    # both enqueue; a repeat names the cutover already queued, running, or
+    # done rather than queuing a second one, which would build a second clone.
+    try:
+        with DbLock(f"replication_commit/{lvol_id}", timeout=constants.REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC):
+            return _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source)
+    except DbLockBusyError:
+        existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+        if existing:
+            return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
+        return False, "another commit of this volume is being queued"
+
+
+def _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source):
+    """replication_commit's lookup and enqueue, under the volume's lock."""
+    existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+    if existing:
+        return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
+
     if not lvol.replication_node_id:
         logger.error(f"LVol: {lvol_id} replication node id not found")
         return False
@@ -6103,8 +6214,6 @@ def replication_commit(lvol_id, delete_source=False):
     if target_node.status != StorageNode.STATUS_ONLINE:
         logger.error(f"Target node is not online: {lvol.replication_node_id}")
         return False
-
-    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
 
     # NO snapshot here. The iterative snapshots ARE the endgame, and the
     # endgame does not start until ordinary replication has the target within
@@ -6135,6 +6244,11 @@ def replication_commit(lvol_id, delete_source=False):
             "delete_source": bool(delete_source),
         })
     if not task:
+        # The enqueue refuses a cutover already queued, which a writer that
+        # took no lock may have queued since the lookup.
+        existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+        if existing:
+            return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
         logger.error("Failed to enqueue replication-final task")
         return False, "Failed to enqueue cutover task"
 

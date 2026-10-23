@@ -46,6 +46,8 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
 
     Most specific wins:
 
+      0. the pool the caller of replication start named, while this is its
+         cluster;
       1. the pool named by the replication TARGET the volume's policy points at,
          when that target IS this destination — it was chosen for this pair;
       2. the SOURCE cluster's snapshot_replication_target_pool, but only when
@@ -60,6 +62,9 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
     pool, and 13 of them ended up stuck in_deletion.
     """
     if lvol is not None:
+        pool_uuid = lvol_controller.requested_destination_pool(db, lvol, remote_node.cluster_id)
+        if pool_uuid:
+            return pool_uuid
         pool_uuid = _policy_target_pool(lvol, remote_node.cluster_id)
         if pool_uuid:
             return pool_uuid
@@ -1555,13 +1560,16 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
             remote_lv.top_bdev, snapshot.get_id())
         return False
 
+    # A node without a secondary is a single-node cluster's: there is no
+    # member to leave holes on, so chaining the node itself is enough.
+    single = not remote_lv_node.secondary_node_id
     sec_node = None
-    if remote_lv_node.secondary_node_id:
+    if not single:
         try:
             sec_node = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
         except KeyError:
             sec_node = None
-    if sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE:
+    if not single and (sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE):
         logger.info(
             "Landing volume %s stays a full-transfer target: the secondary of "
             "%s is not online, and a delta would leave holes on it",
@@ -1596,7 +1604,10 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
     primary_ok = _chain_on(remote_lv_node, "primary")
     # Record whatever actually landed even on the failure path: the entry exists
     # on that node now, and the finish step must not add it a second time.
-    secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
+    if single:
+        secondary_ok = True
+    else:
+        secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
     if prechained != (task.function_params.get("prechained_node_ids") or []):
         task.function_params["prechained_node_ids"] = prechained
         task.write_to_db()
@@ -1768,9 +1779,12 @@ def process_snap_replicate_finish(task, snapshot):
             return False
         _mark_converted(remote_snode)
 
-    # chain snaps on secondary
-    sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
-    if sec_node.status == StorageNode.STATUS_ONLINE and sec_node.get_id() in converted:
+    # chain snaps on secondary; a single-node cluster's node has none
+    sec_node = (db.get_storage_node_by_id(remote_snode.secondary_node_id)
+                if remote_snode.secondary_node_id else None)
+    if sec_node is None:
+        pass
+    elif sec_node.status == StorageNode.STATUS_ONLINE and sec_node.get_id() in converted:
         logger.info("Landing volume %s is already converted on %s; skipping "
                     "its chain and convert", remote_lv.top_bdev, sec_node.get_id())
     elif sec_node.status == StorageNode.STATUS_ONLINE:
