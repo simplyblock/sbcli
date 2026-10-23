@@ -272,9 +272,21 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         f"gateway={hub_bdev} op={operation}")
     with xfer_timing.phase("final_step_transfer", lvol=lvol.get_id(),
                            batch=_FINAL_STEP_BATCH):
-        ret = src_rpc.bdev_lvol_transfer_final_step(
-            src_lvol_composite, tgt_map_id, tgt_snap_composite,
-            _FINAL_STEP_BATCH, hub_bdev, operation)
+        try:
+            ret = src_rpc.bdev_lvol_transfer_final_step(
+                src_lvol_composite, tgt_map_id, tgt_snap_composite,
+                _FINAL_STEP_BATCH, hub_bdev, operation)
+        except RPCException as e:
+            # A raise used to skip the restore below and leave the source
+            # fenced (the volume dark) through every retry (SFAM-2834). SPDK
+            # may still have finished -- e.g. a read timeout on a long
+            # freeze -- so ask it; only an explicit Done counts.
+            logger.error(f"bdev_lvol_transfer_final_step raised for {src_lvol_composite}: {e}")
+            try:
+                ret = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+            except RPCException as stat_e:
+                logger.error(f"bdev_lvol_transfer_stat for {src_lvol_composite} failed: {stat_e}")
+                ret = None
     # The RPC can return normally (no exception) while still reporting the
     # transfer failed -- transfer_state is one of "No process" | "In progress" |
     # "Failed" | "Done".  Checking only for None lets a "Failed" response slip

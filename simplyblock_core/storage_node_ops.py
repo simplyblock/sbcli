@@ -732,6 +732,12 @@ _restart_coordinator_sem = threading.BoundedSemaphore(
     constants.RESTART_COORDINATOR_MAX_CONCURRENCY)
 
 
+def _evict_node_rpc_sessions(snode):
+    """Drop this process's pooled RPC sessions to ``snode``'s SPDK proxy."""
+    client = snode.rpc_client()
+    evict_cached_session(client.host, client.port)
+
+
 def _bounded_thread(target, args=(), name=None, sem=None):
     """threading.Thread whose worker first acquires a global concurrency slot,
     bounding how many connect/reconnect workers run at once across all
@@ -1847,11 +1853,38 @@ def _create_device_partitions(rpc_client, nvme, snode: StorageNode, num_partitio
     return True
 
 
+def _run_threads_collecting(jobs):
+    """Run ``(key, target, args)`` jobs in parallel threads and return the
+    list of keys whose job failed (returned a falsy value or raised).
+
+    Device stacks used to be built in bare threads whose return values were
+    never read, so a failed ``bdev_alceml_create`` vanished and the restart
+    went on to mark that device ONLINE although it did not exist in SPDK
+    (SFAM-2834): peers connected to it, migrations started against it and
+    the node's own distribs then failed to open it.
+    """
+    results: dict = {}
+
+    def _run(key, target, args):
+        try:
+            results[id(key)] = target(*args)
+        except Exception as e:
+            logger.exception(f"{getattr(target, '__name__', target)} failed: {e}")
+            results[id(key)] = None
+
+    threads = [threading.Thread(target=_run, args=job) for job in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return [key for key, _, _ in jobs if not results.get(id(key))]
+
+
 def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     db_controller = DBController()
     new_devices = []
     devices_to_partition = []
-    thread_list = []
+    jobs: list = []
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
             continue
@@ -1860,26 +1893,25 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
             new_devices.append(nvme)
             continue
         if nvme.is_partition:
-            t = threading.Thread(target=_create_storage_device_stack, args=(snode.rpc_client(), nvme, snode, False,))
-            thread_list.append(t)
+            jobs.append((nvme, _create_storage_device_stack, (snode.rpc_client(), nvme, snode, False,)))
             new_devices.append(nvme)
-            t.start()
         else:
             devices_to_partition.append(nvme)
             partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
             if len(partitioned_devices) != (1 + snode.num_partitions_per_dev):
                 logger.info(f"Creating partitions for {nvme.nvme_bdev}")
-                t = threading.Thread(
-                    target=_create_device_partitions,
-                    args=(snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
-                          snode.jm_percent, snode.partition_size, index + 1,))
-                thread_list.append(t)
-                t.start()
+                # Outcome is checked below by re-reading the partitions.
+                jobs.append((nvme, _create_device_partitions,
+                             (snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
+                              snode.jm_percent, snode.partition_size, index + 1,)))
 
-    for thread in thread_list:
-        thread.join()
+    partition_jobs = {id(d) for d in devices_to_partition}
+    failed = [d for d in _run_threads_collecting(jobs) if id(d) not in partition_jobs]
+    if failed:
+        logger.error(f"Failed to create device stack for: {[d.get_id() for d in failed]}")
+        return False
 
-    thread_list = []
+    jobs = []
     for nvme in devices_to_partition:
         partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
         if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
@@ -1887,17 +1919,16 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
             # remove 1st partition for jm
             partitioned_devices.pop(0)
             for dev in partitioned_devices:
-                t = threading.Thread(target=_create_storage_device_stack,
-                                     args=(snode.rpc_client(), dev, snode, False,))
-                thread_list.append(t)
+                jobs.append((dev, _create_storage_device_stack, (snode.rpc_client(), dev, snode, False,)))
                 new_devices.append(dev)
-                t.start()
         else:
             logger.error("Failed to create partitions")
             return False
 
-    for thread in thread_list:
-        thread.join()
+    failed = _run_threads_collecting(jobs)
+    if failed:
+        logger.error(f"Failed to create device stack for: {[d.get_id() for d in failed]}")
+        return False
 
     # assign device order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
@@ -1983,7 +2014,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
     rpc_client = snode.rpc_client(timeout=5 * 60)
 
-    thread_list = []
+    jobs: list = []
     for index, nvme in enumerate(snode.nvme_devices):
         if nvme.status == NVMeDevice.STATUS_JM:
             continue
@@ -1995,16 +2026,16 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
 
-        t = threading.Thread(
-            target=_create_storage_device_stack,
-            args=(rpc_client, nvme, snode, not clear_data,))
-        thread_list.append(t)
+        jobs.append((nvme, _create_storage_device_stack, (rpc_client, nvme, snode, not clear_data,)))
 
-    for thread in thread_list:
-        thread.start()
-
-    for thread in thread_list:
-        thread.join()
+    # Every device that reaches this point was found on the node and is
+    # flipped ONLINE later in the restart, so a missing stack must fail the
+    # restart here -- before peers, migrations and the cluster act on it.
+    # A failed restart kills SPDK, so the next attempt starts clean.
+    failed = _run_threads_collecting(jobs)
+    if failed:
+        logger.error(f"Failed to create device stack for: {[d.get_id() for d in failed]}")
+        return False
 
     snode.nvme_devices = new_devices
     snode.write_to_db()
@@ -8716,6 +8747,10 @@ def _restart_storage_node_impl(
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
+    # The SPDK proxy behind this node's RPC port was just relaunched: every
+    # pooled keep-alive socket to it is dead, and a network outage may have
+    # eaten the FIN that would let urllib3 notice (SFAM-2834).
+    _evict_node_rpc_sessions(snode)
     time.sleep(5)
 
     if small_bufsize:
@@ -12988,13 +13023,21 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # (primary). Leaving it as primary makes SPDK reject a later
         # bdev_lvol_connect_hublvol with "-22 nonsecondary node".
         sec_role = "tertiary" if is_tertiary else "secondary"
-        if not snode_rpc_client.bdev_lvol_set_lvs_opts(
+        try:
+            lvs_opts_ok = snode_rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
                 subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
                 hublvol_port=primary_node.get_hublvol_port(primary_node.lvstore),
                 role=sec_role,
-        ):
+            )
+        except RPCException as e:
+            # Best effort, as before RPCs raised: a raise here escaped with
+            # the leader's port still blocked (SFAM-2834).
+            logger.error("bdev_lvol_set_lvs_opts(%s) raised for %s on %s: %s",
+                         sec_role, primary_node.lvstore, snode.get_id(), e)
+            lvs_opts_ok = True
+        if not lvs_opts_ok:
             logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
                          sec_role, primary_node.lvstore, snode.get_id())
 
@@ -13257,6 +13300,20 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
 
         return True
     finally:
+        # Safety net: anything that raised inside the block window (rather
+        # than going through _abort_and_unblock) left the healthy leader's
+        # client port fenced until the monitor's stale-block watchdog -- long
+        # past client KATO. Same guard as the abort path.
+        try:
+            if _leader_block["t0"] is not None and _may_unblock_peer_port(
+                    leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                    "Restart exit with port still blocked"):
+                leader_node.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(leader_lvs_port)
+                _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
+                _mark_leader_unblocked()
+                _flush_port_events()
+        except Exception as ue:
+            logger.error("Failed to unblock leader port on restart exit: %s", ue)
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
         # An unbounded fence is bad; a fence budget leaking onto this thread's
@@ -16071,10 +16128,10 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             ret = True
 
         elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
-                ret = rpc_client.create_lvstore(**params)
+                ret = _create_or_none(rpc_client.create_lvstore, name, **params)
 
         elif type == "bdev_ptnonexcl":
-            ret = rpc_client.bdev_PT_NoExcl_create(**params)
+            ret = _create_or_none(rpc_client.bdev_PT_NoExcl_create, name, **params)
 
         elif type == "bdev_raid":
             if thread_list:
@@ -16089,7 +16146,8 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
                 return False, f"Failed to (re)create distrib(s) after retry: {failed}"
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
-            ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
+            ret = _create_or_none(rpc_client.bdev_raid_create, name, name, distribs_list,
+                                  strip_size_kb=strip_size_kb)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
@@ -16099,6 +16157,10 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             bdev['status'] = "created"
             created_bdevs.insert(0, bdev)
         else:
+            # Distribs may still be creating; let them land so the rollback
+            # removes them instead of racing their creation.
+            for t in thread_list:
+                t.join()
             _rollback()
             return False, f"Failed to create BDev: {name}"
 
@@ -16112,6 +16174,18 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
         _rollback()
         return False, f"Failed to (re)create distrib(s) after retry: {failed}"
     return True, None
+
+
+def _create_or_none(create, label, /, *args, **kwargs):
+    """Run a bdev create RPC; a raise is logged and reported as None, so the
+    caller's rollback runs. RPCs raise on failure rather than returning False,
+    and an escaping raise skipped the rollback, leaking the distribs and
+    their JM contexts (SFAM-2834)."""
+    try:
+        return create(*args, **kwargs)
+    except RPCException as e:
+        logger.error(f"Failed to create BDev {label}: {e}")
+        return None
 
 
 def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):

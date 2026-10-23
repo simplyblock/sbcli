@@ -1477,6 +1477,10 @@ def create_migration(lvol_id, target_node_id,
                             f"already exists on {_node_id[:8]}")
                 _ns_bdev = _crypto_short
             else:
+                # A crypto volume must never be exported through the plain
+                # lvol: after cutover clients would read ciphertext. Any
+                # failure here aborts the create; a retry re-enters and
+                # reuses whatever already exists (SFAM-2834).
                 try:
                     with create_kms_connection(cluster) as kms:
                         _key1, _key2 = kms.get_data_encryption_keys(
@@ -1484,21 +1488,20 @@ def create_migration(lvol_id, target_node_id,
                             pool_kek_name(lvol.pool_uuid),
                         )
                     _key_name = f"key_{_crypto_short}"
-                    _ret = _rpc.lvol_crypto_key_create(_key_name, _key1, _key2)
-                    if not _ret:
+                    try:
+                        _rpc.lvol_crypto_key_create(_key_name, _key1, _key2)
+                    except RPCException as _e:
                         logger.warning(f"create_migration: crypto key create for "
-                                       f"{_key_name} on {_node_id[:8]} failed (key may exist)")
+                                       f"{_key_name} on {_node_id[:8]} failed (key may exist): {_e}")
                     _ret = _rpc.lvol_crypto_create(_crypto_short, composite, _key_name)
-                    if _ret:
-                        logger.info(f"create_migration: created crypto bdev "
-                                    f"{_crypto_short} on {_node_id[:8]}")
-                        _ns_bdev = _crypto_short
-                    else:
-                        logger.error(f"create_migration: bdev_crypto_create failed "
-                                     f"for {_crypto_short} on {_node_id[:8]}")
                 except Exception as _e:
-                    logger.error(f"create_migration: crypto bdev setup on "
-                                 f"{_node_id[:8]} failed: {_e}")
+                    raise ValueError(f"crypto bdev setup for {_crypto_short} on "
+                                     f"{_node_id[:8]} failed: {_e}") from _e
+                if not _ret:
+                    raise ValueError(f"bdev_crypto_create failed for {_crypto_short} on {_node_id[:8]}")
+                logger.info(f"create_migration: created crypto bdev "
+                            f"{_crypto_short} on {_node_id[:8]}")
+                _ns_bdev = _crypto_short
 
         subsys_min_cntlid_used = set()
         if _node_id in overlap_ids:
