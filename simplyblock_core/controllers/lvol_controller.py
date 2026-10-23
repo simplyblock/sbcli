@@ -596,6 +596,47 @@ def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
     return None
 
 
+def _volume_ha_type(ha_type, cluster):
+    """The HA type a new volume is created with. "default" is the cluster's,
+    except in a cluster that activated as single-node, which is non-HA whatever
+    ha_type it recorded: its volumes have no secondary to be served from, so
+    they are "single". The activation decides that and records it
+    (cluster_ops._record_activation_topology), so creation reads the same
+    decision rather than making its own. An explicit choice is kept."""
+    if ha_type != "default":
+        return ha_type
+    if cluster.is_single_node or cluster.activated_single_node:
+        return "single"
+    return cluster.ha_type
+
+
+def _fabric_active(node, fabric):
+    """Whether node serves the fabric. An unknown fabric is an error rather
+    than a fabric no node serves."""
+    if fabric == "tcp":
+        return node.active_tcp
+    if fabric == "rdma":
+        return node.active_rdma
+    raise ValueError(f"unknown fabric {fabric!r}")
+
+
+def _fabric_error(db_controller, host_node, ha_type, fabric):
+    """Why a volume of this HA type cannot be served over the fabric from
+    host_node, or None. The secondary is asked about only for an "ha" volume:
+    a host of a single-node cluster has none, and looking up its blank id
+    raised KeyError for every create there."""
+    if not _fabric_active(host_node, fabric):
+        return f"Primary node fabric {fabric} is not active"
+    if ha_type != "ha":
+        return None
+    if not host_node.secondary_node_id:
+        return "HA volume requested but the host node has no secondary"
+    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+    if not _fabric_active(s_node, fabric):
+        return f"Secondary node fabric {fabric} is not active"
+    return None
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -732,8 +773,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         except KeyError:
             pass
 
-    if ha_type == "default":
-        ha_type = cl.ha_type
+    ha_type = _volume_ha_type(ha_type, cl)
 
     max_rw_iops = max_rw_iops or 0
     max_rw_mbytes = max_rw_mbytes or 0
@@ -906,14 +946,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.error(error)
         return False, error
 
-    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-    attr_name = f"active_{fabric}"
-    is_active_primary = getattr(host_node, attr_name)
-    is_active_secondary = getattr(s_node, attr_name)
-    if not is_active_primary:
-        return False, f"Primary node fabric {fabric} is not active"
-    if not is_active_secondary:
-        return False, f"Secondary node fabric {fabric} is not active"
+    fabric_error = _fabric_error(db_controller, host_node, ha_type, fabric)
+    if fabric_error:
+        return False, fabric_error
 
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
