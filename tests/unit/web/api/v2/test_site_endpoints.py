@@ -28,6 +28,7 @@ from simplyblock_core.controllers.sync_replication_controller import (
     SiteRecord,
 )
 from simplyblock_core.exceptions import (
+    ReachabilityAddressError,
     SyncReplicationSiteError,
     SyncReplicationUnsupportedError,
     SyncSiteFenceRefusedError,
@@ -217,6 +218,48 @@ class TestReachability:
 
         assert response.status_code == 400
         assert _detail(response)['message'] == str(error)
+
+
+class TestReachabilityOfAddresses:
+    """``?address=`` (repeatable): probe exactly those management addresses -
+    workers that are not storage nodes yet (the follower's preflight, §5.4)."""
+
+    def test_probes_the_addresses_in_request_order(self, client, health_controller):
+        health_controller.address_reachability.return_value = [
+            NodeReachability('', '192.0.2.2', '', True),
+            NodeReachability('', '192.0.2.1', '', False)]
+
+        response = client.get(REACHABILITY_URL + '?address=192.0.2.2&address=192.0.2.1')
+
+        assert response.status_code == 200
+        assert response.json() == [
+            {'id': '', 'mgmt_ip': '192.0.2.2', 'site': '', 'reachable': True},
+            {'id': '', 'mgmt_ip': '192.0.2.1', 'site': '', 'reachable': False}]
+        health_controller.address_reachability.assert_called_once_with(['192.0.2.2', '192.0.2.1'])
+        health_controller.cluster_reachability.assert_not_called()
+
+    def test_site_and_address_together_are_400(self, client, health_controller):
+        response = client.get(REACHABILITY_URL + f'?site={SITE}&address=192.0.2.1')
+
+        assert response.status_code == 400
+        assert 'site' in _detail(response)['message'] and 'address' in _detail(response)['message']
+        health_controller.address_reachability.assert_not_called()
+        health_controller.cluster_reachability.assert_not_called()
+
+    def test_a_refused_address_is_400(self, client, health_controller):
+        error = ReachabilityAddressError("'node-1' is not an IP address literal")
+        health_controller.address_reachability.side_effect = error
+
+        response = client.get(REACHABILITY_URL + '?address=node-1')
+
+        assert response.status_code == 400
+        assert _detail(response) == {'message': str(error)}
+
+    def test_without_an_address_the_nodes_are_probed(self, client, health_controller):
+        health_controller.cluster_reachability.return_value = []
+
+        assert client.get(REACHABILITY_URL).status_code == 200
+        health_controller.address_reachability.assert_not_called()
 
 
 def test_a_fence_task_is_a_valid_task_dto():

@@ -1,4 +1,5 @@
 
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 from logging import DEBUG, ERROR, INFO
 from typing import Any, NamedTuple
@@ -7,6 +8,7 @@ from simplyblock_core import distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
+    ReachabilityAddressError,
     SyncReplicationSiteError,
     SyncReplicationUnsupportedError,
 )
@@ -299,12 +301,55 @@ def management_reachability(nodes) -> list[NodeReachability]:
     parallel; one answer per node, in the order given. Records nothing: the
     monitor's own cycle decides node states."""
     nodes = list(nodes)
-    if not nodes:
-        return []
-    with ThreadPoolExecutor(max_workers=min(len(nodes), _REACHABILITY_PROBES_IN_PARALLEL)) as pool:
-        answers = list(pool.map(lambda node: _check_node_ping(node.mgmt_ip), nodes))
-    return [NodeReachability(node.get_id(), node.mgmt_ip, node.site, bool(answer))
+    answers = _probe_in_parallel([node.mgmt_ip for node in nodes])
+    return [NodeReachability(node.get_id(), node.mgmt_ip, node.site, answer)
             for node, answer in zip(nodes, answers)]
+
+
+#: At most this many addresses per address_reachability call.
+MAX_REACHABILITY_ADDRESSES = 64
+
+
+def _probe_in_parallel(addresses: list[str]) -> list[bool]:
+    """_check_node_ping on each address, at most
+    _REACHABILITY_PROBES_IN_PARALLEL at once; answers in the order given."""
+    if not addresses:
+        return []
+    with ThreadPoolExecutor(max_workers=min(len(addresses), _REACHABILITY_PROBES_IN_PARALLEL)) as pool:
+        return [bool(answer) for answer in pool.map(_check_node_ping, addresses)]
+
+
+def _ip_literal(address: str) -> str:
+    """``address`` when it is an IPv4/IPv6 literal - never resolved, no
+    IPv6 zone id, no surrounding whitespace - else ReachabilityAddressError."""
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        valid = False
+    else:
+        valid = "%" not in address and address == address.strip()
+    if not valid:
+        raise ReachabilityAddressError(f"{address!r} is not an IP address literal (IPv4 or IPv6)")
+    return address
+
+
+def address_reachability(addresses) -> list[NodeReachability]:
+    """management_reachability's probe against management ``addresses``
+    rather than nodes - hosts that are not storage nodes (yet), such as the
+    workers a follower operator is about to add (design-stretched §5.4).
+    One answer per address, in the order given, with no node id and no
+    site. Every address is checked before any is probed. Records nothing.
+
+    Raises ReachabilityAddressError for more than MAX_REACHABILITY_ADDRESSES
+    addresses and for an address that is not an IP literal: the probe never
+    resolves a name, so it cannot be turned into a resolver."""
+    addresses = list(addresses)
+    if len(addresses) > MAX_REACHABILITY_ADDRESSES:
+        raise ReachabilityAddressError(
+            f"at most {MAX_REACHABILITY_ADDRESSES} addresses per request ({len(addresses)} given)")
+    addresses = [_ip_literal(a) for a in addresses]
+    return [NodeReachability("", address, "", answer)
+            for address, answer in zip(addresses, _probe_in_parallel(addresses))]
 
 
 def cluster_reachability(cluster_id: str, site: str | None = None) -> list[NodeReachability]:

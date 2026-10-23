@@ -12,6 +12,7 @@ from simplyblock_core import cluster_ops
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 from simplyblock_core.controllers import health_controller, sync_replication_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import ReachabilityAddressError
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 
@@ -270,19 +271,40 @@ def logs(cluster: Cluster, limit: int = 50, watch: WatchParam = False) -> Union[
     return [ClusterLogEntryDTO.from_model(e) for e in cluster_ops.get_log_events(cluster.get_id(), limit)]
 
 
-@instance_api.get('/reachability', name='clusters:reachability')
+@instance_api.get('/reachability', name='clusters:reachability',
+                  responses={400: {"description": "A bad site, site with address, a non-literal address, "
+                                                  "or too many addresses (detail.message)"}})
 def reachability(
         cluster: Cluster,
         site: Annotated[str | None, Query(description='Sync replication: only the nodes of this site')] = None,
+        address: Annotated[builtins.list[str] | None, Query(
+            description='Probe these management addresses (IP literals, repeatable, at most '
+                        f'{health_controller.MAX_REACHABILITY_ADDRESSES}) instead of the nodes; '
+                        'not with site')] = None,
 ) -> builtins.list[NodeReachabilityDTO]:
     """Run the storage-node monitor's management-address probe once, now,
     against the nodes of ``site`` (every node of the cluster without one;
     removed nodes excepted) and answer, per node, whether it answered. Reads
     nothing the monitor recorded and records nothing. 400 for a site the
     cluster does not have, and for any site on a cluster without sync
-    replication."""
-    with util.sync_http_errors():
-        rows = health_controller.cluster_reachability(cluster.get_id(), site or None)
+    replication.
+
+    With ``address`` (repeatable), probe exactly those addresses instead -
+    hosts that are not storage nodes yet, such as the workers a follower
+    operator's preflight checks (design-stretched §5.4) - one row per
+    address in request order, ``id`` and ``site`` empty. 400 together with
+    ``site``, for an address that is not an IPv4/IPv6 literal (no name is
+    ever resolved), and for more than MAX_REACHABILITY_ADDRESSES."""
+    if address:
+        if site:
+            raise util.sync_error(400, 'site and address cannot be given together')
+        try:
+            rows = health_controller.address_reachability(address)
+        except ReachabilityAddressError as e:
+            raise util.sync_error(400, str(e)) from e
+    else:
+        with util.sync_http_errors():
+            rows = health_controller.cluster_reachability(cluster.get_id(), site or None)
     return [NodeReachabilityDTO.from_model(row) for row in rows]
 
 

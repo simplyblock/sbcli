@@ -124,6 +124,12 @@ class SyncGroupMemberError(PreconditionError):
         super().__init__(message)
 
 
+class ReachabilityAddressError(PreconditionError):
+    """An on-demand reachability probe was asked for an address it does not
+    probe: not an IPv4/IPv6 literal (the probe never resolves a name), or
+    more addresses than one request may name."""
+
+
 class NodeTransitionInProgress(Exception):
     """Raised when a node is mid-transition (e.g. its shutdown has not
     finished) and the request can only be served once it lands. Retryable:
