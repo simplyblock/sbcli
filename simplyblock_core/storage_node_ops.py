@@ -4525,12 +4525,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error("Failed to prepare cluster devices")
                 return False
 
-        # set qos values if enabled
-        if cluster.is_qos_set():
-            logger.info("Setting Alcemls QOS weights")
-            ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
-            if not ret:
-                logger.error("Failed to set Alcemls QOS")
+        # set qos values: always, the replication service class needs its share
+        # even without user classes (see qos_controller.get_qos_weights_list)
+        logger.info("Setting Alcemls QOS weights")
+        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+        if not ret:
+            logger.error("Failed to set Alcemls QOS")
+            # fatal only where user classes depend on it, as before
+            if cluster.is_qos_set():
                 return False
 
         # --- Cluster-wide mesh critical section -------------------------
@@ -8919,12 +8921,14 @@ def _restart_storage_node_impl(
 
     snode.write_to_db()
 
-    # set qos values if enabled
-    if cluster.is_qos_set():
-        logger.info("Setting Alcemls QOS weights")
-        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
-        if not ret:
-            logger.error("Failed to set Alcemls QOS")
+    # set qos values: always, the replication service class needs its share
+    # even without user classes (see qos_controller.get_qos_weights_list)
+    logger.info("Setting Alcemls QOS weights")
+    ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
+    if not ret:
+        logger.error("Failed to set Alcemls QOS")
+        # fatal only where user classes depend on it, as before
+        if cluster.is_qos_set():
             return False
 
     logger.info("Connecting to remote devices")

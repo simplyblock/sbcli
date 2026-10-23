@@ -11,6 +11,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     lvol_controller,
+    qos_controller,
     replication_recovery_points,
     snapshot_controller,
     snapshot_events,
@@ -25,6 +26,43 @@ logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
 # get DB controller
 db = db_controller.DBController()
+
+
+def _set_transfer_class(node_ids, bdev, wire_class, what):
+    """Best-effort: set the IO service class of *bdev* on each online node.
+
+    Replication traffic runs in its own service class
+    (constants.QOS_REPLICATION_CLASS_ID). The transfer reads its source in that
+    class by itself (bdev_lvol_transfer priority_class), leaving the source
+    snapshot's own class alone: client reads of the volume fall through to that
+    snapshot and must not be scheduled as replication. The landing volume on
+    the target is written only by the transfer and carries the class as its
+    own; once it is converted it backs fail-over clones, so it is reset to 0
+    (the class SPDK gives every snapshot) here. SPDK does not persist it.
+    """
+    for node_id in node_ids:
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            node.rpc_client(timeout=10).bdev_lvol_set_priority_class(bdev, wire_class)
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("Setting service class %s on %s %s on %s failed (non-fatal): %s",
+                           wire_class, what, bdev, node_id, e)
+
+
+def _replication_class_on(cluster_id):
+    """qos_controller.replication_class_available, but never raises: the
+    service class is an optimisation and must not stop a transfer."""
+    try:
+        return qos_controller.replication_class_available(cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("QoS lookup for cluster %s failed; replicating in Default: %s",
+                       cluster_id, e)
+        return False
 
 
 def _policy_target_pool(lvol, destination_cluster_id):
@@ -605,11 +643,18 @@ def process_snap_replicate_start(task, snapshot):
         # max_namespace_per_subsys. namespaced is not a persisted field; a
         # max_namespace_per_subsys > 1 IS the "shareable subsystem" signal.
         src_max_ns = snapshot.lvol.max_namespace_per_subsys
+        # The landing volume is written only by the transfer: run it in the
+        # replication service class of the receiving cluster (its own QoS
+        # table decides whether that class exists).
+        landing_class = 0
+        if _replication_class_on(remote_node_uuid.cluster_id):
+            landing_class = constants.QOS_REPLICATION_CLASS_ID
         lv_id, err = lvol_controller.add_lvol_ha(
             f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
             remote_pool_uuid, internal=True,
             namespaced=src_max_ns > 1,
-            max_namespace_per_subsys=src_max_ns)
+            max_namespace_per_subsys=src_max_ns,
+            lvol_priority_class=landing_class)
         if lv_id:
             task.function_params["remote_lvol_id"] = lv_id
             task.write_to_db()
@@ -759,6 +804,10 @@ def process_snap_replicate_start(task, snapshot):
                       lvol=snapshot.lvol.get_id(), size=snapshot.size)
     task.function_params["xfer_submit_t"] = xfer_timing.now()
     task.write_to_db()
+    # The transfer reads the snapshot in the replication class; the
+    # snapshot's own class, which client reads through it use, is untouched.
+    read_class = (constants.QOS_REPLICATION_WIRE_CLASS
+                  if _replication_class_on(snode.cluster_id) else 0)
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
@@ -775,6 +824,7 @@ def process_snap_replicate_start(task, snapshot):
         # replicated snapshot above; the fork independently refuses the delta
         # path unless the snapshot's dirty generation is complete.
         allow_partial=allow_partial,
+        priority_class=read_class,
     )
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
@@ -1817,6 +1867,12 @@ def process_snap_replicate_finish(task, snapshot):
                 logger.error("Failed to convert to snapshot on secondary node")
                 return False
         _mark_converted(sec_node)
+
+    # The landing volume is a snapshot now and will back fail-over and
+    # test-failover clones: drop the replication class from it.
+    if remote_lv.lvol_priority_class == constants.QOS_REPLICATION_CLASS_ID:
+        _set_transfer_class(remote_lv.nodes or [remote_snode.get_id()], remote_lv.top_bdev, 0,
+                            "replicated snapshot")
 
     new_snapshot_uuid = str(uuid.uuid4())
 

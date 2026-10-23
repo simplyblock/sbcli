@@ -1,0 +1,47 @@
+# Client load of the replication service-class benchmark: six parallel jobs on
+# one volume, each at iodepth 16, mixing block sizes, reads and writes, and
+# sequential and random access.
+#
+# bench.py fills in DEV (the volume's block device, resolved by its NQN),
+# RUNTIME (seconds), and LOGDIR, and runs one copy per volume on its client.
+# The per-second logs (log_avg_msec=1000) are what analysis.py sums.
+
+[global]
+filename=${DEV}
+ioengine=libaio
+direct=1
+iodepth=16
+time_based=1
+runtime=${RUNTIME}
+group_reporting=0
+randrepeat=0
+norandommap=1
+log_avg_msec=1000
+write_iops_log=${LOGDIR}/load
+write_bw_log=${LOGDIR}/load
+
+[rand-read-4k]
+rw=randread
+bs=4k
+
+[rand-write-4k]
+rw=randwrite
+bs=4k
+
+[rand-rw-16k-70r]
+rw=randrw
+rwmixread=70
+bs=16k
+
+[seq-read-64k]
+rw=read
+bs=64k
+
+[seq-write-128k]
+rw=write
+bs=128k
+
+[rand-rw-mixed-bs]
+rw=randrw
+rwmixread=50
+bssplit=4k/50:16k/25:64k/15:128k/10
