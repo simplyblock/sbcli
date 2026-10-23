@@ -442,6 +442,10 @@ class RPCClient:
     def subsystem_remove_host(self, nqn, host):
         return self._request("nvmf_subsystem_remove_host", nqn=nqn, host=host)
 
+    def subsystem_allow_any_host(self, nqn, allow_any_host):
+        return self._request("nvmf_subsystem_allow_any_host", nqn=nqn,
+                             allow_any_host=bool(allow_any_host))
+
     def transport_list(self, trtype=None):
         kwargs = {"trtype": trtype} if trtype else {}
         return self._request("nvmf_get_transports", **kwargs)

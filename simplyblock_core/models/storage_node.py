@@ -1,6 +1,7 @@
+import hashlib
 import time
 from datetime import UTC, datetime, timedelta
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from uuid import uuid4
 
 from pydantic import SecretStr
@@ -26,7 +27,15 @@ from simplyblock_core.settings import Settings
 from simplyblock_core.snode_client import SNodeClient
 from simplyblock_core.utils import rpc_budget
 
+if TYPE_CHECKING:
+    from simplyblock_core.models.cluster import Cluster
+
 logger = utils.get_logger(__name__)
+
+# One DNS label, which a hostname in a headless Service is, and the digest a
+# label cut to fit it carries.
+_MAX_DNS_LABEL = 63
+_HOSTNAME_DIGEST = 8
 
 
 class StorageNode(BaseNodeObject):
@@ -174,6 +183,10 @@ class StorageNode(BaseNodeObject):
     # Lets the arbiter grant the peer solo operation even when THIS node is the
     # preferred one (docs/design/two-node-arbitration.md, invariant 3).
     remediation_fenced: bool = False
+    # Kernel NVMe host NQN of the Kubernetes node this storage node runs on,
+    # reported by the operator; revoked on the peer by a host fence
+    # (docs/design/two-node-kubernetes-fencing.md, section 3.2).
+    client_host_nqn: str = ""
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: list[str] = default_factory(list)
@@ -190,6 +203,13 @@ class StorageNode(BaseNodeObject):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
+    # The cluster's workload names (Cluster.snode_api_service and its
+    # siblings), copied onto the node when it is added so that building a
+    # client needs no cluster read.
+    snode_api_service: str = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: str = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: str = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: str = ""
     # Per-LVS restart phase tracking: {lvs_name: phase_string}
     # Phases: "pre_block", "blocked", "post_unblock", "" (not in restart)
     # Used by other services to gate sync deletes and create/clone/resize registrations.
@@ -259,7 +279,7 @@ class StorageNode(BaseNodeObject):
         host = self.api_endpoint
         if Settings().tls_connect != "disabled":
             port = self.api_endpoint.rsplit(":", 1)[1]
-            host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
+            host = f"{self._k8s_service_host(self.snode_api_service)}:{port}"
         return SNodeClient(host, **kwargs)
 
     def from_dict(self, data):
@@ -310,13 +330,37 @@ class StorageNode(BaseNodeObject):
             kwargs.setdefault("retry", retry)
         host = self.mgmt_ip
         if Settings().tls_connect != "disabled":
-            host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
+            host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(
             host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
     def _k8s_node_label(self) -> str:
         return self.hostname.removesuffix(f"_{self.rpc_port}")
+
+    def _k8s_service_host(self, service: str) -> str:
+        """The node's hostname in one of its cluster's headless Services.
+
+        A label too long to take the suffix within the 63 characters of one
+        DNS label is cut and carries an eight-character digest of the whole
+        label, which is the rule the operator publishes the hostname under
+        (atlas-lib kube.WorkloadNames.Hostname): both sides have to build the
+        same name.
+        """
+        label = self._k8s_node_label()
+        suffix = self.node_label_suffix
+        if len(label) + len(suffix) > _MAX_DNS_LABEL:
+            keep = _MAX_DNS_LABEL - len(suffix) - _HOSTNAME_DIGEST - 1
+            digest = hashlib.sha256(label.encode()).hexdigest()[:_HOSTNAME_DIGEST]
+            label = f"{label[:keep].rstrip('-')}-{digest}"
+        return f"{label}{suffix}.{service}.{self.cr_namespace}.svc.cluster.local"
+
+    def record_workload_names(self, cluster: "Cluster") -> None:
+        """Copy the cluster's workload names onto this node."""
+        self.snode_api_service = cluster.snode_api_service
+        self.spdk_proxy_service = cluster.spdk_proxy_service
+        self.spdk_proxy_tls_secret = cluster.spdk_proxy_tls_secret
+        self.node_label_suffix = cluster.node_label_suffix
 
     def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port,
                     ana_state=None, min_cntlid=1):

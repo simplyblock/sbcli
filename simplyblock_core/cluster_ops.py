@@ -35,6 +35,7 @@ from simplyblock_core import (
 from simplyblock_core.controllers import (
     cluster_events,
     device_controller,
+    pool_controller,
     qos_controller,
     tasks_controller,
     tcp_ports_events,
@@ -624,6 +625,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                snode_api_service=constants.K8S_SNODE_API_SERVICE,
+                spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
+                spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
+                node_label_suffix="",
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a DbLock.
@@ -653,6 +658,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
+        snode_api_service=snode_api_service,
+        spdk_proxy_service=spdk_proxy_service,
+        spdk_proxy_tls_secret=spdk_proxy_tls_secret,
+        node_label_suffix=node_label_suffix,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -682,6 +691,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                snode_api_service=constants.K8S_SNODE_API_SERVICE,
+                spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
+                spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
+                node_label_suffix="",
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -796,6 +809,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.cr_name = cr_name
     cluster.cr_namespace = cr_namespace
     cluster.cr_plural = cr_plural
+    cluster.snode_api_service = snode_api_service
+    cluster.spdk_proxy_service = spdk_proxy_service
+    cluster.spdk_proxy_tls_secret = spdk_proxy_tls_secret
+    cluster.node_label_suffix = node_label_suffix
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -1163,6 +1180,17 @@ def is_single_node_activation(cluster, online_nodes) -> bool:
     return bool(cluster.is_single_node or len(online_nodes) == 1)
 
 
+def _record_activation_topology(cluster, single_node, fresh) -> None:
+    """Record whether a fresh activation made the cluster non-HA, which is what
+    volume creation defaults a volume's ha_type from. A reactivation records
+    nothing: an HA cluster reactivated with one node online is degraded, not
+    single-node, and its volumes stay HA."""
+    if not fresh or cluster.activated_single_node == single_node:
+        return
+    cluster.activated_single_node = single_node
+    cluster.write_to_db()
+
+
 def activation_minimum_devices(cluster, single_node_cluster) -> int:
     """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
     headroom that a single-node cluster (no data redundancy to rebuild onto
@@ -1239,6 +1267,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     dev_count += 1
                     raw_device_size += int(dev.size or 0)
     single_node_cluster = is_single_node_activation(cluster, online_nodes)
+    _record_activation_topology(cluster, single_node_cluster, is_fresh_activation)
     if single_node_cluster and cluster.ha_type == "ha":
         logger.warning("Single-node cluster: activating as non-HA "
                        "(no secondary nodes, single journal) regardless of ha_type")
@@ -3578,8 +3607,19 @@ def cluster_restart(cl_id) -> None:
         "them in parallel and reactivate the cluster", cl_id)
 
 
-def delete_cluster(cl_id) -> None:
+def delete_cluster(cl_id, force=False) -> None:
+    """Delete a cluster record, which an empty cluster only allows.
+
+    With force, the cluster is brought down completely first: every storage
+    node is shut down and deleted without migrating anything off it, and every
+    pool is deleted with the volumes and snapshots in it. Nothing survives a
+    forced delete; it is what deleting a cluster that will not come back
+    means, and the node removal it skips is an online removal that drains a
+    node onto the others, which the last node of a cluster has none of."""
     cluster = db_controller.get_cluster_by_id(cl_id)
+
+    if force:
+        _bring_down(cl_id)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if nodes:
@@ -3593,6 +3633,25 @@ def delete_cluster(cl_id) -> None:
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
+
+
+def _bring_down(cl_id) -> None:
+    """Delete every pool, then every node, of a cluster being deleted with
+    force. The pools go first, while the nodes are up and the cluster's KMS
+    configuration exists, so their keys are deleted with them. A node whose
+    SPDK cannot be confirmed stopped is reported, and the teardown goes on:
+    a node whose agent no longer answers is still a node to delete."""
+    for pool in db_controller.get_pools(cl_id):
+        pool_controller.force_delete_pool(pool.get_id())
+
+    unconfirmed = [
+        node.get_id() for node in db_controller.get_storage_nodes_by_cluster_id(cl_id)
+        if not storage_node_ops.force_delete_storage_node(node.get_id())
+    ]
+    if unconfirmed:
+        logger.error(f"Forced delete of cluster {cl_id}: SPDK could not be confirmed stopped on "
+                     f"node(s) {', '.join(unconfirmed)}; check them by hand")
+
 
 def set_(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)

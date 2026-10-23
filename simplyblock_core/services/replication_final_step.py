@@ -212,6 +212,14 @@ def ensure_hub_attached(src_rpc, tgt_node):
     return hub.bdev_name, hub.get_remote_bdev_name(), None
 
 
+class CutoverUnreachable(Exception):
+    """The target could not be reached for the cutover: its transfer hub did
+    not attach. A target node restarting before the control plane marks it
+    down looks like this, and waiting it out is the answer. A cutover that
+    reached the target and failed returns (False, error) instead, and fails
+    the same way on every attempt."""
+
+
 def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
                 tgt_snap_composite, operation="replicate"):
     """Perform the cross-cluster cutover for *lvol*.
@@ -227,8 +235,9 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
                              snapshot (the final lvol is chained onto it)
         operation:          ``"replicate"`` for cross-cluster (metadata + data)
 
-    Returns (ok: bool, error: str|None). The IO-freeze window is bounded by the
-    synchronous ``bdev_lvol_transfer_final_step`` call.
+    Returns (ok: bool, error: str|None), and raises CutoverUnreachable when the
+    target's transfer hub cannot be attached. The IO-freeze window is bounded
+    by the synchronous ``bdev_lvol_transfer_final_step`` call.
     """
     src_rpc = src_node.rpc_client()
     src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
@@ -243,7 +252,7 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     with xfer_timing.phase("final_hub_attach", lvol=lvol.get_id()):
         _ctrl_name, hub_bdev, err = ensure_hub_attached(src_rpc, tgt_node)
     if err:
-        return False, err
+        raise CutoverUnreachable(err)
 
     # Fence the source FIRST: from here on the source cannot take IO by any
     # means; the delta the freeze copies is definitively final.

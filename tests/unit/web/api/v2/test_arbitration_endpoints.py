@@ -162,3 +162,64 @@ class TestClusterFlag:
         assert response.status_code == 204
         _applied(db, cluster)
         assert cluster.two_node_arbitration is True
+
+
+# docs/design/two-node-kubernetes-fencing.md, section 3.5
+HOST_B = 'nqn.2014-08.org.nvmexpress:uuid:host-b'
+
+
+class TestKubernetesFencing:
+
+    def test_get_reports_authority_host_fencing_and_client_hosts(self, client, db, record):
+        body = client.get(f'{BASE}/').json()
+        assert body['fencing_authority'] == 'witness'
+        assert body['host_fencing'] is False
+        assert body['storage_fenced_condition'] == 'StorageFenced'
+        assert set(body['client_hosts']) == {NODE_A, NODE_B}
+        assert body['host_fences'] == {}
+
+    def test_client_host_is_stored_on_the_member(self, client, db, two_nodes):
+        response = client.put(f'{BASE}/client-host', json={'node_id': NODE_B, 'host_nqn': HOST_B})
+        assert response.status_code == 204
+        node = StorageNode()
+        _applied(db, node)
+        assert node.client_host_nqn == HOST_B
+
+    def test_client_host_rejects_non_members_and_non_nqns(self, client, db, two_nodes):
+        assert client.put(f'{BASE}/client-host',
+                          json={'node_id': 'other', 'host_nqn': HOST_B}).status_code == 422
+        assert client.put(f'{BASE}/client-host',
+                          json={'node_id': NODE_B, 'host_nqn': 'host-b'}).status_code == 422
+        db.atomic_update.assert_not_called()
+
+    def test_release_is_refused_until_releasable(self, client, db, record, audit):
+        assert client.post(f'{BASE}/host-fence/release', json={'node_id': NODE_B}).status_code == 404
+        record.host_fences = {NODE_B: {'state': 'revoked', 'on': NODE_A, 'host_nqn': HOST_B}}
+        assert client.post(f'{BASE}/host-fence/release', json={'node_id': NODE_B}).status_code == 409
+        db.atomic_update.assert_not_called()
+
+    def test_release_marks_a_releasable_fence_restoring(self, client, db, record, audit):
+        record.host_fences = {NODE_B: {'state': 'releasable', 'on': NODE_A, 'host_nqn': HOST_B}}
+        response = client.post(f'{BASE}/host-fence/release', json={'node_id': NODE_B})
+        assert response.status_code == 202
+        fresh = ClusterArbitration(record.to_dict())
+        _applied(db, fresh)
+        assert fresh.host_fences[NODE_B]['state'] == 'restoring'
+        assert fresh.host_fences[NODE_B]['release_requested'] is True
+        audit.assert_called_once()
+
+    def test_put_cluster_sets_authority_and_host_fencing(self, client, db, cluster):
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/',
+                              json={'two_node_fencing_authority': 'pacemaker'})
+        assert response.status_code == 204
+        _applied(db, cluster)
+        assert cluster.two_node_fencing_authority == 'pacemaker'
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'two_node_host_fencing': True})
+        assert response.status_code == 204
+        _applied(db, cluster)
+        assert cluster.two_node_host_fencing is True
+
+    def test_put_cluster_rejects_an_unknown_authority(self, client, db, cluster):
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/',
+                              json={'two_node_fencing_authority': 'quorum'})
+        assert response.status_code == 422

@@ -12,6 +12,7 @@ from simplyblock_core.controllers import device_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lock import DbLock, DbLockBusyError
+from simplyblock_core.models.lvol_model import LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -1372,6 +1373,42 @@ def get_active_replication_final_task(cluster_id, lvol_id):
             if task.status != JobSchedule.STATUS_DONE and task.function_params.get("lvol_id") == lvol_id:
                 return task.uuid
     return False
+
+
+def get_replication_final_task(cluster_id, lvol_id):
+    """Return the UUID of the replication cutover task a new commit of *lvol_id*
+    would repeat, or False: one queued or running, or one that finished the
+    cutover while the relationship it cut over still stands. A finished
+    cutover leaves the source in place until delete_source retires it, and a
+    commit then would build a second clone. A fail-back back to the source
+    removes that relationship, and a later commit of the same volume is a new
+    cutover. A task that ended without the cutover is not returned either.
+
+    One indexed read of the cluster's cutover tasks serves both checks."""
+    finished = []
+    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_REPLICATION_FINAL):
+        if task.canceled is not False or task.function_params.get("lvol_id") != lvol_id:
+            continue
+        if task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
+        if task.function_result == "cutover done":
+            finished.append(task)
+    for task in finished:
+        if _cutover_stands(task.function_params.get("replication_id")):
+            return task.uuid
+    return False
+
+
+def _cutover_stands(replication_id):
+    """Whether the relationship a cutover cut over is still recorded as cut
+    over. A fail-back removes the prior relationship when it completes."""
+    if not replication_id:
+        return False
+    try:
+        rep = db.get_lvol_replication_by_id(replication_id)
+    except KeyError:
+        return False
+    return rep.state == LVolReplication.STATE_CUTOVER_DONE
 
 
 def add_replication_final_task(cluster_id, src_node_id, function_params):

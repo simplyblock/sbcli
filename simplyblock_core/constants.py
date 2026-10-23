@@ -849,6 +849,13 @@ OS_K8S_ENDPOINT = "http://opensearch-cluster-master:9200"
 WEBAPI_K8S_ENDPOINT = "http://simplyblock-webappapi:5000/api/v2"
 
 K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
+# The names a cluster's workload is reached by when its record names none: a
+# cluster created before the record existed, and the first cluster in a
+# namespace. A storage node's hostname is <node>.<service>.<namespace>.svc, so
+# these are part of every such node's identity.
+K8S_SNODE_API_SERVICE = "simplyblock-storage-node-api"
+K8S_SPDK_PROXY_SERVICE = "simplyblock-spdk-proxy"
+K8S_SPDK_PROXY_TLS_SECRET = "simplyblock-spdk-proxy-tls"
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
@@ -1031,12 +1038,16 @@ BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---
-# Cooldown between hub-attach retry attempts when the target node is down or
-# recovering (covers control-plane lag before the DB reflects the down state).
+# Cooldown between cutover attempts while the target is unreachable: down or
+# recovering, before the DB reflects the down state.
 REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
-# Max consecutive hub-attach failures with the node still appearing online
-# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
-REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# How long, from the first unreachable attempt, an unreachable target is
+# waited out without burning a task.retry. One window per task: a burned retry
+# does not open another, so the window and max_retry do not multiply.
+REPL_CUTOVER_TRANSIENT_WINDOW_SEC = 600
+# How long a commit waits for another commit of the same volume to finish
+# queuing its cutover: a couple of database round trips.
+REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC = 10
 # Delete the superseded original volume BEFORE building the fail-back clone
 # (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
 # original's blob id while its parent snapshot's clone registry is already
@@ -1148,6 +1159,19 @@ TWO_NODE_LEADERSHIP_RETRY_MS = 3000
 #: Campaign c5: a port-allow task open longer than this no longer holds back
 #: the arbiter's leadership restoration (it targets the same primary).
 TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
+#: Who decides which node of a two-node cluster continues alone
+#: (docs/design/two-node-kubernetes-fencing.md): the arbiter on the control
+#: plane, or Pacemaker on the nodes (the arbiter then stays out entirely).
+TWO_NODE_AUTHORITY_WITNESS = "witness"
+TWO_NODE_AUTHORITY_PACEMAKER = "pacemaker"
+TWO_NODE_AUTHORITIES = (TWO_NODE_AUTHORITY_WITNESS, TWO_NODE_AUTHORITY_PACEMAKER)
+#: Host fencing (kubernetes-fencing contract, section 3.2): a revocation is
+#: applied again this often, covering subsystems recreated with allow_any_host.
+TWO_NODE_HOST_FENCE_REASSERT_S = 10
+#: Timeout of each subsystem RPC of a host-fence revocation or release.
+TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S = 5
+#: Node condition the operator sets on a host-fenced node's Kubernetes Node.
+TWO_NODE_STORAGE_FENCED_CONDITION = "StorageFenced"
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60

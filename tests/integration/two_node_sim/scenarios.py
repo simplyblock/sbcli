@@ -136,6 +136,11 @@ class Scenario:
     caps: frozenset = frozenset()
     notes: str = ""
     extra: dict = field(default_factory=dict)
+    # kubernetes-fencing contract (mode witness): host fencing on the cluster,
+    # and the nodes whose host must be fenced in the run (() = none; an int: that
+    # many, whichever they are). None: not checked.
+    host_fencing: bool = False
+    host_fenced: tuple | int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +349,25 @@ BED = [
              heal_s=300),
 ]
 
+#: docs/design/two-node-kubernetes-fencing.md, mode witness. A host is fenced
+#: (revoked on the winner, then StorageFenced and the out-of-service taint) only
+#: when its state is unknown; never for an SPDK-only or planned loss. A partition
+#: has a winner (contract 3.3): the other node's host is fenced. Every fence is released and every
+#: subsystem restored without a manual step (the operator actor releases a
+#: releasable fence once the node runs again).
+KUBE = [
+    Scenario("K1-host-fence-reboot-sn1", ("k8s",), reboot("sn1"), host_fencing=True,
+             host_fenced=("sn1",), grant_within_s=2.6, heal_s=300),
+    Scenario("K2-no-host-fence-crash-sn2", ("k8s",), crash("sn2"), aborts_ok=("sn2",),
+             host_fencing=True, host_fenced=(), grant_within_s=2.2),
+    Scenario("K3-no-host-fence-shutdown-sn2", ("k8s",), shutdown_then_restart("sn2"),
+             host_fencing=True, host_fenced=(), grant_within_s=2.2),
+    Scenario("K4-host-fence-partition-winner", ("k8s",), partition(), io_errors_ok=True,
+             stall_limit_s=None, heal_s=300, host_fencing=True, host_fenced=1),
+    Scenario("K5-host-fence-hang-sn2", ("k8s",), hang("sn2"), aborts_ok=("sn2",),
+             host_fencing=True, host_fenced=("sn2",), grant_within_s=2.6),
+]
+
 #: finding -> (scenario, bugs that re-introduce it, signature): the scenario
 #: must pass on main and fail with the bugs applied -- with a failure that
 #: contains the signature, so it is caught for that reason and no other.
@@ -403,7 +427,8 @@ EXERCISED = {
 #: crash, freeze of the vol1 primary (abort-on-wake, F5/F13), partition (fence
 #: both, leadership after the heal, F14/F15) -- and the cheapest proofs that
 #: the decision loop never blocks (F16) and port_allow respects the fence (F15).
-FAST = {"01b-crash-sn2", "02b-hang-sn2", "07-partition", "detect:F16", "detect:F3"}
+FAST = {"01b-crash-sn2", "02b-hang-sn2", "07-partition", "detect:F16", "detect:F3",
+        "K1-host-fence-reboot-sn1", "K2-no-host-fence-crash-sn2"}
 
 #: Known failing on main: scenario -> (reason with the fix that flips it, a
 #: text the failure must contain, so it fails for that reason and no other).
