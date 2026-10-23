@@ -8981,8 +8981,10 @@ def _restart_storage_node_impl(
         else:
             ret = _prepare_cluster_devices_partitions(snode, snode.nvme_devices)
         if not ret:
+            # Same rule as the plain restart below: a device whose stack was
+            # not built must never reach the ONLINE flip (SFAM-2834).
             logger.error("Failed to prepare cluster devices")
-            # return False
+            return False
     else:
         ret = _prepare_cluster_devices_on_restart(snode, clear_data=clear_data)
         if not ret:
