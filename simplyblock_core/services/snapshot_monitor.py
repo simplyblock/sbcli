@@ -4,7 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import snapshot_controller, snapshot_events
+from simplyblock_core.controllers import (
+    replication_delta,
+    snapshot_controller,
+    snapshot_events,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -692,8 +696,8 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
-            _id, err = snapshot_controller.add(
-                lvol.get_id(), name, snap_type=SnapShot.TYPE_INTERNAL)
+            _id, err = replication_delta.add_snapshot(
+                lvol, name, snap_type=SnapShot.TYPE_INTERNAL)
             if err:
                 logger.warning(f"Internal snapshot for {lvol.get_id()} failed: {err}")
         except Exception as e:

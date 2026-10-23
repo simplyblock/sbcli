@@ -12,6 +12,7 @@ from simplyblock_core import (
 from simplyblock_core.controllers import (
     lvol_controller,
     qos_controller,
+    replication_delta,
     replication_recovery_points,
     snapshot_controller,
     snapshot_events,
@@ -782,8 +783,8 @@ def process_snap_replicate_start(task, snapshot):
                            backoff=True, count=False)
         return
 
-    allow_partial = _partial_transfer_decision(
-        task, snapshot, replicate_to_source, remote_lv, remote_lv_node)
+    allow_partial, partial_base = _partial_transfer_decision(
+        task, snapshot, replicate_to_source, remote_lv, remote_lv_node, snode.get_id())
     logger.info("Transfer of %s into %s: %s", snapshot.get_id(),
                 remote_lv.top_bdev,
                 "PARTIAL allowed (landing volume is a clone of the previous "
@@ -847,6 +848,7 @@ def process_snap_replicate_start(task, snapshot):
         # replicated snapshot above; the fork independently refuses the delta
         # path unless the snapshot's dirty generation is complete.
         allow_partial=allow_partial,
+        partial_base=partial_base,
         priority_class=read_class,
     )
     task.status = JobSchedule.STATUS_RUNNING
@@ -1689,7 +1691,7 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
 
 
 def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
-                               remote_lv_node):
+                               remote_lv_node, source_node_id):
     """Whether this transfer may ship only the delta, chaining the landing
     volume first if that has not happened yet.
 
@@ -1704,17 +1706,34 @@ def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
     """
     landing_key = remote_lv.get_id()
     if task.function_params.get("allow_partial_landing") == landing_key:
-        return bool(task.function_params.get("allow_partial"))
+        return (bool(task.function_params.get("allow_partial")),
+                int(task.function_params.get("partial_base") or 0))
 
     # Chain state recorded against a previous landing volume says nothing about
     # this one.
     task.function_params["prechained_node_ids"] = []
     allow_partial = _prechain_landing_volume(
         task, snapshot, replicate_to_source, remote_lv, remote_lv_node)
+    partial_base = 0
+    if allow_partial:
+        # The landing volume is chained onto the copy of this predecessor; the
+        # delta must have been computed against exactly it (the fork checks
+        # the base blob id), and no other member may have written past the
+        # transferring node's bitmap meanwhile.
+        prev_snap = _previous_replicated_snapshot(snapshot, replicate_to_source)
+        ok, why = (replication_delta.delta_basis(prev_snap, snapshot, source_node_id)
+                   if prev_snap else (False, "no replicated predecessor"))
+        if ok and prev_snap.blobid:
+            partial_base = int(prev_snap.blobid)
+        else:
+            logger.info("Transfer of %s stays FULL: %s", snapshot.get_id(),
+                        why or "predecessor has no blob id")
+            allow_partial = False
     task.function_params["allow_partial"] = allow_partial
+    task.function_params["partial_base"] = partial_base
     task.function_params["allow_partial_landing"] = landing_key
     task.write_to_db()
-    return allow_partial
+    return allow_partial, partial_base
 
 
 def _prechained_nodes_for(task, remote_lv):

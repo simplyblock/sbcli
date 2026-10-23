@@ -89,6 +89,12 @@ class SnapShot(BaseModel):
     # On Snapshot transfer or replicate this field is the same
     # This value can be used to identify the same snapshot on other nodes
     data_uuid: str = ""
+    #: Replication snapshots only: the lvstore members' local write counts
+    #: right before and right after the snapshot was taken,
+    #: {node_id: [count, online_since]} (controllers/replication_delta.py).
+    #: Empty when they could not be read, which rules out a delta transfer.
+    local_writes_before: dict = default_factory(dict)
+    local_writes_after: dict = default_factory(dict)
 
     def watch_scope(self):
         return (self.pool_uuid,)
