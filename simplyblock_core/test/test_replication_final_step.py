@@ -19,10 +19,11 @@ class _Hub:
 
 
 class _RPC:
-    def __init__(self, node_id, events, final_step_ret=True):
+    def __init__(self, node_id, events, final_step_ret=True, final_step_state="Done"):
         self.node_id = node_id
         self.events = events
         self._final_step_ret = final_step_ret
+        self._final_step_state = final_step_state
         self.final_step_gateways = []
         self.ana_groups = []
 
@@ -42,7 +43,11 @@ class _RPC:
         # which is how the controller-name-instead-of-bdev bug went unnoticed.
         self.events.append(("final_step", operation, lvol_name, snapshot_name, batch))
         self.final_step_gateways.append(gateway)
-        return ["ok"] if self._final_step_ret else None
+        if not self._final_step_ret:
+            return None
+        # The real RPC answers with a transfer_state dict; run_cutover only
+        # proceeds on Done.
+        return {"transfer_state": self._final_step_state, "offset": 0}
 
     def bdev_lvol_add_clone(self, lvol_name, parent):
         self.events.append(("add_clone", self.node_id, lvol_name, parent))

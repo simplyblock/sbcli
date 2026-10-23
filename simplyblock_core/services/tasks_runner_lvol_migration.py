@@ -101,7 +101,13 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException, RPCClient
+from simplyblock_core.rpc_client import (
+    RPCClient,
+    RPCErrorCode,
+    RPCException,
+    RPCRemoteError,
+    request_reached_remote,
+)
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
 
@@ -2215,9 +2221,23 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
             f"[IO-FREEZE] {_now_ms()} bdev_lvol_final_migration starting: "
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
         try:
-            ret = src_rpc.bdev_lvol_transfer_final_step(
-                src_lvol_composite, tgt_map_id, tgt_snap_composite,
-                constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
+            try:
+                ret = src_rpc.bdev_lvol_transfer_final_step(
+                    src_lvol_composite, tgt_map_id, tgt_snap_composite,
+                    constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
+            except RPCException as e:
+                # A transport failure raises (an SPDK error returns None and
+                # takes the branch below). A read timeout on a long freeze can
+                # hide a migration SPDK completed: reverting it serves stale
+                # reads off the source replicas and, once retries run out,
+                # deletes the target (SFAM-2834). Probe transfer_stat like
+                # the falsy case; "No process" proves completion only if the
+                # final step reached SPDK at all.
+                logger.warning(f"bdev_lvol_transfer_final_step raised for {src_lvol_composite}: {e}")
+                ret = None
+                reached = request_reached_remote(e)
+            else:
+                reached = True
             if not ret:
                 # Falsy, not just None: a target restart mid-RPC can come back as a
                 # 200 with an empty/non-JSON body, which rpc_client._request2 then
@@ -2231,6 +2251,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
                 # reverted below like any other failure of this attempt.
                 stat = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
                 state = (stat or {}).get('transfer_state') if stat is not None else None
+                if state == 'No process' and not reached:
+                    state = None
             else:
                 # The RPC can return normally (no exception) while still reporting
                 # transfer failure — transfer_state is one of "No process" |
@@ -4273,7 +4295,9 @@ def _attempt_migration_retry(task, migration):
             max_retries=migration.max_retries,
             deadline_seconds=migration.deadline_seconds,
             retry_on_failure=True)
-    except (ValueError, PreconditionError, MigrationConflictError) as e:
+    except (ValueError, PreconditionError, MigrationConflictError, RPCException) as e:
+        # An RPC transport failure inside create_migration raises; it used to
+        # escape main() and crash-loop the runner on this same task.
         # Preconditions still not met -- pace the next recheck the same way
         # instead of retrying create_migration on every runner tick.
         task.function_params['retry_on_failure_next_attempt_at'] = now + constants.LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC
@@ -4381,7 +4405,12 @@ def main():
                         logger.info(f"LVol-migration task {task.uuid} owned by another runner host; skipping")
                         continue
                     with tasks_controller.task_lease_heartbeat(task):
-                        task_runner(task)
+                        try:
+                            task_runner(task)
+                        except Exception:
+                            # One task's unexpected raise must not take the
+                            # runner (and every other migration) down.
+                            logger.exception(f"LVol-migration task {task.uuid} raised")
 
         time.sleep(3)
 

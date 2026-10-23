@@ -1062,14 +1062,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
-    # set QOS
-    if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
-        set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+    # The volume is online and its create event is out: from here a raised
+    # RPC failure must not turn into a failed create, or callers retry a
+    # create that already committed (SFAM-2834).
+    try:
+        # set QOS
+        if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
+            set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
-    if pool.allowed_hosts:
-        for host_nqn in pool.allowed_hosts:
-            logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
-            add_host_to_lvol(lvol.get_id(), host_nqn)
+        if pool.allowed_hosts:
+            for host_nqn in pool.allowed_hosts:
+                logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
+                add_host_to_lvol(lvol.get_id(), host_nqn)
+    except RPCException as e:
+        logger.error("Volume %s created but QoS/allowed-host setup failed: %s", lvol.get_id(), e)
+        return lvol.uuid, f"Volume created but QoS/allowed-host setup failed: {e}"
 
     if replication_policy:
         # Optional at create time: assigning a policy configures replication for
@@ -1360,6 +1367,41 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
     if not ret:
         return _fail_after_bdev(lvol, rpc_client, msg)
 
+    # The blob exists from here on. A transport failure raises rather than
+    # returning None, so without this catch a failed subsystem create, host
+    # add or namespace add escaped with the blob left behind and the record
+    # never marked in_deletion (SFAM-2834).
+    try:
+        return _attach_lvol_after_bdev(
+            lvol, snode, rpc_client, is_primary, secondary_index, min_cntlid,
+            ns_uuid, primary_nsid, defer_listeners)
+    except RPCException as e:
+        logger.exception("add_lvol_on_node %s on %s failed after the bdev was created",
+                         lvol.get_id(), snode.get_id())
+        _drop_namespace_of_failed_attempt(lvol, rpc_client)
+        return _fail_after_bdev(lvol, rpc_client, f"RPC failed: {e}")
+
+
+def _drop_namespace_of_failed_attempt(lvol, rpc_client):
+    """Best effort: remove a namespace this attempt may already have attached
+    to its top bdev, so the rollback does not delete the bdev under a live
+    namespace (the resurrected-namespace state, incident 2026-07-14)."""
+    try:
+        subsystem = rpc_client.subsystem_get(lvol.nqn)
+        for ns in ((subsystem or {}).get("namespaces") or []):
+            if ns.get("bdev_name") == lvol.top_bdev:
+                logger.info("rollback: removing namespace nsid=%s (%s) left by the failed attempt",
+                            ns.get("nsid"), lvol.top_bdev)
+                rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns.get("nsid"))
+    except Exception:
+        logger.exception("rollback: could not clear the namespace for %s", lvol.get_id())
+
+
+def _attach_lvol_after_bdev(lvol, snode, rpc_client, is_primary, secondary_index, min_cntlid,
+                            ns_uuid, primary_nsid, defer_listeners):
+    """Subsystem, hosts, namespace and listeners for an lvol whose bdev stack
+    add_lvol_on_node just created. Split out only so that one handler there
+    can roll the blob back on any raised RPC failure."""
     db_controller = DBController()
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.has_qos():
@@ -2499,15 +2541,25 @@ def connect_lvol_to_pool(lvol_id, node_id):
     rpc_client = snode.rpc_client()
 
     if pool.has_qos():
-        ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+        # Best effort, as callers treat it: a raised transport failure must
+        # not abort the create or registration that called this.
+        try:
+            ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+        except RPCException as e:
+            logger.error(f"RPC failed bdev_lvol_add_to_group: {e}")
+            return False
         if not ret:
             logger.error("RPC failed bdev_lvol_add_to_group")
             return False
 
         # re-apply the QOS limits
-        ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
-                                            pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
-                                            pool.max_w_mbytes_per_sec)
+        try:
+            ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
+                                                     pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
+                                                     pool.max_w_mbytes_per_sec)
+        except RPCException as e:
+            logger.error(f"RPC failed bdev_set_qos_limit: {e}")
+            return False
         if not ret:
             logger.error("RPC failed bdev_set_qos_limit")
             return False

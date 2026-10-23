@@ -15,6 +15,7 @@ target paths → non_optimized, all source paths → inaccessible).
 """
 from simplyblock_core import db_controller, utils
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -252,22 +253,50 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         f"[IO-FREEZE] bdev_lvol_transfer_final_step starting: lvol={lvol.uuid} "
         f"src={src_lvol_composite} tgt_snap={tgt_snap_composite} "
         f"gateway={hub_bdev} op={operation}")
-    ret = src_rpc.bdev_lvol_transfer_final_step(
-        src_lvol_composite, tgt_map_id, tgt_snap_composite,
-        _FINAL_STEP_BATCH, hub_bdev, operation)
-    if ret is None:
+    try:
+        ret = src_rpc.bdev_lvol_transfer_final_step(
+            src_lvol_composite, tgt_map_id, tgt_snap_composite,
+            _FINAL_STEP_BATCH, hub_bdev, operation)
+    except RPCException as e:
+        # A transport failure used to skip the restore below and leave the
+        # source fenced (the volume dark) (SFAM-2834). SPDK may still have
+        # finished -- e.g. a read timeout on a long freeze -- so ask it; only
+        # an explicit Done counts.
+        logger.error(f"bdev_lvol_transfer_final_step raised for {src_lvol_composite}: {e}")
+        try:
+            ret = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+        except RPCException as stat_e:
+            logger.error(f"bdev_lvol_transfer_stat for {src_lvol_composite} failed: {stat_e}")
+            ret = None
+    # The RPC can return normally while still reporting the transfer failed --
+    # transfer_state is one of "No process" | "In progress" | "Failed" |
+    # "Done". Checking only for None let a "Failed" response through to the
+    # ANA flip as if the data had moved (main, 2026-08-31 lvol=1fc7911f).
+    transfer_state = ret.get("transfer_state") if isinstance(ret, dict) else None
+    if transfer_state != "Done":
         # The freeze failed with the source fenced: restore the source paths so
         # the client resumes there (nothing moved; source is still authoritative)
         # rather than leaving the volume dark until a retry succeeds.
+        logger.error(
+            f"bdev_lvol_transfer_final_step: transfer_state={transfer_state!r} "
+            f"(expected 'Done'): {ret!r} lvol={lvol.uuid}")
         restore_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id)
-        return False, "bdev_lvol_transfer_final_step failed"
+        return False, (
+            f"bdev_lvol_transfer_final_step: transfer_state={transfer_state!r}"
+            f" (expected 'Done'): {ret!r}")
     logger.info(f"[IO-RESUME] final step Done: lvol={lvol.uuid} io now live on target")
 
     # Link the final lvol to its predecessor snapshot on the target peers.
     # bdev_lvol_transfer_final_step handles the primary internally; peers need an
     # explicit add_clone. Non-fatal — a missing peer link self-heals on rejoin.
     for peer in _online_peers(tgt_node):
-        if not peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite):
+        try:
+            add_clone_ok = peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
+        except RPCException as e:
+            logger.warning(
+                f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal): {e}")
+            continue
+        if not add_clone_ok:
             logger.warning(
                 f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal)")
 
