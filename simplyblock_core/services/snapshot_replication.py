@@ -7,6 +7,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, snaps
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -993,7 +994,14 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return False
         if status == "Done":
-            new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+            try:
+                new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+            except RPCException as e:
+                # A transport failure raises; without this it skipped the
+                # counted retry below and re-ran the finish on every pass
+                # forever (SFAM-2834).
+                logger.error("Replication finish for snapshot %s failed: %s", snapshot.get_id(), e)
+                new_snapshot_uuid = None
             if new_snapshot_uuid:
                 task.function_result = new_snapshot_uuid
                 task.status = JobSchedule.STATUS_DONE
@@ -1048,6 +1056,19 @@ def main():
                                 logger.error("Replication task %s failed: %s",
                                              task.get_id(), e)
                                 res = False
+                                # Spend a retry: a raise used to leave the task
+                                # as it was, so the same failure re-ran on every
+                                # pass and max_retry was never reached.
+                                try:
+                                    task = db.get_task_by_id(task.uuid)
+                                    if task.status != JobSchedule.STATUS_DONE and not task.canceled:
+                                        task.function_result = f"task raised: {e}"
+                                        task.status = JobSchedule.STATUS_SUSPENDED
+                                        task.retry += 1
+                                        task.write_to_db()
+                                except Exception as e2:
+                                    logger.error("Could not record retry for task %s: %s",
+                                                 task.get_id(), e2)
                             if not res:
                                 time.sleep(3)
 

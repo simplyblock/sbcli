@@ -1365,7 +1365,12 @@ def main():
                         logger.info(f"Batch-migration task {task.uuid} owned by another runner host; skipping")
                         continue
                     with tasks_controller.task_lease_heartbeat(task):
-                        task_runner(task)
+                        try:
+                            task_runner(task)
+                        except Exception:
+                            # One task's unexpected raise must not take the
+                            # runner (and every other migration) down.
+                            logger.exception(f"Batch-migration task {task.uuid} raised")
 
         time.sleep(3)
 

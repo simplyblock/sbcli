@@ -207,6 +207,23 @@ JC_REMOVE_JM_STILL_IN_USE = -22
 JC_REMOVE_JM_NOT_USED = -13
 
 
+def request_reached_remote(err: BaseException) -> bool:
+    """True when a raised RPC failure provably reached SPDK. On this branch
+    ``_request`` raises only for transport failures and keeps the requests
+    exception on ``__context__``; a read timeout is the one transport failure
+    where the request was delivered and may have executed. Typed errors from
+    ``_request3`` that carry an SPDK answer count as reached too.
+
+    Callers probing a transfer's state after a raise need this: a
+    ``transfer_state`` of "No process" means "finished and cleaned up" only
+    if the final step actually ran.
+    """
+    if isinstance(err, (RPCRemoteError, RPCProtocolError)):
+        return True
+    cause = err.__cause__ or err.__context__
+    return isinstance(cause, ReadTimeout)
+
+
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
