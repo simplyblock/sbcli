@@ -1130,6 +1130,10 @@ def ping_ip(query: PingQuery):
     try:
         _, err, rc = shell_utils.run_command(host_network.host_command(f"ping -c 3 -W 1 {query.ip}"))
         if rc != 0:
+            # run_command returns a process's stderr as bytes, and a failure to
+            # start the process as a str.
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", errors="replace")
             return utils.get_response(False, err or f"{query.ip} does not answer")
         return utils.get_response(host_network.has_carrier(query.ifname))
     except Exception as e:
