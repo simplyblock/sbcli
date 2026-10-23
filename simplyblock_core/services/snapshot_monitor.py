@@ -3,7 +3,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, migration_turn, utils
 from simplyblock_core.controllers import snapshot_controller, snapshot_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -637,6 +637,14 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                   if lv.do_replicate and lv.replication_interval_min > 0]
     if not repl_lvols:
         return
+    # One migrating volume per source node: the others take no snapshot
+    # until the volume ahead of them on their node has cut over.
+    waiting = migration_turn.waiting_lvol_ids(db, cluster_id, repl_lvols)
+    if waiting:
+        logger.debug("Waiting for their node's migration turn: %s", sorted(waiting))
+        repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in waiting]
+        if not repl_lvols:
+            return
     hold = _cadence_capacity_hold(cluster_id)
     if hold:
         logger.warning("Holding internal replication snapshots: %s", hold)

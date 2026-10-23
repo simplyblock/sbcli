@@ -24,6 +24,7 @@ class MigrationPlan(BaseModel):
 
     # Per-volume states, in the order a volume passes through them.
     VOL_SKIPPED = 'skipped'
+    VOL_WAITING = 'waiting'             # another volume of its node is migrating
     VOL_REPLICATING = 'replicating'     # initial copy or catch-up
     VOL_QUEUED = 'queued'               # caught up, waiting for the LVS cutover slot
     VOL_CONVERGING = 'converging'       # shrink rounds

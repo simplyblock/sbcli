@@ -15,7 +15,10 @@ import statistics
 from simplyblock_core import constants
 
 # States whose remaining work is data still to transfer, then a cutover.
-_TRANSFERRING = ("replicating", "queued")
+# A waiting volume has all of it ahead, behind the volume migrating before it
+# on its node -- which is on the same lvstore, so the per-lvstore queue below
+# already orders them.
+_TRANSFERRING = ("waiting", "replicating", "queued")
 # States already in the endgame: only (part of) the cutover remains.
 _ENDGAME = ("converging", "cutting_over")
 

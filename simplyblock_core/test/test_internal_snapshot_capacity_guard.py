@@ -83,3 +83,28 @@ def test_the_reason_names_the_utilization_and_the_threshold(monkeypatch):
     monkeypatch.setattr(sm, "db", _db(91))
     reason = sm._cadence_capacity_hold("CL1")
     assert "91%" in reason and "80%" in reason
+
+
+def test_only_the_nodes_first_migrating_volume_takes_cadence_snapshots(monkeypatch):
+    # One volume per source node migrates at a time: the second volume of N1
+    # takes no snapshot (so ships nothing) until the first has cut over.
+    def mig(uuid, node, queued):
+        lv = _lvol(uuid)
+        lv.node_id = node
+        lv.replication_mode = "migration"
+        lv.migration_queued_at = queued
+        return lv
+    lvols = [mig("N1-second", "N1", 20), mig("N1-first", "N1", 10), mig("N2-only", "N2", 30)]
+    db = _db(None)
+    db.get_lvols = lambda cluster_id: lvols
+    db.get_job_tasks = lambda cluster_id, reverse=True, limit=0: []
+    calls = []
+
+    class _SnapCtl:
+        def add(self, lvol_id, name, snap_type=SnapShot.TYPE_USER):
+            calls.append(lvol_id)
+            return "snap-uuid", None
+    monkeypatch.setattr(sm, "db", db)
+    monkeypatch.setattr(sm, "snapshot_controller", _SnapCtl())
+    sm.take_due_internal_snapshots("CL1", 10_000)
+    assert sorted(calls) == ["N1-first", "N2-only"]

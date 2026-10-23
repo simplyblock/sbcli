@@ -1257,7 +1257,7 @@ class MigrationPlanVolumeDTO(BaseModel):
     """One volume of a migration plan (docs/online-migration.md)."""
     lvol_id: str
     name: str = ""
-    #: skipped | replicating | queued | converging | cutting_over | done | failed | canceled
+    #: skipped | waiting | replicating | queued | converging | cutting_over | done | failed | canceled
     state: str
     target_node_id: str = ""
     error: str = ""

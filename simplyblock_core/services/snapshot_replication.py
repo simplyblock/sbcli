@@ -5,6 +5,7 @@ import uuid
 from simplyblock_core import (
     constants,
     db_controller,
+    migration_turn,
     snapshot_retention,
     utils,
     xfer_timing,
@@ -160,6 +161,9 @@ def _lvs_transfer_hold(task, snapshot):
 
     Two priorities share one lvstore's bandwidth:
 
+    0. A migration-mode volume waits while another volume of its source node
+       is migrating (simplyblock_core/migration_turn.py).
+
     1. A volume in its FINAL CUTOVER owns the lvstore. Its convergence rounds
        decide how long client IO freezes -- every second another volume steals
        from a round is a second of writes the frozen final step must copy --
@@ -178,6 +182,12 @@ def _lvs_transfer_hold(task, snapshot):
         return ""
     own_id = own_lvol.get_id()
     own_group = _group_id_for_lvol(own_lvol)
+
+    # --- priority 0: one migrating volume per source node ------------------
+    # A volume queued behind another on its node ships nothing yet, not even
+    # a backlog of snapshots it had before migration started.
+    if own_id in migration_turn.waiting_lvol_ids(db, task.cluster_id):
+        return "waiting for its node's migration turn"
 
     tasks = db.get_job_tasks(task.cluster_id)
 

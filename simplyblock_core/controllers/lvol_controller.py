@@ -4461,6 +4461,11 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                      lvol.get_id(), replication_cluster_id)
         return False
 
+    if mode == "migration" and not (lvol.do_replicate
+                                    and lvol.replication_mode == "migration"):
+        # Queue position for the node's one-at-a-time turn; a volume already
+        # replicating in migration mode keeps the place it has.
+        lvol.migration_queued_at = int(time.time())
     lvol.do_replicate = True
     if mode in ("failover", "migration"):
         lvol.replication_mode = mode

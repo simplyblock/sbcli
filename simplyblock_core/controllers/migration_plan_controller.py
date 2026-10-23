@@ -11,7 +11,7 @@ back from the volumes' tasks and snapshots. See docs/online-migration.md.
 import time
 import uuid as uuid_lib
 
-from simplyblock_core import constants, migration_forecast, utils
+from simplyblock_core import constants, migration_forecast, migration_turn, utils
 from simplyblock_core.controllers import lvol_controller, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -379,6 +379,7 @@ def _refresh(db, plan, persist=True):
     samples_by_lvs: dict = {}
     dirty_by_lvs: dict = {}
     cutover_durations = []
+    waiting = migration_turn.waiting_lvol_ids(db, plan.cluster_id)
     for vol in plan.volumes:
         if vol["state"] in MigrationPlan.VOL_TERMINAL:
             vol["bytes_remaining"] = 0
@@ -392,7 +393,11 @@ def _refresh(db, plan, persist=True):
                     cutover_durations.append(float(p["end_time"]) - float(p["endgame_started_at"]))
             except KeyError:
                 vol.update(state=MigrationPlan.VOL_FAILED, error="cutover task not found")
-        if vol["state"] in (MigrationPlan.VOL_REPLICATING, MigrationPlan.VOL_QUEUED):
+        if vol["state"] in (MigrationPlan.VOL_REPLICATING, MigrationPlan.VOL_WAITING):
+            vol["state"] = (MigrationPlan.VOL_WAITING if vol["lvol_id"] in waiting
+                            else MigrationPlan.VOL_REPLICATING)
+        if vol["state"] in (MigrationPlan.VOL_WAITING, MigrationPlan.VOL_REPLICATING,
+                            MigrationPlan.VOL_QUEUED):
             remaining, samples = _transfer_progress(db, vol["lvol_id"], vol.get("used_bytes", 0))
             vol["bytes_remaining"] = remaining
             samples_by_lvs.setdefault(vol.get("lvs_name", ""), []).extend(samples)

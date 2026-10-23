@@ -196,6 +196,20 @@ orchestration. Without a measurement, the forecast uses
 `REPL_FORECAST_DEFAULT_BYTES_PER_SEC` (200 MB/s) and sets
 `throughput_measured: false`.
 
+**One volume per source node:** a node migrates one volume at a time, from
+its first snapshot through its cutover. Of a node's migration-mode volumes,
+the one queued first (`LVol.migration_queued_at`, stamped by
+`replication_start`) holds the node's turn; the others take no cadence
+snapshot and ship nothing, not even a pre-existing backlog, and the plan
+reports them `waiting`. The turn is derived on every pass, never handed over:
+a completed cutover clears the source's `do_replicate`, so the next volume of
+the node holds the turn on the next pass. A cutover that gave up or was
+canceled releases the turn as well, so one failing volume does not park its
+node's queue. Consistency-group members share one turn. Nodes progress in
+parallel. Code: `simplyblock_core/migration_turn.py`, gated in
+`snapshot_monitor.take_due_internal_snapshots` and in the transfer gate of
+`snapshot_replication`.
+
 **Queues:** transfers are serialized per source lvstore (the per-LVS transfer
 gate), and so are cutovers (the LVS claim). For each LVS:
 

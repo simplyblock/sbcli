@@ -72,6 +72,9 @@ class _FakeDB:
     def get_task_by_id(self, tid):
         return self.tasks[tid]
 
+    def get_job_tasks(self, cluster_id, reverse=True, limit=0):
+        return list(self.tasks.values())
+
     def get_snapshots_by_lvol_id(self, lid):
         return [s for s in self.snaps if s.lvol.get_id() == lid]
 
@@ -401,3 +404,27 @@ def test_too_little_free_capacity_for_the_worst_case_pin_warns(db, monkeypatch):
     monkeypatch.setattr(mpc, "_source_capacity", lambda d, cid: (50, 80, 200 * GIB, 150 * GIB))
     plan = mpc.build_plan("C1", "C2", db=db)
     assert plan.warnings and "90.0 GiB" in plan.warnings[0]
+
+
+def test_status_shows_volumes_waiting_for_their_nodes_turn(db):
+    # Two volumes of node S1 migrate one after the other; S2's runs alongside.
+    def mig(uuid, node, queued):
+        return _lvol(uuid, node_id=node, do_replicate=True, replication_mode="migration",
+                     replication_node_id="T1", migration_queued_at=queued)
+    db.lvols = {lv.get_id(): lv for lv in [mig("a", "S1", 10), mig("b", "S1", 20), mig("c", "S2", 30)]}
+    tasks = []
+    for lid in "abc":
+        t = JobSchedule()
+        t.uuid = f"t-{lid}"
+        t.function_name = JobSchedule.FN_REPLICATION_FINAL
+        t.function_params = {"lvol_id": lid}
+        t.status = JobSchedule.STATUS_NEW
+        tasks.append(t)
+    db.tasks = {t.uuid: t for t in tasks}
+    plan = mpc.build_plan("C1", "C2", db=db)
+    for v in plan.volumes:
+        v["task_id"] = f"t-{v['lvol_id']}"
+    mpc._refresh(db, plan, persist=False)
+    states = {v["lvol_id"]: v["state"] for v in plan.volumes}
+    assert states == {"a": MigrationPlan.VOL_REPLICATING, "b": MigrationPlan.VOL_WAITING,
+                      "c": MigrationPlan.VOL_REPLICATING}
