@@ -27,6 +27,7 @@ from typing import Any, TypedDict
 import cpuinfo
 import requests
 
+from simplyblock_core.utils import get_k8s_core_client, host_network
 from simplyblock_core.utils import shell as shell_utils
 
 
@@ -46,7 +47,7 @@ def get_static_node_info() -> StaticNodeInfo:
     known not to apply, avoiding up to a few seconds of network timeout on
     the first call after boot).
     """
-    hostname, _, _ = shell_utils.run_command("hostname -s")
+    hostname = host_network.node_hostname().split(".")[0]
     system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
     cloud_info: dict[str, Any] = {}
@@ -64,12 +65,80 @@ def get_static_node_info() -> StaticNodeInfo:
 
 
 def get_cloud_info() -> dict | None:
+    """The instance this node runs on: from the cloud's metadata service, or,
+    where a pod cannot reach it, from the node's Kubernetes object."""
+    return _metadata_cloud_info() or _kubernetes_cloud_info()
+
+
+def _metadata_cloud_info() -> dict | None:
     getters: list[Callable[[], dict | None]] = [_google_info, _amazon_info, _equinix_info]
     return next((
         info
         for getter in getters
         if (info := getter()) is not None
     ), None)
+
+
+# _PROVIDER_CLOUDS maps a Node's spec.providerID scheme to the cloud name the
+# metadata getters report.
+_PROVIDER_CLOUDS = {"aws": "amazon", "gce": "google", "azure": "azure", "equinixmetal": "equinix"}
+
+
+# _NODE_READ_TIMEOUT bounds the Node read, (connect, read) in seconds: it runs
+# synchronously on the first node-info request, and an API server that accepts
+# the connection and stops answering would hold discovery indefinitely.
+_NODE_READ_TIMEOUT = (3, 5)
+
+# _GKE_INSTANCE_ID is where GKE records a node's numeric instance id, the id
+# the GCE metadata service reports.
+_GKE_INSTANCE_ID = "container.googleapis.com/instance_id"
+
+
+def _kubernetes_cloud_info() -> dict | None:
+    """The instance as the node's Kubernetes object states it. On the pod
+    network, the metadata service can be out of reach: AWS answers an IMDSv2
+    token only within the hop limit, and a NetworkPolicy may block it. The
+    cloud's node controller writes the same facts onto the Node."""
+    node_name = os.environ.get("HOSTNAME")
+    if not node_name:
+        return None
+    try:
+        node = get_k8s_core_client().read_node(node_name, _request_timeout=_NODE_READ_TIMEOUT)
+    except Exception:
+        return None
+    scheme, _, rest = (node.spec.provider_id or "").partition("://")
+    instance = _provider_instance_id(scheme, rest, node.metadata.annotations or {})
+    if scheme not in _PROVIDER_CLOUDS or not instance:
+        return None
+    addresses = {address.type: address.address for address in node.status.addresses or []}
+    labels = node.metadata.labels or {}
+    return {
+        "id": instance,
+        "type": labels.get("node.kubernetes.io/instance-type", ""),
+        "cloud": _PROVIDER_CLOUDS[scheme],
+        "ip": addresses.get("InternalIP", ""),
+        "public_ip": addresses.get("ExternalIP", ""),
+    }
+
+
+def _provider_instance_id(scheme: str, rest: str, annotations: dict) -> str:
+    """The instance id a providerID names, in the form the cloud's metadata
+    service reports it, so a node reports the same identity whichever source
+    answered; or an empty string when the node does not carry it.
+
+    AWS and Equinix Metal end the providerID with that id. An Azure id is
+    the whole resource path: a scale set's instances end in their ordinal,
+    and two scale sets share ordinals. GCE ends it with the instance name,
+    while the metadata service reports the numeric id, which GKE records in
+    an annotation; without it the identity is not reported at all rather
+    than as a name that changes with which source answered.
+    """
+    path = rest.strip("/")
+    if scheme == "azure":
+        return path
+    if scheme == "gce":
+        return annotations.get(_GKE_INSTANCE_ID, "")
+    return path.rsplit("/", 1)[-1]
 
 
 def _google_info() -> dict | None:
