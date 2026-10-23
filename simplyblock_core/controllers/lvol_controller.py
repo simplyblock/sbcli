@@ -6053,6 +6053,15 @@ def replication_commit(lvol_id, delete_source=False):
         logger.error(e)
         return False
 
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    # A caller that cannot tell whether its commit arrived sends it again. The
+    # repeat names the cutover already queued, running, or done rather than
+    # queuing a second one, which would build a second clone.
+    existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+    if existing:
+        return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
+
     if not lvol.replication_node_id:
         logger.error(f"LVol: {lvol_id} replication node id not found")
         return False
@@ -6061,8 +6070,6 @@ def replication_commit(lvol_id, delete_source=False):
     if target_node.status != StorageNode.STATUS_ONLINE:
         logger.error(f"Target node is not online: {lvol.replication_node_id}")
         return False
-
-    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
 
     # NO snapshot here. The iterative snapshots ARE the endgame, and the
     # endgame does not start until ordinary replication has the target within

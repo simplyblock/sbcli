@@ -1374,6 +1374,25 @@ def get_active_replication_final_task(cluster_id, lvol_id):
     return False
 
 
+def get_replication_final_task(cluster_id, lvol_id):
+    """Return the UUID of the replication cutover task a new commit of *lvol_id*
+    would repeat, or False: one queued or running, or one that finished the
+    cutover. A finished cutover leaves the source in place until delete_source
+    retires it, and a commit then would build a second clone of a volume whose
+    cutover is done. A task that ended without the cutover is not returned, so
+    the commit can be sent again."""
+    active = get_active_replication_final_task(cluster_id, lvol_id)
+    if active:
+        return active
+    for task in db.get_job_tasks(cluster_id):
+        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL and task.canceled is False
+                and task.status == JobSchedule.STATUS_DONE
+                and task.function_params.get("lvol_id") == lvol_id
+                and task.function_result == "cutover done"):
+            return task.uuid
+    return False
+
+
 def add_replication_final_task(cluster_id, src_node_id, function_params):
     """Create the JobSchedule task that drives a cross-cluster replication
     cutover (freeze + final delta + ANA flip).

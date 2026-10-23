@@ -445,6 +445,20 @@ class TestCutover:
         assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/tasks/{TASK_ID}/')
         lvol_controller.replication_commit.assert_called_once_with(VOLUME_ID, delete_source=False)
 
+    def test_a_second_commit_is_409_naming_the_task(self, client, db, volume, lvol_controller):
+        """A cutover already queued, running, or finished is reported as a
+        conflict naming its task, so a caller resending the commit learns the
+        task it is waiting on."""
+        lvol_controller.replication_commit.return_value = {
+            'cutover_task_queued': False, 'conflict': True, 'task_id': TASK_ID,
+        }
+
+        response = client.post(REPLICATION_URL + 'commit')
+
+        assert response.status_code == 409
+        assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/tasks/{TASK_ID}/')
+        assert response.json()['task_id'] == TASK_ID
+
     def test_unqueued_cutover_is_an_error(self, client, db, volume, lvol_controller):
         lvol_controller.replication_commit.return_value = False
 

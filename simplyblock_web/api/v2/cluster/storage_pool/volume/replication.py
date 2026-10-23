@@ -202,7 +202,7 @@ class CommitParams(BaseModel):
 
 
 @api.post('/commit', name='clusters:storage-pools:volumes:replication:commit',
-          status_code=202, responses={202: {"content": None}})
+          status_code=202, responses={202: {"content": None}, 409: {}})
 def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
            body: CommitParams | None = None) -> Response:
     """Queue the planned cutover. Progress is the returned task.
@@ -218,10 +218,16 @@ def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume
     if not result:
         raise HTTPException(500, 'Failed to queue the replication cutover')
 
-    return Response(status_code=202, headers={'Location': str(request.app.url_path_for(
+    location = str(request.app.url_path_for(
         'clusters:tasks:detail',
         cluster_id=cluster.get_id(), task_id=result['task_id'],
-    ))})
+    ))
+    if result.get('conflict'):
+        # The cutover is already queued, running, or done: the caller resent
+        # the commit and learns the task it is waiting on.
+        return JSONResponse(status_code=409, headers={'Location': location},
+                            content={'task_id': result['task_id']})
+    return Response(status_code=202, headers={'Location': location})
 
 
 @api.post('/demote', name='clusters:storage-pools:volumes:replication:demote',
