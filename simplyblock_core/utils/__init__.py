@@ -224,6 +224,12 @@ def get_docker_client(cluster_id=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes(cluster_id)
+    if not nodes and cluster_id:
+        # Management nodes belong to the deployment, not to one cluster: only
+        # the first cluster's bootstrap records one, so a cluster attached
+        # later with `cluster add` has none of its own. Any of them reaches
+        # the same swarm.
+        nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         raise RuntimeError("No mgmt nodes was found in the cluster!")
 
