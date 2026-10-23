@@ -347,9 +347,14 @@ def _swap_failback_lvol_uuid(rep, failback_source_id):
     # Explicitly re-enable replication on the restored volume.  The original
     # source had do_replicate cleared during failover; failback means it is the
     # active source again and should resume its cadence.
-    new_lvol.do_replicate = True
-    new_lvol.replication_interval_min = failback_src_interval
-    new_lvol.replication_policy_id = failback_src_policy_id
+    # A migration that returns a volume to a cluster it came from (A -> B -> A)
+    # takes this path too, for the UUID swap, but has no pairing to resume: the
+    # failback source follows the B -> A migration policy, and copying it here
+    # made the volume on A replicate toward its own cluster.
+    if rep.mode != "migration":
+        new_lvol.do_replicate = True
+        new_lvol.replication_interval_min = failback_src_interval
+        new_lvol.replication_policy_id = failback_src_policy_id
 
     # Write the clone under the original source UUID.
     new_lvol.uuid = failback_source_id
