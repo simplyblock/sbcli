@@ -11,6 +11,11 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.utils.nvme import (
+    HostConnectAuth,
+    HostNotAllowedError,
+    HostNQNRequiredError,
+)
 
 from .... import util
 from ...._dependencies import Cluster, StoragePool, Volume
@@ -28,6 +33,7 @@ from .replication import (
 
 api = APIRouter()
 db = DBController()
+logger = core_utils.get_logger(__name__)
 
 
 @api.get('/', name='clusters:storage-pools:volumes:list', response_model=builtins.list[VolumeDTO], responses=WATCH_RESPONSES)
@@ -271,9 +277,28 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None):
+    # Authorization first, with its own status codes. This route used to answer
+    # 404 for EVERY failure of connect_lvol, so a host that was not on the
+    # volume's allowed list got the same answer as a volume that does not
+    # exist. The CSI driver reads a 404 here as a deleted volume, went looking
+    # for a fail-over clone, and reported "the control plane did not answer";
+    # pods scheduled on a node the pool does not allow hung for hours while the
+    # volume sat online (live 2026-10-20, TestBackupSecurityLvol: pool allowed
+    # worker-0, pod on worker-4). The volume exists by the time this runs (the
+    # Volume dependency resolved it), so only the volume record vanishing
+    # underneath remains a 404.
+    try:
+        HostConnectAuth.resolve(volume, host_nqn, db)
+    except HostNQNRequiredError as e:
+        raise HTTPException(400, str(e)) from e
+    except HostNotAllowedError as e:
+        logger.warning("connect refused for volume %s: %s", volume.get_id(), e)
+        raise HTTPException(403, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
-        return Response(status_code=404, content=err)
+        raise HTTPException(404, err)
     return details
 
 
