@@ -225,3 +225,10 @@ class TestKubernetesFencing:
         response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/',
                               json={'two_node_fencing_authority': 'quorum'})
         assert response.status_code == 422
+
+    def test_client_host_refuses_an_nqn_another_member_reports(self, client, db, two_nodes):
+        # review on #1527, point 6: a shared NQN would let a fence revoke the survivor
+        two_nodes[1].client_host_nqns = [HOST_B]
+        response = client.put(f'{BASE}/client-host', json={'node_id': NODE_B, 'host_nqns': [HOST_B]})
+        assert response.status_code == 409
+        db.atomic_update.assert_not_called()

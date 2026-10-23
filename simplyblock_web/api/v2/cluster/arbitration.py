@@ -133,6 +133,13 @@ def set_client_host(cluster: Cluster, body: _ClientHost) -> None:
     nqns = sorted({h.strip() for h in body.host_nqns if h.strip()})
     if any(not h.startswith("nqn.") for h in nqns):
         raise HTTPException(422, "every host NQN must be an NVMe qualified name")
+    # A host NQN two members report cannot tell their hosts apart: a host fence
+    # would revoke the survivor's own access (review on #1527).
+    shared = sorted({h for n in _members(cluster.get_id()) if n.get_id() != body.node_id
+                     for h in (n.client_host_nqns or [])} & set(nqns))
+    if shared:
+        raise HTTPException(409, "host NQNs already reported for another storage node: "
+                                 + ", ".join(shared))
     db.atomic_update(node, lambda fresh: setattr(fresh, "client_host_nqns", nqns))
 
 

@@ -141,6 +141,8 @@ class Scenario:
     # many, whichever they are). None: not checked.
     host_fencing: bool = False
     host_fenced: tuple | int | None = None
+    # review on #1527: subsystems allow any host and list both hosts
+    stale_host_lists: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +368,11 @@ KUBE = [
              stall_limit_s=None, heal_s=300, host_fencing=True, host_fenced=1),
     Scenario("K5-host-fence-hang-sn2", ("k8s",), hang("sn2"), aborts_ok=("sn2",),
              host_fencing=True, host_fenced=("sn2",), grant_within_s=2.6),
+    # review on #1527: the loser is listed on an allow-any subsystem; the fence
+    # must not stick in revoking (SPDK refuses a duplicate add), and the
+    # release gives the listed loser back because the volumes authorize it.
+    Scenario("K6-host-fence-stale-host-lists", ("k8s",), reboot("sn1"), host_fencing=True,
+             host_fenced=("sn1",), grant_within_s=2.6, heal_s=300, stale_host_lists=True),
 ]
 
 #: finding -> (scenario, bugs that re-introduce it, signature): the scenario

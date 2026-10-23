@@ -61,11 +61,13 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     return key_names
 
 
-def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
+def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client, scope=""):
     """Write DHCHAP key files to a storage node and register them in SPDK's keyring.
 
     Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
-    to the SPDK keyring name for use in subsystem_add_host.
+    to the SPDK keyring name for use in subsystem_add_host. ``scope`` is
+    appended to the key names (subsystem_access names keys per subsystem,
+    because the key material is per volume); empty keeps the host-scoped names.
     """
     snode_api = snode.client()
     # Sanitize host NQN for use as filename
@@ -76,7 +78,7 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
         key_value = host_entry.get(key_type)
         if not key_value:
             continue
-        key_name = f"{key_type}_{safe_host}"
+        key_name = f"{key_type}_{safe_host}" + (f"_{scope}" if scope else "")
         # allowed_hosts is a list of plain dicts, so the key material arrives
         # untyped; wrap it here or it reaches SNodeClient's request log in clear.
         result, error = snode_api.write_key_file(key_name, SecretStr(key_value))
@@ -95,34 +97,6 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
         key_names[key_type] = key_name
 
     return key_names
-
-
-def add_allowed_host(lvol, snode, rpc_client, host_nqn):
-    """Give one host of ``lvol.allowed_hosts`` back its access to the volume's
-    subsystem on ``snode``, with the keys volume creation gives it (pool-level
-    DH-HMAC-CHAP, else per-host keys, else plain). Used by the two-node host
-    fence release (docs/design/two-node-kubernetes-fencing.md, section 3.2)."""
-    entry = next((h for h in lvol.allowed_hosts if h.get("nqn") == host_nqn), {"nqn": host_nqn})
-    db_ctrl = DBController()
-    cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-    pool = None
-    if lvol.pool_uuid:
-        try:
-            pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
-        except KeyError:
-            pool = None
-    dhchap_group = _get_dhchap_group(cluster, pool)
-    if pool and pool.dhchap:
-        names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
-        return rpc_client.subsystem_add_host(
-            lvol.nqn, host_nqn, dhchap_key=names.get("dhchap_key"),
-            dhchap_ctrlr_key=names.get("dhchap_ctrlr_key"), dhchap_group=dhchap_group)
-    if any(entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk")):
-        names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
-        return rpc_client.subsystem_add_host(
-            lvol.nqn, host_nqn, psk=names.get("psk"), dhchap_key=names.get("dhchap_key"),
-            dhchap_ctrlr_key=names.get("dhchap_ctrlr_key"), dhchap_group=dhchap_group)
-    return rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
 
 
 def _reapply_allowed_hosts(lvol, snode, rpc_client):

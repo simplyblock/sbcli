@@ -137,23 +137,44 @@ Record field `ClusterArbitration.host_fences`, keyed by the fenced node:
 | `releasable` | `restoring` | the operator asks for the release (`POST .../arbitration/host-fence/release`) after it has verified that the node is clean (section 3.4) |
 | `restoring` | (removed) | every change undone (below); recorded in the verdict history and logged as `TWO_NODE_HOST_FENCE_RELEASED` |
 
+The live state of a subsystem is not trusted to be consistent. `allow_any_host` and the host list
+are independent fields, and `add_host_to_lvol` lists a host without switching `allow_any_host`
+off, so a subsystem can allow any host and list hosts at the same time. What the database intends
+for a subsystem is derived in one place, `controllers/subsystem_access.py`: it allows any host only
+if none of its volumes names allowed hosts (the rule volume creation applies), and the authorized
+hosts carry the keys their volume entry gives them.
+
 Revocation, per volume subsystem on the winner (never the hublvol subsystems, `:hublvol:` in the
 NQN: the returning peer's SPDK needs them to resync, campaign c1 B2):
 
-- **Allow-list subsystem** (`allow_any_host: false`): `nvmf_subsystem_remove_host(loser)` if the
-  loser is listed. SPDK disconnects the host's controllers as part of the call.
-- **Allow-any subsystem**: add every host that should keep access (the winner's
-  `client_host_nqns` and every other host connected to that subsystem except the loser's, from
-  `nvmf_subsystem_get_controllers`), switch the subsystem to an allow-list
-  (`nvmf_subsystem_allow_any_host false`), then `nvmf_subsystem_add_host(loser)` followed by
-  `nvmf_subsystem_remove_host(loser)`: the remove is what disconnects the loser's live
+- **Allow-list subsystem** (`allow_any_host: false`): `nvmf_subsystem_remove_host` for every loser
+  identity that is listed. SPDK disconnects the host's controllers as part of the call.
+- **Allow-any subsystem**: add every host that should keep access and is not listed yet (the
+  winner's `client_host_nqns`, every host connected to the subsystem from
+  `nvmf_subsystem_get_controllers`, and every host the database authorizes on it, since
+  `add_host_to_lvol` skips nodes that are offline), all except the loser's; switch the subsystem to
+  an allow-list (`nvmf_subsystem_allow_any_host false`); list the loser identities that are not
+  listed yet, then remove every loser identity. The remove is what disconnects the loser's live
   controllers (SPDK answers `remove_host` for an unlisted host with an error and disconnects
-  nothing).
+  nothing, and answers `add_host` for a listed one with `EINVAL`, so a listed loser is never added
+  again).
 
-Release undoes exactly what the revocation recorded: allow-list subsystems get the loser back
-through `host_auth` (with its DH-HMAC-CHAP keys, if any); converted subsystems get
-`allow_any_host true`. The hosts the revocation added stay listed: harmless while any host is
-allowed, and removing them would disconnect them. Subsystems deleted meanwhile are skipped.
+Each pass records, per subsystem, its mode, the hosts it added, and the loser identities that were
+listed before (in either mode); passes are merged. Release, from that record:
+
+- a loser identity that was listed is given back only if the database still authorizes it, with
+  its keys (`subsystem_access.grant`: the pool's key pair for a pool with DH-HMAC-CHAP, otherwise
+  the volume entry's keys, registered under key names scoped to the subsystem because the key
+  material is per volume). One removed from the pool or the volume during the fence stays out and
+  is reported. A key that cannot be registered fails the release; the host is never added without
+  its keys;
+- a converted subsystem gets `allow_any_host true` back. The hosts the revocation added stay
+  listed: harmless while any host is allowed, and removing them would disconnect them;
+- subsystems deleted meanwhile are skipped.
+
+A host NQN that both nodes report (a cloned image's kernel host NQN, a wrong report) cannot tell
+the hosts apart: the API refuses it (`409`), and should the record hold one anyway, the fence is
+`unavailable`, nothing is revoked, and Kubernetes is not told to act.
 
 All of it runs on the arbiter's work pool, never on the decision thread (campaign c7, F16), and
 **after** the grant: until Kubernetes restarts the loser's VMs there is only one instance of

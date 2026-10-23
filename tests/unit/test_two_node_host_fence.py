@@ -134,11 +134,11 @@ def test_release_restores_exactly_what_was_changed():
     def readd(nqn, host):
         readded.append(nqn)
         rpc.subsystem_add_host(nqn, host)
+        return True
     changes = {VOL1: {"mode": hf.MODE_ANY, "added": [HOST_A], "removed": []},
                VOL2: {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B]},
                "nqn.gone": {"mode": hf.MODE_ANY, "added": [], "removed": []}}
-    done = hf.release(rpc, changes, readd)
-    assert sorted(done) == sorted(changes)
+    assert hf.release(rpc, changes, readd) == []         # nothing left out
     assert rpc.subs[VOL1]["allow_any_host"] is True
     assert rpc.subs[VOL1]["hosts"] == [HOST_A]           # added hosts stay listed
     assert readded == [VOL2] and HOST_B in rpc.subs[VOL2]["hosts"]
@@ -465,6 +465,7 @@ def test_release_gives_back_exactly_the_removed_identities():
     def readd(nqn, host):
         back.append(host)
         rpc.subsystem_add_host(nqn, host)
+        return True
     hf.release(rpc, {VOL2: {"mode": hf.MODE_LIST, "added": [], "removed": [HOST_B, HOST_B2]}}, readd)
     assert sorted(back) == sorted([HOST_B, HOST_B2])
 
@@ -479,3 +480,22 @@ def test_a_newly_reported_identity_reopens_the_fence(hfenv):
     a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
     assert db.revokes[-1] == (A, ",".join(sorted([HOST_B, HOST_B2])))
     assert _fence(db)["state"] == HF_REVOKED and _fence(db)["host_nqns"] == sorted([HOST_B, HOST_B2])
+
+
+# ---- review on #1527, point 6: an NQN both nodes report ------------------------------
+
+def test_a_host_nqn_shared_with_the_winner_is_never_revoked(hfenv):
+    """A cloned image's kernel hostnqn, or a wrong report: revoking it would cut
+    the survivor off, leaving it leaves the loser in. Not a fence: Kubernetes
+    is not told to act."""
+    a, db, nodes, clock, cluster = hfenv
+    nodes[B].client_host_nqns = [HOST_A, HOST_B2]
+    _lose_b_by_lease(a, db, nodes, clock, cluster)
+    fence = _fence(db)
+    assert fence["state"] == HF_UNAVAILABLE and HOST_A in fence["error"]
+    assert db.revokes == [] and "TWO_NODE_HOST_FENCE_UNAVAILABLE" in db.notes
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert db.notes.count("TWO_NODE_HOST_FENCE_UNAVAILABLE") == 1
+    nodes[B].client_host_nqns = [HOST_B, HOST_B2]           # report corrected
+    a.tick_cluster(CL, [nodes[A], nodes[B]], cluster)
+    assert _fence(db)["state"] == HF_REVOKED and db.revokes == [(A, ",".join(sorted([HOST_B, HOST_B2])))]
