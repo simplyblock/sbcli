@@ -19,6 +19,7 @@ from simplyblock_core.exceptions import (
     SyncReplicationSiteError,
     SyncReplicationUnsupportedError,
     SyncSiteConflictError,
+    SyncSiteFenceRefusedError,
     SyncSiteOfflineError,
 )
 
@@ -121,7 +122,9 @@ def sync_http_errors() -> Iterator[None]:
     demote 409 (retryable, never a code csi-addons escalates to force on), a
     site that is not online 412 (csi-addons escalates to a forced promote);
     a promote whose task failed 409 with its ``task_id`` (reported once); a
-    create on one site naming a node of another 409 with both sites.
+    create on one site naming a node of another 409 with both sites; a
+    refused site fence or unfence 409 (with the failed fence's ``task_id``
+    when that is the reason).
     A failed ANA RPC (``SyncAnaError``) is left to the 500 handler."""
     try:
         yield
@@ -133,6 +136,8 @@ def sync_http_errors() -> Iterator[None]:
         raise sync_error(409, str(e), volumes=e.volumes, task_id=e.task_id) from e
     except (SyncPromoteRefusedError, SyncGroupMemberError) as e:
         raise sync_error(409, str(e), volumes=e.volumes) from e
+    except SyncSiteFenceRefusedError as e:
+        raise sync_error(409, str(e), task_id=e.task_id or None) from e
     except SyncSiteConflictError as e:
         raise sync_error(409, str(e), node_id=e.node_id, node_site=e.node_site, site=e.site) from e
     except SyncSiteOfflineError as e:

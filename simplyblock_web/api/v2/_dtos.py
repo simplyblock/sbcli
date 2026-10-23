@@ -8,10 +8,12 @@ from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
+from simplyblock_core.controllers.health_controller import NodeReachability
 from simplyblock_core.controllers.sync_replication_controller import (
     ROLE_PRIMARY,
     STATE_HEALTHY,
     GroupSyncStatus,
+    SiteRecord,
     VolumeSyncStatus,
 )
 from simplyblock_core.db_controller import DBController
@@ -147,6 +149,7 @@ TaskFunctionName = Literal[
     "fdb_backup",
     "sync_promote",
     "sync_resync",
+    "sync_site_fence",
 ]
 
 
@@ -1057,6 +1060,59 @@ class SyncPromoteResultDTO(BaseModel):
     def from_result(connection_strings: dict) -> list['SyncPromoteResultDTO']:
         return [SyncPromoteResultDTO(lvol_id=UUID(lvol_id), connection_strings=entries)
                 for lvol_id, entries in connection_strings.items()]
+
+
+class SiteNodeDTO(BaseModel):
+    """A node of a site, as the site record lists it. ``id`` is the storage
+    node's id (``StorageNodeDTO.id``)."""
+    id: str
+    status: StorageNodeStatus
+    mgmt_ip: str
+
+
+class SiteRecordDTO(BaseModel):
+    """What the control plane records about one site of a sync-replication
+    cluster (``GET /clusters/{id}/sites/{site}/status``, and the 200 answers
+    of ``fence`` / ``unfence``): ``lost`` when the cluster records it as its
+    lost site, ``state`` that record's ``lost_site_state`` (``draining`` /
+    ``down`` written by the storage-node monitor, ``fencing`` / ``done``
+    by a fence), the latest site-level fence task, the site's nodes."""
+    site: str
+    lost: bool
+    state: Literal["", "draining", "down", "fencing", "done"]
+    fence_task_id: UUID | None = None
+    nodes: list[SiteNodeDTO]
+
+    @staticmethod
+    def from_record(record: SiteRecord) -> 'SiteRecordDTO':
+        return SiteRecordDTO(
+            site=record.site,
+            lost=record.lost,
+            state=cast(Literal["", "draining", "down", "fencing", "done"], record.state),
+            fence_task_id=UUID(record.fence_task_id) if record.fence_task_id else None,
+            nodes=[SiteNodeDTO(id=n.node_id, status=cast(StorageNodeStatus, n.status), mgmt_ip=n.mgmt_ip)
+                   for n in record.nodes],
+        )
+
+
+class SiteFenceTaskDTO(BaseModel):
+    """A site fence in progress (the 202 answer of ``fence``): the fence task,
+    also readable at ``/clusters/{id}/tasks/{task_id}/``."""
+    task_id: UUID
+
+
+class NodeReachabilityDTO(BaseModel):
+    """One node's answer to the storage-node monitor's management-address
+    probe, run once on demand (``GET /clusters/{id}/reachability``)."""
+    id: str
+    mgmt_ip: str
+    site: str
+    reachable: bool
+
+    @staticmethod
+    def from_model(model: NodeReachability) -> 'NodeReachabilityDTO':
+        return NodeReachabilityDTO(id=model.node_id, mgmt_ip=model.mgmt_ip, site=model.site,
+                                   reachable=model.reachable)
 
 
 def _sync_health(status: VolumeSyncStatus | GroupSyncStatus) -> dict:

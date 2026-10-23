@@ -1022,6 +1022,84 @@ class DBController(metaclass=Singleton):
         raw = self.kv_store.get(key.encode())
         return JobSchedule().from_dict(json.loads(bytes(raw))) if raw is not None else None
 
+    #: One key per (cluster, site), outside the ``object/`` keyspace, that
+    #: serializes the site-level fence of that site (FN_SYNC_SITE_FENCE):
+    #:
+    #: - ``fence_task`` - db key of its latest fence task
+    #:   (ensure_sync_site_fence_task): a new one is refused while that task
+    #:   is in progress (sync_promote_task_blocks - neither done nor canceled);
+    #: - ``reported`` - the uuid of the last failed fence task whose failure
+    #:   a fence call was answered with (consume_sync_site_fence_failure), so
+    #:   a failure is reported once.
+    _SYNC_SITE_PREFIX = "sync_replication_site/"
+    _SYNC_SITE_DEFAULTS: ClassVar[dict] = {"fence_task": "", "reported": ""}
+
+    @staticmethod
+    def _sync_site_key(cluster_id, site) -> bytes:
+        return f"{DBController._SYNC_SITE_PREFIX}{cluster_id}/{site}".encode()
+
+    @staticmethod
+    def _read_sync_site_tx(tr, key) -> dict:
+        raw = tr.get(key).wait()
+        return {**DBController._SYNC_SITE_DEFAULTS, **(json.loads(bytes(raw)) if raw.present() else {})}
+
+    def _ensure_sync_site_fence_task_tx(self, tr, task, site, index_list):
+        key = self._sync_site_key(task.cluster_id, site)
+        state = self._read_sync_site_tx(tr, key)
+        if state["fence_task"]:
+            current = BaseModel._read_record(tr, state["fence_task"].encode(), JobSchedule)
+            if self.sync_promote_task_blocks(current):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        state["fence_task"] = task.get_db_id()
+        tr[key] = json.dumps(state).encode()
+        return task.uuid, True
+
+    def ensure_sync_site_fence_task(self, task: JobSchedule, site: str) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SYNC_SITE_FENCE task for ``site``) unless the
+        site already has a fence task in progress - checked and written in
+        ONE transaction with the site's key, so concurrent fence calls never
+        create two. Returns ``(uuid of the in-progress or new task, whether it
+        is ``task``)``."""
+        return fdb.transactional(DBController._ensure_sync_site_fence_task_tx)(
+            self, self.kv_store, task, site, JobSchedule.active_indexes(self.kv_store))
+
+    def get_sync_site_fence_task(self, cluster_id: str, site: str) -> JobSchedule | None:
+        """The fence task last recorded for ``site``, or None."""
+        raw = self.kv_store.get(self._sync_site_key(cluster_id, site))
+        key = {**self._SYNC_SITE_DEFAULTS, **(json.loads(bytes(raw)) if raw else {})}["fence_task"]
+        if not key:
+            return None
+        raw = self.kv_store.get(key.encode())
+        return JobSchedule().from_dict(json.loads(bytes(raw))) if raw is not None else None
+
+    def _consume_sync_site_fence_failure_tx(self, tr, key):
+        state = self._read_sync_site_tx(tr, key)
+        if not state["fence_task"]:
+            return None
+        task = BaseModel._read_record(tr, state["fence_task"].encode(), JobSchedule)
+        if (task is None or task.status != JobSchedule.STATUS_DONE
+                or task.function_params.get("fenced") or state["reported"] == task.uuid):
+            return None
+        state["reported"] = task.uuid
+        tr[key] = json.dumps(state).encode()
+        return {"task_id": task.uuid, "reason": task.function_result}
+
+    def consume_sync_site_fence_failure(self, cluster_id: str, site: str) -> dict | None:
+        """Take the unreported failure of ``site``'s latest fence task
+        (``{task_id, reason}``): the task ended without fencing the site
+        (failed, canceled, given up) and no call was answered with it yet.
+        None otherwise. One transaction on the site's key: of concurrent
+        callers exactly one gets it."""
+        return fdb.transactional(DBController._consume_sync_site_fence_failure_tx)(
+            self, self.kv_store, self._sync_site_key(cluster_id, site))
+
+    def get_active_sync_site_fence_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every FN_SYNC_SITE_FENCE task of the cluster that is not done,
+        oldest first - canceled ones included."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_SITE_FENCE)
+
     def get_active_sync_promote_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Every FN_SYNC_PROMOTE task of the cluster that is not done, oldest
         first - canceled ones included: the runner still has to settle the

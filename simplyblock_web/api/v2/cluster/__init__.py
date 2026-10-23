@@ -3,13 +3,14 @@ from threading import Thread
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import cluster_ops
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
+from simplyblock_core.controllers import health_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
@@ -20,6 +21,7 @@ from .._dtos import (
     BackupConfigDTO,
     ClusterDTO,
     ClusterLogEntryDTO,
+    NodeReachabilityDTO,
     UnresolvedBackupConfigDTO,
 )
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
@@ -28,6 +30,7 @@ from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
 from .replication import api as replication_api
+from .site import api as site_api
 from .storage_node import api as storage_node_api
 from .storage_pool import api as pool_api
 from .subsystem import api as subsystem_api
@@ -250,6 +253,22 @@ def logs(cluster: Cluster, limit: int = 50, watch: WatchParam = False) -> Union[
     return [ClusterLogEntryDTO.from_model(e) for e in cluster_ops.get_log_events(cluster.get_id(), limit)]
 
 
+@instance_api.get('/reachability', name='clusters:reachability')
+def reachability(
+        cluster: Cluster,
+        site: Annotated[str | None, Query(description='Sync replication: only the nodes of this site')] = None,
+) -> builtins.list[NodeReachabilityDTO]:
+    """Run the storage-node monitor's management-address probe once, now,
+    against the nodes of ``site`` (every node of the cluster without one;
+    removed nodes excepted) and answer, per node, whether it answered. Reads
+    nothing the monitor recorded and records nothing. 400 for a site the
+    cluster does not have, and for any site on a cluster without sync
+    replication."""
+    with util.sync_http_errors():
+        rows = health_controller.cluster_reachability(cluster.get_id(), site or None)
+    return [NodeReachabilityDTO.from_model(row) for row in rows]
+
+
 @instance_api.post('/start', name='clusters:start', status_code=202, responses={202: {"content": None}})
 def start(cluster: Cluster) -> Response:
     Thread(
@@ -321,4 +340,5 @@ instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
 instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
+instance_api.include_router(site_api, prefix='/sites')
 api.include_router(instance_api)

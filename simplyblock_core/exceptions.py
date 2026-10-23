@@ -95,6 +95,19 @@ class SyncSiteConflictError(PreconditionError):
         super().__init__(message)
 
 
+class SyncSiteFenceRefusedError(PreconditionError):
+    """A site-level fence (or its unfence confirmation) was refused: a node
+    of the site may still run, another site is already lost, the
+    storage-node monitor is draining the site, a site activation runs, no
+    other site could serve - or, for an unfence, the control plane still
+    records the site as lost. ``task_id`` names the fence task whose failure
+    is reported (once), "" otherwise. Retryable: the caller calls again."""
+
+    def __init__(self, message: str, task_id: str = ""):
+        self.task_id = task_id
+        super().__init__(message)
+
+
 class SyncGroupMemberError(PreconditionError):
     """A member of a consistency group could not be resolved to a live volume;
     the group operation is refused as a whole. ``volumes`` lists the ids."""

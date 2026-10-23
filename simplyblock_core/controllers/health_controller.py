@@ -1,10 +1,15 @@
 
+from concurrent.futures import ThreadPoolExecutor
 from logging import DEBUG, ERROR, INFO
-from typing import Any
+from typing import Any, NamedTuple
 
 from simplyblock_core import distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import (
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -272,6 +277,57 @@ def _check_node_ping(ip):
         return True
     else:
         return False
+
+
+class NodeReachability(NamedTuple):
+    """One node's answer to the management-address probe."""
+    node_id: str
+    mgmt_ip: str
+    site: str
+    reachable: bool
+
+
+#: At most this many management-address probes run at once (each is a
+#: two-packet ping bounded at a few seconds).
+_REACHABILITY_PROBES_IN_PARALLEL = 16
+
+
+def management_reachability(nodes) -> list[NodeReachability]:
+    """Run the storage-node monitor's management-address probe - the first
+    check of its node cycle (storage_node_monitor.check_node:
+    _check_node_ping on ``mgmt_ip``) - once against each of ``nodes``, in
+    parallel; one answer per node, in the order given. Records nothing: the
+    monitor's own cycle decides node states."""
+    nodes = list(nodes)
+    if not nodes:
+        return []
+    with ThreadPoolExecutor(max_workers=min(len(nodes), _REACHABILITY_PROBES_IN_PARALLEL)) as pool:
+        answers = list(pool.map(lambda node: _check_node_ping(node.mgmt_ip), nodes))
+    return [NodeReachability(node.get_id(), node.mgmt_ip, node.site, bool(answer))
+            for node, answer in zip(nodes, answers)]
+
+
+def cluster_reachability(cluster_id: str, site: str | None = None) -> list[NodeReachability]:
+    """management_reachability over the nodes of cluster ``cluster_id`` (the
+    removed ones excepted) - only those of ``site`` when given.
+
+    Raises SyncReplicationUnsupportedError for a ``site`` on a cluster
+    without sync replication (it has no sites), SyncReplicationSiteError for
+    a site the cluster does not have."""
+    db = DBController()
+    cluster = db.get_cluster_by_id(cluster_id)
+    nodes = [n for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+             if n.status != StorageNode.STATUS_REMOVED]
+    if site:
+        if not cluster.sync_replication:
+            raise SyncReplicationUnsupportedError(
+                f"cluster {cluster_id} is not a sync-replication cluster; it has no sites")
+        sites = {n.site for n in nodes if n.site}
+        if site not in sites:
+            raise SyncReplicationSiteError(
+                f"site {site!r} is not a site of cluster {cluster_id} (sites: {sorted(sites)})")
+        nodes = [n for n in nodes if n.site == site]
+    return management_reachability(nodes)
 
 
 def _check_ping_from_node(ip, ifname, node):

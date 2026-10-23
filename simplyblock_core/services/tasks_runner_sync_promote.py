@@ -57,6 +57,14 @@ other promote never fences: a record may be the monitor's, with no fail-over.
 Each LVS's hand-off is preceded by a check that none of its T members leads
 it.
 
+The site-level fence (``FN_SYNC_SITE_FENCE``, sync_replication_controller.fence_site)
+is this runner's too, so the site steps have one implementation: its pass
+runs _site_steps for its site with no volume excepted, then records
+``fenced`` in its params - no gate (nothing moves, so nothing can be lost),
+no marker, no hand-off, no volume opened. Refused while a site activation
+runs for that site. Its ending is the driver's own DONE commit; it settles
+nothing.
+
 A node is proven down by the management plane - its status says SPDK does not
 run and neither the node API nor its RPC gets an answer from SPDK
 (_spdk_answers); the data plane only vetoes: a peer that still reports the
@@ -82,6 +90,7 @@ from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
     TaskAbort,
     checkpoint,
+    finish_done,
     serve,
     set_result,
 )
@@ -100,11 +109,18 @@ class _PromoteCanceled(_PromoteFailed):
     pass
 
 
+def _is_site_fence(task) -> bool:
+    return task.function_name == JobSchedule.FN_SYNC_SITE_FENCE
+
+
 def _settle_markers(task) -> None:
     """Settle every ``moving:`` marker the (DONE) task still holds, each
     owner on its own. A reconcile that fails operationally (a member's RPC, a
     changed precondition, a record gone) leaves that marker to the
-    storage-node monitor (reconcile_abandoned_moves)."""
+    storage-node monitor (reconcile_abandoned_moves). A site fence sets no
+    marker."""
+    if _is_site_fence(task):
+        return
     params = task.function_params
     moving = storage_node_ops.lvs_moving_value(params["site"])
     transferring = set(params.get("transferring", []))
@@ -519,11 +535,28 @@ def _run(task):
     return f"promoted {len(params['lvol_ids'])} volume(s) to site {site}"
 
 
+def _fence_site(task):
+    """One pass of a site-level fence: the site steps of its site, every
+    volume fenced (``lvol_ids`` is empty), then ``fenced`` recorded - what
+    tells a later fence call that this task did not fail. Nothing else."""
+    site = task.function_params["site"]
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    if not cluster.sync_replication:
+        raise _PromoteFailed("not a sync-replication cluster")
+    if activation_gate.activating_site(cluster) == site:
+        raise _PromoteFailed(activation_gate.site_activation_blocks(cluster))
+    _site_steps(task, site)
+    if checkpoint(task, fenced=True) is None:
+        raise _PromoteCanceled("canceled")
+    return f"fenced site {site}"
+
+
 def process_task(task):
-    """The driver's handler: one pass over ``task``. A failure or a cancel
-    ends the task (TaskAbort); any other error is the driver's retry."""
+    """The driver's handler: one pass over ``task`` (a promote, or a site
+    fence). A failure or a cancel ends the task (TaskAbort); any other error
+    is the driver's retry."""
     try:
-        result = _run(task)
+        result = _fence_site(task) if _is_site_fence(task) else _run(task)
     except _PromoteCanceled as e:
         raise TaskAbort(str(e)) from e
     except _PromoteFailed as e:
@@ -542,7 +575,10 @@ def finish_task(task, ending, result):
     """The spec's terminal commit: DONE with ``result`` and the volumes'
     outcome in one guarded transaction (DBController.finish_sync_promote_task:
     nothing is published for a task that was canceled or replaced
-    meanwhile). The task as committed, or None when it was DONE already."""
+    meanwhile). The task as committed, or None when it was DONE already. A
+    site fence publishes nothing: the driver's own DONE commit."""
+    if _is_site_fence(task):
+        return finish_done(task, result, context="tasks-runner-sync-promote")
     if not db.finish_sync_promote_task(task, result, _OUTCOMES.get(ending)):
         return None
     task = db.get_task_by_id(task.uuid)
@@ -552,7 +588,7 @@ def finish_task(task, ending, result):
 
 SPEC = RunnerSpec(
     name="tasks-runner-sync-promote",
-    function_names=[JobSchedule.FN_SYNC_PROMOTE],
+    function_names=[JobSchedule.FN_SYNC_PROMOTE, JobSchedule.FN_SYNC_SITE_FENCE],
     handler=process_task,
     finish=finish_task,
     on_finish=_settle_markers,

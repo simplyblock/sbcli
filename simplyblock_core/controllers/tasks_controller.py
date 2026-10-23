@@ -1503,6 +1503,32 @@ def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners, 
     return task_id, created
 
 
+def add_sync_site_fence_task(cluster_id, site):
+    """Queue the site-level fence of ``site`` (sync replication,
+    FN_SYNC_SITE_FENCE): the disaster site steps, run once for the whole
+    site by the promote runner. Returns ``(task_id, created)``: when the site
+    already has a fence task in progress, that task's id and False - checked
+    and created in one transaction (DBController.ensure_sync_site_fence_task)."""
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = JobSchedule.FN_SYNC_SITE_FENCE
+    # ``lvol_ids`` empty: the site steps fence every volume led from the site,
+    # none excepted (a promote excepts the volumes it moves).
+    task_obj.function_params = {"site": site, "lvol_ids": []}
+    # As a promote: a pass ends the task itself, max_retry bounds only the
+    # passes an unexpected error interrupts.
+    task_obj.max_retry = constants.SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_id, created = db.ensure_sync_site_fence_task(task_obj, site)
+    if created:
+        tasks_events.task_create(task_obj)
+    else:
+        logger.info(f"Sync site fence task found, skip adding new task: {task_id}")
+    return task_id, created
+
+
 def get_active_lvol_migration(node_id):
     """Return active LVolMigration records with ``node_id`` as source or target."""
     return [
