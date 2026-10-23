@@ -4140,7 +4140,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                           else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
                 total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
-                mcp_max_unavailable=mcp_max_unavailable)
+                mcp_max_unavailable=mcp_max_unavailable,
+                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret)
             time.sleep(5)
 
         except Exception as e:
@@ -4255,6 +4256,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.cr_name = cr_name
         snode.cr_namespace = cr_namespace
         snode.cr_plural = cr_plural
+        snode.record_workload_names(cluster)
         snode.ssd_pcie = ssd_pcie if not lblk_mode else []
         # lblk mode: persist the configured selection (with serial identity)
         # so restart can re-resolve devices without the host config file.
@@ -8662,7 +8664,8 @@ def _restart_storage_node_impl(
                       else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
             total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
-            spdk_proxy_image=snode.spdk_proxy_image)
+            spdk_proxy_image=snode.spdk_proxy_image,
+            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret)
 
     except Exception as e:
         logger.error(e)

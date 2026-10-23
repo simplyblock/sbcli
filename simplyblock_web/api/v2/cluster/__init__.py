@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core import cluster_ops
+from simplyblock_core import cluster_ops, constants
+from simplyblock_core import utils as core_utils
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
@@ -100,6 +101,14 @@ class ClusterParams(BaseModel):
     device_mode: Literal["nvme", "lblk"] = "nvme"
     inline_checksum: bool = False
     atomic_4k: bool = False
+    # The cluster's workload names: the Services its storage nodes are reached
+    # through, the SPDK proxy's certificate Secret, and the suffix on a node's
+    # hostname label in both Services. Omitted, they are the constant names a
+    # namespace's first cluster uses.
+    snode_api_service: core_utils.K8S_DNS_LABEL = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: core_utils.K8S_DNS_LABEL = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: Annotated[str, Field(pattern=r'^(-[a-z0-9]{1,3})?$')] = ""
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):

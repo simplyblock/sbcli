@@ -160,6 +160,14 @@ class Cluster(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
+    # The Services a storage node is reached through, the SPDK proxy's
+    # certificate Secret, and the suffix on a node's hostname label in both
+    # Services. The operator names them at creation; a record without them
+    # predates them and uses the constant names.
+    snode_api_service: str = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: str = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: str = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False

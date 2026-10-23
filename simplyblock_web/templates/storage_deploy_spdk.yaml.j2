@@ -68,12 +68,12 @@ spec:
     - name: tls
     {% if TLS_PROVIDER == "cert-manager" %}
       secret:
-        secretName: simplyblock-spdk-proxy-tls
+        secretName: "{{ SPDK_PROXY_TLS_SECRET }}"
     {% else %}
       projected:
         sources:
           - secret:
-              name: simplyblock-spdk-proxy-tls
+              name: "{{ SPDK_PROXY_TLS_SECRET }}"
           - configMap:
               name: simplyblock-certificate-authority
               items:

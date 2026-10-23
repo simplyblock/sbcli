@@ -626,6 +626,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                snode_api_service=constants.K8S_SNODE_API_SERVICE,
+                spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
+                spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
+                node_label_suffix="",
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a DbLock.
@@ -655,6 +659,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
+        snode_api_service=snode_api_service,
+        spdk_proxy_service=spdk_proxy_service,
+        spdk_proxy_tls_secret=spdk_proxy_tls_secret,
+        node_label_suffix=node_label_suffix,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -684,6 +692,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                snode_api_service=constants.K8S_SNODE_API_SERVICE,
+                spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
+                spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
+                node_label_suffix="",
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -798,6 +810,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.cr_name = cr_name
     cluster.cr_namespace = cr_namespace
     cluster.cr_plural = cr_plural
+    cluster.snode_api_service = snode_api_service
+    cluster.spdk_proxy_service = spdk_proxy_service
+    cluster.spdk_proxy_tls_secret = spdk_proxy_tls_secret
+    cluster.node_label_suffix = node_label_suffix
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:

@@ -85,6 +85,12 @@ EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
 #: imperatively.
 NQN = Annotated[str, Field(pattern=NQN_PATTERN)]
 
+#: A Kubernetes object name that is also a DNS label, as a Service's is.
+K8S_DNS_LABEL = Annotated[str, Field(pattern=r'^[a-z]([-a-z0-9]*[a-z0-9])?$', max_length=63)]
+#: A Kubernetes object name that is a DNS subdomain, as a Secret's is.
+K8S_DNS_SUBDOMAIN = Annotated[str, Field(
+    pattern=r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$', max_length=253)]
+
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
