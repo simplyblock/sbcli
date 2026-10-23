@@ -14,6 +14,7 @@ from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.exceptions import (
     SyncGateError,
     SyncGroupMemberError,
+    SyncLeaderSiteRefusedError,
     SyncPromoteFailedError,
     SyncPromoteRefusedError,
     SyncReplicationSiteError,
@@ -124,7 +125,7 @@ def sync_http_errors() -> Iterator[None]:
     a promote whose task failed 409 with its ``task_id`` (reported once); a
     create on one site naming a node of another 409 with both sites; a
     refused site fence or unfence 409 (with the failed fence's ``task_id``
-    when that is the reason).
+    when that is the reason); a leader site moved to the lost site 409.
     A failed ANA RPC (``SyncAnaError``) is left to the 500 handler."""
     try:
         yield
@@ -136,6 +137,8 @@ def sync_http_errors() -> Iterator[None]:
         raise sync_error(409, str(e), volumes=e.volumes, task_id=e.task_id) from e
     except (SyncPromoteRefusedError, SyncGroupMemberError) as e:
         raise sync_error(409, str(e), volumes=e.volumes) from e
+    except SyncLeaderSiteRefusedError as e:
+        raise sync_error(409, str(e)) from e
     except SyncSiteFenceRefusedError as e:
         raise sync_error(409, str(e), task_id=e.task_id or None) from e
     except SyncSiteConflictError as e:

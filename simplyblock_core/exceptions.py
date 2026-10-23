@@ -108,6 +108,13 @@ class SyncSiteFenceRefusedError(PreconditionError):
         super().__init__(message)
 
 
+class SyncLeaderSiteRefusedError(PreconditionError):
+    """The cluster's leader site (``Cluster.leader_site``, the site whose
+    operator runs the cluster-scoped lifecycle) cannot be moved to the site
+    asked for: the cluster records that site as lost. Retryable once the
+    site has returned."""
+
+
 class SyncGroupMemberError(PreconditionError):
     """A member of a consistency group could not be resolved to a live volume;
     the group operation is refused as a whole. ``volumes`` lists the ids."""

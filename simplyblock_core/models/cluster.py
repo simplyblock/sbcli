@@ -294,6 +294,15 @@ class Cluster(BaseModel):
     # return clears a record, except that a suspension clears the monitor's.
     lost_site: str = ""
     lost_site_state: str = ""
+    # The site whose Kubernetes operator leads the cluster's cluster-scoped
+    # lifecycle (activate, expand, cluster-wide restarts) on a stretched
+    # deployment ("" = unset); the other site's operator follows
+    # (design-stretched-sync-replication-ramen §5.1). Set by the create, read
+    # by a follower's adoption, moved by the hub's role swap (§11.1) through
+    # sync_replication_controller.set_leader_site - only to a site the cluster
+    # has and never to the recorded lost site. A record for the operators:
+    # the data plane never reads it.
+    leader_site: str = ""
     # The site activation running for the recorded site ("" = none): the site
     # it builds, the ISO time it began - the token its holder checks at every
     # step and ends with - and the heartbeat its wrapper stamps every ~60s.

@@ -211,6 +211,9 @@ class ClusterDTO(BaseModel):
     sync_replication: bool = False
     lost_site: str = ""
     lost_site_state: str = ""
+    # The site whose operator leads the stretched cluster ("" = unset); a
+    # follower's adoption checks the role it was handed against it.
+    leader_site: str = ""
     capacity: CapacityStatDTO
 
     @field_serializer('secret', when_used='json')
@@ -250,6 +253,7 @@ class ClusterDTO(BaseModel):
             sync_replication=model.sync_replication,
             lost_site=model.lost_site,
             lost_site_state=model.lost_site_state,
+            leader_site=model.leader_site,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),

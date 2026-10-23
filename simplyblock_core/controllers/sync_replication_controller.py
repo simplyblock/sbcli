@@ -24,13 +24,18 @@ from typing import NamedTuple
 import fdb
 
 from simplyblock_core import constants, distr_controller, storage_node_ops, utils
-from simplyblock_core.controllers import activation_gate, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    cluster_events,
+    tasks_controller,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
     PreconditionError,
     SyncAnaError,
     SyncGateError,
     SyncGroupMemberError,
+    SyncLeaderSiteRefusedError,
     SyncPromoteFailedError,
     SyncPromoteRefusedError,
     SyncReplicationSiteError,
@@ -1083,6 +1088,66 @@ def _site_record(db: DBController, cluster, site: str, nodes: list[StorageNode])
         fence_task_id=task.uuid if task is not None else "",
         nodes=tuple(SiteNode(n.get_id(), n.status, n.mgmt_ip) for n in nodes
                     if n.site == site and n.status != StorageNode.STATUS_REMOVED))
+
+
+def _check_leader_not_lost(cluster, site: str) -> None:
+    if cluster.lost_site and cluster.lost_site == site:
+        raise SyncLeaderSiteRefusedError(
+            f"site {site!r} is recorded lost on cluster {cluster.get_id()} "
+            f"({cluster.lost_site_state or 'recorded'}); a lost site cannot lead")
+
+
+def check_leader_site(cluster, site: str) -> None:
+    """Whether ``site`` may become ``cluster``'s leader site
+    (``Cluster.leader_site``, design-stretched-sync-replication-ramen §5.1,
+    §11.1): the cluster is a sync-replication cluster, the site is named,
+    a non-removed storage node of the cluster carries it, and the cluster
+    does not record it as the lost site (in any state, ``draining``
+    included: a site on its way out cannot take the lead).
+
+    Raises SyncReplicationUnsupportedError on a cluster without sync
+    replication, SyncReplicationSiteError for an empty site or one the
+    cluster does not have, SyncLeaderSiteRefusedError for the lost site."""
+    if not cluster.sync_replication:
+        raise SyncReplicationUnsupportedError(
+            f"cluster {cluster.get_id()} is not a sync-replication cluster; it has no leader site")
+    if not site:
+        raise SyncReplicationSiteError("leader_site must not be empty")
+    db = DBController()
+    sites = {n.site for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())
+             if n.site and n.status != StorageNode.STATUS_REMOVED}
+    if site not in sites:
+        raise SyncReplicationSiteError(
+            f"site {site!r} is not a site of cluster {cluster.get_id()} (sites: {sorted(sites)})")
+    _check_leader_not_lost(cluster, site)
+
+
+def set_leader_site(cluster_id: str, site: str) -> Cluster:
+    """Move the cluster's leader site to ``site`` (the hub's role swap,
+    design-stretched-sync-replication-ramen §11.1); a no-op when it already
+    leads. Checked as check_leader_site does, the lost site judged again on
+    the record the compare-and-set writes, so a site recorded lost after the
+    caller's check is still refused and no field written since the caller
+    read the cluster is overwritten. Logs a cluster event on a change.
+
+    Raises as check_leader_site does."""
+    db = DBController()
+    cluster = db.get_cluster_by_id(cluster_id)
+    check_leader_site(cluster, site)
+    previous: list[str] = []
+
+    def mutate(fresh):
+        _check_leader_not_lost(fresh, site)
+        previous[:] = [fresh.leader_site]
+        if fresh.leader_site == site:
+            return False
+        fresh.leader_site = site
+        return None
+
+    updated = db.atomic_update(cluster, mutate)
+    if updated is not None and previous and previous[0] != site:
+        cluster_events.cluster_leader_site_change(updated, site, previous[0])
+    return updated
 
 
 def site_record(cluster_id: str, site: str) -> SiteRecord:

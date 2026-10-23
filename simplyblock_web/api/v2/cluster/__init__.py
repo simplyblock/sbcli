@@ -10,7 +10,7 @@ from sse_starlette import EventSourceResponse
 
 from simplyblock_core import cluster_ops
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
-from simplyblock_core.controllers import health_controller
+from simplyblock_core.controllers import health_controller, sync_replication_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
@@ -89,6 +89,10 @@ class ClusterParams(BaseModel):
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
     sync_replication: bool = False
+    #: Stretched sync replication: the site whose operator leads the cluster
+    #: (Cluster.leader_site); only with sync_replication, "" = unset. Not
+    #: checked against node sites - no node exists yet.
+    leader_site: str = ""
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
     # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
@@ -143,7 +147,8 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
             params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
         if parameters.backup_config is not None:
             params["backup_config"] = parameters.backup_config.model_dump(exclude_none=True)
-        cluster_id_or_false = cluster_ops.add_cluster(**params)
+        with util.sync_http_errors():
+            cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     if not cluster_id_or_false:
@@ -182,21 +187,33 @@ class UpdatableClusterParameters(BaseModel):
     name: str | None = None
     #: Two-node arbitration (docs/design/two-node-arbitration.md); off by default.
     two_node_arbitration: bool | None = None
+    #: Stretched sync replication: move the leader site (the hub's role swap,
+    #: design-stretched-sync-replication-ramen §11.1). 400 on a cluster
+    #: without sync replication, for "" and for a site no node of the cluster
+    #: has; 409 for the site the cluster records as lost. Same value: no-op.
+    leader_site: str | None = None
 
 
-@instance_api.put('/', name='clusters:update')
+@instance_api.put('/', name='clusters:update',
+                  responses={400: {"description": "A refused field (detail.message)"},
+                             409: {"description": "leader_site names the lost site (detail.message)"}})
 def update(cluster: Cluster, parameters: UpdatableClusterParameters):
     flag = parameters.two_node_arbitration
-    # The flag is validated before the rename, so a refused request changes
-    # nothing.
-    if flag is not None:
-        with util.sync_http_errors():
+    leader_site = parameters.leader_site
+    # Every field is validated before any is applied, so a refused request
+    # changes nothing.
+    with util.sync_http_errors():
+        if leader_site is not None:
+            sync_replication_controller.check_leader_site(cluster, leader_site)
+        if flag is not None:
             cluster_ops.check_two_node_arbitration(cluster, flag)
     if parameters.name is not None:
         cluster_ops.set_name(cluster.get_id(), parameters.name)
-    if flag is not None:
-        with util.sync_http_errors():
+    with util.sync_http_errors():
+        if flag is not None:
             cluster_ops.set_two_node_arbitration(cluster.get_id(), flag)
+        if leader_site is not None:
+            sync_replication_controller.set_leader_site(cluster.get_id(), leader_site)
 
     return Response(status_code=204)
 
