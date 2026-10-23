@@ -8273,6 +8273,96 @@ def _new_restart_claim_token():
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
+def _reconcile_discovered_devices(snode, nvme_devs):
+    """Match the devices just discovered on the host (`nvme_devs`, from
+    addNvmeDevices/addAioDevices) against this node's known NVMeDevice
+    records, updating `snode.nvme_devices` in place. Returns the list of
+    genuinely new devices (STATUS_NEW) for the caller to provision.
+
+    A live device's serial is checked against devices still considered
+    "known" -- but a device the operator administratively removed
+    (NVMeDevice.admin_removed) must never silently reclaim a live device's
+    identity: that record is never resurrected, and its serial must not
+    block recognizing different hardware that happens to share it. lblk
+    synthetic serials are host-local, not globally unique (see
+    resolve_lblk_entries / _unsafe_live_device_reason in utils), so this
+    collision is possible whenever a node is rescheduled onto storage that
+    looks topologically identical -- without this exclusion, the live
+    device's serial was already in `known_devices_sn` from the removed
+    record and the device would silently vanish: neither merged, nor
+    flagged new, nor logged."""
+    new_devices = []
+    active_devices = []
+    removed_devices = []
+    known_devices_sn = []
+    admin_removed_sn = set()
+    devices_sn_dict = {d.serial_number: d for d in nvme_devs}
+    for db_dev in snode.nvme_devices:
+        if db_dev.admin_removed:
+            admin_removed_sn.add(db_dev.serial_number)
+        else:
+            known_devices_sn.append(db_dev.serial_number)
+        if db_dev.status in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_FAILED,
+                             NVMeDevice.STATUS_REMOVED]:
+            removed_devices.append(db_dev)
+            continue
+        if db_dev.serial_number in devices_sn_dict.keys():
+            logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
+            found_dev = devices_sn_dict[db_dev.serial_number]
+            if not db_dev.is_partition and not found_dev.is_partition:
+                db_dev.device_name = found_dev.device_name
+                db_dev.nvme_bdev = found_dev.nvme_bdev
+                if found_dev.bdev_type == "aio":
+                    # AIO devices have no controller/PCIe identity; refresh
+                    # the re-resolved kernel path instead.
+                    db_dev.bdev_type = "aio"
+                    db_dev.device_path = found_dev.device_path
+                    db_dev.by_id_path = found_dev.by_id_path
+                else:
+                    db_dev.nvme_controller = found_dev.nvme_controller
+                    db_dev.pcie_address = found_dev.pcie_address
+            # Refresh md detection so a re-format between restarts is reflected
+            db_dev.md_size = found_dev.md_size
+            db_dev.md_supported = found_dev.md_supported
+
+            # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
+            #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
+            active_devices.append(db_dev)
+        else:
+            logger.info(f"Device not found: {db_dev.get_id()}")
+            if db_dev.status == NVMeDevice.STATUS_NEW:
+                snode.nvme_devices.remove(db_dev)
+            else:
+                db_dev.status = NVMeDevice.STATUS_REMOVED
+                removed_devices.append(db_dev)
+
+    jm_dev_sn = ""
+    if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
+        jm_dev_sn = snode.jm_device.device_data_dict['serial_number']
+        known_devices_sn.append(jm_dev_sn)
+
+    for dev in nvme_devs:
+        if dev.serial_number == jm_dev_sn:
+            logger.info(f"JM device found: {snode.jm_device.get_id()}")
+            snode.jm_device.nvme_bdev = dev.nvme_bdev
+
+        elif dev.serial_number not in known_devices_sn:
+            if dev.serial_number in admin_removed_sn:
+                logger.warning(
+                    f"Live device {dev.get_id()} (serial {dev.serial_number}) "
+                    f"shares its serial with a device previously removed from "
+                    f"this node by the operator; treating it as new hardware "
+                    f"rather than silently dropping it. If this is actually "
+                    f"the same disk reappearing, it must stay removed -- "
+                    f"investigate before trusting this device.")
+            logger.info(f"New device found: {dev.get_id()}")
+            dev.status = NVMeDevice.STATUS_NEW
+            new_devices.append(dev)
+            snode.nvme_devices.append(dev)
+
+    return new_devices
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -8832,62 +8922,7 @@ def _restart_storage_node_impl(
     logger.info(f"Devices in db: {len(snode.nvme_devices)}")
     logger.debug(snode.nvme_devices)
 
-    new_devices = []
-    active_devices = []
-    removed_devices = []
-    known_devices_sn = []
-    devices_sn_dict = {d.serial_number: d for d in nvme_devs}
-    for db_dev in snode.nvme_devices:
-        known_devices_sn.append(db_dev.serial_number)
-        if db_dev.status in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_FAILED,
-                             NVMeDevice.STATUS_REMOVED]:
-            removed_devices.append(db_dev)
-            continue
-        if db_dev.serial_number in devices_sn_dict.keys():
-            logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
-            found_dev = devices_sn_dict[db_dev.serial_number]
-            if not db_dev.is_partition and not found_dev.is_partition:
-                db_dev.device_name = found_dev.device_name
-                db_dev.nvme_bdev = found_dev.nvme_bdev
-                if found_dev.bdev_type == "aio":
-                    # AIO devices have no controller/PCIe identity; refresh
-                    # the re-resolved kernel path instead.
-                    db_dev.bdev_type = "aio"
-                    db_dev.device_path = found_dev.device_path
-                    db_dev.by_id_path = found_dev.by_id_path
-                else:
-                    db_dev.nvme_controller = found_dev.nvme_controller
-                    db_dev.pcie_address = found_dev.pcie_address
-            # Refresh md detection so a re-format between restarts is reflected
-            db_dev.md_size = found_dev.md_size
-            db_dev.md_supported = found_dev.md_supported
-
-            # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
-            #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
-            active_devices.append(db_dev)
-        else:
-            logger.info(f"Device not found: {db_dev.get_id()}")
-            if db_dev.status == NVMeDevice.STATUS_NEW:
-                snode.nvme_devices.remove(db_dev)
-            else:
-                db_dev.status = NVMeDevice.STATUS_REMOVED
-                removed_devices.append(db_dev)
-
-    jm_dev_sn = ""
-    if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
-        jm_dev_sn = snode.jm_device.device_data_dict['serial_number']
-        known_devices_sn.append(jm_dev_sn)
-
-    for dev in nvme_devs:
-        if dev.serial_number == jm_dev_sn:
-            logger.info(f"JM device found: {snode.jm_device.get_id()}")
-            snode.jm_device.nvme_bdev = dev.nvme_bdev
-
-        elif dev.serial_number not in known_devices_sn:
-            logger.info(f"New device found: {dev.get_id()}")
-            dev.status = NVMeDevice.STATUS_NEW
-            new_devices.append(dev)
-            snode.nvme_devices.append(dev)
+    new_devices = _reconcile_discovered_devices(snode, nvme_devs)
 
     snode.write_to_db(db_controller.kv_store)
     if node_address and len(new_devices) > 0:

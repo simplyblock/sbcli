@@ -11,9 +11,13 @@ Covered:
   - node_utils.split_partition_for_journal: preconditions (missing, mounted,
     held, non-GPT), sgdisk command sequence, sector math and alignment, new
     partition discovery.
-  - utils.resolve_lblk_entries: PARTUUID fallback resolution and journal
-    flag carry-over.
+  - utils.resolve_lblk_entries: PARTUUID fallback resolution, journal flag
+    carry-over, and refusing a match (by any of serial/partuuid/name) that
+    lands on a mounted, held, or root-disk live device.
   - storage_node_ops._find_flagged_journal_device.
+  - storage_node_ops._reconcile_discovered_devices: restart-time device
+    bookkeeping, including a live device's serial colliding with a
+    previously operator-removed (admin_removed) record.
 """
 
 import json
@@ -22,6 +26,7 @@ from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants, storage_node_ops, utils
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_web import node_utils
 
@@ -355,6 +360,41 @@ class TestResolvePartitionEntries(unittest.TestCase):
         self.assertNotIn("type", resolved[0])
         self.assertNotIn("journal", resolved[0])
 
+    def test_name_fallback_onto_root_disk_is_refused(self):
+        # Node restarted on genuinely different hardware: the configured
+        # slot's name ("sdb") happens to be the NEW host's root/boot disk.
+        # Serial matching correctly fails (different hardware), and the name
+        # fallback must not hand the live root disk to bdev_aio_create just
+        # because something is attached at that kernel name now.
+        configured = [_entry("sdb", serial="OLD-SER")]
+        live = [_inv("sdb", serial="NEW-SER", mounted=True)]
+        resolved, missing = utils.resolve_lblk_entries(configured, live)
+        self.assertEqual(resolved, [])
+        self.assertEqual(missing, configured)
+
+    def test_name_fallback_onto_held_disk_is_refused(self):
+        configured = [_entry("sdc", serial="OLD-SER")]
+        live = [_inv("sdc", serial="NEW-SER", holders=["dm-0"])]
+        resolved, missing = utils.resolve_lblk_entries(configured, live)
+        self.assertEqual(resolved, [])
+        self.assertEqual(missing, configured)
+
+    def test_name_fallback_onto_root_disk_flag_is_refused(self):
+        configured = [_entry("sdd", serial="OLD-SER")]
+        live = [_inv("sdd", serial="NEW-SER", root=True)]
+        resolved, missing = utils.resolve_lblk_entries(configured, live)
+        self.assertEqual(resolved, [])
+        self.assertEqual(missing, configured)
+
+    def test_serial_match_onto_busy_disk_is_also_refused(self):
+        # Safety applies regardless of how the match was made -- a serial
+        # match is not exempt just because the identity lined up.
+        configured = [_entry("sdb", serial="SAME-SER")]
+        live = [_inv("sdb", serial="SAME-SER", mounted=True)]
+        resolved, missing = utils.resolve_lblk_entries(configured, live)
+        self.assertEqual(resolved, [])
+        self.assertEqual(missing, configured)
+
 
 class TestFindFlaggedJournalDevice(unittest.TestCase):
 
@@ -390,3 +430,88 @@ class TestFindFlaggedJournalDevice(unittest.TestCase):
         devs = [self._dev("S-OTHER")]
         self.assertIsNone(
             storage_node_ops._find_flagged_journal_device(snode, devs))
+
+
+class TestReconcileDiscoveredDevices(unittest.TestCase):
+    """storage_node_ops._reconcile_discovered_devices: the restart-time
+    bookkeeping that matches freshly discovered bdevs (from
+    addNvmeDevices/addAioDevices) against this node's known NVMeDevice
+    records."""
+
+    def _snode(self, nvme_devices):
+        n = StorageNode()
+        n.uuid = "node-1"
+        n.nvme_devices = nvme_devices
+        n.jm_device = None
+        return n
+
+    def _db_dev(self, serial, status=NVMeDevice.STATUS_ONLINE,
+               admin_removed=False, uid=None):
+        d = NVMeDevice()
+        d.uuid = uid or f"db-{serial}"
+        d.serial_number = serial
+        d.status = status
+        d.admin_removed = admin_removed
+        d.is_partition = False
+        d.bdev_type = "aio"
+        return d
+
+    def _live_dev(self, serial, uid=None):
+        d = NVMeDevice()
+        d.uuid = uid or f"live-{serial}"
+        d.serial_number = serial
+        d.is_partition = False
+        d.bdev_type = "aio"
+        d.device_path = f"/dev/{serial}"
+        d.by_id_path = ""
+        return d
+
+    def test_serial_colliding_with_admin_removed_device_becomes_new(self):
+        # The regression this guards: an operator permanently removed a
+        # device, leaving its serial in this node's history. A *different*
+        # live device (e.g. a synthetic-serial collision after the node
+        # restarted onto storage that looks topologically identical -- see
+        # resolve_lblk_entries) that happens to share that exact serial
+        # must not be silently dropped: neither merged into the removed
+        # record, nor flagged new, nor logged -- which is what happened
+        # before this fix.
+        removed = self._db_dev("SYN-1", status=NVMeDevice.STATUS_REMOVED,
+                               admin_removed=True, uid="removed-dev")
+        snode = self._snode([removed])
+        live = self._live_dev("SYN-1", uid="live-dev")
+
+        new_devices = storage_node_ops._reconcile_discovered_devices(snode, [live])
+
+        self.assertEqual([d.get_id() for d in new_devices], ["live-dev"])
+        self.assertIn(live, snode.nvme_devices)
+        self.assertEqual(live.status, NVMeDevice.STATUS_NEW)
+        # The old, operator-removed record is untouched: not resurrected,
+        # just no longer blocking the new device's identity.
+        self.assertEqual(removed.status, NVMeDevice.STATUS_REMOVED)
+
+    def test_serial_colliding_with_transiently_removed_device_is_not_new(self):
+        # A device that is merely STATUS_REMOVED (not admin_removed -- e.g.
+        # simply not found on an earlier restart) is still "known": its
+        # serial must keep suppressing a spurious duplicate "new device"
+        # entry if that identity resurfaces.
+        removed = self._db_dev("SYN-2", status=NVMeDevice.STATUS_REMOVED,
+                               admin_removed=False, uid="removed-dev-2")
+        snode = self._snode([removed])
+        live = self._live_dev("SYN-2", uid="live-dev-2")
+
+        new_devices = storage_node_ops._reconcile_discovered_devices(snode, [live])
+
+        self.assertEqual(new_devices, [])
+        self.assertNotIn(live, snode.nvme_devices)
+
+    def test_matching_active_device_is_updated_not_duplicated(self):
+        active = self._db_dev("SYN-3", uid="active-dev")
+        snode = self._snode([active])
+        live = self._live_dev("SYN-3", uid="live-dev-3")
+        live.nvme_bdev = "aio_SYN_3"
+
+        new_devices = storage_node_ops._reconcile_discovered_devices(snode, [live])
+
+        self.assertEqual(new_devices, [])
+        self.assertEqual(active.nvme_bdev, "aio_SYN_3")
+        self.assertEqual(len(snode.nvme_devices), 1)

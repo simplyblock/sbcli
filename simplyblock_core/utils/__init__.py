@@ -1500,6 +1500,25 @@ def aio_bdev_name_for_serial(serial: str) -> str:
     return f"aio_{sanitized}"
 
 
+def _unsafe_live_device_reason(dev):
+    """Safety checks that must hold for ANY live device before SPDK is told
+    to open it as storage — whether it was selected at add-node time
+    (`filter_eligible_block_devices`) or re-resolved at restart
+    (`resolve_lblk_entries`). A name/partuuid fallback match can land on a
+    device that merely shares a slot with the configured one on a
+    different host (e.g. a restart onto new hardware); without this check
+    it would be handed straight to `bdev_aio_create` with no re-validation,
+    including the possibility of landing on the host's own mounted root
+    disk."""
+    if dev.get("mounted_in_subtree"):
+        return "mounted (busy)"
+    if dev.get("holders"):
+        return f"held by {dev['holders']} (busy)"
+    if dev.get("is_root_disk"):
+        return "backs the root filesystem"
+    return None
+
+
 def resolve_lblk_entries(configured_entries, host_devices):
     """Match the node's configured lblk devices against the live host
     inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
@@ -1515,7 +1534,13 @@ def resolve_lblk_entries(configured_entries, host_devices):
     new identity instead of silently inheriting the old serial. Callers
     rely on that to tell "same device, renamed" from "different device,
     coincidentally in the same slot": only the former is safe to treat as
-    already-initialized storage."""
+    already-initialized storage.
+
+    A match that resolves to a live device failing `_unsafe_live_device_reason`
+    (mounted, held, or backing the root filesystem) is demoted to `missing`
+    rather than returned as resolved — a fallback match by name/partuuid
+    must clear the same safety bar `filter_eligible_block_devices` enforces
+    at add-node time, not just "something is attached at that name now"."""
     by_serial = {d["serial"]: d for d in host_devices}
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
@@ -1523,11 +1548,23 @@ def resolve_lblk_entries(configured_entries, host_devices):
     resolved, missing = [], []
     for entry in configured_entries:
         live = by_serial.get(entry.get("serial"))
+        matched_by = "serial"
         if live is None and entry.get("partuuid"):
             live = by_partuuid.get(entry["partuuid"].lower())
+            matched_by = "partuuid"
         if live is None:
             live = by_name.get(entry.get("name"))
+            matched_by = "name"
         if live is None:
+            missing.append(entry)
+            continue
+        unsafe_reason = _unsafe_live_device_reason(live)
+        if unsafe_reason:
+            logger.warning(
+                f"Configured block device {entry.get('name')} (serial "
+                f"{entry.get('serial')}) matched live device {live.get('name')} "
+                f"by {matched_by}, but it is {unsafe_reason}; refusing to "
+                f"reuse it as storage")
             missing.append(entry)
             continue
         resolved_entry = {
@@ -1903,12 +1940,9 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
             return "not a disk or partition"
         if dev["name"].startswith(constants.LBLK_EXCLUDED_NAME_PREFIXES):
             return "special device type"
-        if dev.get("mounted_in_subtree"):
-            return "mounted (busy)"
-        if dev.get("holders"):
-            return f"held by {dev['holders']} (busy)"
-        if dev.get("is_root_disk"):
-            return "backs the root filesystem"
+        unsafe_reason = _unsafe_live_device_reason(dev)
+        if unsafe_reason:
+            return unsafe_reason
         if dev.get("ro"):
             return "read-only"
         if not dev.get("size"):
