@@ -48,52 +48,42 @@ def test_without_force_a_cluster_with_nodes_is_refused(world):
     world.cluster.remove.assert_not_called()
 
 
-def test_force_shuts_down_and_deletes_every_node_then_the_pools_and_the_cluster(world):
-    removed = []
+def test_force_deletes_the_pools_before_the_nodes_then_the_cluster(world):
+    """The pools go first, with the nodes still up and the cluster's KMS
+    configuration still there for their keys; then every node, whatever its
+    status; then the cluster."""
+    order = []
 
-    def set_status(node_id, status, caused_by=""):
-        assert status == StorageNode.STATUS_REMOVED
-        removed.append(node_id)
-
-    def delete_node(node_id, force=False):
-        assert force and node_id in removed
-        world.state["nodes"] = [n for n in world.state["nodes"] if n.get_id() != node_id]
-
-    def delete_pool_record(pool):
+    def delete_pool(pool_id):
+        order.append(("pool", pool_id))
         world.state["pools"] = []
+
+    def delete_node(node_id):
+        order.append(("node", node_id))
+        world.state["nodes"] = [n for n in world.state["nodes"] if n.get_id() != node_id]
+        return True
 
     with patch.object(cluster_ops, "db_controller", world.db), \
             patch.object(cluster_ops, "cluster_events"), \
-            patch.object(cluster_ops.storage_node_ops, "shutdown_storage_node") as shutdown, \
-            patch.object(cluster_ops.storage_node_ops, "set_node_status", side_effect=set_status), \
-            patch.object(cluster_ops.storage_node_ops, "delete_storage_node", side_effect=delete_node), \
-            patch.object(cluster_ops, "_remove_pool_record", side_effect=delete_pool_record):
+            patch.object(cluster_ops.pool_controller, "force_delete_pool", side_effect=delete_pool), \
+            patch.object(cluster_ops.storage_node_ops, "force_delete_storage_node", side_effect=delete_node):
         cluster_ops.delete_cluster("c1", force=True)
 
-    # Only a node whose SPDK is up is shut down; an offline one has nothing to stop.
-    shutdown.assert_called_once_with("n1", force=True)
-    assert sorted(removed) == ["n1", "n2"]
-    world.lvol.remove.assert_called_once()
-    world.snap.remove.assert_called_once()
+    assert order == [("pool", "p1"), ("node", "n1"), ("node", "n2")]
     world.cluster.remove.assert_called_once()
 
 
-def test_a_shutdown_that_fails_does_not_stop_the_teardown(world):
-    deleted = []
-
-    def delete_node(node_id, force=False):
-        deleted.append(node_id)
+def test_a_node_whose_spdk_stop_is_not_confirmed_is_reported_and_the_teardown_goes_on(world, caplog):
+    def delete_node(node_id):
         world.state["nodes"] = [n for n in world.state["nodes"] if n.get_id() != node_id]
+        return node_id != "n1"
 
     with patch.object(cluster_ops, "db_controller", world.db), \
             patch.object(cluster_ops, "cluster_events"), \
-            patch.object(cluster_ops.storage_node_ops, "shutdown_storage_node",
-                         side_effect=RuntimeError("snode api unreachable")), \
-            patch.object(cluster_ops.storage_node_ops, "set_node_status"), \
-            patch.object(cluster_ops.storage_node_ops, "delete_storage_node", side_effect=delete_node), \
-            patch.object(cluster_ops, "_remove_pool_record",
-                         side_effect=lambda pool: world.state.update(pools=[])):
+            patch.object(cluster_ops.pool_controller, "force_delete_pool",
+                         side_effect=lambda _id: world.state.update(pools=[])), \
+            patch.object(cluster_ops.storage_node_ops, "force_delete_storage_node", side_effect=delete_node):
         cluster_ops.delete_cluster("c1", force=True)
 
-    assert sorted(deleted) == ["n1", "n2"]
+    assert any("n1" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)
     world.cluster.remove.assert_called_once()

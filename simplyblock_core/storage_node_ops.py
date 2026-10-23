@@ -4771,6 +4771,35 @@ REMOVABLE_STATUSES = (
 #: so phase 1 has something to stop. Everything else is either already
 #: stopped by an earlier step (the departing statuses) or not answering
 #: (OFFLINE, UNREACHABLE), where a shutdown could only fail.
+def force_delete_storage_node(node_id) -> bool:
+    """Delete a storage node as part of bringing its cluster down, killing its
+    SPDK first whatever its status, and report whether SPDK was confirmed
+    stopped.
+
+    The node is marked removed before anything else, which stops a restart
+    driver from bringing SPDK back, and its tasks, migrations among them, are
+    cancelled. SPDK is then killed directly rather than through
+    shutdown_storage_node, whose guards refuse a node with an active restart
+    or a running migration: those protect a cluster that goes on, and this
+    one does not. A kill that cannot be confirmed, the node's API not
+    answering, is reported, and the node is deleted anyway."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="cluster delete")
+    for task in tasks_controller.get_active_node_tasks(snode.cluster_id, node_id):
+        tasks_controller.cancel_task(task.uuid)
+    try:
+        stopped = bool(_kill_spdk_until_dead(snode))
+    except Exception:
+        logger.exception(f"Killing SPDK on node {node_id} failed")
+        stopped = False
+    if not stopped:
+        logger.error(f"SPDK on node {node_id} could not be confirmed stopped; "
+                     f"deleting the node's records anyway")
+    delete_storage_node(node_id, force=True)
+    return stopped
+
+
 REMOVAL_SHUTS_DOWN_FROM = (
     StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN)
 

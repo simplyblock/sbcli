@@ -35,7 +35,7 @@ from simplyblock_core import (
 from simplyblock_core.controllers import (
     cluster_events,
     device_controller,
-    pool_events,
+    pool_controller,
     qos_controller,
     tasks_controller,
     tcp_ports_events,
@@ -3624,35 +3624,22 @@ def delete_cluster(cl_id, force=False) -> None:
 
 
 def _bring_down(cl_id) -> None:
-    """Shut down and delete every node of the cluster, then every pool with
-    its volumes and snapshots. A step that fails on one node is logged and the
-    teardown goes on: a node whose agent no longer answers is still a node to
-    delete."""
-    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-        node_id = node.get_id()
-        if node.status in storage_node_ops.REMOVAL_SHUTS_DOWN_FROM:
-            try:
-                storage_node_ops.shutdown_storage_node(node_id, force=True)
-            except Exception:
-                logger.exception(f"Forced delete of cluster {cl_id}: shutting down node {node_id} failed")
-        storage_node_ops.set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="cluster delete")
-        storage_node_ops.delete_storage_node(node_id, force=True)
-        logger.info(f"Forced delete of cluster {cl_id}: deleted node {node_id}")
-
+    """Delete every pool, then every node, of a cluster being deleted with
+    force. The pools go first, while the nodes are up and the cluster's KMS
+    configuration exists, so their keys are deleted with them. A node whose
+    SPDK cannot be confirmed stopped is reported, and the teardown goes on:
+    a node whose agent no longer answers is still a node to delete."""
     for pool in db_controller.get_pools(cl_id):
-        pool_id = pool.get_id()
-        for snapshot in db_controller.get_snapshots_by_pool_id(pool_id):
-            snapshot.remove(db_controller.kv_store)
-        for lvol in db_controller.get_lvols_by_pool_id(pool_id):
-            lvol.remove(db_controller.kv_store)
-        _remove_pool_record(pool)
-        logger.info(f"Forced delete of cluster {cl_id}: deleted pool {pool_id} and its volumes")
+        pool_controller.force_delete_pool(pool.get_id())
 
+    unconfirmed = [
+        node.get_id() for node in db_controller.get_storage_nodes_by_cluster_id(cl_id)
+        if not storage_node_ops.force_delete_storage_node(node.get_id())
+    ]
+    if unconfirmed:
+        logger.error(f"Forced delete of cluster {cl_id}: SPDK could not be confirmed stopped on "
+                     f"node(s) {', '.join(unconfirmed)}; check them by hand")
 
-def _remove_pool_record(pool) -> None:
-    """Delete a pool's record and announce it, as pool deletion does."""
-    pool_events.pool_remove(pool)
-    pool.remove(db_controller.kv_store)
 
 def set_(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)
