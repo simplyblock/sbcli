@@ -939,7 +939,8 @@ def _site_return_problem(cluster, nodes) -> str:
 
     * the stored cluster status serves (SITE_ACTIVATION_STATUSES) and no
       FN_SYNC_PROMOTE task of the cluster is open (a canceled one included:
-      its leadership moves are not settled yet);
+      its leadership moves are not settled yet), nor an FN_SYNC_SITE_FENCE
+      task (it sets the site's nodes offline after its proof);
     * no node of the cluster is in transition, and no ONLINE one has an
       active restart task - an OFFLINE node of the other site always has one
       queued and does not hold the site back;
@@ -950,6 +951,8 @@ def _site_return_problem(cluster, nodes) -> str:
         return f"cluster {cluster_id} is {cluster.status}"
     if db.get_active_sync_promote_tasks(cluster_id):
         return "a sync promote task is not done"
+    if db.get_active_sync_site_fence_tasks(cluster_id):
+        return "a sync site fence task is not done"
     problem = activation_gate.nodes_in_transition_problem(nodes)
     if problem:
         return problem

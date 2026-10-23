@@ -48,7 +48,10 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     RemoteTripletPlacementError,
 )
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.exceptions import reject_on_sync_replication
+from simplyblock_core.exceptions import (
+    SyncReplicationSiteError,
+    reject_on_sync_replication,
+)
 from simplyblock_core.models import indices
 from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
@@ -360,6 +363,20 @@ def _validate_sync_replication(sync_replication, ha_type, is_single_node) -> Non
         raise ValueError("sync replication cannot be used on a single-node cluster")
 
 
+def _validate_leader_site(sync_replication, leader_site) -> None:
+    """The leader site of a stretched cluster (Cluster.leader_site) exists
+    only on a sync-replication cluster. No node exists at create, so the site
+    is not checked against node sites here (sync_replication_controller.
+    check_leader_site does that when it is moved).
+
+    Raises:
+        SyncReplicationSiteError: a leader site was given without sync replication.
+    """
+    if leader_site and not sync_replication:
+        raise SyncReplicationSiteError(
+            "leader_site is only allowed together with sync_replication")
+
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -652,6 +669,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 inline_checksum=False,
                 atomic_4k=False,
                 sync_replication=False,
+                leader_site="",
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a DbLock.
@@ -682,6 +700,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
         sync_replication=sync_replication,
+        leader_site=leader_site,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -712,6 +731,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 inline_checksum=False,
                 atomic_4k=False,
                 sync_replication=False,
+                leader_site="",
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -724,6 +744,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         raise ValueError("Unsupported erasure coding scheme")
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
+    _validate_leader_site(sync_replication, leader_site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -761,6 +782,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
     cluster.sync_replication = bool(sync_replication)
+    cluster.leader_site = leader_site or ""
     cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:

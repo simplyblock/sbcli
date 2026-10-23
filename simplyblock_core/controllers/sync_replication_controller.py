@@ -24,17 +24,23 @@ from typing import NamedTuple
 import fdb
 
 from simplyblock_core import constants, distr_controller, storage_node_ops, utils
-from simplyblock_core.controllers import activation_gate, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    cluster_events,
+    tasks_controller,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
     PreconditionError,
     SyncAnaError,
     SyncGateError,
     SyncGroupMemberError,
+    SyncLeaderSiteRefusedError,
     SyncPromoteFailedError,
     SyncPromoteRefusedError,
     SyncReplicationSiteError,
     SyncReplicationUnsupportedError,
+    SyncSiteFenceRefusedError,
     SyncSiteOfflineError,
 )
 from simplyblock_core.models.cluster import Cluster
@@ -1039,6 +1045,194 @@ def record_site_return(cluster_id: str, site: str, token: str, built_ids) -> lis
     else:
         logger.warning("Site %s: lost_site cleared, catch-up scheduled for every LVS", site)
     return problems
+
+
+# ---------------------------------------------------------------------------
+# Site fence (the site-level route, design-stretched §10.2)
+# ---------------------------------------------------------------------------
+
+class SiteNode(NamedTuple):
+    """A node of a site, as the site record lists it."""
+    node_id: str
+    status: str
+    mgmt_ip: str
+
+
+@dataclass(frozen=True)
+class SiteRecord:
+    """What the control plane records about one site of a sync-replication
+    cluster: whether it is the cluster's lost site and in which
+    ``lost_site_state`` (draining / down by the storage-node monitor, fencing
+    / done by a fence), the latest site-level fence task ("" when none ran),
+    and its nodes (the removed ones excepted)."""
+    site: str
+    lost: bool
+    state: str
+    fence_task_id: str
+    nodes: tuple[SiteNode, ...]
+
+
+@dataclass(frozen=True)
+class SiteFenceResult:
+    """The answer to a site fence: done (the cluster records the site's
+    steps as done), or in progress with the fence task."""
+    done: bool
+    task_id: str = ""
+
+
+def _site_record(db: DBController, cluster, site: str, nodes: list[StorageNode]) -> SiteRecord:
+    lost = cluster.lost_site == site
+    task = db.get_sync_site_fence_task(cluster.get_id(), site)
+    return SiteRecord(
+        site=site, lost=lost, state=cluster.lost_site_state if lost else "",
+        fence_task_id=task.uuid if task is not None else "",
+        nodes=tuple(SiteNode(n.get_id(), n.status, n.mgmt_ip) for n in nodes
+                    if n.site == site and n.status != StorageNode.STATUS_REMOVED))
+
+
+def _check_leader_not_lost(cluster, site: str) -> None:
+    if cluster.lost_site and cluster.lost_site == site:
+        raise SyncLeaderSiteRefusedError(
+            f"site {site!r} is recorded lost on cluster {cluster.get_id()} "
+            f"({cluster.lost_site_state or 'recorded'}); a lost site cannot lead")
+
+
+def check_leader_site(cluster, site: str) -> None:
+    """Whether ``site`` may become ``cluster``'s leader site
+    (``Cluster.leader_site``, design-stretched-sync-replication-ramen §5.1,
+    §11.1): the cluster is a sync-replication cluster, the site is named,
+    a non-removed storage node of the cluster carries it, and the cluster
+    does not record it as the lost site (in any state, ``draining``
+    included: a site on its way out cannot take the lead).
+
+    Raises SyncReplicationUnsupportedError on a cluster without sync
+    replication, SyncReplicationSiteError for an empty site or one the
+    cluster does not have, SyncLeaderSiteRefusedError for the lost site."""
+    if not cluster.sync_replication:
+        raise SyncReplicationUnsupportedError(
+            f"cluster {cluster.get_id()} is not a sync-replication cluster; it has no leader site")
+    if not site:
+        raise SyncReplicationSiteError("leader_site must not be empty")
+    db = DBController()
+    sites = {n.site for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())
+             if n.site and n.status != StorageNode.STATUS_REMOVED}
+    if site not in sites:
+        raise SyncReplicationSiteError(
+            f"site {site!r} is not a site of cluster {cluster.get_id()} (sites: {sorted(sites)})")
+    _check_leader_not_lost(cluster, site)
+
+
+def set_leader_site(cluster_id: str, site: str) -> Cluster:
+    """Move the cluster's leader site to ``site`` (the hub's role swap,
+    design-stretched-sync-replication-ramen §11.1); a no-op when it already
+    leads. Checked as check_leader_site does, the lost site judged again on
+    the record the compare-and-set writes, so a site recorded lost after the
+    caller's check is still refused and no field written since the caller
+    read the cluster is overwritten. Logs a cluster event on a change.
+
+    Raises as check_leader_site does."""
+    db = DBController()
+    cluster = db.get_cluster_by_id(cluster_id)
+    check_leader_site(cluster, site)
+    previous: list[str] = []
+
+    def mutate(fresh):
+        _check_leader_not_lost(fresh, site)
+        previous[:] = [fresh.leader_site]
+        if fresh.leader_site == site:
+            return False
+        fresh.leader_site = site
+        return None
+
+    updated = db.atomic_update(cluster, mutate)
+    if updated is not None and previous and previous[0] != site:
+        cluster_events.cluster_leader_site_change(updated, site, previous[0])
+    return updated
+
+
+def site_record(cluster_id: str, site: str) -> SiteRecord:
+    """The record of ``site`` (SiteRecord). Raises
+    SyncReplicationUnsupportedError on a cluster without sync replication,
+    SyncReplicationSiteError for a site the cluster does not have."""
+    db = DBController()
+    cluster = _sync_cluster(db, cluster_id)
+    _check_site(db, cluster_id, site)
+    return _site_record(db, cluster, site, db.get_storage_nodes_by_cluster_id(cluster_id))
+
+
+def fence_site(cluster_id: str, site: str) -> SiteFenceResult:
+    """Fence ``site`` as a whole: the disaster site steps of a forced promote
+    (tasks_runner_sync_promote._site_steps - the liveness proof of every node
+    of the site, ``lost_site = site`` / ``fencing``, every device of the site
+    unavailable on the surviving site, its nodes offline, every volume of
+    every LVS led from it fenced there, the proof again, ``done``), run once
+    for the site by an FN_SYNC_SITE_FENCE task. No leadership moves: the LVS
+    led from the site stay closed until a forced promote opens them on the
+    survivor, and that promote finds the steps done and skips them.
+
+    Idempotent and resumable, as the steps are: done once the cluster
+    records ``site`` ``done``; in progress (the task) while a fence task of
+    the site runs, and when this call queued one. Refused
+    (SyncSiteFenceRefusedError) - nothing queued - while another site is
+    recorded lost, while the storage-node monitor drains ``site``, while a
+    site activation runs for it, while no other site has an online node, and
+    while a node of ``site`` may still run SPDK by its status
+    (site_running_nodes; the runner's proof also probes the nodes). A fence
+    task that ended without fencing the site (its proof refused, a node not
+    proven down) is reported once, with its task id, by the next call; the
+    call after it queues a new attempt.
+
+    Raises SyncReplicationUnsupportedError on a cluster without sync
+    replication, SyncReplicationSiteError for a site the cluster does not
+    have."""
+    db = DBController()
+    cluster = _sync_cluster(db, cluster_id)
+    _check_site(db, cluster_id, site)
+    if cluster.lost_site == site and cluster.lost_site_state == Cluster.LOST_SITE_DONE:
+        return SiteFenceResult(done=True)
+    if cluster.lost_site and cluster.lost_site != site:
+        raise SyncSiteFenceRefusedError(f"site {cluster.lost_site} is already lost; site {site} "
+                                        f"cannot be fenced too")
+    if cluster.lost_site == site and cluster.lost_site_state == Cluster.LOST_SITE_DRAINING:
+        raise SyncSiteFenceRefusedError(f"site {site} is being shut down by the storage-node "
+                                        f"monitor; retry once it is down")
+    if activation_gate.activating_site(cluster) == site:
+        raise SyncSiteFenceRefusedError(activation_gate.site_activation_blocks(cluster))
+    task = db.get_sync_site_fence_task(cluster_id, site)
+    if task is not None and db.sync_promote_task_blocks(task):
+        return SiteFenceResult(done=False, task_id=task.uuid)
+    nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    running = site_running_nodes(nodes, site)
+    if running:
+        raise SyncSiteFenceRefusedError(f"site {site} is not lost: nodes of it may still run: {running}")
+    if not online_sites(nodes, cluster) - {site}:
+        raise SyncSiteFenceRefusedError(f"no other site has an online node; fencing site {site} "
+                                        f"would leave no site to serve")
+    failure = db.consume_sync_site_fence_failure(cluster_id, site)
+    if failure is not None:
+        raise SyncSiteFenceRefusedError(
+            f"the last fence of site {site} failed (task {failure['task_id']}): {failure['reason']}",
+            task_id=failure["task_id"])
+    task_id, _ = tasks_controller.add_sync_site_fence_task(cluster_id, site)
+    return SiteFenceResult(done=False, task_id=task_id)
+
+
+def confirm_site_unfenced(cluster_id: str, site: str) -> SiteRecord:
+    """The unfence of ``site`` is a confirmation, not an action: the site
+    returns by the backend's own site activation once its nodes are back
+    (record_site_return clears the record). Returns the site's record once
+    the cluster no longer records ``site`` as lost; refuses
+    (SyncSiteFenceRefusedError) while it does, in any state.
+
+    Raises SyncReplicationUnsupportedError on a cluster without sync
+    replication, SyncReplicationSiteError for a site the cluster does not
+    have."""
+    record = site_record(cluster_id, site)
+    if record.lost:
+        raise SyncSiteFenceRefusedError(
+            f"the control plane still records site {site} as lost ({record.state}); it returns "
+            f"once its nodes are back and the site activation has completed")
+    return record
 
 
 def check_gate(cluster_id: str) -> None:
