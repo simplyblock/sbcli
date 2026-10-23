@@ -124,10 +124,10 @@ def test_the_reported_hostname_is_the_kubernetes_node():
 class _Node:
     """A Node object as the Kubernetes client returns it."""
 
-    def __init__(self, provider_id, labels, addresses):
+    def __init__(self, provider_id, labels, addresses, annotations=None):
         from types import SimpleNamespace
         self.spec = SimpleNamespace(provider_id=provider_id)
-        self.metadata = SimpleNamespace(labels=labels)
+        self.metadata = SimpleNamespace(labels=labels, annotations=annotations or {})
         self.status = SimpleNamespace(addresses=[
             SimpleNamespace(type=kind, address=address) for kind, address in addresses])
 
@@ -138,7 +138,7 @@ def test_cloud_info_falls_back_to_the_node_when_metadata_is_unreachable():
                  [("InternalIP", "10.0.1.5"), ("ExternalIP", "54.1.2.3")])
 
     class Core:
-        def read_node(self, name):
+        def read_node(self, name, **_kwargs):
             assert name == "worker-2"
             return node
 
@@ -154,10 +154,77 @@ def test_a_node_without_a_provider_carries_no_cloud_info():
     from simplyblock_web.api.internal import _node_info
 
     class Core:
-        def read_node(self, name):
+        def read_node(self, name, **_kwargs):
             return _Node("", {}, [("InternalIP", "10.0.1.5")])
 
     with patch.dict("os.environ", {"HOSTNAME": "worker-2"}), \
             patch.object(_node_info, "_metadata_cloud_info", return_value=None), \
             patch.object(_node_info, "get_k8s_core_client", return_value=Core()):
         assert _node_info.get_cloud_info() is None
+
+
+def _fallback(node, **patches):
+    """Cloud info read from the node alone, the metadata service unreachable."""
+    from simplyblock_web.api.internal import _node_info
+
+    class Core:
+        def __init__(self):
+            self.kwargs = {}
+
+        def read_node(self, name, **kwargs):
+            self.kwargs = kwargs
+            if isinstance(node, Exception):
+                raise node
+            return node
+
+    core = Core()
+    with patch.dict("os.environ", {"HOSTNAME": "worker-2"}), \
+            patch.object(_node_info, "_metadata_cloud_info", return_value=None), \
+            patch.object(_node_info, "get_k8s_core_client", return_value=core):
+        return _node_info.get_cloud_info(), core
+
+
+AZURE = ("azure:///subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/"
+         "virtualMachineScaleSets/{}/virtualMachines/0")
+
+
+def test_two_azure_scale_sets_with_the_same_ordinal_are_distinct_instances():
+    a, _ = _fallback(_Node(AZURE.format("pool-a"), {}, []))
+    b, _ = _fallback(_Node(AZURE.format("pool-b"), {}, []))
+    assert a["id"] != b["id"]
+    assert a["id"].endswith("virtualMachineScaleSets/pool-a/virtualMachines/0")
+
+
+def test_a_gce_instance_is_identified_by_its_numeric_id_as_the_metadata_service_reports_it():
+    info, _ = _fallback(_Node("gce://project/europe-west1-b/gke-node-1", {}, [],
+                              annotations={"container.googleapis.com/instance_id": "4515203398452717513"}))
+    assert info["id"] == "4515203398452717513"
+
+
+def test_a_gce_instance_without_its_numeric_id_carries_no_cloud_info():
+    """The instance name is not the id the metadata service reports; a node
+    that would report one or the other depending on reachability has no
+    stable identity, so none is reported."""
+    info, _ = _fallback(_Node("gce://project/europe-west1-b/gke-node-1", {}, []))
+    assert info is None
+
+
+def test_the_node_read_is_bounded_and_a_timeout_reports_nothing():
+    info, core = _fallback(TimeoutError("read timed out"))
+    assert info is None
+    assert core.kwargs.get("_request_timeout"), "the Node read has no timeout"
+    _, core = _fallback(_Node("aws:///eu-west-1a/i-0abc123", {}, []))
+    assert core.kwargs.get("_request_timeout")
+
+
+def test_a_failed_ping_reports_its_diagnostic():
+    from simplyblock_web.api.internal.storage_node import docker
+
+    def run(cmd):
+        return "", b"connect: Network is unreachable", 2
+
+    with Flask(__name__).app_context(), \
+            patch("os.readlink", _namespaces(POD_NS)), \
+            patch.object(docker.shell_utils, "run_command", run):
+        response = docker.ping_ip(docker.PingQuery(ip="10.10.10.246", ifname="ens16np0"))
+    assert "Network is unreachable" in json.dumps(response.get_json())
