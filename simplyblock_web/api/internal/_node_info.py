@@ -84,6 +84,16 @@ def _metadata_cloud_info() -> dict | None:
 _PROVIDER_CLOUDS = {"aws": "amazon", "gce": "google", "azure": "azure", "equinixmetal": "equinix"}
 
 
+# _NODE_READ_TIMEOUT bounds the Node read, (connect, read) in seconds: it runs
+# synchronously on the first node-info request, and an API server that accepts
+# the connection and stops answering would hold discovery indefinitely.
+_NODE_READ_TIMEOUT = (3, 5)
+
+# _GKE_INSTANCE_ID is where GKE records a node's numeric instance id, the id
+# the GCE metadata service reports.
+_GKE_INSTANCE_ID = "container.googleapis.com/instance_id"
+
+
 def _kubernetes_cloud_info() -> dict | None:
     """The instance as the node's Kubernetes object states it. On the pod
     network, the metadata service can be out of reach: AWS answers an IMDSv2
@@ -93,12 +103,11 @@ def _kubernetes_cloud_info() -> dict | None:
     if not node_name:
         return None
     try:
-        node = get_k8s_core_client().read_node(node_name)
+        node = get_k8s_core_client().read_node(node_name, _request_timeout=_NODE_READ_TIMEOUT)
     except Exception:
         return None
-    provider_id = node.spec.provider_id or ""
-    scheme, _, rest = provider_id.partition("://")
-    instance = rest.rstrip("/").rsplit("/", 1)[-1]
+    scheme, _, rest = (node.spec.provider_id or "").partition("://")
+    instance = _provider_instance_id(scheme, rest, node.metadata.annotations or {})
     if scheme not in _PROVIDER_CLOUDS or not instance:
         return None
     addresses = {address.type: address.address for address in node.status.addresses or []}
@@ -110,6 +119,26 @@ def _kubernetes_cloud_info() -> dict | None:
         "ip": addresses.get("InternalIP", ""),
         "public_ip": addresses.get("ExternalIP", ""),
     }
+
+
+def _provider_instance_id(scheme: str, rest: str, annotations: dict) -> str:
+    """The instance id a providerID names, in the form the cloud's metadata
+    service reports it, so a node reports the same identity whichever source
+    answered; or an empty string when the node does not carry it.
+
+    AWS and Equinix Metal end the providerID with that id. An Azure id is
+    the whole resource path: a scale set's instances end in their ordinal,
+    and two scale sets share ordinals. GCE ends it with the instance name,
+    while the metadata service reports the numeric id, which GKE records in
+    an annotation; without it the identity is not reported at all rather
+    than as a name that changes with which source answered.
+    """
+    path = rest.strip("/")
+    if scheme == "azure":
+        return path
+    if scheme == "gce":
+        return annotations.get(_GKE_INSTANCE_ID, "")
+    return path.rsplit("/", 1)[-1]
 
 
 def _google_info() -> dict | None:
