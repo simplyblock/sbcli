@@ -35,6 +35,7 @@ from simplyblock_core import (
 from simplyblock_core.controllers import (
     cluster_events,
     device_controller,
+    pool_controller,
     qos_controller,
     tasks_controller,
     tcp_ports_events,
@@ -3606,8 +3607,19 @@ def cluster_restart(cl_id) -> None:
         "them in parallel and reactivate the cluster", cl_id)
 
 
-def delete_cluster(cl_id) -> None:
+def delete_cluster(cl_id, force=False) -> None:
+    """Delete a cluster record, which an empty cluster only allows.
+
+    With force, the cluster is brought down completely first: every storage
+    node is shut down and deleted without migrating anything off it, and every
+    pool is deleted with the volumes and snapshots in it. Nothing survives a
+    forced delete; it is what deleting a cluster that will not come back
+    means, and the node removal it skips is an online removal that drains a
+    node onto the others, which the last node of a cluster has none of."""
     cluster = db_controller.get_cluster_by_id(cl_id)
+
+    if force:
+        _bring_down(cl_id)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if nodes:
@@ -3621,6 +3633,25 @@ def delete_cluster(cl_id) -> None:
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
+
+
+def _bring_down(cl_id) -> None:
+    """Delete every pool, then every node, of a cluster being deleted with
+    force. The pools go first, while the nodes are up and the cluster's KMS
+    configuration exists, so their keys are deleted with them. A node whose
+    SPDK cannot be confirmed stopped is reported, and the teardown goes on:
+    a node whose agent no longer answers is still a node to delete."""
+    for pool in db_controller.get_pools(cl_id):
+        pool_controller.force_delete_pool(pool.get_id())
+
+    unconfirmed = [
+        node.get_id() for node in db_controller.get_storage_nodes_by_cluster_id(cl_id)
+        if not storage_node_ops.force_delete_storage_node(node.get_id())
+    ]
+    if unconfirmed:
+        logger.error(f"Forced delete of cluster {cl_id}: SPDK could not be confirmed stopped on "
+                     f"node(s) {', '.join(unconfirmed)}; check them by hand")
+
 
 def set_(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)

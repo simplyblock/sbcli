@@ -215,9 +215,12 @@ def get_backup_config(cluster: Cluster) -> BackupConfigDTO:
 
 
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
-def delete(cluster: Cluster) -> Response:
+def delete(cluster: Cluster, force: bool = False) -> Response:
+    """Delete an empty cluster, or with force bring it down completely: every
+    storage node shut down and deleted without migration, every pool deleted
+    with its volumes, then the cluster."""
     try:
-        cluster_ops.delete_cluster(cluster.get_id())
+        cluster_ops.delete_cluster(cluster.get_id(), force=force)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return Response(status_code=204)

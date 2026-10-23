@@ -2936,13 +2936,20 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
 
     if lvol.crypto_bdev:
         with create_kms_connection(cl) as kms:
-            try:
-                kms.delete_data_encryption_keys(lvol_dek_path(cl.get_id(), lvol.get_id()))
-                logger.info("Deleted lvol key")
-            except KMSException:
-                logger.exception("Failed to delete lvol key")
+            delete_lvol_key(kms, cl.get_id(), lvol.get_id())
 
     logger.info("Done")
+
+def delete_lvol_key(kms, cluster_id, lvol_id) -> None:
+    """Delete an encrypted volume's data-encryption key, which its snapshots
+    are encrypted under too. A failure is logged: the volume is going
+    either way."""
+    try:
+        kms.delete_data_encryption_keys(lvol_dek_path(cluster_id, lvol_id))
+        logger.info(f"Deleted the key of lvol {lvol_id}")
+    except KMSException:
+        logger.exception(f"Failed to delete the key of lvol {lvol_id}")
+
 
 def connect_lvol_to_pool(lvol_id, node_id):
     db_controller = DBController()
