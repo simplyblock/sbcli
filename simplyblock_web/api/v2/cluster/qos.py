@@ -6,6 +6,7 @@ User classes are configured here declaratively, and so is the share the
 replication class gets.
 """
 import builtins
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -21,17 +22,17 @@ _MAX_REPLICATION_WEIGHT = 100 - constants.qos_class_meta_and_migration_weight_pe
 
 
 class QOSClassParams(BaseModel):
-    name: str = Field(min_length=1, max_length=64, pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$')
-    weight: int = Field(gt=0, le=1000)
+    name: Annotated[str, Field(min_length=1, max_length=64, pattern=r'^[A-Za-z][A-Za-z0-9_.-]*$')]
+    weight: Annotated[int, Field(gt=0, le=1000)]
 
 
 class QOSConfigParams(BaseModel):
     #: Relative weight of the Default class; user classes are relative to it.
-    default_weight: int = Field(gt=0, le=1000)
-    classes: builtins.list[QOSClassParams] = Field(default_factory=builtins.list,
-                                                   max_length=constants.QOS_MAX_USER_CLASS_ID)
+    default_weight: Annotated[int, Field(gt=0, le=1000)]
+    classes: Annotated[builtins.list[QOSClassParams],
+                       Field(max_length=constants.QOS_MAX_USER_CLASS_ID)] = []
     #: Percent of IO scheduling given to replication traffic; None keeps it.
-    replication_weight: int | None = Field(None, ge=0, le=_MAX_REPLICATION_WEIGHT)
+    replication_weight: Annotated[int, Field(ge=0, le=_MAX_REPLICATION_WEIGHT)] | None = None
 
 
 class QOSClassDTO(BaseModel):
@@ -63,7 +64,9 @@ def set(cluster: Cluster, parameters: QOSConfigParams) -> Response:
     """Make the cluster's service classes exactly the ones given.
 
     Classes not listed are removed (refused with 409 while a volume uses one),
-    and existing ones keep their id. Works on an active cluster: the weights
+    and existing ones keep their id. A request that passes the schema but not
+    the controller's checks (for example duplicate names) is answered with 400
+    by the general PreconditionError handler. Works on an active cluster: the weights
     reach the online nodes before this returns, and nodes that are not online
     get them when they next start.
     """
@@ -72,8 +75,6 @@ def set(cluster: Cluster, parameters: QOSConfigParams) -> Response:
             cluster.get_id(), parameters.default_weight,
             [c.model_dump() for c in parameters.classes],
             parameters.replication_weight)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     if failed:

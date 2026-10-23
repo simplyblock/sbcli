@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
 from simplyblock_core.controllers import qos_controller
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.services import snapshot_replication
 
 
@@ -209,7 +210,9 @@ class TestSetConfig(unittest.TestCase):
                      (10, [{"name": "a", "weight": 1}, {"name": "a", "weight": 2}]),
                      (10, [{"name": f"c{i}", "weight": 1} for i in range(6)]),
                      (10, [], 80)]:
-            with patch.object(qos_controller, "db", db), self.assertRaises(ValueError):
+            # Anything the caller could have checked is a PreconditionError,
+            # which the API answers with 400 (review on #1529).
+            with patch.object(qos_controller, "db", db), self.assertRaises(PreconditionError):
                 qos_controller.set_config("c", *args)
 
 

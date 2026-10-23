@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from simplyblock_core.exceptions import PreconditionError
 from tests.unit.web.api.v2._factories import CLUSTER_ID, POOL_ID, VOLUME_ID
 
 BASE = f'/api/v2/clusters/{CLUSTER_ID}/qos'
@@ -75,6 +76,20 @@ class TestSetQOS:
 
         assert response.status_code == 422
         qos.set_config.assert_not_called()
+
+    def test_a_precondition_error_is_not_mapped_here(self, client, db, cluster, qos):
+        """What the caller could have checked past the static validation (422)
+        is a PreconditionError, which app.py answers with 400 for the whole
+        API. The endpoint lets it through instead of turning it into a 422.
+
+        (This test app mounts only the routers, so an unhandled exception
+        surfaces here instead of reaching that handler.)
+        """
+        qos.set_config.side_effect = PreconditionError('class names must be unique')
+
+        with pytest.raises(PreconditionError):
+            client.put(f'{BASE}/', json={'default_weight': 1, 'classes': [
+                {'name': 'a', 'weight': 1}, {'name': 'a', 'weight': 2}]})
 
     def test_class_in_use_is_a_conflict(self, client, db, cluster, qos):
         qos.set_config.side_effect = RuntimeError('classes still used by volumes: gold')

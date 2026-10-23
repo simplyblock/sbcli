@@ -3,6 +3,7 @@ import uuid
 
 from simplyblock_core import constants
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.qos import QOSClass
 
@@ -255,24 +256,25 @@ def set_config(cluster_id, default_weight, classes, replication_weight=None) -> 
     this works on an active cluster: the weights are pushed to the online nodes
     right away.
 
-    Raises ValueError for an invalid request and RuntimeError when a class to
-    delete is still used by a volume.
+    Raises PreconditionError for a request the caller could have checked (the
+    API answers it with 400) and RuntimeError when a class to delete is still
+    used by a volume.
     """
     if default_weight is None or default_weight <= 0:
-        raise ValueError("default_weight must be a positive integer")
+        raise PreconditionError("default_weight must be a positive integer")
     names = [c["name"] for c in classes]
     if len(names) != len(set(names)):
-        raise ValueError("class names must be unique")
+        raise PreconditionError("class names must be unique")
     if len(names) > constants.QOS_MAX_USER_CLASS_ID:
-        raise ValueError(f"at most {constants.QOS_MAX_USER_CLASS_ID} classes besides Default")
+        raise PreconditionError(f"at most {constants.QOS_MAX_USER_CLASS_ID} classes besides Default")
     for c in classes:
         if not c["name"] or c["name"] == "Default" or c["name"].isdigit():
-            raise ValueError(f"invalid class name: {c['name']!r}")
+            raise PreconditionError(f"invalid class name: {c['name']!r}")
         if c["weight"] <= 0:
-            raise ValueError(f"weight of {c['name']} must be a positive integer")
+            raise PreconditionError(f"weight of {c['name']} must be a positive integer")
     max_repl = 100 - constants.qos_class_meta_and_migration_weight_percent - 1
     if replication_weight is not None and not 0 <= replication_weight <= max_repl:
-        raise ValueError(f"replication_weight must be between 0 and {max_repl}")
+        raise PreconditionError(f"replication_weight must be between 0 and {max_repl}")
 
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == Cluster.STATUS_IN_ACTIVATION:

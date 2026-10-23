@@ -482,8 +482,8 @@ def report(args):
     (RESULTS / "summary.json").write_text(json.dumps(rows, indent=2, default=str))
     lines = [
         "| run | share | client IOPS | client MB/s | to steady (s) | ramp iter mean (s) |"
-        " steady iter mean / p95 (s) | steady period p50 (s) | IOPS in steady | MB/s in steady |"
-        " landing class ok |",
+        + " steady iter mean / p95 (s) | steady period p50 (s) | IOPS in steady | MB/s in steady |"
+        + " landing class ok |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
