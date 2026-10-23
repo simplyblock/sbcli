@@ -248,16 +248,39 @@ class TestStartStopTrigger:
         assert args == (VOLUME_ID,)
         assert kwargs == {
             'replication_cluster_id': TARGET_CLUSTER_ID,
+            'replication_pool_id': None,
             'mode': 'migration',
             'interval_min': 15,
         }
+
+    def test_start_passes_the_destination_pool(self, client, db, volume, lvol_controller):
+        response = client.post(REPLICATION_URL + 'start', json={
+            'replication_cluster_id': TARGET_CLUSTER_ID,
+            'replication_pool_id': POOL_ID,
+            'mode': 'migration',
+        })
+
+        assert response.status_code == 204
+        assert lvol_controller.replication_start.call_args.kwargs['replication_pool_id'] == POOL_ID
+
+    def test_a_refused_destination_is_400_with_the_reason(self, client, db, volume, lvol_controller):
+        lvol_controller.replication_start_error.return_value = 'cluster X is the volume\'s own cluster'
+
+        response = client.post(REPLICATION_URL + 'start', json={
+            'replication_cluster_id': TARGET_CLUSTER_ID, 'mode': 'migration',
+        })
+
+        assert response.status_code == 400
+        assert 'own cluster' in response.json()['detail']
+        lvol_controller.replication_start.assert_not_called()
 
     def test_start_without_body_uses_cluster_default(self, client, db, volume, lvol_controller):
         response = client.post(REPLICATION_URL + 'start')
 
         assert response.status_code == 204
         assert lvol_controller.replication_start.call_args.kwargs == {
-            'replication_cluster_id': None, 'mode': None, 'interval_min': None,
+            'replication_cluster_id': None, 'replication_pool_id': None,
+            'mode': None, 'interval_min': None,
         }
 
     def test_unknown_mode_rejected(self, client, db, volume, lvol_controller):

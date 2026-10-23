@@ -46,6 +46,8 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
 
     Most specific wins:
 
+      0. the pool the caller of replication start named, while this is its
+         cluster;
       1. the pool named by the replication TARGET the volume's policy points at,
          when that target IS this destination — it was chosen for this pair;
       2. the SOURCE cluster's snapshot_replication_target_pool, but only when
@@ -60,6 +62,9 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
     pool, and 13 of them ended up stuck in_deletion.
     """
     if lvol is not None:
+        pool_uuid = lvol_controller.requested_destination_pool(db, lvol, remote_node.cluster_id)
+        if pool_uuid:
+            return pool_uuid
         pool_uuid = _policy_target_pool(lvol, remote_node.cluster_id)
         if pool_uuid:
             return pool_uuid

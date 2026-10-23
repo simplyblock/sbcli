@@ -80,12 +80,13 @@ def get_status(cluster: Cluster, pool: StoragePool, volume: Volume) -> Replicati
 
 class ReplicationStartParams(BaseModel):
     replication_cluster_id: UUID | None = None  # destination; None = cluster default
+    replication_pool_id: UUID | None = None  # pool on the destination; None = resolved there
     mode: ReplicationMode | None = None
     interval_min: util.Unsigned | None = None
 
 
 @api.post('/start', name='clusters:storage-pools:volumes:replication:start',
-          status_code=204, responses={204: {"content": None}})
+          status_code=204, responses={204: {"content": None}, 400: {}})
 def start(cluster: Cluster, pool: StoragePool, volume: Volume,
           body: ReplicationStartParams | None = None) -> Response:
     """Start replicating a volume.
@@ -97,12 +98,17 @@ def start(cluster: Cluster, pool: StoragePool, volume: Volume,
     at all. mode/interval_min were likewise unreachable.
     """
     parameters = body or ReplicationStartParams()
+    cluster_id = str(parameters.replication_cluster_id) if parameters.replication_cluster_id else None
+    pool_id = str(parameters.replication_pool_id) if parameters.replication_pool_id else None
+    refused = lvol_controller.replication_start_error(
+        volume.get_id(), replication_cluster_id=cluster_id, replication_pool_id=pool_id,
+        mode=parameters.mode)
+    if refused:
+        raise HTTPException(400, refused)
     if not lvol_controller.replication_start(
             volume.get_id(),
-            replication_cluster_id=(
-                str(parameters.replication_cluster_id)
-                if parameters.replication_cluster_id else None
-            ),
+            replication_cluster_id=cluster_id,
+            replication_pool_id=pool_id,
             mode=parameters.mode,
             interval_min=parameters.interval_min):
         raise HTTPException(500, 'Failed to start volume snapshot replication')
