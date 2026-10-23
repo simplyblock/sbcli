@@ -574,6 +574,11 @@ REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
 # just falls back to being noticed on a later pass.
 REPL_XFER_INLINE_WAIT_SEC = 5.0
+# A delta's landing volume is merged with its base on the target as a job
+# (bdev_lvol_merge_base): how long the finish waits for it inline, and how
+# often it polls, before leaving it to the next pass.
+REPL_MERGE_INLINE_WAIT_SEC = 10.0
+REPL_MERGE_POLL_SEC = 1.0
 # A volume in its final cutover already owns its lvstore and every other
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.

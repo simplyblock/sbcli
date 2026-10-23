@@ -159,40 +159,50 @@ class TestPartialDecision(unittest.TestCase):
 
 class TestLandingMerge(unittest.TestCase):
     """After a delta, the landing volume's pre-allocated clusters hold only the
-    delta's blocks; the rest comes from the base before the convert."""
+    delta's blocks; the rest comes from the base before the convert, as a job
+    on the target that the finish starts and then waits for across passes."""
 
-    def _merge(self, params, side_effect=None, ret=None):
+    def _merge(self, params, start=None, stats=(), side_effect=None):
         task = SimpleNamespace(function_params=params, write_to_db=MagicMock(), uuid="t")
         lv = SimpleNamespace(get_id=lambda: "landing", top_bdev="LVS/LAND")
         node = MagicMock()
         node.get_id.return_value = "n1"
-        rpc = node.rpc_client.return_value.bdev_lvol_merge_base
-        rpc.side_effect = side_effect
-        rpc.return_value = ret
-        return snapshot_replication._merge_landing(task, lv, node), rpc, task
+        rpc = node.rpc_client.return_value
+        rpc.bdev_lvol_merge_base.return_value = start
+        rpc.bdev_lvol_merge_base.side_effect = side_effect
+        rpc.bdev_lvol_merge_base_stat.side_effect = list(stats)
+        with patch.object(snapshot_replication.constants, "REPL_MERGE_INLINE_WAIT_SEC", 0.05),                 patch.object(snapshot_replication.constants, "REPL_MERGE_POLL_SEC", 0.01):
+            return snapshot_replication._merge_landing(task, lv, node), rpc, task
 
     def test_a_full_transfer_needs_no_merge(self):
         res, rpc, _ = self._merge({})
         self.assertEqual(res, "ok")
-        rpc.assert_not_called()
+        rpc.bdev_lvol_merge_base.assert_not_called()
 
     def test_a_delta_is_merged_once(self):
-        res, rpc, task = self._merge({"partial_base": 7}, ret={"clusters": 3})
+        res, rpc, task = self._merge({"partial_base": 7}, start={"state": "running"},
+                                     stats=[{"state": "done", "rc": 0, "clusters": 3}])
         self.assertEqual(res, "ok")
-        rpc.assert_called_once_with("LVS/LAND")
+        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND")
         self.assertEqual(task.function_params["merged_landing"], "landing")
         res, rpc, _ = self._merge(dict(task.function_params))
         self.assertEqual(res, "ok")
-        rpc.assert_not_called()
+        rpc.bdev_lvol_merge_base.assert_not_called()
+
+    def test_a_long_merge_is_left_to_the_next_pass(self):
+        res, _, task = self._merge({"partial_base": 7}, start={"state": "running"},
+                                   stats=[{"state": "running"}] * 50)
+        self.assertEqual(res, "pending")
+        self.assertNotIn("merged_landing", task.function_params)
 
     def test_a_lost_record_repeats_the_transfer(self):
-        from simplyblock_core.rpc_client import RPCRemoteError
-        res, _, _ = self._merge({"partial_base": 7},
-                                side_effect=RPCRemoteError("Stale file handle", -116))
+        res, _, _ = self._merge({"partial_base": 7}, start={"state": "failed", "rc": -116})
         self.assertEqual(res, "restart")
 
     def test_other_failures_retry_the_finish(self):
         from simplyblock_core.rpc_client import RPCRemoteError
+        res, _, _ = self._merge({"partial_base": 7}, start={"state": "failed", "rc": -5})
+        self.assertEqual(res, "retry")
         res, _, _ = self._merge({"partial_base": 7},
                                 side_effect=RPCRemoteError("No such device", -19))
         self.assertEqual(res, "retry")

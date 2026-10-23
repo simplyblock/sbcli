@@ -1,4 +1,3 @@
-import errno
 import logging
 import time
 import uuid
@@ -23,7 +22,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException, RPCRemoteError
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
@@ -297,6 +296,11 @@ def _finish_completed_transfer(task, snapshot, offset):
             # forever (SFAM-2834).
             logger.error("Replication finish for snapshot %s failed: %s", snapshot.get_id(), e)
             new_snapshot_uuid = None
+    if new_snapshot_uuid == FINISH_PENDING:
+        # still merging on the target: no failure, the next pass finishes it
+        task.function_result = "landing volume merging with its base"
+        task.write_to_db()
+        return True
     if new_snapshot_uuid:
         task.function_result = new_snapshot_uuid
         task.status = JobSchedule.STATUS_DONE
@@ -1749,42 +1753,64 @@ def _prechained_nodes_for(task, remote_lv):
     return set(task.function_params.get("prechained_node_ids") or [])
 
 
+#: process_snap_replicate_finish could not finish yet: the landing volume is
+#: still merging with its base. Not a failure -- the next pass finishes it.
+FINISH_PENDING = "finish-pending"
+#: -ESTALE as SPDK reports it: a Linux errno, whatever this host's errno says
+_SPDK_ESTALE = -116
+
+
 def _merge_landing(task, remote_lv, remote_snode):
     """Fill the landing volume from its base after a delta transfer.
 
     The destination pre-allocates every cluster the delta touches and receives
     only the delta's blocks; the rest of each such cluster must come from the
-    base the landing volume is chained onto, once, before the convert. Returns
-    "ok", "retry" (try the finish again later) or "restart" (the target lost
-    the record of what arrived: transfer again into a fresh landing volume).
-    Only transfers that named a base (partial_base) need it; for any other the
+    base the landing volume is chained onto, once, before the convert. That
+    merge is a job on the target (it takes minutes for a large delta, longer
+    than an RPC may): it is started -- idempotently, a running job is not
+    started twice -- and waited for briefly inline, then on later passes.
+
+    Returns "ok", "pending" (still merging), "retry" (try the finish again
+    later; a failed job is started again) or "restart" (the target lost the
+    record of what arrived: transfer again into a fresh landing volume). Only
+    transfers that named a base (partial_base) need it; for any other the
     landing volume holds every block already.
     """
     if not task.function_params.get("partial_base"):
         return "ok"
     if task.function_params.get("merged_landing") == remote_lv.get_id():
         return "ok"
+    rpc = remote_snode.rpc_client()
     try:
-        with xfer_timing.phase("landing_merge", lvol=remote_lv.get_id()):
-            ret = remote_snode.rpc_client().bdev_lvol_merge_base(remote_lv.top_bdev)
-    except RPCRemoteError as e:
-        if e.code == -errno.ESTALE or "stale" in str(e).lower():
-            logger.error("Replication task %s: %s on %s no longer knows which blocks the "
-                         "transfer wrote (%s); the transfer is repeated", task.uuid,
-                         remote_lv.top_bdev, remote_snode.get_id(), e)
-            return "restart"
-        logger.error("Replication task %s: merge of %s with its base failed on %s: %s",
-                     task.uuid, remote_lv.top_bdev, remote_snode.get_id(), e)
-        return "retry"
+        st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev)
+        deadline = time.time() + constants.REPL_MERGE_INLINE_WAIT_SEC
+        while (st or {}).get("state") == "running" and time.time() < deadline:
+            time.sleep(constants.REPL_MERGE_POLL_SEC)
+            st = rpc.bdev_lvol_merge_base_stat(remote_lv.top_bdev)
     except Exception as e:                                # noqa: BLE001
-        logger.error("Replication task %s: merge of %s failed on %s: %s",
+        logger.error("Replication task %s: merge of %s with its base on %s: %s",
                      task.uuid, remote_lv.top_bdev, remote_snode.get_id(), e)
         return "retry"
-    logger.info("Landing volume %s merged with its base on %s: %s", remote_lv.top_bdev,
-                remote_snode.get_id(), ret)
-    task.function_params["merged_landing"] = remote_lv.get_id()
-    task.write_to_db()
-    return "ok"
+    st = st or {}
+    state = st.get("state")
+    if state == "running":
+        return "pending"
+    if state == "done":
+        logger.info("Landing volume %s merged with its base on %s: %s", remote_lv.top_bdev,
+                    remote_snode.get_id(), st)
+        xfer_timing.stamp("landing_merge", lvol=remote_lv.get_id(), ms=st.get("ms", 0),
+                          bytes=st.get("bytes", 0), clusters=st.get("clusters", 0))
+        task.function_params["merged_landing"] = remote_lv.get_id()
+        task.write_to_db()
+        return "ok"
+    if st.get("rc") == _SPDK_ESTALE:
+        logger.error("Replication task %s: %s on %s no longer knows which blocks the "
+                     "transfer wrote; the transfer is repeated", task.uuid,
+                     remote_lv.top_bdev, remote_snode.get_id())
+        return "restart"
+    logger.error("Replication task %s: merge of %s with its base failed on %s: %s",
+                 task.uuid, remote_lv.top_bdev, remote_snode.get_id(), st)
+    return "retry"
 
 
 def process_snap_replicate_finish(task, snapshot):
@@ -1912,6 +1938,8 @@ def process_snap_replicate_finish(task, snapshot):
             return False
         if merge == "retry":
             return False
+        if merge == "pending":
+            return FINISH_PENDING
 
     # convert to snapshot on primary
     if remote_snode.get_id() not in converted:
