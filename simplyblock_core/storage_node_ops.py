@@ -1884,7 +1884,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     db_controller = DBController()
     new_devices = []
     devices_to_partition = []
-    jobs = []
+    jobs: list = []
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
             continue
@@ -2014,7 +2014,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
     rpc_client = snode.rpc_client(timeout=5 * 60)
 
-    jobs = []
+    jobs: list = []
     for index, nvme in enumerate(snode.nvme_devices):
         if nvme.status == NVMeDevice.STATUS_JM:
             continue
@@ -16172,7 +16172,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     return True, None
 
 
-def _create_or_none(create, bdev_name, *args, **kwargs):
+def _create_or_none(create, label, /, *args, **kwargs):
     """Run a bdev create RPC; a raise is logged and reported as None, so the
     caller's rollback runs. RPCs raise on failure rather than returning False,
     and an escaping raise skipped the rollback, leaking the distribs and
@@ -16180,7 +16180,7 @@ def _create_or_none(create, bdev_name, *args, **kwargs):
     try:
         return create(*args, **kwargs)
     except RPCException as e:
-        logger.error(f"Failed to create BDev {bdev_name}: {e}")
+        logger.error(f"Failed to create BDev {label}: {e}")
         return None
 
 
