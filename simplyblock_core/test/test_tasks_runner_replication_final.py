@@ -108,43 +108,69 @@ def test_happy_path_returns_and_updates_state(monkeypatch):
     assert task.function_params["start_time"] <= task.function_params["end_time"]
 
 
-def test_failure_enters_hub_cooldown_without_burning_a_retry(monkeypatch):
-    """With the clone already prepared (tgt_lvol_composite set), a run_cutover
-    failure is treated as likely connectivity trouble: the task suspends
-    behind a cooldown and task.retry stays intact for the first
-    REPL_CUTOVER_MAX_HUB_ATTEMPTS attempts — burning retries at the poll
-    interval would exhaust the ceiling long before a restarting node
-    recovers."""
+def test_a_failed_final_step_burns_a_retry_at_once(monkeypatch):
+    """The target online, its hub attached, and the final step failing is
+    not a connectivity problem: it fails the same way on every attempt
+    (2026-10-23, an SPDK final step failing at offset 0, retried about 80
+    times). It burns a retry at once, with no cooldown loop in front."""
     rep = LVolReplication()
     rep.cutover_proceed = True
     nodes = {"S1": _node("S1"), "T1": _node("T1")}
-    _install(monkeypatch, nodes, rep, (False, "boom"))
+    _install(monkeypatch, nodes, rep, (False, "transfer_state='Failed'"))
 
     task = _task()
-    with pytest.raises(TaskDefer, match="boom"):
+    with pytest.raises(TaskRetry, match="Failed"):
         runner.task_runner(task.frozen_view(), [])
 
-    assert task.retry == 0, "a transient hub attempt must not burn task.retry"
-    assert task.function_params["cutover_hub_attempts"] == 1
+    assert "cutover_transient_since" not in task.function_params
+    assert "cutover_retry_after" not in task.function_params
+
+
+def _install_unreachable(monkeypatch, nodes, rep):
+    db = _FakeDB(nodes, rep)
+    monkeypatch.setattr(runner, "db", db)
+
+    def _run_cutover(*_args, **_kwargs):
+        raise runner.replication_final_step.CutoverUnreachable("hub attach failed")
+    monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)
+
+
+def test_an_unreachable_target_waits_without_burning_a_retry(monkeypatch):
+    """A hub that cannot be attached is transient -- a target node restarting
+    before the control plane marks it down -- and is waited out behind a
+    cooldown, without burning a retry, inside one window."""
+    rep = LVolReplication()
+    rep.cutover_proceed = True
+    nodes = {"S1": _node("S1"), "T1": _node("T1")}
+    _install_unreachable(monkeypatch, nodes, rep)
+
+    task = _task()
+    with pytest.raises(TaskDefer, match="hub attach failed"):
+        runner.task_runner(task.frozen_view(), [])
+
+    assert task.retry == 0, "a transient failure inside the window must not burn task.retry"
+    assert task.function_params["cutover_transient_since"] > 0
     assert task.function_params["cutover_retry_after"] > 0
 
 
-def test_failure_burns_a_retry_once_hub_attempts_are_exhausted(monkeypatch):
-    """Past the hub-attempt cap with the target node online, the failure is
-    real: the cooldown state resets and one retry is burned, so the ceiling
-    is real: the cooldown state resets and the driver burns a retry, so the
-    ceiling can eventually end a cutover that keeps failing."""
+def test_an_unreachable_target_past_the_window_burns_a_retry_and_keeps_the_window(monkeypatch):
+    """Past the window the failure burns a retry, and the window is kept: it
+    is one budget for the whole task, so a burned retry does not buy another
+    full window -- the two limits do not multiply."""
+    import time
+
     from simplyblock_core import constants
     rep = LVolReplication()
     rep.cutover_proceed = True
     nodes = {"S1": _node("S1"), "T1": _node("T1")}
-    _install(monkeypatch, nodes, rep, (False, "boom"))
+    _install_unreachable(monkeypatch, nodes, rep)
 
-    task = _task(cutover_hub_attempts=constants.REPL_CUTOVER_MAX_HUB_ATTEMPTS)
-    with pytest.raises(TaskRetry, match="boom"):
+    since = int(time.time()) - constants.REPL_CUTOVER_TRANSIENT_WINDOW_SEC - 1
+    task = _task(cutover_transient_since=since)
+    with pytest.raises(TaskRetry, match="hub attach failed"):
         runner.task_runner(task.frozen_view(), [])
 
-    assert "cutover_hub_attempts" not in task.function_params
+    assert task.function_params["cutover_transient_since"] == since
     assert "cutover_retry_after" not in task.function_params
 
 

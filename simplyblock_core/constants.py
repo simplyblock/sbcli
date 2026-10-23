@@ -1021,12 +1021,13 @@ BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---
-# Cooldown between hub-attach retry attempts when the target node is down or
-# recovering (covers control-plane lag before the DB reflects the down state).
+# Cooldown between cutover attempts while the target is unreachable: down or
+# recovering, before the DB reflects the down state.
 REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
-# Max consecutive hub-attach failures with the node still appearing online
-# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
-REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# How long, from the first unreachable attempt, an unreachable target is
+# waited out without burning a task.retry. One window per task: a burned retry
+# does not open another, so the window and max_retry do not multiply.
+REPL_CUTOVER_TRANSIENT_WINDOW_SEC = 600
 # Delete the superseded original volume BEFORE building the fail-back clone
 # (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
 # original's blob id while its parent snapshot's clone registry is already
