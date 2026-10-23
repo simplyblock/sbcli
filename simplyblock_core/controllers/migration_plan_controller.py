@@ -144,6 +144,36 @@ def _predict_destination(db, lvol, cluster, target_cluster_id, load, batch_nqn_n
     return node.get_id() if node else ""
 
 
+def _source_capacity(db, cluster_id):
+    """(utilization %, warning threshold %, total bytes, used bytes) of
+    *cluster_id* from its latest capacity record, or None without one."""
+    try:
+        cluster = db.get_cluster_by_id(cluster_id)
+        records = db.get_cluster_capacity(cluster, 1)
+    except Exception:                                     # noqa: BLE001
+        return None
+    if not records:
+        return None
+    rec = records[0]
+    return (getattr(rec, "size_util", 0), getattr(cluster, "cap_warn", 0) or 0,
+            getattr(rec, "size_total", 0), getattr(rec, "size_used", 0))
+
+
+def _write_rate(db, lvol_id, samples=6):
+    """Bytes/sec the clients write to *lvol_id*: the mean of its latest IO
+    stats records, or 0 without any. This is what re-dirties a volume while it
+    is being copied, and it is readable from the start -- unlike a rate derived
+    from cadence snapshots, of which a volume holds only one while its initial
+    copy is outstanding."""
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+        stats = db.get_lvol_stats(lvol, limit=samples)
+    except Exception:                                     # noqa: BLE001
+        return 0
+    rates = [getattr(s, "write_bytes_ps", 0) or 0 for s in stats or []]
+    return sum(rates) / len(rates) if rates else 0
+
+
 def _validate_clusters(db, cluster_id, target_cluster_id):
     if not target_cluster_id:
         raise MigrationPlanError("a target cluster is required")
@@ -196,6 +226,25 @@ def build_plan(cluster_id, target_cluster_id, pool_id=None, lvol_ids=None,
     plan.created_at = int(time.time())
 
     cluster = db.get_cluster_by_id(cluster_id)
+    # Every volume's initial-copy snapshot pins the blocks overwritten while it
+    # is outstanding -- up to the volume's whole used size. A source already
+    # past its warning threshold has no room for that (the EKS bed of
+    # 2026-10-22 filled, went read_only, and its clients got EIO).
+    capacity = _source_capacity(db, cluster_id)
+    if capacity:
+        util, warn, total, used = capacity
+        if warn and util >= warn:
+            raise MigrationPlanError(
+                f"source cluster {cluster_id} is at {util}% capacity, at or above "
+                f"its warning threshold of {warn}%: snapshots taken for the "
+                f"migration would fill it")
+        pin = sum(_used_bytes(db, lv) for lv in selected)
+        if total and total - used < pin:
+            plan.warnings.append(
+                f"source cluster has {utils.humanbytes(total - used)} free, less than "
+                f"the {utils.humanbytes(pin)} the volumes' initial-copy snapshots can "
+                f"pin under sustained overwrites; keep client writes well below the "
+                f"replication throughput")
     load = lvol_controller._replication_node_load(db, target_cluster_id)
     batch_nqn_node: dict = {}
     for lv in selected:
@@ -328,6 +377,7 @@ def _refresh(db, plan, persist=True):
     """Re-derive volume states and the forecast; persist a status change
     (never for a dry run, whose plan does not exist)."""
     samples_by_lvs: dict = {}
+    dirty_by_lvs: dict = {}
     cutover_durations = []
     for vol in plan.volumes:
         if vol["state"] in MigrationPlan.VOL_TERMINAL:
@@ -346,6 +396,9 @@ def _refresh(db, plan, persist=True):
             remaining, samples = _transfer_progress(db, vol["lvol_id"], vol.get("used_bytes", 0))
             vol["bytes_remaining"] = remaining
             samples_by_lvs.setdefault(vol.get("lvs_name", ""), []).extend(samples)
+        if vol["state"] not in MigrationPlan.VOL_TERMINAL:
+            lvs = vol.get("lvs_name", "")
+            dirty_by_lvs[lvs] = dirty_by_lvs.get(lvs, 0) + _write_rate(db, vol["lvol_id"])
         else:
             vol["bytes_remaining"] = 0
 
@@ -353,7 +406,8 @@ def _refresh(db, plan, persist=True):
                   for lvs, s in samples_by_lvs.items()}
     per_volume, overall = migration_forecast.forecast(
         plan.volumes, throughput,
-        migration_forecast.typical_cutover_seconds(cutover_durations), time.time())
+        migration_forecast.typical_cutover_seconds(cutover_durations), time.time(),
+        dirty_by_lvs=dirty_by_lvs)
     for vol in plan.volumes:
         vol["eta_seconds"] = per_volume.get(vol["lvol_id"], 0)
 

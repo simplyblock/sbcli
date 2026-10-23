@@ -63,3 +63,34 @@ def test_default_rate_when_unmeasured_is_flagged():
     per, overall = mf.forecast(vols, {"L1": None}, 0, now=0)
     assert per == {"a": 4}
     assert overall["throughput_measured"] is False
+
+
+def test_writes_faster_than_replication_never_converge():
+    """The EKS bed of 2026-10-22: ~147 MiB/s written per volume against
+    ~80-115 MiB/s replicated per lvstore. The lag can only grow, and the
+    cutover gate (lag below REPL_CUTOVER_ENDGAME_LAG_SEC) is never reached --
+    while the forecast promised about eight minutes."""
+    vols = [_vol("a", "L1", "replicating", 80 * 1024 * MB),
+            _vol("b", "L2", "replicating", 10 * MB)]
+    per, overall = mf.forecast(vols, {"L1": 100 * MB, "L2": 100 * MB}, 30, now=0,
+                               dirty_by_lvs={"L1": 147 * MB, "L2": 5 * MB})
+    assert overall["converging"] is False
+    assert overall["eta_seconds"] == 0 and overall["completes_at"] == 0
+    assert overall["dirty_bytes_per_sec"] == 152 * MB
+    assert overall["not_converging_lvs"] == ["L1"]
+    assert per["a"] == 0
+    assert per["b"] > 0
+
+
+def test_writes_slower_than_replication_converge_and_slow_the_copy():
+    vols = [_vol("a", "L1", "replicating", 100 * MB)]
+    per, overall = mf.forecast(vols, {"L1": 20 * MB}, 0, now=0,
+                               dirty_by_lvs={"L1": 10 * MB})
+    assert overall["converging"] is True
+    # Effective progress is replication minus what the client re-dirties.
+    assert per["a"] == 10
+
+
+def test_no_write_rate_means_no_verdict_against_converging():
+    _, overall = mf.forecast([_vol("a", "L1", "replicating", MB)], {"L1": MB}, 0, now=0)
+    assert overall["converging"] is True and overall["dirty_bytes_per_sec"] == 0

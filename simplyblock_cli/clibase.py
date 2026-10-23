@@ -763,7 +763,14 @@ class CLIWrapperBase:
         header = (f"Plan {'(dry run)' if dry_run else plan.uuid}: {plan.status}, "
                   f"{utils.humanbytes(forecast['bytes_remaining'])} remaining, "
                   f"ETA {utils.strfdelta_seconds(forecast['eta_seconds'])} at {rate}")
-        return header + "\n" + utils.print_table(volumes)
+        lines = [header]
+        if not forecast.get("converging", True):
+            lines.append(
+                f"NOT CONVERGING: clients write {utils.humanbytes(forecast['dirty_bytes_per_sec'])}/s, "
+                f"faster than lvstore(s) {', '.join(forecast['not_converging_lvs'])} replicate; "
+                f"no cutover can start until writes drop below the replication throughput")
+        lines.extend(f"WARNING: {w}" for w in plan.warnings)
+        return "\n".join(lines) + "\n" + utils.print_table(volumes)
 
     def cluster__migrate(self, sub_command, args):
         lvol_ids = [i.strip() for i in args.lvol_ids.split(",") if i.strip()] if args.lvol_ids else None

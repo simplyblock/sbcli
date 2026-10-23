@@ -48,6 +48,9 @@ class MigrationPlan(BaseModel):
     # One dict per selected volume: lvol_id, name, size, used_bytes,
     # lvs_name, target_node_id, state, task_id, error.
     volumes: list[dict] = default_factory(list)
+    # Conditions found at planning time that do not refuse the plan but put it
+    # at risk (e.g. too little free capacity for the worst-case snapshot pin).
+    warnings: list[str] = default_factory(list)
 
     def get_id(self):
         # Prefixed with the source cluster so a cluster's plans are one range read.

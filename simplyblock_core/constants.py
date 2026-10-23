@@ -527,6 +527,10 @@ REPL_CUTOVER_ENDGAME_LAG_SEC = 50
 # cutovers have been measured (simplyblock_core/migration_forecast.py).
 REPL_FORECAST_DEFAULT_BYTES_PER_SEC = 200 * 1024 * 1024
 REPL_FORECAST_DEFAULT_CUTOVER_SEC = 60
+# An lvstore whose volumes are written at this fraction of its replication
+# throughput or more is reported as not converging: the remaining margin is
+# eaten by snapshot and convert overhead, and the lag never closes.
+REPL_CONVERGENCE_MARGIN = 0.9
 # Cadence a migration plan gives a volume that has none: the initial copy and
 # the catch-up ride the cadence snapshots, so without one nothing ever ships.
 REPL_MIGRATION_DEFAULT_INTERVAL_MIN = 1

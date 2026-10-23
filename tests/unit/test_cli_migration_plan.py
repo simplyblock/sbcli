@@ -54,3 +54,15 @@ def test_planning_error_is_reported(monkeypatch):
     w, ctl = _wrapper(monkeypatch)
     ctl.start_plan.side_effect = ValueError("no volume selected")
     assert w.cluster__migrate(None, _args()) == "Error: no volume selected"
+
+
+def test_a_non_converging_plan_and_its_warnings_are_shown(monkeypatch):
+    w, ctl = _wrapper(monkeypatch)
+    plan = _plan()
+    plan.warnings = ["source cluster has 10 GiB free"]
+    ctl.plan_status.return_value = (plan, {**FORECAST, "converging": False,
+                                           "dirty_bytes_per_sec": 150 * 1024 * 1024,
+                                           "not_converging_lvs": ["LVS_1"]})
+    out = w.cluster__migrate_status(None, _args(plan_id="P1"))
+    assert "NOT CONVERGING" in out and "LVS_1" in out
+    assert "WARNING: source cluster has 10 GiB free" in out

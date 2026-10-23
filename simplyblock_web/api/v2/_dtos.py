@@ -1274,6 +1274,13 @@ class MigrationForecastDTO(BaseModel):
     throughput_bytes_per_sec: util.Unsigned = 0
     #: False while the forecast still runs on the default throughput.
     throughput_measured: bool = False
+    #: False when some source lvstore's volumes are written at least about as
+    #: fast as it replicates: their lag never closes, no cutover can start,
+    #: and eta_seconds/completes_at are 0.
+    converging: bool = True
+    #: What the clients write to the volumes still being copied.
+    dirty_bytes_per_sec: util.Unsigned = 0
+    not_converging_lvs: list[str] = []
 
 
 class MigrationPlanDTO(BaseModel):
@@ -1288,6 +1295,8 @@ class MigrationPlanDTO(BaseModel):
     finished_at: util.Unsigned = 0
     volumes: list[MigrationPlanVolumeDTO]
     forecast: MigrationForecastDTO
+    #: Risks found at planning time that did not refuse the plan.
+    warnings: list[str] = []
 
     @staticmethod
     def from_model(plan, forecast, dry_run=False):
@@ -1307,4 +1316,5 @@ class MigrationPlanDTO(BaseModel):
                 bytes_remaining=v.get("bytes_remaining", 0),
                 eta_seconds=v.get("eta_seconds", 0)) for v in plan.volumes],
             forecast=MigrationForecastDTO(**forecast),
+            warnings=list(plan.warnings),
         )

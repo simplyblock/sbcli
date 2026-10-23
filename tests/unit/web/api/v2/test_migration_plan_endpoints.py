@@ -89,3 +89,15 @@ def test_name_and_an_omitted_target_reach_the_controller(client, db, cluster, co
     assert resp.status_code == 201 and resp.json()["name"] == "replicationops/ns/op/uid"
     args, kwargs = controller.start_plan.call_args
     assert args[1] == "" and kwargs["name"] == "replicationops/ns/op/uid"
+
+
+def test_convergence_and_warnings_are_served(client, db, cluster, controller):
+    plan = _plan()
+    plan.warnings = ["too little free capacity"]
+    controller.plan_status.return_value = (plan, {**FORECAST, "converging": False,
+                                                  "dirty_bytes_per_sec": 5,
+                                                  "not_converging_lvs": ["LVS_1"]})
+    body = client.get(f'{BASE}/{PLAN_ID}').json()
+    assert body["forecast"]["converging"] is False
+    assert body["forecast"]["not_converging_lvs"] == ["LVS_1"]
+    assert body["warnings"] == ["too little free capacity"]
