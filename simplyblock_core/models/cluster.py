@@ -258,6 +258,11 @@ class Cluster(BaseModel):
     #: falls back to the per-device record when it is still empty.
     jm_raid_layout: str = ""
     is_single_node: bool = False
+    # Whether the cluster's fresh activation made it non-HA: set when it was
+    # flagged single-node or activated with exactly one online node. Volume
+    # creation reads it to default a volume's ha_type the way the activation
+    # decided, without deciding again from how many nodes are online now.
+    activated_single_node: bool = False
     # Two-node arbitration (docs/design/two-node-arbitration.md). Off by default:
     # a dual-node cluster then keeps today's tolerance without the hold.
     two_node_arbitration: bool = False

@@ -598,15 +598,26 @@ def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
 
 def _volume_ha_type(ha_type, cluster):
     """The HA type a new volume is created with. "default" is the cluster's,
-    except in a single-node cluster, which activates as non-HA whatever
-    ha_type it recorded (cluster_ops.is_single_node_activation): its volumes
-    have no secondary to be served from, so they are "single". An explicit
-    choice is kept."""
+    except in a cluster that activated as single-node, which is non-HA whatever
+    ha_type it recorded: its volumes have no secondary to be served from, so
+    they are "single". The activation decides that and records it
+    (cluster_ops._record_activation_topology), so creation reads the same
+    decision rather than making its own. An explicit choice is kept."""
     if ha_type != "default":
         return ha_type
-    if getattr(cluster, "is_single_node", False):
+    if cluster.is_single_node or cluster.activated_single_node:
         return "single"
     return cluster.ha_type
+
+
+def _fabric_active(node, fabric):
+    """Whether node serves the fabric. An unknown fabric is an error rather
+    than a fabric no node serves."""
+    if fabric == "tcp":
+        return node.active_tcp
+    if fabric == "rdma":
+        return node.active_rdma
+    raise ValueError(f"unknown fabric {fabric!r}")
 
 
 def _fabric_error(db_controller, host_node, ha_type, fabric):
@@ -614,15 +625,14 @@ def _fabric_error(db_controller, host_node, ha_type, fabric):
     host_node, or None. The secondary is asked about only for an "ha" volume:
     a host of a single-node cluster has none, and looking up its blank id
     raised KeyError for every create there."""
-    attr_name = f"active_{fabric}"
-    if not getattr(host_node, attr_name):
+    if not _fabric_active(host_node, fabric):
         return f"Primary node fabric {fabric} is not active"
     if ha_type != "ha":
         return None
     if not host_node.secondary_node_id:
         return "HA volume requested but the host node has no secondary"
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-    if not getattr(s_node, attr_name):
+    if not _fabric_active(s_node, fabric):
         return f"Secondary node fabric {fabric} is not active"
     return None
 

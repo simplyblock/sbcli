@@ -1164,6 +1164,17 @@ def is_single_node_activation(cluster, online_nodes) -> bool:
     return bool(cluster.is_single_node or len(online_nodes) == 1)
 
 
+def _record_activation_topology(cluster, single_node, fresh) -> None:
+    """Record whether a fresh activation made the cluster non-HA, which is what
+    volume creation defaults a volume's ha_type from. A reactivation records
+    nothing: an HA cluster reactivated with one node online is degraded, not
+    single-node, and its volumes stay HA."""
+    if not fresh or cluster.activated_single_node == single_node:
+        return
+    cluster.activated_single_node = single_node
+    cluster.write_to_db()
+
+
 def activation_minimum_devices(cluster, single_node_cluster) -> int:
     """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
     headroom that a single-node cluster (no data redundancy to rebuild onto
@@ -1240,6 +1251,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     dev_count += 1
                     raw_device_size += int(dev.size or 0)
     single_node_cluster = is_single_node_activation(cluster, online_nodes)
+    _record_activation_topology(cluster, single_node_cluster, is_fresh_activation)
     if single_node_cluster and cluster.ha_type == "ha":
         logger.warning("Single-node cluster: activating as non-HA "
                        "(no secondary nodes, single journal) regardless of ha_type")

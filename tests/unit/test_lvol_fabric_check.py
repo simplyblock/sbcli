@@ -41,8 +41,9 @@ def test_an_ha_volume_without_a_secondary_is_refused_not_raised():
     assert error and "secondary" in error.lower()
 
 
-def _cluster(ha_type="ha", single=False):
-    return SimpleNamespace(ha_type=ha_type, is_single_node=single)
+def _cluster(ha_type="ha", single=False, activated_single=False):
+    return SimpleNamespace(ha_type=ha_type, is_single_node=single,
+                           activated_single_node=activated_single)
 
 
 def test_a_single_node_clusters_volumes_default_to_single():
@@ -58,3 +59,22 @@ def test_a_clusters_volumes_default_to_its_ha_type():
 
 def test_an_explicit_ha_type_is_kept():
     assert lvol_controller._volume_ha_type("single", _cluster("ha")) == "single"
+
+
+def test_a_cluster_activated_with_one_node_defaults_its_volumes_to_single():
+    """A cluster activated with exactly one online node is non-HA without the
+    single-node flag (cluster_ops.is_single_node_activation). Its volumes
+    follow what the activation recorded, not the flag alone."""
+    assert lvol_controller._volume_ha_type("default", _cluster("ha", activated_single=True)) == "single"
+
+
+def test_an_ha_cluster_down_to_one_node_keeps_ha_volumes():
+    """An HA cluster that has lost nodes is not single-node: the default is
+    the cluster's, not inferred from how many nodes are online now."""
+    assert lvol_controller._volume_ha_type("default", _cluster("ha")) == "ha"
+
+
+def test_an_unknown_fabric_fails_loudly():
+    import pytest
+    with pytest.raises(ValueError, match="fc"):
+        lvol_controller._fabric_error(_DB(), _node(), "single", "fc")
