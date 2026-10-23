@@ -1655,6 +1655,14 @@ class RPCClient:
             params["lvol_priority_class"] = priority_class
         return self._request("bdev_lvol_register", **params)
 
+    def bdev_lvol_set_priority_class(self, lvol_name, priority_class):
+        """Set the in-memory IO service class of an lvol/snapshot blob.
+
+        Not persisted by SPDK: lost on restart/re-register.
+        """
+        return self._request("bdev_lvol_set_priority_class",
+                             lvol_name=lvol_name, lvol_priority_class=priority_class)
+
     def nvmf_subsystem_get_controllers(self, nqn):
         return self._request("nvmf_subsystem_get_controllers", nqn=nqn)
 
@@ -2058,7 +2066,7 @@ class RPCClient:
         return self._request("bdev_lvol_set_migration_flag", lvol_name=name)
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
-                           allow_partial=False):
+                           allow_partial=False, priority_class=0):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -2080,6 +2088,11 @@ class RPCClient:
         clone of the destination's copy of the PREVIOUS snapshot. Passing it for
         a transfer into a fresh empty volume would silently drop every cluster
         the delta does not cover.
+
+        *priority_class* is the IO class the transfer reads its source in,
+        without changing the source's own class (0 = the source's own). An SPDK
+        older than the parameter refuses the whole request, so it is retried
+        once without it, which reads in the source's class as before.
         """
         params = {
             "lvol_name": name,
@@ -2096,6 +2109,14 @@ class RPCClient:
         # the fork is fixed.
         # if allow_partial:
         #     params["allow_partial"] = True
+        if priority_class:
+            try:
+                return self._request("bdev_lvol_transfer", priority_class=priority_class, **params)
+            except RPCRemoteError as e:
+                if "decode" not in str(e):
+                    raise
+                logger.warning("bdev_lvol_transfer: SPDK does not take priority_class; "
+                               "transferring %s in its own class", name)
         return self._request("bdev_lvol_transfer", **params)
 
     def bdev_lvol_transfer_stat(self, name: str):

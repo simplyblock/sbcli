@@ -101,6 +101,7 @@ from simplyblock_core.controllers import (
     cg_colocation,
     migration_controller,
     migration_events,
+    qos_controller,
     snapshot_controller,
     tasks_controller,
     tasks_events,
@@ -984,7 +985,10 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     snap_lvol = snap.lvol
     _ndcs = snap_lvol.ndcs if snap_lvol else 0
     _npcs = snap_lvol.npcs if snap_lvol else 0
-    _priority_class = snap_lvol.lvol_priority_class if snap_lvol else 0
+    # wire value (see qos_controller.wire_priority_class); the primary create
+    # below passes none, so the peers' registration is all that carries it
+    _priority_class = (qos_controller.wire_priority_class(
+        tgt_node.cluster_id, snap_lvol.lvol_priority_class) if snap_lvol else 0)
     # Step 1: create target lvol on primary, or reuse if already owned by this migration.
     # Pre-cleanup skips deletion of owned bdevs so we can reuse them here on retry
     # rather than paying the create cost again.

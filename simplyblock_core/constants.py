@@ -914,6 +914,16 @@ prometheus_patch = {
 
 qos_class_meta_and_migration_weight_percent = 25
 
+# Service (QoS) classes travel in the top NBITS_PRIORITY_CLASS=3 bits of every
+# lvol IO's LBA, so distrib schedules 8 wire classes: 0 = Default, 1 = internal
+# metadata/migration, 2..7 = lvol_priority_class 1..6 (wire = class id + 1).
+# Class id 6 (wire 7) is reserved for cross-cluster snapshot replication
+# traffic, which leaves users Default plus class ids 1..QOS_MAX_USER_CLASS_ID.
+QOS_MAX_USER_CLASS_ID = 5
+QOS_REPLICATION_CLASS_ID = 6
+QOS_REPLICATION_WIRE_CLASS = QOS_REPLICATION_CLASS_ID + 1
+qos_class_replication_weight_percent = 10
+
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 

@@ -28,6 +28,7 @@ from .alert import api as alert_api
 from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
+from .qos import api as qos_api
 from .replication import api as replication_api
 from .storage_node import api as storage_node_api
 from .storage_pool import api as pool_api
@@ -336,4 +337,5 @@ instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
 instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
+instance_api.include_router(qos_api, prefix='/qos')
 api.include_router(instance_api)

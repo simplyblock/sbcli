@@ -274,6 +274,9 @@ class Cluster(BaseModel):
     # Two-node arbitration (docs/design/two-node-arbitration.md). Off by default:
     # a dual-node cluster then keeps today's tolerance without the hold.
     two_node_arbitration: bool = False
+    # Share (percent) of the data plane's IO scheduling given to the service
+    # class reserved for snapshot replication (constants.QOS_REPLICATION_CLASS_ID).
+    qos_replication_weight: int = constants.qos_class_replication_weight_percent
     # Who decides on a two-node cluster (docs/design/two-node-kubernetes-fencing.md):
     # "witness" (the arbiter) or "pacemaker" (the nodes follow Pacemaker's fence;
     # the arbiter does not act on the cluster).
@@ -354,9 +357,8 @@ class Cluster(BaseModel):
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         qos_classes = db_controller.get_qos(self.get_id())
-        if len(qos_classes) > 1:
-            return True
-        return False
+        # Any user class: Default alone, or nothing at all, is no QoS.
+        return any(c.class_name != "Default" for c in qos_classes)
 
     def default_backup_bucket_name(self) -> str:
         """The bucket this cluster backs up to when its configuration names none.

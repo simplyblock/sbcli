@@ -46,6 +46,7 @@ from simplyblock_core import constants
 from simplyblock_core.controllers import (
     cg_colocation,
     migration_events,
+    qos_controller,
     tasks_controller,
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
@@ -1288,7 +1289,8 @@ def create_migration(lvol_id, target_node_id,
             raise PreconditionError(f"Cannot create target lvol {composite}: {err}")
         ret = tgt_rpc.create_lvol(
             bdev_short, size_in_mib, tgt_node.lvstore,
-            lvol_priority_class=lvol.lvol_priority_class,
+            lvol_priority_class=qos_controller.wire_priority_class(
+                tgt_node.cluster_id, lvol.lvol_priority_class),
             ndcs=lvol.ndcs, npcs=lvol.npcs)
         if not ret:
             raise ValueError(f"bdev_lvol_create failed for {composite} on {target_node_id}")
@@ -1329,7 +1331,8 @@ def create_migration(lvol_id, target_node_id,
                 elif _tgt_blobid is not None and _tgt_uuid is not None:
                     ret_sec = _sec_rpc_reg.bdev_lvol_register(
                         bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
-                        lvol.lvol_priority_class)
+                        qos_controller.wire_priority_class(
+                            tgt_node.cluster_id, lvol.lvol_priority_class))
                     if ret_sec:
                         _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
                         logger.info(
@@ -1359,7 +1362,8 @@ def create_migration(lvol_id, target_node_id,
                 elif _tgt_blobid is not None and _tgt_uuid is not None:
                     ret_ter = _ter_rpc_reg.bdev_lvol_register(
                         bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
-                        lvol.lvol_priority_class)
+                        qos_controller.wire_priority_class(
+                            tgt_node.cluster_id, lvol.lvol_priority_class))
                     if ret_ter:
                         _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
                         logger.info(

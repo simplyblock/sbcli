@@ -14,6 +14,7 @@ from simplyblock_core.controllers import (
     object_limits,
     ops_gate,
     pool_controller,
+    qos_controller,
     replication_recovery_points,
     snapshot_controller,
     snapshot_events,
@@ -754,7 +755,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if cl.status not in Cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cl.status}"
 
-    if lvol_priority_class > 0:
+    if internal and lvol_priority_class == constants.QOS_REPLICATION_CLASS_ID:
+        # replication receive volume, see snapshot_replication; the caller
+        # checked qos_controller.replication_class_available
+        pass
+    elif lvol_priority_class > 0:
         class_found = False
         for qos_class in db_controller.get_qos(cl.uuid):
             if qos_class.class_id == lvol_priority_class:
@@ -1008,8 +1013,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol_dict["params"]["ndcs"] = lvol.ndcs
         lvol_dict["params"]["npcs"] = lvol.npcs
 
-    if cl.is_qos_set() and lvol.lvol_priority_class > 0:
-        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class +1
+    lvol_dict["params"]["lvol_priority_class"] = qos_controller.wire_priority_class(
+        cl.uuid, lvol.lvol_priority_class)
 
     lvol.bdev_stack = [lvol_dict]
 
@@ -1392,7 +1397,8 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                             raise
                 else:
                     ret = rpc_client.bdev_lvol_register(
-                        lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
+                        lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid,
+                        qos_controller.wire_priority_class(snode.cluster_id, lvol.lvol_priority_class))
 
             elif type == "bdev_lvol_clone":
                 if is_primary:
@@ -1426,6 +1432,17 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                                 f"clone_register acknowledged but {bdev_name} did "
                                 f"not appear within 20s on the peer")
                             ret = None
+                # bdev_lvol_clone/_clone_register take no class, so a clone
+                # would run in Default regardless of its record; apply it here.
+                wire_class = qos_controller.wire_priority_class(
+                    snode.cluster_id, lvol.lvol_priority_class)
+                if ret and wire_class:
+                    try:
+                        rpc_client.bdev_lvol_set_priority_class(
+                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", wire_class)
+                    except RPCException as e:
+                        logger.warning(f"Failed to set priority class {wire_class} on clone "
+                                       f"{lvol.lvol_bdev} on {snode.get_id()}: {e}")
 
             else:
                 logger.debug(f"Unknown BDev type: {type}")
@@ -5202,6 +5219,10 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # the other cluster, where it names nothing and would block fail-back.
     new_lvol.replication_policy_id = ""
     new_lvol.cloned_from_snap = snapshot.get_id()
+    # Carries client IO from here on: keep the source volume's service class
+    # (never the replication class of the snapshot it is cloned from).
+    new_lvol.lvol_priority_class = qos_controller.class_on_cluster(
+        target_node.cluster_id, getattr(lvol, "lvol_priority_class", 0))
     _reset_demote_state(new_lvol)
     new_lvol.place_in_pool(db_controller.get_pool_by_id(pool_uuid))
     new_lvol.lvs_name = target_node.lvstore
@@ -6531,6 +6552,8 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.from_source = True
+    new_lvol.lvol_priority_class = qos_controller.class_on_cluster(
+        source_node.cluster_id, getattr(lvol, "lvol_priority_class", 0))
     _reset_demote_state(new_lvol)
     new_lvol.node_id = source_node.get_id()
     new_lvol.nodes = [source_node.get_id(), source_node.secondary_node_id]
