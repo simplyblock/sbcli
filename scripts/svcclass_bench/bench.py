@@ -26,6 +26,7 @@ import argparse
 import json
 import shlex
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -238,12 +239,12 @@ def _guard(client, vol):
 # run
 # --------------------------------------------------------------------------- #
 
-def _start_fio(bed, vols, run_dir_remote, runtime):
+def _start_fio(bed, vols, run_dir_remote, runtime, profile="mixed.fio"):
     starts = {}
     for vid, v in vols.items():
         c = bed.clients[v["client"]]
         _guard(c, v)
-        c.put(HERE / "mixed.fio", f"{REMOTE}/mixed.fio")
+        c.put(HERE / profile, f"{REMOTE}/{profile}")
         d = f"{run_dir_remote}/{v['name']}"
         c.run(f"sudo rm -rf {d} && sudo mkdir -p {d}")
         # The redirection into the run directory is root's (the directory is
@@ -253,7 +254,7 @@ def _start_fio(bed, vols, run_dir_remote, runtime):
         # bash -c` runs, but in a session no later command can see, so
         # nothing can tell whether the load is alive.
         inner = (f"cd {d} && DEV={v['device']} RUNTIME={runtime} LOGDIR={d} "
-                 f"exec fio {REMOTE}/mixed.fio --output-format=json --output={d}/fio.json "
+                 f"exec fio {REMOTE}/{profile} --output-format=json --output={d}/fio.json "
                  f"> {d}/fio.out 2>&1")
         starts[vid] = float(c.run(f"sudo setsid nohup sh -c {shlex.quote(inner)} > /dev/null 2>&1 "
                                   f"< /dev/null & date +%s.%N").strip().splitlines()[-1])
@@ -288,6 +289,42 @@ def _fetch_fio(bed, vols, run_dir_remote, run_dir):
         import tarfile
         with tarfile.open(local) as t:
             t.extractall(run_dir / "fio", filter="data")
+
+
+_MGMT_LOG_SERVICES = ("SnapshotReplication", "SnapshotMonitor", "TasksRunnerReplicationFinal",
+                      "TasksRunnerLVolSyncDelete", "LVolMonitor", "StorageNodeMonitor",
+                      "HealthCheck", "TasksRunnerRestart", "WebAppAPI")
+
+
+def _fetch_logs(bed, run_id, run_dir, since):
+    """The SPDK and proxy logs of every storage node of both clusters, and the
+    control-plane services that replicate, since the client load started.
+
+    bench.py records the phase boundaries (fio_start, t0, steady_epoch,
+    t_repl_stop, t_end) in meta.json, so the logs can be cut by phase."""
+    iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since))
+    user, key = bed.meta["user"], bed.meta["key_path"]
+    for side in ("src", "tgt"):
+        for ip in bed.meta["clusters"][side]["storage_public_ips"]:
+            try:
+                h = Host(ip, user, key)
+                names = [n for n in h.run("sudo docker ps --format '{{.Names}}'").split()
+                         if n.startswith("spdk")]
+                for n in names:
+                    f = f"{REMOTE}/{run_id}-{n}.log.gz"
+                    h.run(f"sudo mkdir -p {REMOTE} && sudo sh -c 'docker logs --timestamps --since {iso} {n} "
+                          f"2>&1 | gzip > {f}' && sudo chmod a+r {f}")
+                    h.get(f, run_dir / "logs" / side / ip / f"{n}.log.gz")
+            except Exception as e:                         # noqa: BLE001
+                log(f"WARNING: logs of {side} node {ip}: {e}")
+    for svc in _MGMT_LOG_SERVICES:
+        f = f"{REMOTE}/{run_id}-{svc}.log.gz"
+        try:
+            bed.mgmt.run(f"sudo sh -c 'docker service logs --timestamps --since {iso} app_{svc} "
+                         f"2>&1 | gzip > {f}' && sudo chmod a+r {f}")
+            bed.mgmt.get(f, run_dir / "logs" / "mgmt" / f"{svc}.log.gz")
+        except Exception as e:                             # noqa: BLE001
+            log(f"WARNING: logs of {svc}: {e}")
 
 
 def _replicate(bed, vols, policy):
@@ -333,6 +370,91 @@ def _unreplicate(bed, vols, policy):
             bed.sbctl(f"cluster replication-policy-remove {p['ID']}")
 
 
+def _snapshot_cadence(bed, vols, meta, t0, args):
+    """Scenario (c): the snapshots of (b) without the replication.
+
+    Every volume is snapshotted every --snap-interval seconds and only the
+    newest --keep are kept, as replication's retention does. What client IO
+    loses here is the cost of the snapshots themselves (copy-on-write after
+    each one); what (b) loses beyond it is the cost of the transfers.
+    """
+    meta["snapshots"] = []
+    kept = {vid: [] for vid in vols}
+    next_at = t0
+    while time.time() - t0 < args.measure:
+        if time.time() >= next_at:
+            for vid, v in vols.items():
+                out = bed.sbctl(f"snapshot add {vid} bench-c-{v['name']}-{int(time.time())}")
+                rec = {"volume": vid, "snapshot": out.strip().splitlines()[-1].strip(),
+                       "t": time.time()}
+                meta["snapshots"].append(rec)
+                kept[vid].append(rec)
+                while len(kept[vid]) > args.keep:
+                    old = kept[vid].pop(0)
+                    bed.mgmt.run(f"{SBCTL} snapshot delete {old['snapshot']}", check=False)
+                    old["deleted"] = time.time()
+            log(f"t+{time.time() - t0:.0f}s snapshots taken: {len(meta['snapshots'])}")
+            next_at += args.snap_interval
+        time.sleep(5)
+
+
+def _delete_snapshots(bed, ids):
+    for sid in ids:
+        bed.mgmt.run(f"{SBCTL} snapshot delete {sid}", check=False)
+
+
+def _parse_ss(out):
+    """`ss -tinH state established`: one line per connection (Recv-Q Send-Q
+    Local Peer), followed by an indented line of TCP info with the byte
+    counters. Returns [{"l": local, "p": peer, "sent": bytes, "recv": bytes}]."""
+    conns, cur = [], None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            parts = line.split()
+            if len(parts) >= 4:
+                cur = {"l": parts[2], "p": parts[3], "sent": 0, "recv": 0}
+                conns.append(cur)
+            continue
+        if cur is None:
+            continue
+        for tok in line.split():
+            if tok.startswith("bytes_sent:"):
+                cur["sent"] = int(tok.split(":", 1)[1])
+            elif tok.startswith("bytes_received:"):
+                cur["recv"] = int(tok.split(":", 1)[1])
+    return conns
+
+
+def _net_sampler(bed, path, stop, every=60):
+    """Every `every` seconds, the TCP connections of every storage node and
+    client with their byte counters (telemetry_report.py classifies them by
+    port into client, replication and cluster-internal traffic)."""
+    user, key = bed.meta["user"], bed.meta["key_path"]
+    hosts = {}
+    for side in ("src", "tgt"):
+        for pub, priv in zip(bed.meta["clusters"][side]["storage_public_ips"],
+                             bed.meta["clusters"][side]["storage_private_ips"]):
+            hosts[pub] = (side, priv)
+    for c in bed.meta["clients"]:
+        hosts[c["public_ip"]] = ("client", c["private_ip"])
+    conns = {}
+    with open(path, "a", encoding="utf-8") as f:
+        while not stop.is_set():
+            for pub, (role, priv) in hosts.items():
+                try:
+                    if pub not in conns:
+                        conns[pub] = Host(pub, user, key)
+                    out = conns[pub].run("ss -tinH state established", check=False, idempotent=True)
+                    f.write(json.dumps({"t": time.time(), "host": pub, "ip": priv, "role": role,
+                                        "conns": _parse_ss(out)}) + "\n")
+                except Exception as e:                     # noqa: BLE001
+                    f.write(json.dumps({"t": time.time(), "host": pub, "error": str(e)}) + "\n")
+            f.flush()
+            stop.wait(every)
+
+
 def run_one(bed, scenario, share, args):
     state = load_state()
     vols = state["volumes"]
@@ -352,12 +474,16 @@ def run_one(bed, scenario, share, args):
     log(f"weights src {qos['src']['config']['weights']}")
 
     _wait_idle(bed, vols)
-    cap = args.warmup + (args.measure if scenario == "a" else args.cap)
-    starts = _start_fio(bed, vols, remote, cap + 60)
+    cap = args.warmup + (args.measure if scenario == "a" else args.cap + args.after)
+    starts = _start_fio(bed, vols, remote, cap + 120, args.fio)
+    net_stop = threading.Event()
+    net_thread = threading.Thread(target=_net_sampler, daemon=True,
+                                  args=(bed, run_dir / "net.jsonl", net_stop))
+    net_thread.start()
     fio_start = min(starts.values())
     meta = {"run_id": run_id, "scenario": scenario, "share": share, "qos": qos,
-            "fio_start": fio_start, "fio_starts": starts, "warmup": args.warmup,
-            "volumes": vols}
+            "fio": args.fio, "fio_start": fio_start, "fio_starts": starts,
+            "warmup": args.warmup, "volumes": vols}
     log(f"warm-up {args.warmup}s")
     time.sleep(args.warmup)
     t0 = time.time()
@@ -366,6 +492,8 @@ def run_one(bed, scenario, share, args):
     try:
         if scenario == "a":
             time.sleep(args.measure)
+        elif scenario == "c":
+            _snapshot_cadence(bed, vols, meta, t0, args)
         else:
             policy = f"bench-{run_id}"
             meta["policy"] = policy
@@ -393,13 +521,20 @@ def run_one(bed, scenario, share, args):
                 summary = analysis.replication_summary(
                     analysis.iterations_from_records(recs, t0), t0)
                 if steady_epoch is None and summary["steady_state_reached"]:
-                    steady_epoch = summary["steady_epoch"]
+                    steady_epoch = meta["steady_epoch"] = summary["steady_epoch"]
                     log(f"steady state after {summary['time_to_steady_s']:.0f}s; "
                         f"measuring {args.measure}s more")
                 if steady_epoch and time.time() - steady_epoch >= args.measure:
                     break
                 log(f"t+{time.time() - t0:.0f}s iterations "
                     f"{sum(v['iterations'] for v in summary['volumes'].values())}")
+            if args.after:
+                # replication stops, the client load goes on: the recovery
+                # after replication, with the collector still recording
+                meta["t_repl_stop"] = time.time()
+                log(f"stopping replication: {bed.agent('repl-stop --volumes ' + ','.join(vols))}; "
+                    f"client load for {args.after}s more")
+                time.sleep(args.after)
             bed.mgmt.run(f"sudo touch {stop}")
             time.sleep(15)
             bed.mgmt.get(out, run_dir / "snapshots.jsonl")
@@ -415,9 +550,15 @@ def run_one(bed, scenario, share, args):
         # meta.json goes first, since without it nothing of the run can be
         # analysed.
         meta["t_end"] = time.time()
+        net_stop.set()
         (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
         steps = [("stop fio", lambda: _stop_fio(bed, vols)),
                  ("fetch fio", lambda: _fetch_fio(bed, vols, remote, run_dir))]
+        if args.logs:
+            steps.append(("fetch logs", lambda: _fetch_logs(bed, run_id, run_dir, fio_start - 60)))
+        if scenario == "c":
+            steps.append(("delete snapshots", lambda: _delete_snapshots(
+                bed, [s["snapshot"] for s in meta.get("snapshots", []) if not s.get("deleted")])))
         if scenario == "b" and meta.get("policy"):
             steps += [("stop collector", lambda: bed.mgmt.run(f"sudo touch {REMOTE}/{run_id}.stop",
                                                                check=False)),
@@ -468,7 +609,8 @@ def summarize(run_dir):
         out["landing_classes"] = [r for r in recs if r.get("kind") == "landing_class"]
         if rep["steady_epoch"]:
             out["client_ramp"] = analysis.client_window(series, t0, rep["steady_epoch"])
-            out["client_steady"] = analysis.client_window(series, rep["steady_epoch"], t_end)
+            out["client_steady"] = analysis.client_window(
+                series, rep["steady_epoch"], meta.get("t_repl_stop") or t_end)
     return out
 
 
@@ -482,8 +624,8 @@ def report(args):
     (RESULTS / "summary.json").write_text(json.dumps(rows, indent=2, default=str))
     lines = [
         "| run | share | client IOPS | client MB/s | to steady (s) | ramp iter mean (s) |"
-        + " steady iter mean / p95 (s) | steady period p50 (s) | IOPS in steady | MB/s in steady |"
-        + " landing class ok |",
+        " steady iter mean / p95 (s) | steady period p50 (s) | IOPS in steady | MB/s in steady |"
+        " landing class ok |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
@@ -513,7 +655,12 @@ def main():
     for name in ("run", "matrix"):
         s = sub.add_parser(name)
         if name == "run":
-            s.add_argument("--scenario", choices=("a", "b"), required=True)
+            s.add_argument("--scenario", choices=("a", "b", "c"), required=True,
+                           help="a: client IO; b: + replication; c: + snapshots only, at a fixed cadence")
+            s.add_argument("--snap-interval", type=int, default=300,
+                           help="(c) seconds between snapshots of each volume")
+            s.add_argument("--keep", type=int, default=2,
+                           help="(c) snapshots kept per volume, as replication's retention keeps")
             s.add_argument("--share", type=int, required=True)
         else:
             s.add_argument("--shares", default="15,30,60")
@@ -523,6 +670,11 @@ def main():
         s.add_argument("--measure", type=int, default=1800,
                        help="(a) measured seconds; (b) seconds measured in steady state")
         s.add_argument("--cap", type=int, default=7200, help="(b) longest replication phase")
+        s.add_argument("--after", type=int, default=0,
+                       help="(b) seconds of client load after replication is stopped")
+        s.add_argument("--fio", default="mixed.fio", help="fio job file next to bench.py")
+        s.add_argument("--logs", action="store_true",
+                       help="fetch SPDK and control-plane logs of the run")
     sub.add_parser("report")
     args = p.parse_args()
     {"prepare": prepare, "run": run, "matrix": matrix, "report": report}[args.cmd](args)

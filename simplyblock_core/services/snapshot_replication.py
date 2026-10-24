@@ -840,12 +840,12 @@ def process_snap_replicate_start(task, snapshot):
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
-        # 16 in-flight clusters (32 MiB window). With the dispatch fix keeping
-        # the window genuinely full AND reads fragmented like writes (32x64KiB
-        # per cluster), 16 clusters already put up to 512 concurrent 64 KiB
-        # IOs per phase on the wire -- a 64-window quadruples the DMA buffer
-        # (128 MiB per transfer task) for little more overlap.
-        batch_size=16,
+        # A full transfer keeps 16 whole clusters in flight (32 MiB). A delta
+        # sends requests of at most 64 KiB, so 16 of them were only ~1 MiB in
+        # flight and the transfer could not keep up with the writes it chases;
+        # it keeps 256 in flight (16 MiB) instead.
+        batch_size=(constants.REPL_XFER_PARTIAL_BATCH if allow_partial
+                    else constants.REPL_XFER_BATCH),
         bdev_name=hub_bdev,
         operation="replicate",
         lvol_id=remote_map_id,
