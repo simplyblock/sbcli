@@ -64,7 +64,8 @@ class TestTaskRunnerLeaderAndBackoff(unittest.TestCase):
         db.get_snapshot_by_id.return_value = self._snapshot()
         with patch.object(snapshot_replication, "db", db), \
                 patch.object(snapshot_replication, "_source_leader_node") as leader:
-            self.assertFalse(snapshot_replication.task_runner(task))
+            # not a failure: True keeps main() from adding its penalty sleep
+            self.assertTrue(snapshot_replication.task_runner(task))
         leader.assert_not_called()
 
     def test_no_source_member_waits_without_spending_retries(self):

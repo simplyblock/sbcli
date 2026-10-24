@@ -572,13 +572,21 @@ REPL_MAX_NODE_SWITCHES = 6
 REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # How long the submitting pass may wait inline for the transfer. The runner is
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
-# just falls back to being noticed on a later pass.
-REPL_XFER_INLINE_WAIT_SEC = 5.0
+# just falls back to being noticed on a later pass, REPL_ACTIVE_PASS_SEC later.
+REPL_XFER_INLINE_WAIT_SEC = 1.0
 # A delta's landing volume is merged with its base on the target as a job
 # (bdev_lvol_merge_base): how long the finish waits for it inline, and how
-# often it polls, before leaving it to the next pass.
-REPL_MERGE_INLINE_WAIT_SEC = 10.0
+# often it polls, before leaving it to the next pass. No inline wait: merges
+# take minutes, and every second spent here blocks the single-threaded runner
+# for every other task -- with three volumes merging, a pass took ~50 s and a
+# finished merge was acted on that much later (bed run 4, 2026-10-24). The
+# pass interval (REPL_ACTIVE_PASS_SEC) notices a finished merge instead.
+REPL_MERGE_INLINE_WAIT_SEC = 0.0
 REPL_MERGE_POLL_SEC = 1.0
+# Pass interval of the snapshot replication runner while any transfer or
+# merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
+# pass reads the task table (see test_transfer_completion_latency).
+REPL_ACTIVE_PASS_SEC = 1.0
 # Requests a replication transfer keeps in flight. A full transfer sends one
 # whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
 # (allow_partial) sends at most 64 KiB per request, so it needs a deeper window

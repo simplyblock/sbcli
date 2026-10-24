@@ -366,9 +366,38 @@ def _finish_completed_transfer(task, snapshot, offset):
         task.status = JobSchedule.STATUS_DONE
         task.function_params["end_time"] = int(time.time())
         task.write_to_db()
+        _hand_off_to_successor(task, snapshot)
     else:
         _suspend_for_retry(task, "complete repl failed, retrying", backoff=True)
     return True
+
+
+def _hand_off_to_successor(task, snapshot):
+    """The copy of *snapshot* now exists: finish the transfer that ran while
+    it was merged (chain_deferred_to) right away, which chains its landing
+    volume and starts its merge. Waiting for the next pass left the target's
+    merges of a volume idle for ~50 s per cycle (bed run 4, 2026-10-24); the
+    merges of a volume run one after another, so that idle time was on the
+    critical path."""
+    for t in db.get_job_tasks(task.cluster_id):
+        p = t.function_params or {}
+        if (t.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION
+                or t.status == JobSchedule.STATUS_DONE or t.canceled
+                or p.get("chain_deferred_to") != snapshot.get_id()
+                or not p.get("transfer_done")):
+            continue
+        try:
+            succ = db.get_snapshot_by_id(p["snapshot_id"])
+        except KeyError:
+            return
+        logger.info("Replication task %s: %s has its copy; finishing %s now",
+                    task.uuid, snapshot.get_id(), succ.get_id())
+        try:
+            _resume_finish(t, succ)
+        except Exception as e:                            # noqa: BLE001
+            # the next pass finishes it as before
+            logger.warning("Hand-off to task %s failed: %s", t.uuid, e)
+        return
 
 
 def _rpc_or_none(fn, *args):
@@ -2301,7 +2330,8 @@ def task_runner(task: JobSchedule):
 
     if (task.status == JobSchedule.STATUS_SUSPENDED and not task.canceled
             and int(time.time()) < int(task.function_params.get("not_before") or 0)):
-        return False
+        # waiting out a backoff is not a failure: no penalty sleep in main()
+        return True
 
     try:
         db.get_storage_node_by_id(snapshot.lvol.node_id)
@@ -2425,6 +2455,14 @@ def task_runner(task: JobSchedule):
             return _finish_completed_transfer(task, snapshot, offset)
 
 
+def _replication_in_flight(tasks):
+    """Whether a transfer or a landing merge is running: then a finished one
+    must be noticed within REPL_ACTIVE_PASS_SEC, not TASK_EXEC_INTERVAL_SEC."""
+    return any(t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+               and t.status == JobSchedule.STATUS_RUNNING and not t.canceled
+               for t in tasks)
+
+
 def main():
     logger.info("Starting Tasks runner...")
     while True:
@@ -2435,11 +2473,13 @@ def main():
             time.sleep(3)
             continue
         clusters = db.get_clusters()
+        active = False
         if not clusters:
             logger.error("No clusters found!")
         else:
             for cl in clusters:
                 tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                active = active or _replication_in_flight(tasks)
                 for task in tasks:
                     if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
                         if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
@@ -2490,7 +2530,8 @@ def main():
                             if not res:
                                 time.sleep(3)
 
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        time.sleep(constants.REPL_ACTIVE_PASS_SEC if active
+                   else constants.TASK_EXEC_INTERVAL_SEC)
 
 
 if __name__ == "__main__":
