@@ -1,5 +1,4 @@
-"""A consistency group's backup policy applied against real FoundationDB
-(design-consistency-group-backup.md §9).
+"""A consistency group's backup policy applied against real FoundationDB.
 
 These are the integration-tier counterpart of the pure-logic
 ``tests/unit/backup/test_group_retention.py``: there the retention arithmetic is

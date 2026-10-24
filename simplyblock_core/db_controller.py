@@ -1580,8 +1580,7 @@ class DBController(metaclass=Singleton):
 
     def get_backups_by_group_backup_id(self, group_backup_id: str) -> list[Backup]:
         """The member backups of a group backup. A standalone backup's blank
-        group_backup_id is dropped by the index, so only members are returned
-        (design-consistency-group-backup.md §4.1).
+        group_backup_id is dropped by the index, so only members are returned.
 
         A blank id names no group backup, so it has no members: return empty
         rather than querying the index, which rejects a blank component (a blank
@@ -1721,8 +1720,7 @@ class DBController(metaclass=Singleton):
         """The backup policy attached to a consistency group, or None.
 
         A group is backed up as one unit, so its policy attaches to the group
-        directly rather than to a pool or an lvol (design-consistency-group-backup.md
-        §7.1).
+        directly rather than to a pool or an lvol.
         """
         policy_id = next(
             (att.policy_id for att in self.query(

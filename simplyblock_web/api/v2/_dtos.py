@@ -763,7 +763,7 @@ def _bare_uuid(composite_id: str) -> UUID:
 
 class GroupBackupDTO(BaseModel):
     """A consistency-group backup: the member backups of one generation as one
-    all-or-nothing unit (design §4.1)."""
+    all-or-nothing unit."""
     id: UUID
     cluster_id: UUID
     #: The consistency group the generation was taken from.
@@ -791,7 +791,7 @@ class GroupBackupDTO(BaseModel):
             consistency_group_name=model.consistency_group_name,
             group_seq=model.group_seq,
             status=model.status,
-            member_backup_ids=[_bare_uuid(m["backup_id"]) for m in model.members],
+            member_backup_ids=[_bare_uuid(b) for b in model.member_backup_ids],
             size=model.size,
             created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
             completed_at=(datetime.fromtimestamp(model.completed_at, tz=UTC)

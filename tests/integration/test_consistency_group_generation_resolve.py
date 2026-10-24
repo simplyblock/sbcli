@@ -6,8 +6,7 @@ snapshots. `resolve_complete_generation(group, seq)` also requires the
 generation whole: an ONLINE snapshot of every volume that was a member at that
 sequence (the membership epochs, `ConsistencyGroup.included_in_seq`). A group
 backup is taken through the strict form, so a generation missing a member is
-refused rather than backed up as a group that silently lacks a volume
-(design-consistency-group-backup.md §5).
+refused rather than backed up as a group that silently lacks a volume.
 """
 import pytest
 

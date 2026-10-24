@@ -1,5 +1,4 @@
-"""Group-backup export, import and discover against real FoundationDB
-(design-consistency-group-backup.md §6.5).
+"""Group-backup export, import and discover against real FoundationDB.
 
 A group backup is portable the way a single backup is: export emits the group
 manifest together with the member backup chains it names, import preserves ids
@@ -100,7 +99,7 @@ def _group_backup(db, members, cluster=SOURCE_CLUSTER,
     gb.consistency_group_name = "gitea"
     gb.group_seq = 7
     gb.status = status
-    gb.members = [{"lvol_id": m.lvol_id, "backup_id": m.get_id()} for m in members]
+    gb.member_backup_ids = [m.get_id() for m in members]
     gb.size = sum(m.size for m in members)
     gb.created_at = 100
     gb.completed_at = 200
@@ -174,10 +173,10 @@ class TestExportImportRoundTrip:
         assert restored.status == GroupBackup.STATUS_COMPLETED
         assert restored.group_seq == 7
         assert restored.consistency_group_name == "gitea"
-        assert {m["backup_id"] for m in restored.members} == {
+        assert set(restored.member_backup_ids) == {
             f"{TARGET_CLUSTER}/{_backup_id(1)}", f"{TARGET_CLUSTER}/{_backup_id(2)}"}
         # Where the group lives is its members': each imported member records it.
-        for member_id in restored.member_backup_ids():
+        for member_id in restored.member_backup_ids:
             assert db.get_backup_by_id(member_id).get_location().bucket_name == BUCKET
 
     def test_member_ids_and_group_stamp_are_preserved(self, db, source_cluster):
@@ -289,7 +288,7 @@ class TestDiscoverAndImportFromBucket:
 
         assert imported == [f"{TARGET_CLUSTER}/{GROUP_BACKUP_UUID}"]
         restored = db.get_group_backup_by_id(f"{TARGET_CLUSTER}/{GROUP_BACKUP_UUID}")
-        assert {m["backup_id"] for m in restored.members} == {
+        assert set(restored.member_backup_ids) == {
             f"{TARGET_CLUSTER}/{_backup_id(1)}", f"{TARGET_CLUSTER}/{_backup_id(2)}"}
 
     def test_import_from_bucket_skips_a_group_backup_being_deleted(self, db, source_cluster):

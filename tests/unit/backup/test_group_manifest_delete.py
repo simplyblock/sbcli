@@ -1,4 +1,4 @@
-"""Removing a group manifest from its bucket (design §9).
+"""Removing a group manifest from its bucket.
 
 Removing the group manifest un-commits its group backup: the bucket stops naming
 its members as one restorable generation. The manifest module therefore offers

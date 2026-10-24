@@ -1,8 +1,8 @@
 """Where a group backup's manifest lives comes from its member backups, against
 real FoundationDB.
 
-A group backup's members share one location (design-consistency-group-backup.md
-§3.4), and each member Backup records it. The group record keeps no copy of its
+A group backup's members share one location, and each member Backup records
+it. The group record keeps no copy of its
 own: the bucket its group manifest is written to and deleted from is the one its
 members live in, and only the credentials come from the cluster.
 """
@@ -50,7 +50,7 @@ def _group_backup(db, members):
     gb = GroupBackup()
     gb.uuid = GROUP_BACKUP_UUID
     gb.cluster_id = CLUSTER
-    gb.members = [{"lvol_id": m.lvol_id, "backup_id": m.get_id()} for m in members]
+    gb.member_backup_ids = [m.get_id() for m in members]
     gb.status = GroupBackup.STATUS_IN_PROGRESS
     gb.write_to_db(db.kv_store)
     return gb

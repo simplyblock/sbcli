@@ -1416,7 +1416,7 @@ class CLIWrapperBase:
             "Group": gb.consistency_group_name or "-",
             "Gen": gb.group_seq,
             "Status": gb.status,
-            "Members": len(gb.members),
+            "Members": len(gb.member_backup_ids),
             "Size": utils.humanbytes(gb.size),
         }
 

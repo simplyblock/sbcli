@@ -34,7 +34,7 @@ def main():
 
                 # Consistency-group backups are policy-driven in the control plane
                 # too: a group attached to a policy is backed up as one unit on its
-                # schedule, and its generations are pruned per the policy (§7.1, §9).
+                # schedule, and its generations are pruned per the policy.
                 for group in db.get_consistency_groups(cl.get_id()):
                     try:
                         backup_policy.evaluate_group_backups(group)

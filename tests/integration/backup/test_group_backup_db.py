@@ -1,5 +1,5 @@
 """GroupBackup records round-trip and the group indexes resolve, against real
-FoundationDB (design-consistency-group-backup.md §4.1).
+FoundationDB.
 
 The database is real; nothing here mocks the DB layer. Nodes are not involved.
 """
@@ -21,7 +21,7 @@ def _group_backup(uuid="gb-1", cluster="cl-1", cg="cl-1/cg-1", seq=7):
     gb.consistency_group_id = cg
     gb.consistency_group_name = "gitea"
     gb.group_seq = seq
-    gb.members = [{"lvol_id": "lv-db", "backup_id": f"{cluster}/b-db"}]
+    gb.member_backup_ids = [f"{cluster}/b-db"]
     return gb
 
 
@@ -42,7 +42,7 @@ def test_group_backup_round_trips_and_reads_by_id(db):
     got = db.get_group_backup_by_id(gb.get_id())
     assert got.get_id() == gb.get_id()
     assert got.consistency_group_id == "cl-1/cg-1"
-    assert got.members == gb.members
+    assert got.member_backup_ids == gb.member_backup_ids
 
 
 def test_get_group_backup_by_id_missing_raises(db):

@@ -190,7 +190,7 @@ def _group_export(**overrides):
 
 class TestGroupExportSchema:
     """GroupBackupExport is the unit of transfer: the group manifest together with
-    the member backup manifests it names (design §6.5)."""
+    the member backup manifests it names."""
 
     def test_round_trip(self):
         original = _group_export()

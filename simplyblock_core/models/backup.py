@@ -73,7 +73,7 @@ class Backup(BaseModel):
     #: generation backed up as one unit -- the ``GroupBackup.get_id()`` it
     #: belongs to and the generation sequence. Blank/0 for a standalone
     #: single-volume backup, so the ``group_backup_id`` index skips standalone
-    #: backups (design-consistency-group-backup.md §4.1).
+    #: backups.
     group_backup_id: str = ""
     group_seq: int = 0
 
@@ -120,12 +120,11 @@ class GroupBackup(BaseModel):
 
     The crash-consistency comes from the generation, not this record: the member
     snapshots are a single point in time because one frozen
-    ``bdev_lvol_snapshot_group`` call took them (design-consistency-groups.md
-    §5). This record ties the N per-member :class:`Backup` records together and
-    is the control-plane half of the group manifest written to
-    ``groups/<uuid>.json``. It is ``completed`` only once every member backup is
-    completed and the group manifest is published -- the commit barrier
-    (design-consistency-group-backup.md §3.3).
+    ``bdev_lvol_snapshot_group`` call took them. This record ties the N
+    per-member :class:`Backup` records together and is the control-plane half of
+    the group manifest written to ``groups/<uuid>.json``. It is ``completed``
+    only once every member backup is completed and the group manifest is
+    published -- the commit barrier.
     """
 
     _WATCHED = True
@@ -153,7 +152,7 @@ class GroupBackup(BaseModel):
     STATUS_COMPLETED = 'completed'
     STATUS_FAILED = 'failed'
     #: Being deleted: its members are being retired, the group manifest says
-    #: so, and it is no longer restorable (design §9).
+    #: so, and it is no longer restorable.
     STATUS_DELETING = 'deleting'
     #: A delete ended after retiring some members: what is left cannot restore
     #: as a group. Deleting it again resumes the retirement.
@@ -175,11 +174,11 @@ class GroupBackup(BaseModel):
     consistency_group_id: str = ""
     consistency_group_name: str = ""
     group_seq: int = 0
-    #: The member backups, one per member snapshot of the generation. Each entry
-    #: is ``{"lvol_id": <member lvol id>, "backup_id": <Backup.get_id()>}``.
-    members: list = default_factory(list)
+    #: The member backups, one per member snapshot of the generation, by
+    #: ``Backup.get_id()``. Each member Backup records its own volume.
+    member_backup_ids: list = default_factory(list)
     #: Where the members live and whether they are encrypted is not repeated
-    #: here: each member Backup records both, and they agree (design §3.4).
+    #: here: each member Backup records both, and they agree.
     size: int = 0
     created_at: int = 0
     completed_at: int = 0
@@ -196,10 +195,6 @@ class GroupBackup(BaseModel):
         only place ``completed_at`` is set, or at an import, of a committed one.
         A group backup that failed before committing has none."""
         return bool(self.completed_at)
-
-    def member_backup_ids(self) -> list:
-        """The ``Backup.get_id()`` of every member, in record order."""
-        return [m["backup_id"] for m in self.members]
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.UTC))

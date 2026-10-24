@@ -1,5 +1,5 @@
 """Group restore re-forms a consistency group from a group backup, all-or-nothing,
-against real FoundationDB (design-consistency-group-backup.md §6).
+against real FoundationDB.
 
 The database is real; nothing here mocks the DB layer. The boundaries patched are
 the ones above it: the single-volume restore (which creates the volume and drives
@@ -58,7 +58,7 @@ def _seed_group(db, members, status=GroupBackup.STATUS_COMPLETED):
     gb.consistency_group_name = "gitea"
     gb.group_seq = 7
     gb.status = status
-    gb.members = [{"lvol_id": m.lvol_id, "backup_id": m.get_id()} for m in members]
+    gb.member_backup_ids = [m.get_id() for m in members]
     gb.write_to_db(db.kv_store)
     return gb
 
@@ -183,7 +183,7 @@ def test_refuses_when_a_member_backup_record_is_missing(db):
     members = [_member("b-db", "db")]
     gb = _seed_group(db, members)
     # Record a second member whose Backup record was never written.
-    gb.members.append({"lvol_id": f"{CLUSTER}/lv-gone", "backup_id": f"{CLUSTER}/b-gone"})
+    gb.member_backup_ids.append(f"{CLUSTER}/b-gone")
     gb.write_to_db(db.kv_store)
 
     group_id, lvol_ids, err = group_backup.restore_group_backup(

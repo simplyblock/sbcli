@@ -248,7 +248,7 @@ class _GenerationTakeParams(BaseModel):
                    response_model=ConsistencyGroupGenerationDTO)
 def take_generation(cluster: Cluster, group: ConsistencyGroupResource,
                     body: _GenerationTakeParams | None = None) -> ConsistencyGroupGenerationDTO:
-    """Take one crash-consistent generation across every current member (§5).
+    """Take one crash-consistent generation across every current member.
 
     With a ``request_id``, a retry of a take whose answer was lost returns the
     generation already taken under that id.

@@ -331,7 +331,7 @@ def _group_export():
 class TestGroupExportImportFile:
     """What `group-backup export` writes and `group-backup import --from-file`
     reads back -- the single-volume contract (TestExportImportFile) lifted to a
-    group backup carried as one unit (design §6.5)."""
+    group backup carried as one unit."""
 
     def _export(self, tmp_path, **args):
         out = tmp_path / "group.json"
@@ -398,7 +398,7 @@ class TestGroupExportImportFile:
 
 class TestGroupDiscoverRendering:
     """`group-backup discover` reports the group backups a bucket holds, including
-    a torn generation (design §6.5)."""
+    a torn generation."""
 
     def _run(self, manifests, member_manifests=()):
         with patch.object(group_backup_controller, "discover_group_backups",

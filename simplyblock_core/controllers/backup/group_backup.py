@@ -1,11 +1,11 @@
 """Consistency-group backup: back up the member snapshots of one group
-generation to S3 as one all-or-nothing unit (design-consistency-group-backup.md).
+generation to S3 as one all-or-nothing unit.
 
 This module holds the group-level decisions that sit on top of the per-member
 single-volume backup path (``controllers/backup/controller.py``): the
-homogeneity gate that the first version requires (§3.4) and the all-or-nothing
+homogeneity gate that the first version requires and the all-or-nothing
 commit decision that makes a group backup visible only when every member
-completed (§3.3). The orchestration around them -- :func:`create_group_backup`
+completed. The orchestration around them -- :func:`create_group_backup`
 resolving or taking a generation, creating the ``GroupBackup`` record, and
 fanning out one single-volume backup per member, and
 :func:`try_commit_group_backup` publishing the group manifest last once every
@@ -40,7 +40,7 @@ class CommitState(Enum):
 
 
 def check_members_homogeneous(members: list) -> list:
-    """The members that break the first version's homogeneity requirement (§3.4).
+    """The members that break the first version's homogeneity requirement.
 
     ``members`` is a list of ``{"lvol_id", "location", "encrypted"}``. Every
     member must share one S3 location and one encryption disposition, which is
@@ -65,7 +65,7 @@ def check_members_homogeneous(members: list) -> list:
 def group_commit_state(member_statuses: list) -> CommitState:
     """The commit decision for a group backup, from its members' backup statuses.
 
-    All-or-nothing (§3.3): a group backup commits (its group manifest is
+    All-or-nothing: a group backup commits (its group manifest is
     published) only when every member backup has completed, and one terminal
     member failure fails the whole group even while others are still uploading.
 
@@ -84,19 +84,19 @@ def group_commit_state(member_statuses: list) -> CommitState:
 
 def build_group_manifest(group_backup, member_backups: dict):
     """Assemble the group manifest from the ``GroupBackup`` record and its member
-    ``Backup`` records (design §4.2).
+    ``Backup`` records.
 
     Pure: the caller supplies the records. ``member_backups`` maps
     ``Backup.get_id()`` to the member ``Backup`` for every member in
-    ``group_backup.members``. Called at the commit barrier, once every member is
+    ``group_backup.member_backup_ids``. Called at the commit barrier, once every member is
     completed, so a missing member is a programming error, not a partial group.
 
     The group manifest is written LAST, after every member manifest exists, so
-    its presence is the all-or-nothing commit barrier (§3.3). It names the member
+    its presence is the all-or-nothing commit barrier. It names the member
     backups by id; a reader then reads each ``manifests/<backup_id>.json`` to
     assemble that member's chain. The encryption keys are per-member and live in
     those member manifests; the group manifest records only the shared
-    ``encrypted`` disposition (§3.4).
+    ``encrypted`` disposition.
 
     Raises:
         ValueError: a member backup is missing, or an id is not a UUID -- the
@@ -106,11 +106,11 @@ def build_group_manifest(group_backup, member_backups: dict):
     member_backup_ids = []
     total_size = 0
     encrypted = False
-    for entry in group_backup.members:
-        backup = member_backups.get(entry["backup_id"])
+    for backup_id in group_backup.member_backup_ids:
+        backup = member_backups.get(backup_id)
         if backup is None:
             raise ValueError(
-                f"member backup {entry['backup_id']} missing while committing "
+                f"member backup {backup_id} missing while committing "
                 f"group backup {group_backup.uuid}")
         member_backup_ids.append(UUID(backup.uuid))
         total_size += backup.size
@@ -133,7 +133,7 @@ def build_group_manifest(group_backup, member_backups: dict):
 
 
 def _config_for_group(group_backup):
-    """Credentials for the bucket a group backup's members live in (design §3.4).
+    """Credentials for the bucket a group backup's members live in.
 
     The group record keeps no location of its own: each member backup records
     one, and they share it, so the group manifest's bucket is theirs. Each member
@@ -149,7 +149,7 @@ def _config_for_group(group_backup):
 
     db = db_controller.DBController()
     config = None
-    for backup_id in group_backup.member_backup_ids():
+    for backup_id in group_backup.member_backup_ids:
         try:
             member = db.get_backup_by_id(backup_id)
         except KeyError:
@@ -166,11 +166,11 @@ def create_group_backup(consistency_group_id, group_seq=None):
     """Back up one generation of a consistency group as an all-or-nothing unit.
 
     Resolves the generation -- taking a fresh crash-consistent group snapshot
-    when ``group_seq`` is None -- gates its members on homogeneity (§3.4),
+    when ``group_seq`` is None -- gates its members on homogeneity,
     records a :class:`GroupBackup`, and fans out one single-volume backup per
     member stamped with the group backup id and generation. The group manifest
     that makes the backup visible is published later, by the commit task this
-    enqueues, once every member backup has completed (§3.3). Each member backup
+    enqueues, once every member backup has completed. Each member backup
     is an ordinary single-volume backup, so the existing backup runner drives it
     to a terminal state and the commit task only watches.
 
@@ -190,7 +190,7 @@ def create_group_backup(consistency_group_id, group_seq=None):
             return None, err
 
     # A torn generation is refused rather than backed up as a group that
-    # silently lacks a volume (§5).
+    # silently lacks a volume.
     try:
         member_snaps = cg.resolve_complete_generation(group, group_seq)
     except cg.ConsistencyGroupError as e:
@@ -201,7 +201,7 @@ def create_group_backup(consistency_group_id, group_seq=None):
     except (KeyError, ValueError) as e:
         return None, str(e)
 
-    # Homogeneity gate (§3.4): every member must share one location and one
+    # Homogeneity gate: every member must share one location and one
     # encryption disposition, the per-chain coherence rule applied across the
     # group. The location is the cluster's own and shared by construction; the
     # encryption disposition is per volume, so this is where a group mixing an
@@ -247,10 +247,10 @@ def create_group_backup(consistency_group_id, group_seq=None):
         backup.group_backup_id = group_backup.get_id()
         backup.group_seq = group_seq
         backup.write_to_db()
-        members.append({"lvol_id": snap.lvol.get_id(), "backup_id": backup.get_id()})
+        members.append(backup.get_id())
         total_size += backup.size
 
-    group_backup.members = members
+    group_backup.member_backup_ids = members
     group_backup.size = total_size
     group_backup.write_to_db()
 
@@ -259,7 +259,7 @@ def create_group_backup(consistency_group_id, group_seq=None):
 
 
 def try_commit_group_backup(group_backup_id) -> CommitState:
-    """The all-or-nothing commit barrier for a group backup (design §3.3).
+    """The all-or-nothing commit barrier for a group backup.
 
     Reads the member backups, decides with :func:`group_commit_state`, and on
     the first version's three outcomes:
@@ -293,14 +293,14 @@ def try_commit_group_backup(group_backup_id) -> CommitState:
         return CommitState.FAILED
 
     member_backups = {}
-    for entry in group_backup.members:
+    for backup_id in group_backup.member_backup_ids:
         try:
-            backup = db.get_backup_by_id(entry["backup_id"])
+            backup = db.get_backup_by_id(backup_id)
         except KeyError:
             continue
         member_backups[backup.get_id()] = backup
 
-    if len(member_backups) != len(group_backup.members):
+    if len(member_backups) != len(group_backup.member_backup_ids):
         return _fail_group(group_backup, "a member backup record is missing")
 
     state = group_commit_state([b.status for b in member_backups.values()])
@@ -329,7 +329,7 @@ def _fail_group(group_backup, reason: str) -> CommitState:
 
 
 def _unwind_restored(lvol_ids: list) -> None:
-    """Tear down the volumes a failed group restore already created (design §6.5).
+    """Tear down the volumes a failed group restore already created.
 
     Best-effort: every volume is attempted even if one teardown fails, so a
     failed group restore leaves no half-group behind. The volumes are still
@@ -347,7 +347,7 @@ def _unwind_restored(lvol_ids: list) -> None:
 
 def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
                          target_node_id=None, s3_credentials=None):
-    """Restore a group backup into a NEW consistency group (design §6).
+    """Restore a group backup into a NEW consistency group.
 
     Recreates the N member volumes of one group backup from S3 and re-forms them
     into a new standalone consistency group named ``into_group_name``, the
@@ -357,9 +357,9 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
     standalone restore does, so "all members online" is each member's restore
     task reaching ONLINE, watched by the caller.
 
-    All-or-nothing (design §6.5): the member chains are all validated restorable
+    All-or-nothing: the member chains are all validated restorable
     before any volume is created, every restored volume is pinned to one store so
-    the group can form (§3.5), and if any member fails to restore or join, the
+    the group can form, and if any member fails to restore or join, the
     volumes already created are torn down so a failed group restore leaves no
     half-group.
 
@@ -375,7 +375,7 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
         return None, None, str(e)
 
     # Only a committed group backup is restorable: an in-progress or failed one
-    # is not a crash-consistent generation (design §3.3).
+    # is not a crash-consistent generation.
     if group_backup.status != GroupBackup.STATUS_COMPLETED:
         return None, None, (
             f"group backup {group_backup_id} is {group_backup.status}, not "
@@ -393,13 +393,13 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
             f"{cluster_id}; a group restore always produces a new group")
 
     # Resolve the member backups and validate every chain BEFORE creating any
-    # volume, so a doomed restore leaves nothing behind (design §6.2). The
+    # volume, so a doomed restore leaves nothing behind. The
     # membership is complete by construction -- a group backup is COMPLETED only
     # when every member committed -- but a member whose Backup record was since
     # deleted is caught here.
     try:
-        member_backups = [db.get_backup_by_id(entry["backup_id"])
-                          for entry in group_backup.members]
+        member_backups = [db.get_backup_by_id(backup_id)
+                          for backup_id in group_backup.member_backup_ids]
     except KeyError as e:
         return None, None, f"a member backup of the group is missing: {e}"
 
@@ -415,7 +415,7 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
 
     # Create the member volumes, pinned to one store so they can form a group.
     # The first restore may auto-select a node; the rest are pinned to it, which
-    # add_member_to_group then enforces (design §3.5). Each member is created
+    # add_member_to_group then enforces. Each member is created
     # INTO the new group (add_lvol_ha's consistency_group): that is what lets a
     # member whose source shared a subsystem take the group's own subsystem
     # (cg_colocation), so the restored group is laid out as its source was --
@@ -445,7 +445,7 @@ def restore_group_backup(group_backup_id, into_group_name, pool_id_or_name,
 
     # Re-form the consistency group from the restored volumes. add_member_to_group
     # enforces single-store placement and fails loudly on an off-store member,
-    # which the unwind then cleans up (design §6.4). The group we just created is
+    # which the unwind then cleans up. The group we just created is
     # removed on failure too, so the half-formed name does not block a retry.
     group = cg.ensure_group(cluster_id, into_group_name)
     for lvol_id in created_ids:
@@ -481,7 +481,7 @@ class DeleteState(Enum):
 
 
 def delete_group_backup(group_backup_id):
-    """Start deleting a group backup (design §9), metadata first.
+    """Start deleting a group backup, metadata first.
 
     A group backup is created data first and committed last; it is deleted the
     other way round. This marks the group manifest and then the record as being
@@ -614,7 +614,7 @@ def _config_for_deleting(db, group_backup):
     then it is the cluster's configured bucket: the one every member was checked
     against when the delete was marked.
     """
-    for backup_id in group_backup.member_backup_ids():
+    for backup_id in group_backup.member_backup_ids:
         try:
             db.get_backup_by_id(backup_id)
         except KeyError:
@@ -625,7 +625,7 @@ def _config_for_deleting(db, group_backup):
 
 def _members_touched(db, group_backup) -> bool:
     """Whether retiring a member has begun: a member deleted, merging, or merged."""
-    for backup_id in group_backup.member_backup_ids():
+    for backup_id in group_backup.member_backup_ids:
         try:
             member = db.get_backup_by_id(backup_id)
         except KeyError:
@@ -645,7 +645,7 @@ def _retire_members(db, group_backup) -> bool:
     """
 
     retired = True
-    for backup_id in group_backup.member_backup_ids():
+    for backup_id in group_backup.member_backup_ids:
         try:
             member = db.get_backup_by_id(backup_id)
         except KeyError:
@@ -675,8 +675,8 @@ def _retire_members(db, group_backup) -> bool:
 
 
 def retire_orphaned_member_backups(lvol_ids, db=None):
-    """Retire the member backups of group backups that no longer exist (design
-    §9): for each of *lvol_ids*, every completed backup whose ``group_backup_id``
+    """Retire the member backups of group backups that no longer exist: for
+    each of *lvol_ids*, every completed backup whose ``group_backup_id``
     names a GroupBackup that is gone (pruned, or deleted by hand).
 
     * A backup the next generation chains against (a successor names it as
@@ -738,7 +738,7 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
 
 def export_group_backup(group_backup_id, cluster_id=None):
     """Export a group backup's manifests as a unit, for import into another
-    cluster (design §6.5).
+    cluster.
 
     Emits the group manifest together with the member backup chains it names, as
     one :class:`backup_manifest.GroupBackupExport`. The member chains are grouped
@@ -772,17 +772,17 @@ def export_group_backup(group_backup_id, cluster_id=None):
         raise PreconditionError(str(e)) from e
 
     # Only a committed group backup is a unit worth exporting: an in-progress or
-    # failed one has no published group manifest and is not crash-consistent
-    # (design §3.3), the same rule that gates restore.
+    # failed one has no published group manifest and is not crash-consistent,
+    # the same rule that gates restore.
     if group_backup.status != GroupBackup.STATUS_COMPLETED:
         raise PreconditionError(
             f"group backup {group_backup_id} is {group_backup.status}, not "
             f"completed; only a committed group backup can be exported")
 
     member_by_id = {}
-    for entry in group_backup.members:
+    for backup_id in group_backup.member_backup_ids:
         try:
-            backup = db.get_backup_by_id(entry["backup_id"])
+            backup = db.get_backup_by_id(backup_id)
         except KeyError as e:
             raise PreconditionError(
                 f"a member backup of group backup {group_backup_id} is "
@@ -811,8 +811,7 @@ def export_group_backup(group_backup_id, cluster_id=None):
 
 
 def discover_group_backups(config):
-    """Every group backup in a bucket, read from its group manifests alone
-    (design §6.5).
+    """Every group backup in a bucket, read from its group manifests alone.
 
     The disaster-recovery entry point for group backups, parallel to the
     single-volume :func:`controller.discover_backups`: given a bucket and
@@ -829,7 +828,7 @@ def discover_group_backups(config):
 
 def import_group_backup(export, cluster_id=None):
     """Register a group backup described by a ``GroupBackupExport`` into this
-    cluster, preserving ids and all-or-nothing across the group (design §6.5).
+    cluster, preserving ids and all-or-nothing across the group.
 
     Recreates both the member ``Backup`` records AND the ``GroupBackup`` record
     that ties them together, keeping every id: the member uuids and s3_ids (which
@@ -915,7 +914,7 @@ def import_group_backup(export, cluster_id=None):
         backup.write_to_db()
         # The member's volume comes from its own manifest, which import_backups
         # recorded on the backup.
-        members.append({"lvol_id": backup.lvol_id, "backup_id": backup.get_id()})
+        members.append(backup.get_id())
 
     # Recreate the GroupBackup record, preserving its uuid and generation. It is
     # imported COMPLETED: only a committed group backup is exportable, so what
@@ -926,7 +925,7 @@ def import_group_backup(export, cluster_id=None):
     group_backup.consistency_group_id = group_manifest.source.consistency_group_id
     group_backup.consistency_group_name = group_manifest.source.consistency_group_name
     group_backup.group_seq = group_manifest.source.generation
-    group_backup.members = members
+    group_backup.member_backup_ids = members
     group_backup.size = group_manifest.size
     group_backup.created_at = int(group_manifest.created_at.timestamp())
     group_backup.completed_at = int(group_manifest.completed_at.timestamp())
@@ -937,12 +936,12 @@ def import_group_backup(export, cluster_id=None):
 
 
 def import_group_backup_from_bucket(config, cluster_id=None):
-    """Import every group backup a bucket holds (design §6.5).
+    """Import every group backup a bucket holds.
 
     The disaster-recovery path: given a bucket and credentials for it, read its
     group manifests and the member manifests they name, and import each group
     backup. Reuses the single-volume bucket read for the member manifests, since a
-    group's members live in the same bucket (§3.4), and walks each member's chain
+    group's members live in the same bucket, and walks each member's chain
     over them so a group imports exactly its own members' chains rather than every
     backup the bucket happens to hold.
 

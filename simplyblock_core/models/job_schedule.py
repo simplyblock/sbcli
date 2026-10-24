@@ -66,10 +66,10 @@ class JobSchedule(BaseModel):
     FN_BACKUP_MERGE = "s3_backup_merge"
     # Consistency-group backup commit: watch the member backups of one group
     # generation and publish the group manifest once every member completed,
-    # the all-or-nothing barrier (design-consistency-group-backup.md §3.3).
+    # the all-or-nothing barrier.
     FN_GROUP_BACKUP_COMMIT = "group_backup_commit"
     # Consistency-group backup delete: retire the member backups of a group
-    # backup marked deleting, then remove its manifest and record (§9).
+    # backup marked deleting, then remove its manifest and record.
     FN_GROUP_BACKUP_DELETE = "group_backup_delete"
     FN_CLUSTER_EXPAND = "cluster_expand"
     # Cross-cluster replication cutover: freeze source IO, transfer the final

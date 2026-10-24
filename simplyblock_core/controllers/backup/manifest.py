@@ -482,11 +482,11 @@ def parse_export(body: bytes, source: str) -> BackupExport:
 # The self-describing part of a CONSISTENCY-GROUP backup: one JSON document per
 # group backup, under a "groups/" prefix, naming the N member backups of one
 # generation as a unit. It is written LAST, after every member manifest exists,
-# so its presence is the group backup's all-or-nothing commit barrier
-# (design-consistency-group-backup.md §3.3, §4.2). A reader resolves a group
-# backup from this document, then reads each member's manifests/<backup_id>.json
-# to assemble that member's chain. Like the per-backup manifest, it records
-# identity and encoding, never the bucket, region, endpoint, or credentials.
+# so its presence is the group backup's all-or-nothing commit barrier. A reader
+# resolves a group backup from this document, then reads each member's
+# manifests/<backup_id>.json to assemble that member's chain. Like the
+# per-backup manifest, it records identity and encoding, never the bucket,
+# region, endpoint, or credentials.
 # ---------------------------------------------------------------------------
 
 GROUP_MANIFEST_PREFIX = "groups/"
@@ -512,7 +512,7 @@ class GroupManifestSource(BaseModel):
 
 
 class GroupManifestState(StrEnum):
-    """Whether a group manifest's member backups can be relied on (design §9).
+    """Whether a group manifest's member backups can be relied on.
 
     A group manifest is written ``committed``, at the commit barrier. A delete
     marks it ``deleting`` before it touches any member, and removes it only once
@@ -550,7 +550,7 @@ class GroupBackupManifest(BaseModel):
     #: what it was.
     state: GroupManifestState = GroupManifestState.COMMITTED
 
-    #: Whether the members are encrypted. Homogeneous (design §3.4): every member
+    #: Whether the members are encrypted. Homogeneous: every member
     #: shares this disposition. The actual per-member keys are NOT here -- each
     #: member has its own DEK, recorded in its own manifest
     #: (``manifests/<backup_id>.json``) -- so this is only the group-level
@@ -573,7 +573,7 @@ def write_group(config: BackupConfig, manifest: GroupBackupManifest) -> None:
     """Store a group manifest, next to the member backups it names.
 
     Written LAST, after every member manifest exists: its presence is the group
-    backup's commit barrier (design §3.3).
+    backup's commit barrier.
 
     Raises:
         ManifestError: it could not be stored. A group backup with member
@@ -647,7 +647,7 @@ def list_all_groups(config: BackupConfig) -> list[GroupBackupManifest]:
 
 def delete_retired_group(config: BackupConfig, group_backup_id: UUID) -> None:
     """Remove the group manifest of a group backup whose delete has retired
-    every member: the last bucket step of deleting a group backup (design §9).
+    every member: the last bucket step of deleting a group backup.
 
     The group manifest is not a link in any backup chain. A member manifest
     names its own predecessor, never a group manifest, so removing one breaks
@@ -736,7 +736,7 @@ GROUP_EXPORT_SCHEMA_VERSION = 1
 
 class GroupBackupExport(BaseModel):
     """A group backup carried out of a cluster in a file: the group manifest plus
-    the member backup manifests it names, as one unit (design §6.5).
+    the member backup manifests it names, as one unit.
 
     This is to the group manifest what ``BackupExport`` is to a single-volume
     manifest -- the one document that does record a location, because it is not
@@ -744,7 +744,7 @@ class GroupBackupExport(BaseModel):
     members; ``members`` carries each member's whole restorable chain, grouped by
     the location it lives in exactly as a single-volume export groups its
     manifests. A group backup is homogeneous -- its members share one location
-    (§3.4) -- so there is one group in practice, but reusing ``BackupExport`` keeps
+ -- so there is one group in practice, but reusing ``BackupExport`` keeps
     the member records on the single-volume import path and describes a member's
     chain the same way everywhere.
     """

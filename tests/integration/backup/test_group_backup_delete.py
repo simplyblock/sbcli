@@ -1,4 +1,4 @@
-"""Deleting a group backup, against real FoundationDB (design §9).
+"""Deleting a group backup, against real FoundationDB.
 
 A group backup is deleted the way it is created, metadata outermost: the group
 manifest and the record are first marked as being deleted, then the member
@@ -122,7 +122,7 @@ def _group_backup(db, bucket, gen_uuid, gen, members, status=GroupBackup.STATUS_
     gb.consistency_group_id = f"{CLUSTER}/cccc0000-0000-4000-8000-000000000001"
     gb.consistency_group_name = "gitea"
     gb.group_seq = gen
-    gb.members = [{"lvol_id": m.lvol_id, "backup_id": m.get_id()} for m in members]
+    gb.member_backup_ids = [m.get_id() for m in members]
     gb.created_at = 100
     gb.status = status
     if status == GroupBackup.STATUS_COMPLETED:

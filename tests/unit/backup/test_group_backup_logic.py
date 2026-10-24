@@ -1,5 +1,5 @@
 """The decision core of consistency-group backup: the homogeneity gate and the
-all-or-nothing commit decision (design-consistency-group-backup.md §3.3, §3.4).
+all-or-nothing commit decision.
 
 Pure logic -- the orchestration around it (resolving a generation, creating the
 record, enqueuing member backups, publishing the group manifest) touches the
@@ -69,7 +69,7 @@ class TestCommitDecision:
 
     def test_failure_wins_over_still_in_flight(self):
         # All-or-nothing: one terminal failure fails the group even while others
-        # are still uploading (design §3.3).
+        # are still uploading.
         statuses = [Backup.STATUS_FAILED, Backup.STATUS_IN_PROGRESS]
         assert group_backup.group_commit_state(statuses) == group_backup.CommitState.FAILED
 
@@ -88,7 +88,7 @@ class TestCommitDecision:
 
 class TestBuildGroupManifest:
     """build_group_manifest assembles the group manifest from the GroupBackup
-    record and its member Backup records (design §4.2)."""
+    record and its member Backup records."""
 
     def _group_and_members(self, encrypted=False):
         cluster = _uuid("cluster")
@@ -112,9 +112,9 @@ class TestBuildGroupManifest:
             b.s3_id = size
             b.size = size
             b.encrypted = encrypted
-            members.append({"lvol_id": b.lvol_id, "backup_id": b.get_id()})
+            members.append(b.get_id())
             by_id[b.get_id()] = b
-        gb.members = members
+        gb.member_backup_ids = members
         return gb, by_id
 
     def test_builds_from_records(self):
@@ -125,7 +125,7 @@ class TestBuildGroupManifest:
         assert manifest.source.consistency_group_id == gb.consistency_group_id
         assert manifest.source.generation == 7
         assert manifest.size == 150
-        assert manifest.member_backup_ids == [UUID(by_id[e["backup_id"]].uuid) for e in gb.members]
+        assert manifest.member_backup_ids == [UUID(by_id[b].uuid) for b in gb.member_backup_ids]
         assert manifest.created_at == datetime.fromtimestamp(gb.created_at, tz=UTC)
         assert manifest.completed_at == datetime.fromtimestamp(gb.completed_at, tz=UTC)
         assert manifest.encrypted is False
@@ -136,6 +136,6 @@ class TestBuildGroupManifest:
 
     def test_a_missing_member_backup_is_an_error(self):
         gb, by_id = self._group_and_members()
-        by_id.pop(gb.members[0]["backup_id"])   # drop one member's record
+        by_id.pop(gb.member_backup_ids[0])   # drop one member's record
         with pytest.raises(ValueError, match="missing"):
             group_backup.build_group_manifest(gb, by_id)

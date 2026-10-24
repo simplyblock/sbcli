@@ -1,5 +1,5 @@
 """The all-or-nothing commit barrier for a consistency-group backup, against
-real FoundationDB (design-consistency-group-backup.md §3.3).
+real FoundationDB.
 
 The database is real; nothing here mocks the DB layer. The only boundaries
 patched are the ones above it: the S3 manifest write and the bucket-credential
@@ -55,7 +55,7 @@ def _group_backup(members, status=GroupBackup.STATUS_IN_PROGRESS):
     gb.group_seq = 7
     gb.created_at = 100
     gb.status = status
-    gb.members = [{"lvol_id": m.lvol_id, "backup_id": m.get_id()} for m in members]
+    gb.member_backup_ids = [m.get_id() for m in members]
     return gb
 
 
@@ -126,7 +126,7 @@ def test_a_missing_member_record_fails_the_group(db):
     gb = _group_backup(members)
     # Record a second member on the group backup whose Backup record was never
     # written (e.g. hard-deleted): the group cannot be committed.
-    gb.members.append({"lvol_id": f"{CLUSTER}/lv-gone", "backup_id": f"{CLUSTER}/b-gone"})
+    gb.member_backup_ids.append(f"{CLUSTER}/b-gone")
     members[0].write_to_db(db.kv_store)
     gb.write_to_db(db.kv_store)
 

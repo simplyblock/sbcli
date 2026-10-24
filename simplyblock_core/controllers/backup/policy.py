@@ -302,7 +302,7 @@ def evaluate_schedule(lvol):
 
 
 def evaluate_group_backups(group):
-    """Back up and prune a consistency group per its backup policy (design §9).
+    """Back up and prune a consistency group per its backup policy.
 
     One pass, three steps. Member copies orphaned by a delete from before group
     backups retired their own members are swept. A generation is taken when the

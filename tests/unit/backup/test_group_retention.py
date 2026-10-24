@@ -1,4 +1,4 @@
-"""Which group backups a count/age policy prunes (design-consistency-group-backup.md §9).
+"""Which group backups a count/age policy prunes.
 
 Pure logic -- ``evaluate_group_backups`` around it touches the database and the
 data plane and is the integration tier's. Retention is per generation: a

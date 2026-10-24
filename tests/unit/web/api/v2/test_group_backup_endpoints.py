@@ -1,4 +1,4 @@
-"""v2 REST endpoints for consistency-group backup (design §8).
+"""v2 REST endpoints for consistency-group backup.
 
 The routers run through TestClient; the control-plane logic (group_backup
 controller) and the database are mocked, so these assert the HTTP contract: which

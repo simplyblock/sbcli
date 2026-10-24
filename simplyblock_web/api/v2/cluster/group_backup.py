@@ -1,4 +1,4 @@
-"""Consistency-group backup REST surface (design-consistency-group-backup.md §8).
+"""Consistency-group backup REST surface.
 
 Group backups are backups, so they live under the backup tree, at
 `/clusters/{cluster_id}/backups/groups/`: creating one from a generation of the
@@ -8,7 +8,7 @@ export, import, and discover a single-volume backup has. The endpoints are thin.
 Create fans out to the single-volume backup path per member, restore fans out to
 the single-volume restore path per member and re-forms the group, and delete
 removes the group manifest and the record, leaving the member backups to
-per-volume retention (§9).
+per-volume retention.
 
 This router is mounted ahead of the single-volume one, whose
 `/backups/{backup_id}/` would otherwise take `groups` for a backup id.
@@ -57,7 +57,7 @@ class _GroupBackupCreateParams(BaseModel):
 @api.post('/', name='clusters:backups:groups:create', status_code=201, response_model=GroupBackupDTO)
 def create_group_backup(cluster: Cluster, body: _GroupBackupCreateParams) -> GroupBackupDTO:
     """Back up one generation of a consistency group to S3 as one all-or-nothing
-    unit (design §6). Takes a fresh crash-consistent generation unless
+    unit. Takes a fresh crash-consistent generation unless
     ``group_seq`` names an existing one. Returns the in-progress group backup,
     which commits once every member backup completes.
     """
@@ -82,7 +82,7 @@ def export_group_backup(
     cluster: Cluster,
     group_backup_id: str = Query(..., description="Export the group backup with this UUID"),
 ) -> GroupBackupExportDTO:
-    """Export a group backup's manifests as a unit, for import elsewhere (§6.5).
+    """Export a group backup's manifests as a unit, for import elsewhere.
 
     Carries the group manifest plus every member backup's chain, so a hand-carried
     file describes the group backup identically to a bucket read.
@@ -127,7 +127,7 @@ _GroupImportParams = Union[_GroupImportManifests, _GroupImportFromBucket]
 
 @api.post('/import', name='clusters:backups:groups:import')
 def import_group_backup(cluster: Cluster, parameters: _GroupImportParams):
-    """Import a group backup, preserving ids, all-or-nothing (§6.5)."""
+    """Import a group backup, preserving ids, all-or-nothing."""
     try:
         ids = (
             group_backup_controller.import_group_backup_from_bucket(
@@ -148,7 +148,7 @@ def import_group_backup(cluster: Cluster, parameters: _GroupImportParams):
 
 @api.post('/discover', name='clusters:backups:groups:discover')
 def discover_group_backups(parameters: BackupConfigDTO) -> list[GroupBackupManifestDTO]:
-    """List the group backups a bucket contains, without importing anything (§6.5).
+    """List the group backups a bucket contains, without importing anything.
 
     A POST because it carries credentials, which have no business in a query
     string. Takes no cluster state at all: this is what an operator runs when the
@@ -177,7 +177,7 @@ def list_group_backup_members(cluster: Cluster, group_backup: GroupBackupResourc
 
 class _GroupRestoreParams(BaseModel):
     #: Name of the NEW consistency group the restore forms; must not already
-    #: exist (design §6: a group restore always produces a new group).
+    #: exist: a group restore always produces a new group.
     into_group_name: str
     pool: str
     target_node_id: str | None = None
@@ -189,8 +189,8 @@ class _GroupRestoreParams(BaseModel):
 @instance_api.post('/restore', name='clusters:backups:groups:restore', status_code=202)
 def restore_group_backup(cluster: Cluster, group_backup: GroupBackupResource,
                          parameters: _GroupRestoreParams):
-    """Restore a group backup into a NEW consistency group, all-or-nothing
-    (design §6). Returns the restored group id and one entry per restored member
+    """Restore a group backup into a NEW consistency group, all-or-nothing.
+    Returns the restored group id and one entry per restored member
     volume (its id and the source member's name); each volume recovers its data
     asynchronously, the same as a single-volume restore.
     """
@@ -211,7 +211,7 @@ def restore_group_backup(cluster: Cluster, group_backup: GroupBackupResource,
 @instance_api.delete('/', name='clusters:backups:groups:delete',
                      status_code=202, responses={202: {"content": None}})
 def delete_group_backup(cluster: Cluster, group_backup: GroupBackupResource) -> Response:
-    """Start deleting a group backup (design §9). Its record and manifest are
+    """Start deleting a group backup. Its record and manifest are
     marked deleting, and a task retires its member backups and then removes
     both; the record reads ``deleting`` until then, and ``broken`` if the delete
     could not finish after retiring a member."""

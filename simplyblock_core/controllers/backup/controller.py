@@ -997,8 +997,8 @@ def delete_backups(lvol_id):
 def delete_backup(backup_id):
     """Delete ONE backup: its record, its KMS keys and, best effort, its S3
     objects -- the single-record form of :func:`delete_backups`, for a backup
-    that nothing chains against any more (a pruned group generation's leaf
-    copy, design-consistency-group-backup.md §9).
+    that nothing chains against any more, such as a deleted group backup's
+    member that is the last link of its volume's chain.
 
     Raises:
         KeyError: no backup has this id.

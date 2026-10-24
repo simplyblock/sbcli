@@ -419,7 +419,7 @@ def _run_group_backup_commit(task):
 
     Does no data-plane RPC. It watches the member backups -- which the FN_BACKUP
     runner drives independently -- and publishes the group manifest when every
-    one has completed, the all-or-nothing barrier (design §3.3). It defers while
+    one has completed, the all-or-nothing barrier. It defers while
     any member is still in flight, aborts if a member failed, and treats a
     manifest-publish failure as retryable S3 trouble rather than a group failure.
     """
@@ -442,7 +442,7 @@ def _run_group_backup_commit(task):
 
 def _run_group_backup_delete(task):
     """Retire a deleting group backup's members, then remove its manifest and
-    record (design §9).
+    record.
 
     Does no data-plane RPC of its own: a member's merge is its own
     FN_BACKUP_MERGE task, which this waits on. Defers while a member is still
