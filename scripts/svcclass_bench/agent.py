@@ -146,6 +146,8 @@ def _node_kind(nqn):
         return "client"
     if ":dev:" in nqn:
         return "internal-device"
+    if ":transferhub:" in nqn:
+        return "transferhub"    # replication transfers (shares the hublvol port)
     if "hublvol" in nqn:
         return "hublvol"        # internal redirect, or replication: told apart by the peer
     if ":jm" in nqn or "_jm" in nqn:

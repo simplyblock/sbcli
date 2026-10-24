@@ -42,10 +42,18 @@ def _load(path):
     return out
 
 
+def _kind(r):
+    """Subsystem kind of a qpairs record (older collectors filed the
+    transferhub under "other")."""
+    if ":transferhub:" in r.get("nqn", ""):
+        return "transferhub"
+    return r["type"]
+
+
 def _class(kind, local_cluster, peer_cluster):
     if kind == "client":
         return "client"
-    if kind == "hublvol" and peer_cluster is not None and peer_cluster != local_cluster:
+    if kind in ("hublvol", "transferhub") and peer_cluster is not None and peer_cluster != local_cluster:
         return "replication"
     if kind == "other":
         return None
@@ -60,7 +68,7 @@ def endpoints(qpair_recs):
     for r in qpair_recs:
         ip_cluster[r["node_ip"]] = r.get("cluster")
         for port in r.get("listen") or []:
-            port_kinds[(r["node_ip"], str(port))][r["type"]] += 1
+            port_kinds[(r["node_ip"], str(port))][_kind(r)] += 1
     return ip_cluster, {k: c.most_common(1)[0][0] for k, c in port_kinds.items()}
 
 
@@ -70,7 +78,7 @@ def qpair_table(qpair_recs, ip_cluster):
     for r in qpair_recs:
         for peer, n in (r.get("peers") or {}).items():
             peer_ip = peer.rsplit(":", 1)[0]
-            cls = _class(r["type"], r.get("cluster"), ip_cluster.get(peer_ip))
+            cls = _class(_kind(r), r.get("cluster"), ip_cluster.get(peer_ip))
             if cls:
                 out[round(r["t"])][cls] += n
     return out
@@ -78,7 +86,8 @@ def qpair_table(qpair_recs, ip_cluster):
 
 def _split(addr):
     ip, _, port = addr.rpartition(":")
-    return ip.strip("[]").removeprefix("::ffff:"), port
+    # ss prints a local address bound to a device as ip%dev
+    return ip.strip("[]").removeprefix("::ffff:").split("%")[0], port
 
 
 def net_table(net_recs, ip_cluster, listeners):
@@ -110,17 +119,46 @@ def net_table(net_recs, ip_cluster, listeners):
     return [(t, *rows[t]) for t in sorted(rows)]
 
 
-def transfer_table(xfer_recs):
+def _target_write_us(iostat_recs, bdev, t1, t2):
+    """Mean write latency of *bdev* over [t1, t2] (widened to the enclosing
+    samples) on the node where it took the most writes, or None."""
+    best = None
+    by_node = defaultdict(list)
+    for r in iostat_recs:
+        by_node[r["node"]].append(r)
+    for recs in by_node.values():
+        recs.sort(key=lambda r: r["t"])
+        before = [r for r in recs if r["t"] <= t1] or recs[:1]
+        after = [r for r in recs if r["t"] >= t2] or recs[-1:]
+        a, b = before[-1], after[0]
+        if a is b:
+            continue
+        x = next((d for d in a["bdevs"] if d["name"] == bdev), None)
+        y = next((d for d in b["bdevs"] if d["name"] == bdev), None)
+        if not x or not y or not b.get("tick_rate"):
+            continue
+        ops = (y["num_write_ops"] or 0) - (x["num_write_ops"] or 0)
+        if ops > 0 and (best is None or ops > best[0]):
+            ticks = (y["write_latency_ticks"] or 0) - (x["write_latency_ticks"] or 0)
+            best = (ops, ticks / ops * 1e6 / b["tick_rate"])
+    return best[1] if best else None
+
+
+def transfer_table(xfer_recs, iostat_recs=()):
     """Per transfer (snapshot): the last statistics and the time split.
 
     stat_read_us_avg is the source read (replication client side);
-    stat_write_us_avg is the write to the target (network + target); the
-    target's own share is the landing bdev's write latency there, so
-    network = write - target. Approximate: a 64 KiB request is written as up
-    to two writes, timed together on the source and singly on the target."""
-    last = {}
+    stat_write_us_avg is the write to the target (network + target). The
+    transfer writes into the target's lvstore directly, not through the
+    landing bdev, so the target's share is the write latency of the
+    lvstore's base bdev (raid0_<n> of the landing's LVS_<n>) on the target
+    over the transfer; network = write - target. Approximate: that bdev also
+    serves the merges, and a 64 KiB request is written as up to two writes,
+    timed together on the source and singly on the target."""
+    first, last = {}, {}
     for r in xfer_recs:
         if r.get("stat_reqs") is not None:
+            first.setdefault(r["snapshot"], r)
             last[r["snapshot"]] = r
     out = []
     for snap, r in sorted(last.items(), key=lambda kv: kv[1]["t"]):
@@ -128,8 +166,10 @@ def transfer_table(xfer_recs):
         read_us, write_us = r.get("stat_read_us_avg") or 0, r.get("stat_write_us_avg") or 0
         land = r.get("landing") or {}
         target_us = None
-        if land.get("num_write_ops") and land.get("tick_rate"):
-            target_us = land["write_latency_ticks"] / land["num_write_ops"] * 1e6 / land["tick_rate"]
+        lvs = (land.get("bdev") or "").split("/")[0]
+        if lvs.startswith("LVS_"):
+            target_us = _target_write_us(iostat_recs, "raid0_" + lvs[4:],
+                                         r["t"] - elapsed_s, r["t"])
         out.append({
             "snapshot": snap, "volume": r.get("volume"), "partial": r.get("allow_partial"),
             "reqs": n, "bytes": r.get("stat_bytes") or 0, "elapsed_s": elapsed_s,
@@ -180,14 +220,15 @@ def main(run_dir):
 
     print("\n== Replication transfers: time per request ==")
     print(f"  {'snapshot':36} {'kind':5} {'reqs':>9} {'GB':>7} {'s':>6} {'MB/s':>7} {'inflt':>6}"
-          f" {'read us':>8} {'net us':>8} {'tgt us':>8}")
-    xt = transfer_table([r for r in recs if r.get("kind") == "xfer_stat"])
+          f" {'read us':>8} {'write us':>8} {'net us':>8} {'tgt us':>8}")
+    xt = transfer_table([r for r in recs if r.get("kind") == "xfer_stat"],
+                        [r for r in recs if r.get("kind") == "iostat"])
     for x in xt:
         net = f"{x['network_us']:.0f}" if x["network_us"] is not None else "-"
         tgt = f"{x['target_us']:.0f}" if x["target_us"] is not None else "-"
         print(f"  {x['snapshot']:36} {'delta' if x['partial'] else 'full':5} {x['reqs']:9} "
               f"{x['bytes'] / 1e9:7.1f} {x['elapsed_s']:6.0f} {x['mb_s']:7.1f} {x['in_flight']:6.1f}"
-              f" {x['read_us']:8.0f} {net:>8} {tgt:>8}")
+              f" {x['read_us']:8.0f} {x['write_us']:8.0f} {net:>8} {tgt:>8}")
     if xt:
         for part in ("read_us", "network_us", "target_us"):
             vals = [x[part] for x in xt if x[part] is not None]

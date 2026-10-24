@@ -99,8 +99,10 @@ class Host:
                     time.sleep(30)
                 continue
             try:
-                rc = out.channel.recv_exit_status()
+                # read before waiting for the exit: an output larger than the
+                # channel window otherwise blocks the remote command forever
                 o, e = out.read().decode(errors="replace"), err.read().decode(errors="replace")
+                rc = out.channel.recv_exit_status()
             except (paramiko.SSHException, OSError, EOFError) as exc:
                 if not idempotent or attempt == 4:
                     raise
@@ -513,7 +515,8 @@ def run_one(bed, scenario, share, args):
                 # history keeps being written on the mgmt node regardless.
                 try:
                     recs = [r for r in (json.loads(line) for line in bed.mgmt.run(
-                                f"sudo cat {out}", check=False, idempotent=True).splitlines()
+                                f"sudo grep -F '\"kind\": \"snapshot\"' {out}", check=False,
+                                idempotent=True).splitlines()
                                 if line.strip()) if r.get("kind") == "snapshot"]
                 except Exception as e:                     # noqa: BLE001
                     log(f"t+{time.time() - t0:.0f}s poll failed: {e}")
