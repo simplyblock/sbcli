@@ -11,6 +11,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     lvol_controller,
+    qos_controller,
     replication_recovery_points,
     snapshot_controller,
     snapshot_events,
@@ -20,11 +21,49 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
 # get DB controller
 db = db_controller.DBController()
+
+
+def _set_transfer_class(node_ids, bdev, wire_class, what):
+    """Best-effort: set the IO service class of *bdev* on each online node.
+
+    Replication traffic runs in its own service class
+    (constants.QOS_REPLICATION_CLASS_ID). The transfer reads its source in that
+    class by itself (bdev_lvol_transfer priority_class), leaving the source
+    snapshot's own class alone: client reads of the volume fall through to that
+    snapshot and must not be scheduled as replication. The landing volume on
+    the target is written only by the transfer and carries the class as its
+    own; once it is converted it backs fail-over clones, so it is reset to 0
+    (the class SPDK gives every snapshot) here. SPDK does not persist it.
+    """
+    for node_id in node_ids:
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            node.rpc_client(timeout=10).bdev_lvol_set_priority_class(bdev, wire_class)
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("Setting service class %s on %s %s on %s failed (non-fatal): %s",
+                           wire_class, what, bdev, node_id, e)
+
+
+def _replication_class_on(cluster_id):
+    """qos_controller.replication_class_available, but never raises: the
+    service class is an optimisation and must not stop a transfer."""
+    try:
+        return qos_controller.replication_class_available(cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("QoS lookup for cluster %s failed; replicating in Default: %s",
+                       cluster_id, e)
+        return False
 
 
 def _policy_target_pool(lvol, destination_cluster_id):
@@ -46,6 +85,8 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
 
     Most specific wins:
 
+      0. the pool the caller of replication start named, while this is its
+         cluster;
       1. the pool named by the replication TARGET the volume's policy points at,
          when that target IS this destination — it was chosen for this pair;
       2. the SOURCE cluster's snapshot_replication_target_pool, but only when
@@ -60,6 +101,9 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
     pool, and 13 of them ended up stuck in_deletion.
     """
     if lvol is not None:
+        pool_uuid = lvol_controller.requested_destination_pool(db, lvol, remote_node.cluster_id)
+        if pool_uuid:
+            return pool_uuid
         pool_uuid = _policy_target_pool(lvol, remote_node.cluster_id)
         if pool_uuid:
             return pool_uuid
@@ -243,7 +287,14 @@ def _finish_completed_transfer(task, snapshot, offset):
                     bytes=offset)
     with xfer_timing.phase("replicate_finish", snap=snapshot.get_id(),
                            lvol=snapshot.lvol.get_id()):
-        new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+        try:
+            new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+        except RPCException as e:
+            # RPC failures raise; without this they skipped the counted,
+            # backed-off retry below and re-ran the finish on every pass
+            # forever (SFAM-2834).
+            logger.error("Replication finish for snapshot %s failed: %s", snapshot.get_id(), e)
+            new_snapshot_uuid = None
     if new_snapshot_uuid:
         task.function_result = new_snapshot_uuid
         task.status = JobSchedule.STATUS_DONE
@@ -252,6 +303,16 @@ def _finish_completed_transfer(task, snapshot, offset):
     else:
         _suspend_for_retry(task, "complete repl failed, retrying", backoff=True)
     return True
+
+
+def _rpc_or_none(fn, *args):
+    """Call an RPC whose failure the caller handles itself; a raise is
+    logged and reported as None so the caller's failure branch runs."""
+    try:
+        return fn(*args)
+    except RPCException as e:
+        logger.error("%s%s failed: %s", getattr(fn, "__name__", fn), args, e)
+        return None
 
 
 def _backoff_seconds(retry):
@@ -605,11 +666,18 @@ def process_snap_replicate_start(task, snapshot):
         # max_namespace_per_subsys. namespaced is not a persisted field; a
         # max_namespace_per_subsys > 1 IS the "shareable subsystem" signal.
         src_max_ns = snapshot.lvol.max_namespace_per_subsys
+        # The landing volume is written only by the transfer: run it in the
+        # replication service class of the receiving cluster (its own QoS
+        # table decides whether that class exists).
+        landing_class = 0
+        if _replication_class_on(remote_node_uuid.cluster_id):
+            landing_class = constants.QOS_REPLICATION_CLASS_ID
         lv_id, err = lvol_controller.add_lvol_ha(
             f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
             remote_pool_uuid, internal=True,
             namespaced=src_max_ns > 1,
-            max_namespace_per_subsys=src_max_ns)
+            max_namespace_per_subsys=src_max_ns,
+            lvol_priority_class=landing_class)
         if lv_id:
             task.function_params["remote_lvol_id"] = lv_id
             task.write_to_db()
@@ -759,6 +827,10 @@ def process_snap_replicate_start(task, snapshot):
                       lvol=snapshot.lvol.get_id(), size=snapshot.size)
     task.function_params["xfer_submit_t"] = xfer_timing.now()
     task.write_to_db()
+    # The transfer reads the snapshot in the replication class; the
+    # snapshot's own class, which client reads through it use, is untouched.
+    read_class = (constants.QOS_REPLICATION_WIRE_CLASS
+                  if _replication_class_on(snode.cluster_id) else 0)
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
@@ -775,6 +847,7 @@ def process_snap_replicate_start(task, snapshot):
         # replicated snapshot above; the fork independently refuses the delta
         # path unless the snapshot's dirty generation is complete.
         allow_partial=allow_partial,
+        priority_class=read_class,
     )
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
@@ -1555,13 +1628,16 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
             remote_lv.top_bdev, snapshot.get_id())
         return False
 
+    # A node without a secondary is a single-node cluster's: there is no
+    # member to leave holes on, so chaining the node itself is enough.
+    single = not remote_lv_node.secondary_node_id
     sec_node = None
-    if remote_lv_node.secondary_node_id:
+    if not single:
         try:
             sec_node = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
         except KeyError:
             sec_node = None
-    if sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE:
+    if not single and (sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE):
         logger.info(
             "Landing volume %s stays a full-transfer target: the secondary of "
             "%s is not online, and a delta would leave holes on it",
@@ -1596,7 +1672,10 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
     primary_ok = _chain_on(remote_lv_node, "primary")
     # Record whatever actually landed even on the failure path: the entry exists
     # on that node now, and the finish step must not add it a second time.
-    secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
+    if single:
+        secondary_ok = True
+    else:
+        secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
     if prechained != (task.function_params.get("prechained_node_ids") or []):
         task.function_params["prechained_node_ids"] = prechained
         task.write_to_db()
@@ -1768,9 +1847,12 @@ def process_snap_replicate_finish(task, snapshot):
             return False
         _mark_converted(remote_snode)
 
-    # chain snaps on secondary
-    sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
-    if sec_node.status == StorageNode.STATUS_ONLINE and sec_node.get_id() in converted:
+    # chain snaps on secondary; a single-node cluster's node has none
+    sec_node = (db.get_storage_node_by_id(remote_snode.secondary_node_id)
+                if remote_snode.secondary_node_id else None)
+    if sec_node is None:
+        pass
+    elif sec_node.status == StorageNode.STATUS_ONLINE and sec_node.get_id() in converted:
         logger.info("Landing volume %s is already converted on %s; skipping "
                     "its chain and convert", remote_lv.top_bdev, sec_node.get_id())
     elif sec_node.status == StorageNode.STATUS_ONLINE:
@@ -1778,7 +1860,8 @@ def process_snap_replicate_finish(task, snapshot):
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
             with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
                                    lvol=snapshot.lvol.get_id(), node="secondary"):
-                ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+                ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_add_clone,
+                                   remote_lv.top_bdev, target_prev_snap['snap_bdev'])
             if not ret:
                 if _secondary_lacks_bdev(sec_node, target_prev_snap['snap_bdev']) or                         _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
                     # The secondary does not hold the base (-19 No such
@@ -1804,7 +1887,7 @@ def process_snap_replicate_finish(task, snapshot):
         # convert to snapshot on secondary
         with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
                                lvol=snapshot.lvol.get_id(), node="secondary"):
-            ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+            ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_convert, remote_lv.top_bdev)
         if not ret:
             if _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
                 # The landing volume never reached the secondary (its
@@ -1817,6 +1900,12 @@ def process_snap_replicate_finish(task, snapshot):
                 logger.error("Failed to convert to snapshot on secondary node")
                 return False
         _mark_converted(sec_node)
+
+    # The landing volume is a snapshot now and will back fail-over and
+    # test-failover clones: drop the replication class from it.
+    if remote_lv.lvol_priority_class == constants.QOS_REPLICATION_CLASS_ID:
+        _set_transfer_class(remote_lv.nodes or [remote_snode.get_id()], remote_lv.top_bdev, 0,
+                            "replicated snapshot")
 
     new_snapshot_uuid = str(uuid.uuid4())
 
@@ -2106,6 +2195,16 @@ def main():
                                 logger.error("Replication task %s failed: %s",
                                              task.get_id(), e)
                                 res = False
+                                # Spend a retry: a raise used to leave the task
+                                # as it was, so the same failure re-ran on every
+                                # pass and max_retry was never reached.
+                                try:
+                                    task = db.get_task_by_id(task.uuid)
+                                    if task.status != JobSchedule.STATUS_DONE and not task.canceled:
+                                        _suspend_for_retry(task, f"task raised: {e}", backoff=True)
+                                except Exception as e2:
+                                    logger.error("Could not record retry for task %s: %s",
+                                                 task.get_id(), e2)
                             if not res:
                                 time.sleep(3)
 

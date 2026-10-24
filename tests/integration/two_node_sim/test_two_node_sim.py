@@ -19,6 +19,7 @@ from .scenarios import (
     EXTRA,
     FAST,
     KNOWN_FAILING,
+    KUBE,
     NOT_MODELLED,
     PENDING_FIX,
     REGRESSIONS,
@@ -49,6 +50,18 @@ def test_bed_scenario(make_world, sc):
     assert any(signature in f for f in out.failures), (
         "%s fails, but not for its known reason (%s):\n%s" % (sc.name, reason, out.report()))
     pytest.xfail(reason)
+
+
+@pytest.mark.timeout(SCENARIO_TIMEOUT_S)
+@pytest.mark.parametrize("sc", [pytest.param(s, id=s.name, marks=_fast(s.name)) for s in KUBE])
+def test_kubernetes_fencing_scenario(make_world, sc):
+    """docs/design/two-node-kubernetes-fencing.md, mode witness: the bed's
+    criteria plus which hosts are fenced, that a revoked host is locked out on
+    the winner, and that every fence is released without a manual step."""
+    world = make_world(conditions=sc.conditions, host_fencing=sc.host_fencing,
+                       stale_host_lists=sc.stale_host_lists)
+    out = run(world, sc)
+    assert out.passed, out.report()
 
 
 @pytest.mark.timeout(SCENARIO_TIMEOUT_S)

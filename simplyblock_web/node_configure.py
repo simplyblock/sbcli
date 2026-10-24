@@ -194,9 +194,10 @@ def parse_arguments() -> argparse.Namespace:
              '(/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0, '
              '/dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba). A kernel name '
              "(sdb) or kernel path (/dev/sdb) is refused: it states a position in this "
-             "boot's enumeration order, and this configure runs again at every node "
-             'restart, so it names another disk after a reboot that probes the controllers '
-             'in another order',
+             "boot's enumeration order, and it would name another disk after a reboot that "
+             'probes the controllers in another order. The path is taken as given: the node '
+             'records it, and add-node and every restart open the device by that path alone, '
+             'never by serial or kernel name. A path that no longer exists is a missing device',
         type=str,
         default='',
         dest='blk_names',

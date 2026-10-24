@@ -374,6 +374,39 @@ def _reset_generation_if_emptied(group, members):
     return {}
 
 
+def _update_group(group, mutate):
+    """Apply ``mutate`` to the group's record as one read-modify-write.
+
+    Every writer of a group record used to ``read(); change; write_to_db()``,
+    and the write is the WHOLE record, so two writers racing on one group lose
+    one of the changes. A relocate's Disable (``detach_group_policy``) reads
+    the group, then spends seconds stopping each member, while the fail-back
+    promote on the peer deletes the demoted predecessors and ``delete_lvol``
+    closes each one's epoch. The detach's stale write reopened the first
+    deleted member's epoch, the second close then no longer emptied the group,
+    and the next fail-over's resync failed the deleted member back for hours
+    ("LVol … not found", run 20261020-1920-ebs, Gitea test 8).
+
+    ``db.atomic_update`` re-reads the record inside the transaction and
+    replays ``mutate`` on conflict, so ``mutate`` must only change the object
+    it is handed: no I/O, no logging. Returns the record as written, or
+    ``None`` when it no longer exists (nothing is written then: a deleted
+    group has no membership to close and no policy to unlink). A ``db`` with
+    no store or no ``atomic_update`` (the unit-tier fakes) takes the plain
+    write, as before.
+    """
+    updater = getattr(db, "atomic_update", None)
+    if updater is None or getattr(db, "kv_store", None) is None:
+        mutate(group)
+        group.write_to_db(db.kv_store)
+        return group
+    fresh = updater(group, mutate)
+    if fresh is None:
+        logger.warning("Consistency group %s no longer exists; its update is dropped",
+                       group.uuid[:8])
+    return fresh
+
+
 def remove_member_from_group(group, lvol_id):
     """Close the member's epoch at the current generation (detach semantics).
 
@@ -381,13 +414,22 @@ def remove_member_from_group(group, lvol_id):
     untouched (design §8.2), only the epoch's ``removed_seq`` is set -- until the
     member is the last one out, at which point the group is reset to generation 0
     (see :func:`_reset_generation_if_emptied`).
+
+    The close is computed on the record as stored, not on ``group`` as handed
+    in (see :func:`_update_group`): the caller's copy may predate a concurrent
+    policy detach or another member's close.
     """
     if group is None:
         return
-    members = dict(group.members or {})
-    entry = members.get(lvol_id)
-    if entry and entry.get("removed_seq", 0) == 0:
-        if group.last_group_seq < entry.get("joined_seq", 1):
+    outcome: dict = {}
+
+    def _close(fresh):
+        outcome.clear()
+        members = dict(fresh.members or {})
+        entry = members.get(lvol_id)
+        if not entry or entry.get("removed_seq", 0) != 0:
+            return False
+        if fresh.last_group_seq < entry.get("joined_seq", 1):
             # No generation ever contained this member, so there is no history
             # to preserve, and a closed-empty window is unrepresentable:
             # removed_seq == 0 is the open-epoch sentinel, so stamping
@@ -395,19 +437,30 @@ def remove_member_from_group(group, lvol_id):
             # open and the member would count as one forever (2026-09-11: a
             # restored group at generation 0 kept every deleted member).
             del members[lvol_id]
-            group.members = _reset_generation_if_emptied(group, members)
-            group.write_to_db(db.kv_store)
-            logger.info("Volume %s left consistency group %s before any "
-                        "generation contained it; membership entry dropped",
-                        lvol_id, group.uuid[:8])
-            return
-        entry = dict(entry)
-        entry["removed_seq"] = group.last_group_seq
-        members[lvol_id] = entry
+            outcome["dropped"] = True
+        else:
+            entry = dict(entry)
+            entry["removed_seq"] = fresh.last_group_seq
+            members[lvol_id] = entry
+            outcome["removed_seq"] = entry["removed_seq"]
+        if not any(m.get("removed_seq", 0) == 0 for m in members.values()):
+            outcome["emptied"] = fresh.last_group_seq
+            members = {}
+        fresh.members = members
+        return True
+
+    if _update_group(group, _close) is None or not outcome:
+        return
+    if outcome.get("dropped"):
+        logger.info("Volume %s left consistency group %s before any "
+                    "generation contained it; membership entry dropped",
+                    lvol_id, group.uuid[:8])
+    else:
         logger.info("Volume %s left consistency group %s (included up to "
-                    "generation %d)", lvol_id, group.uuid[:8], entry["removed_seq"])
-        group.members = _reset_generation_if_emptied(group, members)
-        group.write_to_db(db.kv_store)
+                    "generation %d)", lvol_id, group.uuid[:8], outcome["removed_seq"])
+    if "emptied" in outcome:
+        logger.info("Consistency group %s has no live members; closed epochs cleared, "
+                    "generation counter kept at %d", group.uuid[:8], outcome["emptied"])
 
 
 def remove_member(policy_id, lvol_id):
@@ -606,9 +659,10 @@ def attach_group_policy(group, policy_id):
         raise ConsistencyGroupError(f"replication policy {policy_id} not found")
     target = db.get_replication_target_by_id(pol.target_id)
 
-    group = db.get_consistency_group_by_id(group.get_id())
-    group.policy_id = pol.get_id()
-    group.write_to_db(db.kv_store)
+    policy_id = pol.get_id()
+    group = _update_group(group, lambda g: setattr(g, "policy_id", policy_id))
+    if group is None:
+        raise ConsistencyGroupError(f"consistency group {policy_id} no longer exists")
 
     open_members = [m for m in list_members(group) if not m.get("removed_seq")]
     for member in open_members:
@@ -704,8 +758,10 @@ def detach_group_policy(group):
         if member.get("removed_seq"):
             continue
         replication_policy_controller.stop_member_replication(member["lvol_id"])
-    group.policy_id = ""
-    group.write_to_db(db.kv_store)
+    # Stopping the members takes seconds, and a member may leave the group
+    # meanwhile (a fail-back promote deleting it): unlink the policy on the
+    # record as it is NOW, never by writing the copy read above back.
+    group = _update_group(group, lambda g: setattr(g, "policy_id", "")) or group
     logger.info("Consistency group %s detached from its replication policy",
                 group.uuid[:8])
     return group
@@ -983,10 +1039,13 @@ def failback_group(group, source_cluster_id=None):
                           "to fail back: the resync was addressed to the retired group, "
                           "resolve to the live peer group first")}
 
+    # Only the members that exist as volumes: an open entry whose record is
+    # gone (a stale epoch, run 20261020-1920-ebs) has nothing to fail back and
+    # must not fail the live members' re-protect with it.
     members = []
     configured = True
-    for member in list_members(group):
-        lvol_id = member["lvol_id"]
+    for lvol in member_lvols:
+        lvol_id = lvol.get_id()
         result = lvol_controller.replication_failback(lvol_id, source_cluster_id=source_cluster_id)
         if isinstance(result, tuple) or not result:
             configured = False

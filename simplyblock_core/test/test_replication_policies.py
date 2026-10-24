@@ -1190,6 +1190,48 @@ def test_failback_group_clones_settled_targets_not_skipped(monkeypatch):
     assert all(r["status"] == "failed_over" for r in results), results
 
 
+def test_failback_group_refuses_a_cut_whose_copies_are_not_on_the_home_cluster(monkeypatch):
+    """#34: after a re-protect that aimed the peer's replication at ITSELF, every
+    generation's "home" copy is recorded on the peer's own cluster. Its task is
+    DONE and the copy is present, so the cut used to qualify -- and the clone on
+    the home node then failed with "No such device" (run 20261016-1108, WordPress
+    from LVS_13/LVOL_104 on B, Gitea from LVS_4 on A). A copy counts as shipped
+    home only when it is on the home cluster; otherwise refuse, naming why."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    for copy_id in ("H1_PB1", "H1_PB2"):
+        db.get_snapshot_by_id(copy_id).cluster_id = "CL_TGT"      # beside the live clone
+    touched: list = []
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        touched.append(lvol_id)
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(local)
+    assert touched == [], "no clone may be attempted from a copy that is not home"
+    assert all(r["status"] == "failed" for r in results), results
+    assert "not on the home cluster CL_SRC" in results[0]["detail"], results[0]["detail"]
+
+
+def test_failback_group_accepts_copies_recorded_on_the_home_cluster(monkeypatch):
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    for copy_id in ("H1_PB1", "H1_PB2"):
+        db.get_snapshot_by_id(copy_id).cluster_id = "CL_SRC"
+    pins: dict = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    rpc.failover_group(local)
+    assert pins == {"PB1": "D1_PB1", "PB2": "D1_PB2"}
+
+
 def test_failback_group_refuses_until_the_demote_cut_finished_shipping(monkeypatch):
     """A fail-back cut is atomic: if the demote generation has shipped home for one
     member but not the other, refuse rather than clone a split group -- and clone
@@ -1460,6 +1502,33 @@ def test_direct_replication_start_refused_on_a_policy_managed_volume(monkeypatch
     monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
     assert lvol_controller.replication_start("LV1", replication_cluster_id="CL_OTHER") is False
     assert lvol_controller.replication_stop("LV1") is False
+
+
+def test_replication_start_refuses_the_volumes_own_cluster(monkeypatch):
+    """#34: handed its own cluster as the destination, replication_start picked a
+    node ON that cluster (the chain picker found the volume's own snapshots) and
+    the volume replicated to itself with a healthy status. Refuse up front."""
+    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.models.storage_node import StorageNode
+
+    lv = _lvol("LV1")
+    lv.node_id = "N1"
+    node = StorageNode()
+    node.uuid, node.cluster_id, node.status = "N1", "CL_SRC", StorageNode.STATUS_ONLINE
+    writes: list = []
+
+    class _DB:
+        def get_lvol_by_id(self, lvol_id):
+            return lv
+
+        def get_storage_node_by_id(self, node_id):
+            return node
+
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: writes.append(self.do_replicate))
+    assert lvol_controller.replication_start("LV1", replication_cluster_id="CL_SRC",
+                                             from_policy=True) is False
+    assert writes == [], "nothing persisted for a refused start"
 
 
 def test_policy_controller_may_drive_the_raw_verbs(monkeypatch):
