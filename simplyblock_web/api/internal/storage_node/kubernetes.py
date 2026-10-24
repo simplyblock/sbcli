@@ -137,6 +137,9 @@ def get_info():
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
         "network_interface": core_utils.get_nics_data(),
+        # The agent may run in the pod network, where its own interfaces are not the
+        # host's. The DaemonSet hands it the worker's address.
+        "host_ip": os.environ.get("HOST_IP", ""),
 
         "cloud_instance": node_info["cloud_info"],
         "nodes_config": get_nodes_config(),

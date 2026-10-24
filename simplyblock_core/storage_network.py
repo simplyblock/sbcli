@@ -8,6 +8,7 @@ reads from the host describes them. The agent's start call returns what the pod 
 import uuid
 
 from simplyblock_core.models.iface import IFace
+from simplyblock_core.utils import get_mgmt_ip
 
 MANAGEMENT_INTERFACE = "mgmt0"
 ATTACHED_NET_TYPE = "attached"
@@ -46,3 +47,15 @@ def apply_report(snode, report: dict) -> None:
     known = {nic.if_name: nic.uuid for nic in snode.data_nics}
     snode.spdk_ip = spdk_ip
     snode.data_nics = [IFace({**nic, "uuid": known.get(nic["if_name"], nic["uuid"])}) for nic in nics]
+
+
+def host_mgmt(node_info: dict, iface_name: str, networks) -> tuple[str, str] | None:
+    """The worker's address and the interface it is on, for the node's identity.
+
+    A node on the host network names the interface the agent reads it from. With attached
+    networks the agent runs in the pod network and cannot see the host's interfaces, so it
+    reports the host's address itself, and no interface is named."""
+    if networks:
+        host_ip = node_info.get("host_ip")
+        return (host_ip, iface_name or "") if host_ip else None
+    return get_mgmt_ip(node_info, iface_name)

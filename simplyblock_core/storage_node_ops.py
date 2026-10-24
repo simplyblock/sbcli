@@ -3751,7 +3751,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         #     if node_info['cluster_id'] != cluster_id:
         #         logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
         #         return False
-        ip_iface = utils.get_mgmt_ip(node_info, iface_name)
+        ip_iface = storage_network.host_mgmt(node_info, iface_name, networks)
         mgmt_ip = ip_iface[0] if ip_iface else None
 
         # A host's failure domain is immutable for the lifetime of its node
@@ -4002,7 +4002,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
-        mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
+        mgmt_info = storage_network.host_mgmt(node_info, iface_name, networks)
         if not mgmt_info:
             logger.error(f"No management interface with IP found in provided interfaces: {iface_name}")
             return False

@@ -3,6 +3,7 @@ restart (operator design-storage-network.md §5, P0-1): v2 node-add parameters,
 the node agent request body, and the StorageNode record."""
 
 import json
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -238,3 +239,47 @@ class TestApplyingAReportToANode:
         source = inspect.getsource(storage_node_ops.add_node)
         assert "storage_network.from_report(results)" in source
         assert "snode.spdk_ip = spdk_ip" in source
+
+
+class TestTheWorkersAddressOfANodeOnAttachedNetworks:
+    INFO: ClassVar[dict] = {"hostname": "w1", "host_ip": "192.168.10.62", "network_interface": {"eth0": {"ip": "10.42.1.9"}}}
+
+    def test_a_named_host_interface_still_decides_it(self):
+        from simplyblock_core import storage_network
+
+        assert storage_network.host_mgmt(self.INFO, "eth0", networks=[]) == ("10.42.1.9", "eth0")
+
+    def test_with_networks_and_no_interface_the_agent_reports_its_hosts_address(self):
+        from simplyblock_core import storage_network
+
+        assert storage_network.host_mgmt(self.INFO, "", networks=[{"interface": "data0"}]) == ("192.168.10.62", "")
+
+    def test_with_networks_the_hosts_address_wins_over_the_pods_own_interface(self):
+        from simplyblock_core import storage_network
+
+        assert storage_network.host_mgmt(self.INFO, "eth0", networks=[{"interface": "data0"}])[0] == "192.168.10.62"
+
+    def test_without_networks_and_without_an_interface_there_is_no_address(self):
+        from simplyblock_core import storage_network
+
+        assert storage_network.host_mgmt(self.INFO, "", networks=[]) is None
+
+    def test_an_agent_that_reports_no_host_address_gives_none_for_a_networked_node(self):
+        from simplyblock_core import storage_network
+
+        assert storage_network.host_mgmt({"network_interface": {}}, "", networks=[{"interface": "data0"}]) is None
+
+    def test_add_node_asks_this_instead_of_the_host_interface_directly(self):
+        import inspect
+
+        from simplyblock_core import storage_node_ops
+
+        source = inspect.getsource(storage_node_ops.add_node)
+        assert source.count("storage_network.host_mgmt(node_info, iface_name, networks)") == 2
+
+    def test_the_agent_reports_its_host_address(self):
+        import inspect
+
+        from simplyblock_web.api.internal.storage_node import kubernetes
+
+        assert '"host_ip"' in inspect.getsource(kubernetes.get_info)
