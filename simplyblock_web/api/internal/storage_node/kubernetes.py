@@ -422,6 +422,7 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
             'SPDK_PROXY_TLS_SECRET': body.spdk_proxy_tls_secret,
+            'AGENT_IP': os.environ.get("POD_IP", "") if body.networks else "",
             'NETWORKS': network_attachments.annotation(body.networks),
             'NETWORK_RESOURCES': network_attachments.resources(body.networks),
         }

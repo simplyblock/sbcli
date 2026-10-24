@@ -205,3 +205,42 @@ class TestTheStartEndpointReportsTheNetworksItAttached:
     def test_it_waits_for_the_pod_to_report_only_when_it_attached_networks(self):
         source = self._source()
         assert "if body.networks:" in source and "network_attachments.wait_for_report(" in source
+
+
+def _render_init_job(**extra):
+    env = Environment(loader=FileSystemLoader(str(deploy_template.TEMPLATE_DIR)), trim_blocks=True, lstrip_blocks=True)
+    values = dict(NAMESPACE="simplyblock", HOSTNAME="w1", JOBNAME="snode-spdk-job-w1", SIMPLYBLOCK_DOCKER_IMAGE="sb:test",
+                  TLS_CONNECT="disabled", TLS_SERVE=False, TLS_PROVIDER="cert-manager", OPENSHIFT_MCP="", MODE="kubernetes")
+    values.update(extra)
+    docs = [d for d in yaml.safe_load_all(env.get_template("storage_init_job.yaml.j2").render(values)) if d]
+    return docs[0]
+
+
+def _init_container(job):
+    return job["spec"]["template"]["spec"]["containers"][0]
+
+
+def test_the_preparation_job_calls_the_agent_at_its_pod_address_when_the_agent_is_off_the_host_network():
+    container = _init_container(_render_init_job(AGENT_IP="10.42.1.9"))
+
+    env = {e["name"]: e for e in container["env"]}
+    assert env["API_HOST"]["value"] == "10.42.1.9"
+    script = "\n".join(container.get("command", []) + container.get("args", []))
+    assert "${API_HOST:-$NODE_IP}:5000/snode/apply_config" in script
+
+
+def test_the_preparation_job_still_calls_the_host_address_when_the_agent_is_on_the_host_network():
+    job = _render_init_job()
+
+    container = _init_container(job)
+    assert "API_HOST" not in {e["name"] for e in container["env"]}
+    script = "\n".join(container.get("command", []) + container.get("args", []))
+    assert "${API_HOST:-$NODE_IP}:5000/snode/apply_config" in script
+
+
+def test_the_start_endpoint_gives_the_job_the_agents_own_address_when_networks_are_attached():
+    import inspect
+
+    from simplyblock_web.api.internal.storage_node import kubernetes
+
+    assert "'AGENT_IP': os.environ.get(\"POD_IP\", \"\") if body.networks else \"\"" in inspect.getsource(kubernetes.spdk_process_start)
