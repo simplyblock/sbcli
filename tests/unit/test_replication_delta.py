@@ -326,5 +326,49 @@ class TestLandingMerge(unittest.TestCase):
         self.assertEqual(res, "retry")
 
 
+
+class TestMergeHandOff(unittest.TestCase):
+    """The merges of a volume run one after another; the runner must not
+    leave the target idle between them (bed run 4: ~50 s per cycle)."""
+
+    def _task(self, snap_id, **params):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        return SimpleNamespace(function_name=JobSchedule.FN_SNAPSHOT_REPLICATION,
+                               status=JobSchedule.STATUS_RUNNING, canceled=False, uuid=snap_id,
+                               cluster_id="cl", function_params={"snapshot_id": snap_id, **params})
+
+    def test_the_successor_is_finished_as_soon_as_the_copy_exists(self):
+        done = self._task("s1")
+        waiting = self._task("s2", chain_deferred_to="s1", transfer_done=True)
+        other = self._task("s3", chain_deferred_to="s0", transfer_done=True)
+        db = MagicMock()
+        db.get_job_tasks.return_value = [done, other, waiting]
+        db.get_snapshot_by_id.side_effect = lambda i: SimpleNamespace(get_id=lambda: i)
+        with patch.object(snapshot_replication, "db", db),                 patch.object(snapshot_replication, "_resume_finish") as resume:
+            snapshot_replication._hand_off_to_successor(done, SimpleNamespace(get_id=lambda: "s1"))
+        resume.assert_called_once()
+        self.assertIs(resume.call_args.args[0], waiting)
+        self.assertEqual(resume.call_args.args[1].get_id(), "s2")
+
+    def test_a_successor_still_transferring_is_left_alone(self):
+        done = self._task("s1")
+        waiting = self._task("s2", chain_deferred_to="s1")
+        db = MagicMock()
+        db.get_job_tasks.return_value = [done, waiting]
+        with patch.object(snapshot_replication, "db", db),                 patch.object(snapshot_replication, "_resume_finish") as resume:
+            snapshot_replication._hand_off_to_successor(done, SimpleNamespace(get_id=lambda: "s1"))
+        resume.assert_not_called()
+
+    def test_the_runner_passes_fast_while_replication_is_in_flight(self):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        running = self._task("s1")
+        idle = self._task("s2")
+        idle.status = JobSchedule.STATUS_DONE
+        self.assertTrue(snapshot_replication._replication_in_flight([idle, running]))
+        self.assertFalse(snapshot_replication._replication_in_flight([idle]))
+        c = snapshot_replication.constants
+        self.assertLess(c.REPL_ACTIVE_PASS_SEC, c.TASK_EXEC_INTERVAL_SEC)
+        self.assertEqual(c.REPL_MERGE_INLINE_WAIT_SEC, 0)
+
 if __name__ == "__main__":
     unittest.main()
