@@ -288,6 +288,16 @@ def _check_ping_from_node(ip, ifname, node):
     # node DOWN on that; the caller ignores None and re-evaluates next cycle.
     # (The previous mgmt-side ICMP fallback pinged the data IP from mgmt, which
     # is typically off the data VLAN -> always False -> spurious node-down.)
+    if node.networks:
+        # The interface is in the SPDK pod's namespace, which the node agent cannot
+        # see, so the pod's own proxy is asked.
+        try:
+            rpc = node.rpc_client(timeout=8, retry=1)
+            return bool(rpc.link_state(ifname)) and bool(rpc.net_ping(ifname, ip))
+        except Exception as e:
+            logger.error(e)
+            logger.info("data-nic check through the SPDK proxy failed; treating as inconclusive")
+            return None
     snodeapi = node.client(timeout=8, retry=1, connect_retry=0)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
