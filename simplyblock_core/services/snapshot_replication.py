@@ -222,8 +222,6 @@ def _finishing_predecessor(snapshot, replicate_to_source):
     the wrong base. None when the predecessor is replicated (the normal path)
     or not finishing.
     """
-    attr = ("source_replicated_snap_uuid" if replicate_to_source
-            else "target_replicated_snap_uuid")
     prev = None
     for s in db.get_snapshots_by_node_id(snapshot.lvol.node_id):
         if (s.lvol.get_id() == snapshot.lvol.get_id()
@@ -232,7 +230,11 @@ def _finishing_predecessor(snapshot, replicate_to_source):
                 and s.created_at < snapshot.created_at
                 and (prev is None or s.created_at > prev.created_at)):
             prev = s
-    if prev is None or getattr(prev, attr, ""):
+    if prev is None:
+        return None
+    copy = (prev.source_replicated_snap_uuid if replicate_to_source
+            else prev.target_replicated_snap_uuid)
+    if copy:
         return None
     return prev if _transfer_completed(prev, replicate_to_source) else None
 
