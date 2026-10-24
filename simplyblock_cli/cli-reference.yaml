@@ -3114,6 +3114,17 @@ commands:
             dest: into
             type: str
             required: false
+      - name: backup-create
+        help: "Back up one generation of a consistency group to S3 as one all-or-nothing unit. Takes a fresh crash-consistent generation unless --group-seq names an existing one."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--group-seq"
+            help: "Back up an existing generation by its sequence number. Omit to take a fresh generation."
+            dest: group_seq
+            type: int
   - name: "backup"
     help: "Backup Commands"
     weight: 650
@@ -3335,6 +3346,168 @@ commands:
             help: "The target id (storage pool or logical volume id)."
             dest: target_id
             type: str
+  - name: "group-backup"
+    help: "Consistency-group backup commands"
+    aliases:
+      - gb
+    weight: 655
+    subcommands:
+      - name: list
+        help: "List the cluster's consistency-group backups."
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: get
+        help: "Show one consistency-group backup and its members."
+        arguments:
+          - name: "group_backup_id"
+            help: "Group backup id (or uuid)."
+            dest: group_backup_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: restore
+        help: "Restore a consistency-group backup into a NEW consistency group, all-or-nothing. Each member volume recovers asynchronously."
+        arguments:
+          - name: "group_backup_id"
+            help: "Group backup id (or uuid)."
+            dest: group_backup_id
+            type: str
+          - name: "--name"
+            help: "Name of the NEW consistency group to form from the restored volumes. Must not already exist."
+            dest: into_group_name
+            type: str
+            required: true
+          - name: "--pool"
+            help: "The target pool name or id."
+            dest: pool
+            type: str
+            required: true
+          - name: "--node"
+            help: "The target storage node id. Omit to auto-select; every member is pinned to one store."
+            dest: node
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the backup's bucket, when it is not this cluster's own."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the backup's bucket, when it is not this cluster's own."
+            dest: secret_access_key
+            type: secret
+      - name: delete
+        help: "Delete a consistency-group backup: its group manifest and record. Its member backups are retired: merged into the copy of the next generation while that chains against them, deleted once nothing does."
+        arguments:
+          - name: "group_backup_id"
+            help: "Group backup id (or uuid)."
+            dest: group_backup_id
+            type: str
+      - name: export
+        help: "Export a consistency-group backup's manifests as a unit, to a JSON file for cross-cluster restore."
+        arguments:
+          - name: "group_backup_id"
+            help: "Group backup id (or uuid)."
+            dest: group_backup_id
+            type: str
+          - name: "--cluster-id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+          - name: "-o"
+            aliases:
+              - "--output"
+            help: "The output file path."
+            dest: output
+            type: str
+      - name: discover
+        help: "List the consistency-group backups a bucket contains, reading its group manifests. Needs no cluster."
+        arguments:
+          - name: "--bucket"
+            help: "The bucket holding the group backups."
+            dest: bucket
+            type: str
+            required: true
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
+      - name: import
+        help: "Register the consistency-group backups held in a bucket, or in an export file, into this cluster."
+        arguments:
+          - name: "--cluster-id"
+            help: "The target cluster to import into (required for cross-cluster restore)."
+            dest: cluster_id
+            type: str
+          - name: "--bucket"
+            help: "Import every group backup in this bucket. Give this or --from-file, not both."
+            dest: bucket
+            type: str
+          - name: "--from-file"
+            help: "Import the group backup in this file, from 'group-backup export'. It records which bucket its members live in, so --bucket is neither needed nor accepted."
+            dest: from_file
+            type: str
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
   - name: "qos"
     help: "QoS Commands"
     weight: 700

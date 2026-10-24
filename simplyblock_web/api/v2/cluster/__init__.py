@@ -28,6 +28,7 @@ from .alert import api as alert_api
 from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
+from .group_backup import api as group_backup_api
 from .migration_plan import api as migration_plan_api
 from .qos import api as qos_api
 from .replication import api as replication_api
@@ -334,6 +335,9 @@ instance_api.include_router(arbitration_api, prefix='/arbitration')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
+# Ahead of the single-volume backups, whose /backups/{backup_id}/ would
+# otherwise take "groups" for a backup id.
+instance_api.include_router(group_backup_api, prefix='/backups/groups')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')

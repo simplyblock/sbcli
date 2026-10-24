@@ -746,7 +746,7 @@ def take_due_internal_snapshots(cluster_id, now_ts):
             group = db.get_consistency_group_by_id(group_id)
             logger.info("Taking consistency-group snapshot for group %s "
                         "(%d members)", group_id, len(members))
-            _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
+            _seq, err = consistency_group_controller.create_group_snapshot_for_group(group)
             if err:
                 logger.warning("Group snapshot for group %s failed: %s",
                                group_id, err)

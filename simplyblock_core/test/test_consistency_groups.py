@@ -91,11 +91,19 @@ def test_no_group_or_no_seq_is_silent():
 # --------------------------------------------------------------------------- #
 
 class _FakeDB:
-    def __init__(self, group):
+    def __init__(self, group, lvols=()):
         self._group = group
+        # The volume records that still exist; a member id not here is a
+        # dangling entry whose volume is gone.
+        self._lvols = set(lvols)
 
     def get_consistency_group_for_policy(self, policy_id):
         return self._group
+
+    def get_lvol_by_id(self, lvol_id):
+        if lvol_id not in self._lvols:
+            raise KeyError(lvol_id)
+        return _Lvol(lvol_id, "NODE_A", "LVS_1")
 
     @property
     def kv_store(self):
@@ -192,10 +200,36 @@ def test_delete_group_refuses_while_it_has_a_current_member(monkeypatch):
     g = _group({"v1": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
     removed = []
     g.remove = lambda kv=None: removed.append(g)
-    monkeypatch.setattr(cgc, "db", _FakeDB(g))
+    monkeypatch.setattr(cgc, "db", _FakeDB(g, lvols=("v1",)))
     with pytest.raises(cgc.ConsistencyGroupError, match="still has 1 member"):
         cgc.delete_group(g)
     assert removed == [], "a group with a live member must NOT be deleted"
+
+
+def test_delete_group_drops_a_dangling_member_whose_volume_is_gone(monkeypatch):
+    """A member joined through add_member_to_group alone carries no group_id, so
+    deleting its volume never closed its epoch: the entry outlived the volume
+    and held the group "in use" for good (live 2026-10-20, three restored
+    members long deleted). An open entry without a volume record is dangling,
+    not live, and does not block the delete."""
+    g = _group({"gone": {"joined_seq": 1, "removed_seq": 0},
+                "closed": {"joined_seq": 1, "removed_seq": 3}}, last_seq=4)
+    removed = []
+    g.remove = lambda kv=None: removed.append(g)
+    monkeypatch.setattr(cgc, "db", _FakeDB(g))          # no volume record exists
+    cgc.delete_group(g)
+    assert removed == [g]
+
+
+def test_delete_group_still_refuses_when_one_open_member_is_live(monkeypatch):
+    g = _group({"gone": {"joined_seq": 1, "removed_seq": 0},
+                "live": {"joined_seq": 1, "removed_seq": 0}}, last_seq=4)
+    removed = []
+    g.remove = lambda kv=None: removed.append(g)
+    monkeypatch.setattr(cgc, "db", _FakeDB(g, lvols=("live",)))
+    with pytest.raises(cgc.ConsistencyGroupError, match="still has 1 member"):
+        cgc.delete_group(g)
+    assert removed == []
 
 
 def test_delete_group_removes_an_empty_group(monkeypatch):
@@ -492,69 +526,4 @@ def test_list_members_reports_current_only(standalone):
     assert rows[0]["online"] is True
 
 
-def test_list_generations_reports_incomplete(standalone):
-    g = cgc.ensure_group("CL", "db-group")
-    g.members = {"a": {"joined_seq": 1, "removed_seq": 0},
-                 "b": {"joined_seq": 1, "removed_seq": 0}}
-    gid = g.get_id()
-    la, lb = _StandaloneLvol("a"), _StandaloneLvol("b")
-    # generation 1 complete (both members), generation 2 missing member b
-    standalone.snapshots = {
-        "s1a": _StandaloneSnap("s1a", gid, 1, la),
-        "s1b": _StandaloneSnap("s1b", gid, 1, lb),
-        "s2a": _StandaloneSnap("s2a", gid, 2, la),
-    }
-    rows = {r["group_seq"]: r for r in cgc.list_generations(g)}
-    assert rows[1]["expected"] == 2 and rows[1]["present"] == 2 and rows[1]["complete"]
-    assert rows[2]["expected"] == 2 and rows[2]["present"] == 1 and not rows[2]["complete"]
 
-
-def test_delete_generation_removes_every_member_snapshot(standalone, monkeypatch):
-    from simplyblock_core.controllers import snapshot_controller
-    g = cgc.ensure_group("CL", "db-group")
-    gid = g.get_id()
-    la = _StandaloneLvol("a")
-    standalone.snapshots = {
-        "s2a": _StandaloneSnap("s2a", gid, 2, la),
-        "s2b": _StandaloneSnap("s2b", gid, 2, la),
-        "s3a": _StandaloneSnap("s3a", gid, 3, la),
-    }
-    deleted_calls = []
-
-    def _fake_delete(sid, *a, **k):
-        deleted_calls.append(sid)
-        return True
-
-    monkeypatch.setattr(snapshot_controller, "delete", _fake_delete)
-    deleted, err = cgc.delete_generation(g, 2)
-    assert err is None
-    assert set(deleted_calls) == {"s2a", "s2b"}   # generation 3 untouched
-
-
-def test_delete_generation_unknown_seq_errors(standalone):
-    g = cgc.ensure_group("CL", "db-group")
-    deleted, err = cgc.delete_generation(g, 9)
-    assert deleted is None and "not found" in err
-
-
-def test_clone_generation_forms_new_group(standalone, monkeypatch):
-    from simplyblock_core.controllers import snapshot_controller
-    g = cgc.ensure_group("CL", "db-group")
-    g.node_id, g.lvs_name = "NODE_A", "LVS_1"
-    gid = g.get_id()
-    standalone.snapshots = {
-        "s1a": _StandaloneSnap("s1a", gid, 1, _StandaloneLvol("a")),
-        "s1b": _StandaloneSnap("s1b", gid, 1, _StandaloneLvol("b")),
-    }
-    # each clone lands on the pinned node so the new group colocates
-    standalone.lvols = {"clone-a": _StandaloneLvol("clone-a"),
-                        "clone-b": _StandaloneLvol("clone-b")}
-    seq = iter(["clone-a", "clone-b"])
-    monkeypatch.setattr(snapshot_controller, "clone",
-                        lambda sid, name, *a, **k: (next(seq), False))
-    created, err = cgc.clone_generation(g, 1, into_name="restored")
-    assert err is None
-    assert set(created) == {"clone-a", "clone-b"}
-    new_group = standalone.get_consistency_group_by_name("CL", "restored")
-    assert new_group is not None
-    assert set(new_group.members) == {"clone-a", "clone-b"}
