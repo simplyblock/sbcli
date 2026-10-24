@@ -12,7 +12,10 @@ from pathlib import Path
 
 import boto3
 import requests
-from exceptions.custom_exception import LvolNotConnectException
+from exceptions.custom_exception import (
+    ClusterUnhealthyBeforeTest,
+    LvolNotConnectException,
+)
 from logger_config import setup_logger, start_log_flusher
 from utils.common_utils import CommonUtils, sleep_n_sec
 from utils.fio_defaults import FIO_MAX_LATENCY
@@ -310,7 +313,7 @@ class TestClusterBase:
                     f"not healthy after {timeout}s:\n" + "\n".join(unhealthy)
                 )
                 self.logger.error(msg)
-                raise RuntimeError(msg)
+                raise ClusterUnhealthyBeforeTest(msg)
 
             self.logger.info(
                 "%d node(s) not yet healthy, retrying in 20s...\n%s",

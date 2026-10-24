@@ -38,6 +38,7 @@ from __init__ import (
 )
 from e2e_tests.cluster_test_base import TestClusterBase
 from exceptions.custom_exception import (
+    ClusterUnhealthyBeforeTest,
     MultipleExceptions,
     SkippedTestsException,
     TestNotFoundException,
@@ -403,6 +404,23 @@ def main():
 
     errors = {}
     passed_cases = []
+    # Consecutive cases that could not start because the cluster was unhealthy,
+    # and how many of those are worth spending before giving up on the run.
+    #
+    # Run 40080313048 (2026-10-24): a migration suspended the cluster at
+    # 10:11:55 and nothing resumes a suspended cluster, so each of the 18
+    # remaining cases spent 300s failing the pre-test health check and the rest
+    # of its ~22-minute box failing teardown against it -- 6h40m, 190 identical
+    # "cluster status is suspended" errors, and a summary reading "19 failed"
+    # for one defect. The check was right every time; nothing acted on it.
+    #
+    # Two rather than one: a single unhealthy reading can be a node still
+    # rejoining after the case before it, and the check already retries for
+    # five minutes before it raises. Two in a row is a cluster that is not
+    # coming back on its own.
+    unhealthy_streak = 0
+    abort_after = int(os.environ.get("HEALTH_ABORT_AFTER", "2"))
+    aborted_for_health = None
     # Per-test NFS log directory, for the Slack summary. A failure
     # notification that names the test but not its logs makes the reader go
     # hunting for a path the run summary already knew.
@@ -454,13 +472,28 @@ def main():
             # Deliberately NOT added to errors: the summary reports anything
             # that is neither passed nor failed as SKIPPED.
             logger.warning(f"{test.__name__} SKIPPED: {exp}")
+            unhealthy_streak = 0
             # Deliberately NOT incremented here. The final tally counts every
             # case that is neither passed nor failed, which already includes
             # this one -- incrementing as well reported one skip as two.
+        except ClusterUnhealthyBeforeTest as exp:
+            # Not a test failure: the case never ran. Recording it as one would
+            # charge the product for a cluster that was already gone, which is
+            # how one defect got reported as nineteen. It lands in neither
+            # passed_cases nor errors, so the summary counts it as SKIPPED --
+            # and skipped cases still fail the run, at the bottom of main().
+            unhealthy_streak += 1
+            logger.error(
+                "%s NOT RUN (%d in a row): the cluster was not healthy when it "
+                "tried to start -- %s",
+                test.__name__, unhealthy_streak, exp)
         except Exception as exp:
             tb = traceback.format_exc()
             logger.error(tb)
             errors[f"{test.__name__}"] = [exp, tb]
+            unhealthy_streak = 0
+        else:
+            unhealthy_streak = 0
         _test_failed = f"{test.__name__}" in errors
         _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
         if _skip_k8s:
@@ -632,6 +665,21 @@ def main():
                     ]
                     break
 
+        if unhealthy_streak >= abort_after:
+            remaining = [t.__name__ for t in test_class_run[i + 1:]]
+            aborted_for_health = (
+                f"{unhealthy_streak} case(s) in a row could not start because "
+                f"the cluster was not healthy. Nothing in this suite can "
+                f"recover it, so the remaining {len(remaining)} case(s) were "
+                f"not run: {', '.join(remaining) or 'none'}")
+            logger.error("ABORTING THE SUITE: %s", aborted_for_health)
+            logger.error(
+                "Look at what the cluster did before the first of those, not "
+                "at the cases themselves -- they never ran. "
+                "`sbctl cluster list` and the alert log are the place to "
+                "start; a cluster in SUSPENDED does not resume by itself.")
+            break
+
     failed_cases = list(errors.keys())
     # skipped_cases so far counts only cases dropped BEFORE the run, which
     # never entered test_class_run (missing --new-nodes and friends). Cases
@@ -654,6 +702,11 @@ def main():
 
         *Test Wise Run Status:*
     """
+
+    if aborted_for_health:
+        logger.info(aborted_for_health)
+        summary = (f"\n        :rotating_light: *Suite aborted:* "
+                   f"{aborted_for_health}\n" + summary)
 
     logger.info("Test Wise run status:")
     for test in test_class_run:
