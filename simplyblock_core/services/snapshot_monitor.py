@@ -4,7 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import snapshot_controller, snapshot_events
+from simplyblock_core.controllers import (
+    replication_delta,
+    snapshot_controller,
+    snapshot_events,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -544,23 +548,37 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
     # rest of the run (case 4: outstanding=0 and not one new snapshot in 20
     # minutes). The chaining bug is fixed, but the guard must not be able to
     # convert ANY future terminal failure into a silent halt.
-    if not _replication_task_is_live(full):
+    task = _live_replication_task(full)
+    if task is None:
         logger.error(
             "Internal snapshot %s of lvol %s never replicated and has no live "
             "replication task; resuming the cadence. Replication for this "
             "volume is NOT making progress -- investigate the transfer.",
             full.get_id(), lvol.get_id())
         return None
+    # Its transfer is complete and only the merge and convert on the target
+    # remain: the next snapshot may transfer meanwhile (constants.
+    # REPL_OVERLAP_MERGE), but no further -- the one before it must have its
+    # copy, so at most two snapshots of a volume are in flight.
+    if (constants.REPL_OVERLAP_MERGE and task is not _UNKNOWN_TASK
+            and task.function_params.get("transfer_done")
+            and not _older_internal_outstanding(lvol, all_snaps, newest)):
+        return None
     return full
 
 
-def _replication_task_is_live(snapshot):
-    """Whether a replication task for *snapshot* can still make progress.
+#: _live_replication_task's answer when the tasks cannot be read
+_UNKNOWN_TASK = object()
+
+
+def _live_replication_task(snapshot):
+    """The replication task for *snapshot* that can still make progress, or
+    None.
 
     A task that is DONE (successfully or having given up) or cancelled will
     never set the replicated marker, so waiting on it is waiting for ever.
-    When the tasks cannot be read at all, assume live: back-pressure staying on
-    is the conservative side of that guess.
+    When the tasks cannot be read at all, assume one is live (_UNKNOWN_TASK):
+    back-pressure staying on is the conservative side of that guess.
     """
     try:
         node = db.get_storage_node_by_id(snapshot.lvol.node_id)
@@ -568,15 +586,35 @@ def _replication_task_is_live(snapshot):
     except Exception as e:
         logger.warning("Cannot read replication tasks for %s (%s); keeping "
                        "back-pressure on", snapshot.get_id(), e)
-        return True
+        return _UNKNOWN_TASK
     for task in tasks:
         if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
             continue
         if task.function_params.get("snapshot_id") != snapshot.get_id():
             continue
         if task.status != JobSchedule.STATUS_DONE and not task.canceled:
-            return True
-    return False
+            return task
+    return None
+
+
+def _older_internal_outstanding(lvol, all_snaps, newest):
+    """Whether the internal snapshot of *lvol* before *newest* has no copy on
+    the remote side yet."""
+    prev = None
+    for s in all_snaps:
+        if (s.lvol.get_id() == lvol.get_id()
+                and s.snap_type == SnapShot.TYPE_INTERNAL
+                and s.status != SnapShot.STATUS_IN_DELETION
+                and s.created_at < newest.created_at
+                and (prev is None or s.created_at > prev.created_at)):
+            prev = s
+    if prev is None:
+        return False
+    try:
+        full = db.get_snapshot_by_id(prev.get_id())
+    except KeyError:
+        return False
+    return not (full.target_replicated_snap_uuid or full.source_replicated_snap_uuid)
 
 
 def partition_by_group(pairs):
@@ -692,8 +730,8 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
-            _id, err = snapshot_controller.add(
-                lvol.get_id(), name, snap_type=SnapShot.TYPE_INTERNAL)
+            _id, err = replication_delta.add_snapshot(
+                lvol, name, snap_type=SnapShot.TYPE_INTERNAL)
             if err:
                 logger.warning(f"Internal snapshot for {lvol.get_id()} failed: {err}")
         except Exception as e:

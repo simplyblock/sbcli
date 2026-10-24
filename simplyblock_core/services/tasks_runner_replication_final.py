@@ -609,7 +609,7 @@ def _replication_lag_sec(lvol):
 
 def _take_shrink_snapshot(task, lvol):
     """Snapshot the source and record it as the round in flight."""
-    from simplyblock_core.controllers import snapshot_controller
+    from simplyblock_core.controllers import replication_delta
     params = task.function_params
     # The gap since the previous round finished: dead time between a round
     # completing and the next snapshot existing is pure added delta.
@@ -618,8 +618,8 @@ def _take_shrink_snapshot(task, lvol):
                     round=params.get("shrink_round", 0))
     with xfer_timing.phase("take_shrink_snapshot", lvol=lvol.get_id(),
                            round=params.get("shrink_round", 0) + 1):
-        new_snap, err = snapshot_controller.add(
-            lvol.get_id(), f"repl_commit_{uuid_lib.uuid4()}",
+        new_snap, err = replication_delta.add_snapshot(
+            lvol, f"repl_commit_{uuid_lib.uuid4()}",
             snap_type=SnapShot.TYPE_INTERNAL)
     if err:
         return None, f"shrink round {params.get('shrink_round', 0) + 1} snapshot failed: {err}"

@@ -574,6 +574,23 @@ REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
 # just falls back to being noticed on a later pass.
 REPL_XFER_INLINE_WAIT_SEC = 5.0
+# A delta's landing volume is merged with its base on the target as a job
+# (bdev_lvol_merge_base): how long the finish waits for it inline, and how
+# often it polls, before leaving it to the next pass.
+REPL_MERGE_INLINE_WAIT_SEC = 10.0
+REPL_MERGE_POLL_SEC = 1.0
+# Requests a replication transfer keeps in flight. A full transfer sends one
+# whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
+# (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
+# for the same in-flight bytes (256 x 64 KiB = 16 MiB). Powers of two (SPDK
+# rings).
+REPL_XFER_BATCH = 16
+REPL_XFER_PARTIAL_BATCH = 256
+# The next snapshot of a volume may transfer while the target still merges the
+# previous copy: the cycle then takes the longer of transfer and merge, not
+# their sum. Its landing volume is chained onto that copy once the copy exists
+# (snapshot_replication._finishing_predecessor).
+REPL_OVERLAP_MERGE = True
 # A volume in its final cutover already owns its lvstore and every other
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
