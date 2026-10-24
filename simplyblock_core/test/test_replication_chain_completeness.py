@@ -106,6 +106,9 @@ class _DB:
     def get_snapshots_by_node_id(self, node_id):
         return self._snaps
 
+    def get_job_tasks(self, cluster_id):
+        return []
+
 
 def _walk(monkeypatch, bases, snaps, top, to_source=False):
     monkeypatch.setattr(sr, "db", _DB(snaps))

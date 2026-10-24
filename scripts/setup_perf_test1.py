@@ -215,7 +215,7 @@ def get_sn_uuids(mgmt_ip):
 
 
 def fetch_cluster_topology(mgmt_ip, cluster_uuid):
-    script = f"""sudo python3 - <<'PY'
+    script = f"""sudo python3.11 - <<'PY'
 import json
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.storage_node import StorageNode

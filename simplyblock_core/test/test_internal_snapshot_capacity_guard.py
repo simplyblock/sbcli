@@ -57,12 +57,13 @@ def _db(util):
 def _run(monkeypatch, util):
     calls = []
 
-    class _SnapCtl:
-        def add(self, lvol_id, name, snap_type=SnapShot.TYPE_USER):
-            calls.append(lvol_id)
+    class _Delta:
+        # The cadence takes its snapshots through replication_delta (#1537).
+        def add_snapshot(self, lvol, name, snap_type=SnapShot.TYPE_USER):
+            calls.append(lvol.get_id())
             return "snap-uuid", None
     monkeypatch.setattr(sm, "db", _db(util))
-    monkeypatch.setattr(sm, "snapshot_controller", _SnapCtl())
+    monkeypatch.setattr(sm, "replication_delta", _Delta())
     sm.take_due_internal_snapshots("CL1", 10_000)
     return calls
 
@@ -100,11 +101,12 @@ def test_only_the_nodes_first_migrating_volume_takes_cadence_snapshots(monkeypat
     db.get_job_tasks = lambda cluster_id, reverse=True, limit=0: []
     calls = []
 
-    class _SnapCtl:
-        def add(self, lvol_id, name, snap_type=SnapShot.TYPE_USER):
-            calls.append(lvol_id)
+    class _Delta:
+        # The cadence takes its snapshots through replication_delta (#1537).
+        def add_snapshot(self, lvol, name, snap_type=SnapShot.TYPE_USER):
+            calls.append(lvol.get_id())
             return "snap-uuid", None
     monkeypatch.setattr(sm, "db", db)
-    monkeypatch.setattr(sm, "snapshot_controller", _SnapCtl())
+    monkeypatch.setattr(sm, "replication_delta", _Delta())
     sm.take_due_internal_snapshots("CL1", 10_000)
     assert sorted(calls) == ["N1-first", "N2-only"]

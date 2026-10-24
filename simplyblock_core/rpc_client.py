@@ -2142,7 +2142,7 @@ class RPCClient:
         return self._request("bdev_lvol_set_migration_flag", lvol_name=name)
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
-                           allow_partial=False, priority_class=0):
+                           allow_partial=False, priority_class=0, partial_base=0):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -2161,9 +2161,12 @@ class RPCClient:
         What it does NOT excuse is the destination's starting content: a partial
         transfer only ships the delta, so everything outside the delta must
         already be on the destination. Pass it only when the landing volume is a
-        clone of the destination's copy of the PREVIOUS snapshot. Passing it for
-        a transfer into a fresh empty volume would silently drop every cluster
-        the delta does not cover.
+        clone of the destination's copy of the PREVIOUS snapshot, and pass that
+        snapshot's SOURCE blob id as *partial_base*: the fork sends a delta only
+        if the snapshot's dirty generation started at exactly that blob, and
+        without a base it sends everything. Passing it for a transfer into a
+        fresh empty volume would silently drop every cluster the delta does not
+        cover.
 
         *priority_class* is the IO class the transfer reads its source in,
         without changing the source's own class (0 = the source's own). An SPDK
@@ -2178,22 +2181,46 @@ class RPCClient:
             "gateway": bdev_name,
             "operation": operation,
         }
-        # The delta path is DISABLED (PR #1276, commit 52e75afb2): the SPDK
-        # fork's fragment write path corrupts partial transfers, so
-        # allow_partial is never emitted and every transfer is a full one,
-        # regardless of what the caller requests. Re-enable the emission once
-        # the fork is fixed.
-        # if allow_partial:
-        #     params["allow_partial"] = True
+        # A delta needs both: the request and the base it applies on top of.
+        # An SPDK older than partial_base refuses the whole request (it was
+        # disabled in 52e75afb2 while the fork's destination side corrupted
+        # partial transfers), so it is retried without the delta, then without
+        # the class: each step back sends more, never less.
+        attempts = []
+        if allow_partial and partial_base:
+            attempts.append(dict(params, allow_partial=True, partial_base=int(partial_base),
+                                 **({"priority_class": priority_class} if priority_class else {})))
         if priority_class:
+            attempts.append(dict(params, priority_class=priority_class))
+        for extra in attempts:
             try:
-                return self._request("bdev_lvol_transfer", priority_class=priority_class, **params)
+                return self._request("bdev_lvol_transfer", **extra)
             except RPCRemoteError as e:
                 if "decode" not in str(e):
                     raise
-                logger.warning("bdev_lvol_transfer: SPDK does not take priority_class; "
-                               "transferring %s in its own class", name)
+                logger.warning("bdev_lvol_transfer: SPDK does not take %s; retrying %s without it",
+                               ", ".join(k for k in ("partial_base", "priority_class") if k in extra),
+                               name)
         return self._request("bdev_lvol_transfer", **params)
+
+    def bdev_lvol_merge_base(self, name):
+        """After a partial transfer into the landing volume *name*: START
+        filling every block the transfer did not write from the volume's base
+        (its parent), before it is converted. Returns the job's state at once
+        (``state`` none/running/done/failed, ``rc``, ``clusters``, ``ranges``,
+        ``bytes``, ``ms``); idempotent. A failed job with ``rc`` ``-ESTALE``:
+        the node no longer knows what arrived (it restarted), and the transfer
+        must be repeated into a fresh landing volume."""
+        return self._request("bdev_lvol_merge_base", lvol_name=name)
+
+    def bdev_lvol_merge_base_stat(self, name):
+        """State of the landing volume *name*'s merge job (see bdev_lvol_merge_base)."""
+        return self._request("bdev_lvol_merge_base_stat", lvol_name=name)
+
+    def bdev_lvol_dirty_bitmap_info(self, name):
+        """The dirty-tracking state of *name*'s blob and the lvstore's count of
+        writes executed locally while not leading (replication_delta.py)."""
+        return self._request("bdev_lvol_dirty_bitmap_info", lvol_name=name)
 
     def bdev_lvol_transfer_stat(self, name: str):
         """

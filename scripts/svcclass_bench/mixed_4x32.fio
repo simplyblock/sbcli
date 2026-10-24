@@ -1,0 +1,39 @@
+# Client load for the replication phase run (bench.py run --fio mixed_4x32.fio):
+# four parallel jobs on one volume, each at iodepth 32, with block sizes from
+# 4 KiB to 64 KiB, reads and writes, random and sequential access.
+#
+# bench.py fills in DEV (the volume's block device, resolved by its NQN),
+# RUNTIME (seconds), and LOGDIR, and runs one copy per volume on its client.
+# The per-second logs (log_avg_msec=1000) are what analysis.py sums.
+
+[global]
+filename=${DEV}
+ioengine=libaio
+direct=1
+iodepth=32
+time_based=1
+runtime=${RUNTIME}
+group_reporting=0
+randrepeat=0
+norandommap=1
+log_avg_msec=1000
+write_iops_log=${LOGDIR}/load
+write_bw_log=${LOGDIR}/load
+
+[rand-rw-small-70r]
+rw=randrw
+rwmixread=70
+bssplit=4k/40:8k/30:16k/20:64k/10
+
+[rand-rw-db-50r]
+rw=randrw
+rwmixread=50
+bssplit=8k/30:16k/40:32k/20:64k/10
+
+[seq-read]
+rw=read
+bssplit=16k/30:32k/30:64k/40
+
+[seq-write]
+rw=write
+bssplit=16k/30:32k/30:64k/40
