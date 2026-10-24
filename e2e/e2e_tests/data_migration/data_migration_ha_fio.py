@@ -270,7 +270,10 @@ class FioWorkloadTest(TestClusterBase):
             # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
             spdk_debug=affected_node_details[0]["spdk_debug"],
             spdk_image=affected_node_details[0]["spdk_image"],
-            spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"],
+            # No spdk_cpu_mask here: this is SshUtils.add_storage_node,
+            # which builds an `sbctl storage-node add-node` command, and
+            # the CLI has no cpu-mask flag -- it is an API-only field on
+            # SbcliUtils.add_storage_node. Passing it raised TypeError.
             data_nic=data_nic,
         )
         sleep_n_sec(200)

@@ -50,3 +50,19 @@ class NodeUnreachableTimeout(Exception):
     """
     def __init__(self, message) -> None:
         super().__init__(message)
+
+
+class CapacityCeilingExceeded(Exception):
+    """The cluster was driven past the utilisation the harness is willing to run at.
+
+    A full simplyblock cluster does not fail IO cleanly. At 100% the devices
+    answer writes with error_write_cannot_allocate, every node stops completing
+    IO, and the clients' NVMe multipath exhausts fast_io_fail_tmo and returns
+    EIO -- which aborts ext4 journals and shuts XFS down, destroying the
+    filesystems under test. Run 39565026057 (2026-10-21) lost three that way.
+
+    So the harness stops itself first, while the cluster is still serving IO,
+    and says so. Raised by TestLvolHACluster.assert_capacity_headroom().
+    """
+    def __init__(self, message) -> None:
+        super().__init__(message)

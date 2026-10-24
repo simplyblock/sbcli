@@ -160,14 +160,25 @@ import posixpath
 from pathlib import Path
 
 import paramiko
+import ssh_auth
 from scp import SCPClient
 
 
-def create_ssh_client(host, key_path):
-    k = paramiko.Ed25519Key.from_private_key_file(key_path)
+def create_ssh_client(host, key_path=None):
+    """Connect, trying every credential rather than one named key.
+
+    key_path is kept in the signature so existing callers still work, and is
+    honoured first when given; ssh_auth then falls through to the CI key, the
+    old pem, the developer keys and finally SSH_PASSWORD. Insisting on a single
+    Ed25519 file is what made this raise on a lab where that key is no longer
+    authorised.
+    """
+    if key_path:
+        os.environ.setdefault("KEY_PATH", key_path)
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    c.connect(hostname=host, username='root', pkey=k)
+    used = ssh_auth.connect(c, host, "root")
+    print(f"Connected to {host} using {used}")
     return c
 
 def exec_command(ssh, cmd):
@@ -232,7 +243,13 @@ def main():
     if not all([remote_host, fio_file_path]):
         raise OSError("One or more required environment variables are missing.")
 
-    ssh_key_path = os.path.join(Path.home(), ".ssh", "simplyblock-us-east-2.pem")
+    # KEY_PATH, then KEY_NAME, then the old name. simplyblock-us-east-2.pem is
+    # not a credential any more: infra strips it from the nodes' authorized_keys,
+    # so naming it directly resolves to a file that exists and does not
+    # authenticate.
+    ssh_key_path = os.environ.get("KEY_PATH") or os.path.join(
+        Path.home(), ".ssh",
+        os.environ.get("KEY_NAME", "simplyblock-us-east-2.pem"))
     ssh = create_ssh_client(remote_host, ssh_key_path)
     scp = SCPClient(ssh.get_transport())
 

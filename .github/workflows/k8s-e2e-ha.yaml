@@ -45,11 +45,55 @@ jobs:
       group: ${{ github.workflow }}
       cancel-in-progress: false
     steps:
-      - name: Fix workspace permissions
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+      - name: Fix workspace permissions and reset a dirty tree
+        run: |
+          # Errors are NOT swallowed here. The previous version ended every
+          # command with "2>/dev/null || true", so a chown that failed on
+          # root-owned files looked identical to one that worked -- and the
+          # reset that followed could not rewrite those files either, printed
+          # its complaint to the discarded stderr, and still logged
+          # "HEAD is now at ...". The run then failed in an unrelated step.
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"             || echo "::warning::chown of the workspace failed"
+
+          if [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            git -C "$GITHUB_WORKSPACE" reset --hard               || echo "::warning::git reset --hard failed"
+            git -C "$GITHUB_WORKSPACE" clean -ffdx               || echo "::warning::git clean -ffdx failed"
+
+            # If anything survives that, git cannot reconcile this tree and
+            # actions/checkout will not either: it reports
+            #   "error: Path 'x' not uptodate; will not remove from working tree"
+            # and STILL EXITS 0, leaving HEAD on the new ref with files from it
+            # never written. Wipe instead and let checkout clone fresh -- the
+            # fetch is --depth=1, so this costs seconds.
+            dirty="$(git -C "$GITHUB_WORKSPACE" status --porcelain 2>/dev/null)"
+            if [ -n "${dirty}" ]; then
+              echo "::warning::workspace still dirty after reset; wiping it"
+              echo "${dirty}" | head -20
+              sudo rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* || true
+            fi
+          fi
 
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # A checkout that could not fully update the tree still exits 0, so the
+      # only way to know is to look. Cheap, and it turns a confusing exit 127
+      # hundreds of lines later into a failure that names the cause.
+      - name: Verify the checkout is complete
+        run: |
+          missing=""
+          for f in e2e/scripts/cleanup_upgrade_test.sh e2e/e2e.py e2e/requirements.txt; do
+            [ -f "$GITHUB_WORKSPACE/$f" ] || missing="${missing} ${f}"
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::Checkout left an incomplete tree. Missing:${missing}"
+            echo "HEAD is $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null)"
+            echo "This means actions/checkout hit 'not uptodate' on some paths"
+            echo "and could not finish. The workspace reset before it should"
+            echo "have prevented that; check its warnings above."
+            exit 1
+          fi
+          echo "checkout complete"
 
       - name: Set send_slack_notification for scheduled and push events
         if: github.event_name == 'schedule' || github.event_name == 'push'
@@ -364,7 +408,20 @@ jobs:
       - name: Calculate Total Time Taken
         if: always()
         run: |
-          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          # Both default, because this step is if: always() and the test step
+          # may never have run -- a bring-up that stalls leaves TEST_END_TIME
+          # unset, and $(( 1791405229 - )) is "operand expected", which then
+          # leaves TEST_TIME unset for every line below it including
+          # LOG_COLLECT_TIMEOUT_MINS. Four shell errors in the summary of a
+          # run whose real failure was somewhere else entirely.
+          TEST_START_TIME="${TEST_START_TIME:-0}"
+          TEST_END_TIME="${TEST_END_TIME:-$(date +%s)}"
+          if [ "$TEST_START_TIME" -gt 0 ]; then
+            TEST_TIME=$((TEST_END_TIME - TEST_START_TIME))
+          else
+            TEST_TIME=0
+          fi
+          [ "$TEST_TIME" -ge 0 ] || TEST_TIME=0
           TEST_TIME_HOURS=$(($TEST_TIME / 3600))
           TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))
           TEST_TIME_SECS=$(($TEST_TIME % 60))
@@ -764,10 +821,40 @@ jobs:
           done
           NUM_CHUNKS=${#_CHUNK_STARTS[@]}
 
+          # `python3` on the mgmt node is /root/.local/bin/python3, which does NOT
+          # have sbcli. What it finds instead is
+          # /usr/local/lib/python3.12/site-packages/simplyblock_core/ holding only
+          # scripts/prometheus.yml and scripts/alerting/alert_resources.yaml and
+          # no __init__.py -- so `import simplyblock_core` succeeds as an empty
+          # namespace package and `-m ...collect_logs` dies with "No module named".
+          #
+          # That directory is NOT junk and must not be deleted. The product writes
+          # it: render_and_deploy_alerting_configs (simplyblock_core/utils) renders
+          # the templates and sudo-mv's them into <parent-of-package>/
+          # simplyblock_core/scripts/, and docker-compose-swarm-monitoring.yml
+          # mounts ./prometheus.yml from there into the Prometheus container. It is
+          # live monitoring config. It outlived the package only because a sudo mv
+          # is not pip-managed, so it stayed put when sbcli moved to the uv tool
+          # install behind sbctl.
+          #
+          # So: resolve the interpreter instead of touching the path. Derive it
+          # from sbctl's shebang and confirm it can import the module.
+          COLLECT_PY=$("${SSH_CMD[@]}" '
+            for c in "$(head -1 "$(command -v sbctl 2>/dev/null)" 2>/dev/null | sed "s|^#!||")" \
+                     /root/.local/share/uv/tools/sbctl/bin/python \
+                     python3; do
+              [ -n "$c" ] || continue
+              "$c" -c "import simplyblock_core.scripts.collect_logs" >/dev/null 2>&1 \
+                && { echo "$c"; exit 0; }
+            done
+            echo python3' 2>/dev/null | tail -1)
+          COLLECT_PY=${COLLECT_PY:-python3}
+          echo "  collect_logs interpreter: ${COLLECT_PY}"
+
           run_collect() {
             local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
             "${SSH_CMD[@]}" \
-              "python3 -m simplyblock_core.scripts.collect_logs \
+              "${COLLECT_PY} -m simplyblock_core.scripts.collect_logs \
                 '${iso}' '${mins}' \
                 --mode docker \
                 --output-dir '${outdir}' \
