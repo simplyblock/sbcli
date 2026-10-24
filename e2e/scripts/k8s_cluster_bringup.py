@@ -495,6 +495,60 @@ def shape_images(spec: dict) -> None:
         log(f"  pinning {slot} -> {ref}")
 
 
+def strip_orphan_failure_domains(spec: dict) -> None:
+    """Drop group failure-domain labels the cluster has no feature for.
+
+    simplyblock-operator f155e686 made discovery seed every group's
+    failureDomain from the worker's topology.kubernetes.io/zone. On a fleet
+    that is all one zone -- which every OpenShift lab here is, all six
+    workers carrying zone=default -- that labels every group and then
+    declines to enable failure-domain mode, because the control plane only
+    activates it with at least parityChunks+2 distinct domains. The labels
+    stay behind.
+
+    Downstream, nothing rechecks the flag. The deployment controller indexes
+    the labels into StorageCluster.status.failureDomains, the node controller
+    sends that index as failure_domain on every node add, and the control
+    plane refuses an explicit domain on a cluster created without the
+    feature::
+
+        --failure-domain was given but this cluster does not have the
+        failure-domain feature enabled.
+
+    So every node_add returns False, retries eleven times and gives up; no
+    node is ever added; and the deployment reports nothing but "Activating"
+    until it times out. That is run 39675850279 attempts 3 and 4, 1h20m, and
+    a lab left unusable for nine hours.
+
+    Removing the label here is the whole fix from this side: with no label on
+    any group, failureDomainsOf() is empty, mapFailureDomains() returns
+    early, no index exists, and the node add carries no failure_domain --
+    which is exactly the shape every bring-up had before f155e686.
+
+    A draft that really does enable the feature is left alone, labels and
+    all: there the domains are the point.
+    """
+    if ((spec.get("cluster") or {}).get("enableFailureDomains")) is True:
+        return
+    stripped = {}
+    for node_set in spec.get("nodeSets") or []:
+        for group in node_set.get("groups") or []:
+            domain = (group.pop("failureDomain", "") or "").strip()
+            if domain:
+                stripped.setdefault(domain, []).extend(
+                    group.get("workers") or [])
+    if not stripped:
+        return
+    for domain, workers in sorted(stripped.items()):
+        log(f"dropping failureDomain {domain!r} from {len(workers)} worker(s): "
+            f"the draft does not enable failure-domain mode, and the control "
+            f"plane refuses a node add that names a domain on a cluster "
+            f"without the feature")
+    log("  (operator-side defect: discovery labels the groups from "
+        "topology.kubernetes.io/zone and the index is sent regardless of "
+        "spec.cluster.enableFailureDomains)")
+
+
 def shape_draft(cfg: dict) -> dict:
     """Write our parameters into the draft, before anyone approves it."""
     spec = cfg.setdefault("spec", {})
@@ -606,6 +660,7 @@ def shape_draft(cfg: dict) -> dict:
         spec["environment"] = env_name
 
     shape_groups(spec)
+    strip_orphan_failure_domains(spec)
 
     return cfg
 
@@ -740,6 +795,100 @@ def describe(cfg: dict) -> None:
 # ── step 3: approve and wait ─────────────────────────────────────────────
 
 
+# The Deployment the task runners share, the container of it that runs
+# node_add, and how much of that container's log is worth reading: one line
+# per attempt plus the control plane's own reason above it, and a node retried
+# eleven times produces a few dozen.
+TASKS_DEPLOY = "simplyblock-tasks"
+NODE_ADD_CONTAINER = "tasks-node-add-runner"
+NODE_ADD_LOG_LINES = 400
+
+
+def node_add_failures(limit: int = 8) -> list[str]:
+    """Why the control plane refused the node_add, in its own words.
+
+    This is the gap 2026-10-23 exposed. Five StorageNodes sat in AwaitingSlot
+    behind one in Resolving for the full 1800s; the operator emits nothing
+    while a node_add is still in the control plane's task window, so the
+    bring-up log had thirty minutes of silence and then a phase name. The
+    reason was in this container the whole time, one line per attempt::
+
+        ERROR: --failure-domain was given but this cluster does not have the
+        failure-domain feature enabled. Redeploy the cluster with
+        --enable-failure-domain to use failure domains.
+        INFO: Node add result: False
+
+    "Node add result: False" is all the operator ever sees -- add_node returns
+    a bool -- so the line *above* it is the diagnosis and the only place it
+    exists is here. Read it rather than leaving it on a lab the next run wipes.
+
+    Returns the newest distinct reasons, oldest first, each with how many
+    adds it failed and how many it exhausted. Best-effort: this runs on a
+    path that is already reporting a problem.
+    """
+    out = kubectl("logs", f"deploy/{TASKS_DEPLOY}", "-c", NODE_ADD_CONTAINER,
+                  f"--tail={NODE_ADD_LOG_LINES}", check=False)
+    reason = ""
+    attempts: dict[str, int] = {}
+    gave_up: dict[str, set[str]] = {}
+    order: list[str] = []
+    for line in (out or "").splitlines():
+        body = line.split(": ", 3)[-1].strip()
+        if ": ERROR: " in line and "tasks-runner-node-add:" not in line:
+            # The control plane's own complaint, logged just before add_node
+            # returns False. It stays current until the next one: the "gave
+            # up" line comes several attempts later and has none of its own.
+            reason = body
+            continue
+        if "tasks-runner-node-add:" not in line:
+            continue
+        if " failed: " not in line and " gave up: " not in line:
+            continue
+        key = reason or body
+        if key not in attempts:
+            order.append(key)
+            gave_up[key] = set()
+        attempts[key] = attempts.get(key, 0) + 1
+        if " gave up: " in line:
+            task = body.split("task ", 1)[-1].split(" ", 1)[0]
+            gave_up[key].add(task)
+
+    lines = []
+    for key in order[-limit:]:
+        tally = f"{attempts[key]} attempt(s)"
+        if gave_up[key]:
+            tally += f", {len(gave_up[key])} add(s) gave up after 11 retries"
+        lines.append(f"{key}  [{tally}]")
+    return lines
+
+
+def node_steps() -> list[tuple[str, str, str, str]]:
+    """(worker, phase, step, message) for every StorageNode, worker order.
+
+    The STEP column is where a stalled deployment says what it is doing, and
+    it was the one thing the wait never printed. One node in Resolving with
+    five in AwaitingSlot is a queue behind a single failing add; six in
+    CheckingHost is a fleet that cannot be reached; and the two look identical
+    from the deployment config's phase, which says Activating for both.
+    """
+    out = kubectl("get", "storagenode", "-o",
+                  "jsonpath={range .items[*]}{.spec.workerNode}{\"\\t\"}"
+                  "{.status.phase}{\"\\t\"}{.status.step.state}{\"\\t\"}"
+                  "{.status.message}{\"\\n\"}{end}", check=False)
+    rows = []
+    for line in (out or "").splitlines():
+        if not line.strip():
+            continue
+        parts = (line.split("\t") + ["", "", "", ""])[:4]
+        rows.append(tuple(p.strip() for p in parts))
+    return sorted(rows)
+
+
+def steps_signature(rows) -> str:
+    """What has to change for the wait to call the deployment "moving"."""
+    return "|".join(f"{w}={p}/{s}" for w, p, s, _ in rows)
+
+
 def failed_storage_nodes():
     """StorageNodes the operator has given up on, with the reason.
 
@@ -859,6 +1008,12 @@ def wait_control_plane_ready(timeout=1800):
 #: across four workers is drain + reboot + rejoin, one at a time.
 MCO_GRACE_TOTAL = int(os.environ.get("TIMEOUT_MCO_GRACE", "3600"))
 
+#: How long every storage node may sit on the same step before the
+#: wait says so and goes looking for the reason. Short enough that a
+#: 30 minute deadline produces several reports, long enough that the
+#: ordinary one-node-at-a-time march through the fleet is not one.
+STALL_REPORT_SEC = int(os.environ.get("STALL_REPORT_SEC", "300"))
+
 
 def mco_updating():
     """MachineConfigPools OpenShift is currently applying, by name.
@@ -957,6 +1112,18 @@ def dump_control_plane_state() -> None:
     log("")
 
 
+def not_ready_row(line: str) -> bool:
+    """True for a custom-columns row whose READY column holds a false.
+
+    Running is not Ready, and the field selector only knows about phase. On
+    2026-10-23 simplyblock-tasks was Running and 0/1 ready for the whole
+    stall, so the "not Running" list -- the only pod view the dump had --
+    was empty while the control plane was degraded.
+    """
+    parts = line.split()
+    return len(parts) > 1 and "false" in parts[1]
+
+
 def dump_stall_state(name: str) -> None:
     """Everything worth seeing when the deployment stops advancing.
 
@@ -969,36 +1136,128 @@ def dump_stall_state(name: str) -> None:
 
     Reads only, each independent and best-effort: this runs on the failure
     path, and a dump that raises would replace the real error with its own.
+
+    It also writes itself to a file, because the step that collects logs runs
+    after the test step and the test step never runs when bring-up fails:
+    run 39675850279 ended "RUN_DIR_FILE not found -- skipping" and kept
+    nothing at all. save_stall_dump puts the same text somewhere that
+    outlives the runner.
     """
-    def show(title, *args, limit=50):
-        log(f"---- {title}")
+    captured: list[str] = []
+
+    def emit(line):
+        captured.append(line)
+        log(line)
+
+    def show(title, *args, limit=50, keep=None):
+        """One kubectl read, printed and captured. keep() drops the rows a
+        server-side selector cannot: custom-columns has no field selector, so
+        "the pods that are not Ready" is a filter this end or nothing."""
+        emit(f"---- {title}")
         try:
             out = kubectl(*args, check=False)
         except Exception as exc:                       # noqa: BLE001
-            log(f"     (could not read: {str(exc)[:120]})")
+            emit(f"     (could not read: {str(exc)[:120]})")
             return
         lines = (out or "").strip().splitlines()
+        if keep:
+            lines = [line for line in lines if keep(line)]
         if not lines:
-            log("     (nothing)")
+            emit("     (nothing)")
             return
         for line in lines[:limit]:
-            log(f"     {line}")
+            emit(f"     {line}")
         if len(lines) > limit:
-            log(f"     ... {len(lines) - limit} more line(s)")
+            emit(f"     ... {len(lines) - limit} more line(s)")
 
-    log("")
-    log("state at the point the deployment stopped advancing:")
+    emit("")
+    emit("state at the point the deployment stopped advancing:")
     show("machine config pools (OpenShift reboots workers here)",
          "get", "machineconfigpool", "--no-headers", limit=40)
     show("storage nodes", "get", "storagenode", "-o", "wide")
+    # -o wide stops at the step name. The message and the step's own deadline
+    # are the two fields that say whether the operator is still trying and
+    # how long it has left, and neither is in any column.
+    show("storage node steps", "get", "storagenode", "-o",
+         "jsonpath={range .items[*]}{.spec.workerNode}{\"\\t\"}"
+         "{.status.phase}{\"/\"}{.status.step.state}"
+         "{\"\\tdeadline=\"}{.status.step.deadline}"
+         "{\"\\ttask=\"}{.status.nodeAddTaskID}"
+         "{\"\\t\"}{.status.message}{\"\\n\"}{end}")
     show("storage cluster", "get", "storagecluster", "-o", "wide")
+    # status.failureDomains is the label-to-index mapping the operator sends
+    # as failure_domain on every node add. A mapping on a cluster whose
+    # spec.enableFailureDomains is unset is the 2026-10-23 deadlock, and it
+    # is invisible in every other view.
+    show("failure-domain mapping vs the feature flag", "get",
+         "storagecluster", "-o",
+         "jsonpath={range .items[*]}{.metadata.name}"
+         "{\"\\tenableFailureDomains=\"}{.spec.enableFailureDomains}"
+         "{\"\\tstatus.failureDomains=\"}{.status.failureDomains}"
+         "{\"\\n\"}{end}")
+    show("control plane", "get", "controlplane", "-o",
+         "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"
+         "{.status.phase}{\"/\"}{.status.step.state}{\"\\t\"}"
+         "{.status.message}{\"\\n\"}{end}")
     show("pods that are not Running", "get", "pods",
          "--field-selector=status.phase!=Running", "-o", "wide")
+    # Running is not Ready. simplyblock-tasks was Running and 0/1 ready for
+    # the whole of the 2026-10-23 stall, so it never appeared above.
+    show("pods that are not Ready", "get", "pods", "--no-headers", "-o",
+         "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses"
+         "[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,"
+         "NODE:.spec.nodeName",
+         keep=not_ready_row)
     show("recent warnings", "get", "events", "--field-selector=type=Warning",
          "--sort-by=.lastTimestamp", limit=30)
     show(f"clusterdeploymentconfig {name}", "describe",
          "clusterdeploymentconfig", name, limit=80)
-    log("")
+
+    # Last and most important: the only place the control plane's reason for
+    # refusing a node_add is written down. The operator reduces it to
+    # "Node add result: False" and a deployment that never gets a node
+    # reports nothing but its phase.
+    emit("---- why node_add failed (control plane, "
+         f"{TASKS_DEPLOY}/{NODE_ADD_CONTAINER})")
+    try:
+        failures = node_add_failures(limit=12)
+    except Exception as exc:                           # noqa: BLE001
+        failures = []
+        emit(f"     (could not read: {str(exc)[:120]})")
+    for failure in failures:
+        emit(f"     {failure}")
+    if not failures:
+        emit("     (no node_add failure in the runner's recent log)")
+    emit("")
+    save_stall_dump(name, captured)
+
+
+def save_stall_dump(name: str, lines: list[str]) -> None:
+    """Keep the dump somewhere the runner's workspace is not.
+
+    The workflow collects logs in a later step keyed on RUN_DIR_FILE, which
+    the test step writes -- so a bring-up failure, which is exactly when
+    nobody can look at the cluster afterwards, collects nothing. The NFS
+    share every lab already mounts is where the rest of a run's evidence
+    lives, so the dump goes next to it; the workspace is the fallback, which
+    at least survives long enough to be uploaded as an artifact.
+
+    Best-effort by construction: a dump that cannot be saved must not replace
+    the failure it was describing.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run = os.environ.get("GITHUB_RUN_ID", "local")
+    base = os.environ.get("NFS_MOUNTPOINT") or os.environ.get(
+        "GITHUB_WORKSPACE") or "."
+    path = os.path.join(base, f"bringup-stall-{run}-{stamp}.log")
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(f"bring-up stall dump for {name}, run {run}\n")
+            handle.write("\n".join(lines) + "\n")
+    except Exception as exc:                           # noqa: BLE001
+        log(f"could not save the stall dump ({str(exc)[:120]}); it is above")
+        return
+    log(f"stall dump saved to {path}")
 
 
 def check_stripe_fits(name: str) -> None:
@@ -1067,6 +1326,86 @@ def check_stripe_fits(name: str) -> None:
         f"{ndcs}+{npcs} stripe needs {needed}")
 
 
+def check_failure_domains(name: str) -> None:
+    """Refuse a draft that labels fault groups on a cluster that has none.
+
+    This is what cost run 39675850279 its last two attempts, 1h20m, and left
+    a lab unusable for nine hours.
+
+    Discovery seeds every group's failureDomain from the worker's
+    topology.kubernetes.io/zone (operator internal/discovery/failuredomain.go,
+    new in simplyblock-operator f155e686). Every worker of this OpenShift lab
+    carries zone=default, so all six were labelled and the draft went to
+    enable failure-domain mode -- and then declined to, because the control
+    plane only activates that mode with at least parity+2 distinct domains
+    and one "default" is one. The decline leaves enableFailureDomains unset
+    and the per-group labels in place, which is the state this checks for.
+
+    What follows from it is not recoverable and not obvious. The deployment
+    controller indexes the labels into StorageCluster.status.failureDomains
+    without consulting enableFailureDomains, the node controller sends that
+    index as failure_domain on every node add, and the control plane refuses
+    an explicit domain on a cluster created without the feature:
+
+        --failure-domain was given but this cluster does not have the
+        failure-domain feature enabled.
+
+    So every node_add returns False, retries eleven times and gives up; no
+    node is ever added; the deployment waits out its deadline reporting
+    "Activating". Nothing in the deployment config's own phase says why.
+
+    The ordinary path never reaches this: strip_orphan_failure_domains
+    removes the labels during the edit pass, before the draft is written
+    back. This is the backstop for the paths that do not edit a draft --
+    APPROVE_ONLY, and a draft that arrives already approved -- where
+    refusing is all that is left, because approval is irreversible.
+    """
+    raw = kubectl("get", "clusterdeploymentconfig", name, "-o", "json")
+    if not raw.strip():
+        return
+    spec = (json.loads(raw).get("spec") or {})
+    enabled = (spec.get("cluster") or {}).get("enableFailureDomains")
+
+    labelled = {}
+    for node_set in spec.get("nodeSets") or []:
+        for group in node_set.get("groups") or []:
+            domain = (group.get("failureDomain") or "").strip()
+            if domain:
+                labelled.setdefault(domain, []).extend(
+                    group.get("workers") or [])
+    if not labelled or enabled is True:
+        return
+
+    log("")
+    log(f"REFUSING to approve {name}: the draft names failure domains on a "
+        f"cluster that does not have the feature.")
+    log(f"  enableFailureDomains   {enabled!r} (the feature is off)")
+    for domain, workers in sorted(labelled.items()):
+        log(f"  failureDomain {domain!r}      {len(workers)} worker(s): "
+            f"{', '.join(sorted(set(workers)))}")
+    log("")
+    log("  The operator will still send these as failure_domain on every")
+    log("  node add, and the control plane refuses an explicit domain on a")
+    log("  cluster created without the feature -- so no node is added, and")
+    log("  the deployment reports only 'Activating' until it times out.")
+    log("")
+    log("  Clear the labels, or give the fleet real domains:")
+    log("")
+    log(f"    kubectl -n {NS} patch clusterdeploymentconfig {name} "
+        "--type=json \\")
+    log("      -p '[{\"op\":\"remove\",\"path\":"
+        "\"/spec/nodeSets/0/groups/<i>/failureDomain\"}]'")
+    log("")
+    log("  or relabel the workers so topology.kubernetes.io/zone names at")
+    log("  least parityChunks+2 domains holding an equal number of workers,")
+    log("  and run discovery again.")
+    log("")
+    raise SystemExit(
+        f"draft {name} labels failure domain(s) "
+        f"{', '.join(sorted(labelled))} but enableFailureDomains is not set; "
+        f"every node_add would be refused by the control plane")
+
+
 def approve_and_wait(name: str, timeout: int) -> None:
     # The gate the manual deploy waits on before it edits the draft.
     wait_control_plane_ready(int(os.environ.get("TIMEOUT_CP_READY", "1800")))
@@ -1075,6 +1414,7 @@ def approve_and_wait(name: str, timeout: int) -> None:
     # becomes immutable, so a draft that cannot work is worth catching while
     # it can still be rebuilt.
     check_stripe_fits(name)
+    check_failure_domains(name)
 
     log(f"approving {name}")
     kubectl("patch", "clusterdeploymentconfig", name, "--type=merge",
@@ -1087,6 +1427,15 @@ def approve_and_wait(name: str, timeout: int) -> None:
     reported_failed = set()
     mco_granted = 0.0
     mco_seen = set()
+    # The per-node view, which the deployment config's own phase does not
+    # carry. Run 39675850279 spent its whole 1800s on one line -- "waiting on
+    # Activating" -- while five nodes queued behind a sixth whose add was
+    # being refused. The signature is what counts as movement; when it stops
+    # changing, say what is holding and read the reason out of the task
+    # runner rather than leaving it on the lab.
+    last_steps = None
+    steps_since = time.time()
+    stall_reported = set()
     while time.time() < deadline:
         out = kubectl("get", "clusterdeploymentconfig", name, "-o", "json",
                       check=False)
@@ -1105,6 +1454,32 @@ def approve_and_wait(name: str, timeout: int) -> None:
                 return
             if phase == "Failed":
                 raise RuntimeError(f"deployment failed: {msg}")
+
+        rows = node_steps()
+        signature = steps_signature(rows)
+        if rows and signature != last_steps:
+            last_steps, steps_since = signature, time.time()
+            for worker, phase, step, message in rows:
+                detail = f"  {message}" if message else ""
+                log(f"  node {worker}: {phase}/{step or '-'}{detail}")
+        elif rows and time.time() - steps_since >= STALL_REPORT_SEC:
+            held = sorted(f"{w} in {s_}" for w, _, s_, _ in rows
+                          if s_ not in ("", "AwaitingSlot"))
+            waiting = sum(1 for _, _, s_, _ in rows if s_ == "AwaitingSlot")
+            mins = int((time.time() - steps_since) // 60)
+            log(f"NOTE: no storage node has changed step in {mins}m. "
+                f"Holding: {', '.join(held) or 'nothing'}"
+                + (f"; {waiting} queued on AwaitingSlot behind it" if waiting
+                   else ""))
+            # The operator stays silent while the control plane still counts
+            # the add as in flight, so its reason only exists in the task
+            # runner. Print each one once, as it appears.
+            for failure in node_add_failures():
+                if failure in stall_reported:
+                    continue
+                stall_reported.add(failure)
+                log(f"      node_add: {failure}")
+            steps_since = time.time()
 
         # The document stays Expanding while a node underneath it has already
         # failed, so watch the nodes too -- but report rather than give up.
