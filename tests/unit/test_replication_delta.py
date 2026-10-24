@@ -256,6 +256,25 @@ class TestOverlapWithMerge(unittest.TestCase):
         self.assertEqual(rec.get_id(), "s1")
 
 
+    def test_a_landing_chained_by_an_earlier_pass_is_recognised(self):
+        """The finish chains, then waits for the merge over several passes;
+        add_clone again fails with "File exists" (bed run 4)."""
+        node = MagicMock()
+        node.rpc_client.return_value.bdev_get.return_value = {
+            "driver_specific": {"lvol": {"base_snapshot": "LVOL_59"}}}
+        self.assertTrue(snapshot_replication._chained_onto(node, "LVS_25/LVOL_61", "LVS_25/LVOL_59"))
+        self.assertFalse(snapshot_replication._chained_onto(node, "LVS_25/LVOL_61", "LVS_25/LVOL_55"))
+        node.rpc_client.return_value.bdev_get.return_value = [{"driver_specific": {"lvol": {}}}]
+        self.assertFalse(snapshot_replication._chained_onto(node, "LVS_25/LVOL_61", "LVS_25/LVOL_59"))
+
+    def test_a_chain_is_recorded_once(self):
+        task = SimpleNamespace(function_params={}, write_to_db=MagicMock())
+        node = SimpleNamespace(get_id=lambda: "n1")
+        snapshot_replication._record_chained(task, node)
+        snapshot_replication._record_chained(task, node)
+        self.assertEqual(task.function_params["prechained_node_ids"], ["n1"])
+        task.write_to_db.assert_called_once()
+
 class TestLandingMerge(unittest.TestCase):
     """After a delta, the landing volume's pre-allocated clusters hold only the
     delta's blocks; the rest comes from the base before the convert, as a job

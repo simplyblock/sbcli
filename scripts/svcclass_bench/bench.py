@@ -182,6 +182,11 @@ def prepare(args):
     Resumable: with a state file present, the volumes exist and are being or
     have been filled, so it only waits for the fill to end."""
     bed = Bed()
+    if STATE.exists() and load_state().get("cluster") != bed.src["cluster_uuid"]:
+        # the volumes of an earlier bed: this one has none of them
+        stale = STATE.with_name(f"state-{int(time.time())}.json")
+        STATE.rename(stale)
+        log(f"state file belongs to another cluster; moved to {stale.name}")
     if STATE.exists():
         log("volumes already prepared; waiting for the preconditioning to finish")
         _wait_idle(bed, load_state()["volumes"])
@@ -216,7 +221,7 @@ def prepare(args):
         v.update(device=f"/dev/{dev}", nqn=nqn, size=info[vid]["size"])
         log(f"volume {vid}: {client.ip} {v['device']}")
     RESULTS.mkdir(exist_ok=True)
-    STATE.write_text(json.dumps({"volumes": vols}, indent=2))
+    STATE.write_text(json.dumps({"cluster": bed.src["cluster_uuid"], "volumes": vols}, indent=2))
     log("preconditioning: one sequential pass over every volume")
     for vid, v in vols.items():
         c = bed.clients[v["client"]]

@@ -1867,6 +1867,29 @@ def _deferred_chain_gate(task, snapshot, replicate_to_source):
     return "pending"
 
 
+def _chained_onto(node, lvol_bdev, snap_bdev):
+    """Whether *lvol_bdev* already reads through *snap_bdev* on *node*."""
+    try:
+        ret = node.rpc_client().bdev_get(lvol_bdev)
+    except Exception:                                     # noqa: BLE001
+        return False
+    if isinstance(ret, list):
+        ret = ret[0] if ret else {}
+    base = (((ret or {}).get("driver_specific") or {}).get("lvol") or {}).get("base_snapshot")
+    return bool(base) and base == snap_bdev.split("/")[-1]
+
+
+def _record_chained(task, node):
+    """Remember that the landing volume is chained on *node* (see
+    _prechained_nodes_for), so a later pass of the finish does not chain it
+    again."""
+    chained = list(task.function_params.get("prechained_node_ids") or [])
+    if node.get_id() not in chained:
+        chained.append(node.get_id())
+        task.function_params["prechained_node_ids"] = chained
+        task.write_to_db()
+
+
 def _discard_landing_for_retry(task, remote_lv, msg):
     """Delete the landing volume and send the snapshot again from the start."""
     try:
@@ -2060,6 +2083,11 @@ def process_snap_replicate_finish(task, snapshot):
     if remote_snode.get_id() in converted:
         logger.info("Landing volume %s is already converted on %s; skipping "
                     "its chain and convert", remote_lv.top_bdev, remote_snode.get_id())
+    elif (target_prev_snap and remote_snode.get_id() not in _prechained
+          and _chained_onto(remote_snode, remote_lv.top_bdev, target_prev_snap['snap_bdev'])):
+        # chained by an earlier pass of this finish that then waited for the
+        # merge: add_clone is not idempotent ("File exists")
+        _record_chained(task, remote_snode)
     elif target_prev_snap and remote_snode.get_id() not in _prechained:
         logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
         with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
@@ -2068,6 +2096,8 @@ def process_snap_replicate_finish(task, snapshot):
         if not ret:
             logger.error("Failed to chain replicated snapshot on primary node")
             return False
+        # the merge may keep this finish pending for several passes
+        _record_chained(task, remote_snode)
     elif target_prev_snap:
         logger.info("Landing volume %s was already chained to %s on %s before "
                     "the transfer; skipping the redundant add_clone",
