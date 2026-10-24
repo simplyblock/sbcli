@@ -161,6 +161,38 @@ class TestFinishSkipsConvertedNodes(unittest.TestCase):
         primary.rpc_client.return_value.bdev_lvol_convert.assert_called_once()
         self.assertEqual(task.function_params["converted_nodes"], ["n-p"])
 
+    def test_secondary_already_chained_is_not_chained_again(self):
+        """Bed run 5: a landing volume chained on the primary after its
+        transfer reached the secondary through the lvstore's metadata sync
+        while it merged; add_clone there failed with "File exists" on every
+        retry. A secondary that already reads through the base is skipped."""
+        task = _task(remote_lvol_id="r-1")
+        prev = {"snap_bdev": "LVS_1/LVOL_83"}
+        primary = MagicMock()
+        primary.get_id.return_value = "n-p"
+        primary.secondary_node_id = "n-s"
+        primary.transfer_hublvol = None
+        primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
+        secondary = MagicMock()
+        secondary.get_id.return_value = "n-s"
+        secondary.status = "online"
+        secondary.rpc_client.return_value.bdev_get.return_value = {
+            "driver_specific": {"lvol": {"base_snapshot": "LVOL_83"}}}
+        secondary.rpc_client.return_value.bdev_lvol_convert.return_value = False
+        db = MagicMock()
+        db.get_lvol_by_id.return_value = SimpleNamespace(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1",
+                                                         node_id="n-p")
+        db.get_storage_node_by_id.return_value = secondary
+        with patch.object(snapshot_replication, "db", db), \
+                patch.object(snapshot_replication, "_stable_target_leader", return_value=(primary, "")), \
+                patch.object(snapshot_replication, "_transfer_source_node", return_value=MagicMock()), \
+                patch.object(snapshot_replication, "_resolve_chain_target", return_value=(prev, None, True)), \
+                patch.object(snapshot_replication, "_require_lvs_leader", return_value=True), \
+                patch.object(snapshot_replication, "_prechained_nodes_for", return_value={"n-p"}):
+            snapshot_replication.process_snap_replicate_finish(task, MagicMock())
+        secondary.rpc_client.return_value.bdev_lvol_add_clone.assert_not_called()
+        secondary.rpc_client.return_value.bdev_lvol_convert.assert_called_once()
+
     def test_retry_converts_only_what_is_left(self):
         task = _task(remote_lvol_id="r-1", converted_nodes=["n-p"])
         ret, primary, secondary = self._run(task, sec_convert_ok=False)
