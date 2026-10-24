@@ -95,6 +95,9 @@ class StorageNode(BaseNodeObject):
     cpu_hz: int = 0
     ctrl_secret: SecretStr = SecretStr("")
     data_nics: list[IFace] = default_factory(list)
+    # The networks the SPDK pod attaches to, as the operator stated them at node-add
+    # (name, namespace, interface, ips, resource). Empty for a node on the host network.
+    networks: list[dict] = default_factory(list)
     distrib_cpu_cores: list[int] = default_factory(list)
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
@@ -135,6 +138,10 @@ class StorageNode(BaseNodeObject):
     max_snap: int = 0
     memory: int = 0
     mgmt_ip: str = ""
+    # The address the SPDK RPC is served on, for a node whose pod is on attached
+    # networks. mgmt_ip stays the worker's address, which is what identifies the host
+    # and what its agent and firewall answer on. Empty for a node on the host network.
+    spdk_ip: str = ""
     namespace: str = ""
     node_lvs: str = "lvs"
     num_partitions_per_dev: int = 1
@@ -329,7 +336,7 @@ class StorageNode(BaseNodeObject):
             timeout, retry = budget
             kwargs.setdefault("timeout", timeout)
             kwargs.setdefault("retry", retry)
-        host = self.mgmt_ip
+        host = self.spdk_ip or self.mgmt_ip
         if Settings().tls_connect != "disabled":
             host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(

@@ -446,6 +446,15 @@ class RPCClient:
             self.host, self.port, self.username, self.password, self.retry, Settings())
 
 
+    def link_state(self, ifname: str) -> bool:
+        """Whether the interface has carrier, in the SPDK pod's network namespace."""
+        return self._request("sbcli_link_state", ifname=ifname)
+
+    def net_ping(self, ifname: str, ip: str) -> bool:
+        """Whether the address answers a ping sent out of the interface, from the
+        SPDK pod's network namespace."""
+        return self._request("sbcli_net_ping", ifname=ifname, ip=ip)
+
     def get_version(self):
         return self._request("spdk_get_version")
 

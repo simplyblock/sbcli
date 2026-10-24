@@ -6,17 +6,26 @@ metadata:
   labels:
     app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
-  {% if MODE == "kubernetes" %}
+  {% if MODE == "kubernetes" or NETWORKS %}
   annotations:
+    {% if MODE == "kubernetes" %}
     log-collector/enabled: "true"
+    {% endif %}
+    {% if NETWORKS %}
+    k8s.v1.cni.cncf.io/networks: {{ NETWORKS | tojson }}
+    {% endif %}
   {% endif %}
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
   nodeSelector:
     kubernetes.io/hostname: {{ HOSTNAME }}
+  {% if NETWORKS %}
+  dnsPolicy: ClusterFirst
+  {% else %}
   hostNetwork: true
   dnsPolicy: ClusterFirstWithHostNet
+  {% endif %}
   tolerations:
     - effect: NoSchedule
       operator: Exists
@@ -134,12 +143,18 @@ spec:
         limits:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
           cpu: {{ CORES }}
+          {% for resource, count in (NETWORK_RESOURCES or {}).items() %}
+          {{ resource }}: {{ count }}
+          {% endfor %}
           {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
         requests:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
+          {% for resource, count in (NETWORK_RESOURCES or {}).items() %}
+          {{ resource }}: {{ count }}
+          {% endfor %}
           {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
@@ -168,6 +183,12 @@ spec:
           readOnly: true
         {% endif %}
       env:
+        {% if NETWORKS %}
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        {% endif %}
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
         - name: RPC_PORT

@@ -35,6 +35,7 @@ from simplyblock_core import (
     distr_controller,
     jm_raid,
     scripts,
+    storage_network,
     utils,
 )
 from simplyblock_core import db_controller as db_module
@@ -3631,7 +3632,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
              spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
-             force_format=False):
+             force_format=False, networks=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -3750,7 +3751,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         #     if node_info['cluster_id'] != cluster_id:
         #         logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
         #         return False
-        ip_iface = utils.get_mgmt_ip(node_info, iface_name)
+        ip_iface = storage_network.host_mgmt(node_info, iface_name, networks)
         mgmt_ip = ip_iface[0] if ip_iface else None
 
         # A host's failure domain is immutable for the lifetime of its node
@@ -4001,7 +4002,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
-        mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
+        mgmt_info = storage_network.host_mgmt(node_info, iface_name, networks)
         if not mgmt_info:
             logger.error(f"No management interface with IP found in provided interfaces: {iface_name}")
             return False
@@ -4172,7 +4173,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
                 mcp_max_unavailable=mcp_max_unavailable,
-                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret)
+                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret, networks=networks)
             time.sleep(5)
 
         except Exception as e:
@@ -4231,12 +4232,27 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
 
         data_nics = []
+        spdk_ip = ""
 
         active_tcp = False
         active_rdma = False
         fabric_tcp = cluster.fabric_tcp
         fabric_rdma = cluster.fabric_rdma
         names = data_nics_list or [mgmt_iface]
+        if networks:
+            # The pod's interfaces exist only in its own namespace, so the host's
+            # NICs say nothing about them: the pod reported what it holds, and an
+            # attached interface is TCP.
+            try:
+                spdk_ip, reported_nics = storage_network.from_report(results)
+            except (ValueError, KeyError, TypeError) as e:
+                _abort_started_spdk(snode_api, rpc_port, cluster_id,
+                                    f"The SPDK pod reported no usable interfaces: {e}",
+                                    cluster_mode=cluster.mode)
+                return False
+            data_nics = [IFace(nic) for nic in reported_nics]
+            active_tcp = True
+            names = []
         logger.info(f"fabric_tcp is {fabric_tcp}")
         logger.info(f"fabric_rdma is {fabric_rdma}")
         logger.debug(f"Data nics ports are: {names}")
@@ -4296,6 +4312,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.host_nqn = subsystem_nqn
         snode.subsystem = subsystem_nqn
         snode.data_nics = data_nics
+        snode.networks = list(networks or [])
+        snode.spdk_ip = spdk_ip
         snode.mgmt_ip = mgmt_ip
         snode.primary_ip = mgmt_ip
         snode.rpc_port = rpc_port
@@ -8440,18 +8458,19 @@ def _restart_storage_node_impl(
         old_rpc_host, old_rpc_port = _old_rpc_client.host, _old_rpc_client.port
         snode.api_endpoint = node_address
         snode.mgmt_ip = utils.resolve_address(node_address)
-        data_nics = []
-        for nic in snode.data_nics:
-            if_name = nic["if_name"]
-            device = node_info['network_interface'][if_name]
-            data_nics.append(
-                IFace({
-                    'uuid': str(uuid.uuid4()),
-                    'if_name': if_name,
-                    'ip4_address': device['ip'],
-                    'status': device['status'],
-                    'net_type': device['net_type']}))
-        snode.data_nics = data_nics
+        if not snode.networks:
+            data_nics = []
+            for nic in snode.data_nics:
+                if_name = nic["if_name"]
+                device = node_info['network_interface'][if_name]
+                data_nics.append(
+                    IFace({
+                        'uuid': str(uuid.uuid4()),
+                        'if_name': if_name,
+                        'ip4_address': device['ip'],
+                        'status': device['status'],
+                        'net_type': device['net_type']}))
+            snode.data_nics = data_nics
         snode.hostname = node_info['hostname']
         evict_cached_session(old_rpc_host, old_rpc_port)
 
@@ -8501,7 +8520,11 @@ def _restart_storage_node_impl(
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
     snode_api = snode.client(timeout=5 * 60, retry=3)
-    for nic in snode.data_nics:
+    if snode.networks:
+        # The host's interfaces are not the pod's, so the agent's probes would answer
+        # for the wrong namespace. An attached interface is TCP.
+        active_tcp = True
+    for nic in ([] if snode.networks else snode.data_nics):
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
             nic.trtype = "RDMA"
             active_rdma = True
@@ -8698,7 +8721,11 @@ def _restart_storage_node_impl(
             total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image,
-            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret)
+            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret, networks=snode.networks)
+        if snode.networks:
+            # A pod recreated on a restart can hold other addresses than the one it
+            # replaced, so they are read from the new pod every time.
+            storage_network.apply_report(snode, results)
 
     except Exception as e:
         logger.error(e)
