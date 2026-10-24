@@ -156,10 +156,13 @@ def transfer_table(xfer_recs, iostat_recs=()):
     serves the merges, and a 64 KiB request is written as up to two writes,
     timed together on the source and singly on the target."""
     first, last = {}, {}
+    sampled = defaultdict(list)         # samples taken while the transfer ran
     for r in xfer_recs:
         if r.get("stat_reqs") is not None:
             first.setdefault(r["snapshot"], r)
             last[r["snapshot"]] = r
+            if r.get("transfer_state") == "In progress":
+                sampled[r["snapshot"]].append(r)
     out = []
     for snap, r in sorted(last.items(), key=lambda kv: kv[1]["t"]):
         n, elapsed_s = r["stat_reqs"], (r.get("stat_elapsed_ms") or 0) / 1000
@@ -170,6 +173,7 @@ def transfer_table(xfer_recs, iostat_recs=()):
         if lvs.startswith("LVS_"):
             target_us = _target_write_us(iostat_recs, "raid0_" + lvs[4:],
                                          r["t"] - elapsed_s, r["t"])
+        runs = sampled.get(snap) or []
         out.append({
             "snapshot": snap, "volume": r.get("volume"), "partial": r.get("allow_partial"),
             "reqs": n, "bytes": r.get("stat_bytes") or 0, "elapsed_s": elapsed_s,
@@ -177,8 +181,39 @@ def transfer_table(xfer_recs, iostat_recs=()):
             "in_flight": n * (read_us + write_us) / 1e6 / elapsed_s if elapsed_s else 0,
             "read_us": read_us, "write_us": write_us, "target_us": target_us,
             "network_us": max(write_us - target_us, 0) if target_us is not None else None,
+            # where a request waits outside its IO (SPDK with in-place refill)
+            "inline_pct": (100 * r["stat_inline_reqs"] / n
+                           if n and r.get("stat_inline_reqs") is not None else None),
+            "ready_wait_us": r.get("stat_ready_wait_us_avg"),
+            "free_wait_us": r.get("stat_free_wait_us_avg"),
+            "inflight_sampled": (statistics.mean(x.get("stat_inflight") or 0 for x in runs)
+                                 if runs and "stat_inflight" in runs[0] else None),
+            "inflight_max": r.get("stat_inflight_max"),
+            "md_gap_ms": (max((x.get("md_tick_gap_max_us") or 0) for x in runs) / 1000
+                          if runs and "md_tick_gap_max_us" in runs[0] else None),
+            "deferred": bool(r.get("deferred_to")),
         })
     return out
+
+
+def merge_table(xfer_recs):
+    """Per landing volume: the merge job's last state and duration, and
+    whether a transfer of the same volume ran while it merged (overlap)."""
+    last, merging = {}, defaultdict(list)
+    for r in xfer_recs:
+        m = r.get("merge")
+        if isinstance(m, dict) and m:
+            last[r["snapshot"]] = (r, m)
+            if m.get("state") == "running":
+                merging[r["volume"]].append(r["t"])
+    overlap = defaultdict(int)
+    for r in xfer_recs:
+        if r.get("transfer_state") == "In progress" and r["t"] in set(merging.get(r.get("volume"), ())):
+            overlap[r["volume"]] += 1
+    return [{"snapshot": s, "volume": r.get("volume"), "state": m.get("state"),
+             "ms": m.get("ms"), "bytes": m.get("bytes"), "clusters": m.get("clusters"),
+             "overlap_samples": overlap.get(r.get("volume"), 0)}
+            for s, (r, m) in sorted(last.items(), key=lambda kv: kv[1][0]["t"])]
 
 
 def _ratio(c):
@@ -236,6 +271,29 @@ def main(run_dir):
                 print(f"  median {part}: {statistics.median(vals):.0f}")
     else:
         print("  no xfer_stat records")
+
+    print("\n== Replication transfers: waits outside the IO ==")
+    print(f"  {'snapshot':36} {'kind':5} {'defer':5} {'inline%':>7} {'ready us':>8} {'free us':>8}"
+          f" {'inflt(L)':>8} {'inflt(s)':>8} {'max':>5} {'md gap ms':>9}")
+
+    def _f(v, fmt):
+        width = fmt.split(".")[0].rstrip("df")
+        return format(v, fmt) if v is not None else format("-", ">" + width)
+    for x in xt:
+        print(f"  {x['snapshot']:36} {'delta' if x['partial'] else 'full':5} "
+              f"{'yes' if x['deferred'] else 'no':5} {_f(x['inline_pct'], '7.0f')} "
+              f"{_f(x['ready_wait_us'], '8.0f')} {_f(x['free_wait_us'], '8.0f')} "
+              f"{x['in_flight']:8.1f} {_f(x['inflight_sampled'], '8.1f')} "
+              f"{_f(x['inflight_max'], '5d')} {_f(x['md_gap_ms'], '9.1f')}")
+
+    print("\n== Landing merges (and transfers of the same volume running meanwhile) ==")
+    mt = merge_table([r for r in recs if r.get("kind") == "xfer_stat"])
+    for m in mt:
+        print(f"  {m['snapshot']:36} {m['state'] or '-':8} {(m['ms'] or 0) / 1000:7.0f} s "
+              f"{(m['bytes'] or 0) / 1e9:7.1f} GB {m['clusters'] or 0:8} clusters  "
+              f"overlap samples {m['overlap_samples']}")
+    if not mt:
+        print("  no merge records")
 
 
 if __name__ == "__main__":

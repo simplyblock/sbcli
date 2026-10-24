@@ -586,6 +586,11 @@ REPL_MERGE_POLL_SEC = 1.0
 # rings).
 REPL_XFER_BATCH = 16
 REPL_XFER_PARTIAL_BATCH = 256
+# The next snapshot of a volume may transfer while the target still merges the
+# previous copy: the cycle then takes the longer of transfer and merge, not
+# their sum. Its landing volume is chained onto that copy once the copy exists
+# (snapshot_replication._finishing_predecessor).
+REPL_OVERLAP_MERGE = True
 # A volume in its final cutover already owns its lvstore and every other
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.

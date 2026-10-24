@@ -206,7 +206,9 @@ def _transfers(f, now, cluster_id):
             src = db.get_storage_node_by_id(snap.lvol.node_id)
             st = src.rpc_client(timeout=10, retry=1).bdev_lvol_transfer_stat(snap.snap_bdev) or {}
             rec = {"t": now, "kind": "xfer_stat", "snapshot": snap.get_id(), "volume": snap.lvol.get_id(),
-                   "allow_partial": p.get("allow_partial"), **st}
+                   "allow_partial": p.get("allow_partial"), "transfer_done": bool(p.get("transfer_done")),
+                   "deferred_to": p.get("chain_deferred_to"), "task_result": str(t.function_result)[:80],
+                   **st}
             if p.get("remote_lvol_id"):
                 lv = db.get_lvol_by_id(p["remote_lvol_id"])
                 tgt = db.get_storage_node_by_id(lv.node_id)
@@ -215,6 +217,9 @@ def _transfers(f, now, cluster_id):
                 rec["landing"] = {"lvol": lv.get_id(), "bdev": lv.top_bdev, "tick_rate": io.get("tick_rate"),
                                   **{k: b.get(k) for k in ("bytes_written", "num_write_ops",
                                                            "write_latency_ticks")}}
+                if p.get("transfer_done"):
+                    # the merge on the target, while it runs next to the next transfer
+                    rec["merge"] = _rpc(tgt, "bdev_lvol_merge_base_stat", lvol_name=lv.top_bdev)
             f.write(json.dumps(rec) + "\n")
         except Exception as e:                               # noqa: BLE001
             f.write(json.dumps({"t": now, "kind": "error", "error": f"xfer {t.get_id()}: {e}"}) + "\n")

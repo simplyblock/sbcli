@@ -135,6 +135,7 @@ class TestPartialDecision(unittest.TestCase):
         task = SimpleNamespace(function_params={}, write_to_db=MagicMock(), uuid="t")
         remote_lv = SimpleNamespace(get_id=lambda: "landing")
         with patch.object(snapshot_replication, "_prechain_landing_volume", return_value=prechained), \
+                patch.object(snapshot_replication, "_finishing_predecessor", return_value=None), \
                 patch.object(snapshot_replication, "_previous_replicated_snapshot", return_value=prev):
             first = snapshot_replication._partial_transfer_decision(
                 task, snap or _snap(after=CLEAN), False, remote_lv, None, "n1")
@@ -155,6 +156,104 @@ class TestPartialDecision(unittest.TestCase):
 
     def test_a_predecessor_without_blob_id_is_full(self):
         self.assertEqual(self._decide(True, _snap(before=CLEAN, blobid=0)), (False, 0))
+
+
+class TestOverlapWithMerge(unittest.TestCase):
+    """The next transfer of a volume runs while the target still merges the
+    previous copy: its delta is taken against that predecessor, and its
+    landing volume is chained onto the predecessor's copy only in the finish,
+    once that copy exists."""
+
+    def _decide(self, pred, sec_status=None):
+        task = SimpleNamespace(function_params={}, write_to_db=MagicMock(), uuid="t")
+        remote_lv = SimpleNamespace(get_id=lambda: "landing")
+        node = SimpleNamespace(secondary_node_id="sec" if sec_status else "",
+                               get_id=lambda: "tgt")
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = SimpleNamespace(status=sec_status)
+        prechain = MagicMock()
+        with patch.object(snapshot_replication, "_finishing_predecessor", return_value=pred), \
+                patch.object(snapshot_replication, "_prechain_landing_volume", prechain), \
+                patch.object(snapshot_replication, "db", db):
+            res = snapshot_replication._partial_transfer_decision(
+                task, _snap(after=CLEAN), False, remote_lv, node, "n1")
+        prechain.assert_not_called()        # nothing to chain onto yet
+        return res, task.function_params
+
+    def test_a_delta_on_the_merging_predecessor(self):
+        (res, params) = self._decide(_snap(before=CLEAN, blobid=0x88), sec_status="online")
+        self.assertEqual(res, (True, 0x88))
+        self.assertEqual(params["chain_deferred_to"], "snap")
+
+    def test_an_offline_secondary_makes_it_full_but_still_deferred(self):
+        (res, params) = self._decide(_snap(before=CLEAN, blobid=0x88), sec_status="offline")
+        self.assertEqual(res, (False, 0))
+        self.assertEqual(params["chain_deferred_to"], "snap")
+
+    def test_a_dirty_basis_makes_it_full(self):
+        (res, _) = self._decide(_snap(before={"n1": [0, "t0"], "n2": [9, "t0"]}))
+        self.assertEqual(res, (False, 0))
+
+    def _gate(self, pred, chain=None, live=True):
+        task = SimpleNamespace(function_params={"chain_deferred_to": "pred"}, uuid="t")
+        db = MagicMock()
+        if pred is None:
+            db.get_snapshot_by_id.side_effect = KeyError("pred")
+        else:
+            db.get_snapshot_by_id.return_value = pred
+        with patch.object(snapshot_replication, "db", db), \
+                patch.object(snapshot_replication, "_previous_replicated_snapshot",
+                             return_value=chain), \
+                patch.object(snapshot_replication, "_live_replication_task",
+                             return_value=object() if live else None):
+            return snapshot_replication._deferred_chain_gate(task, _snap(), False)
+
+    @staticmethod
+    def _pred(copy="", status="online"):
+        return SimpleNamespace(target_replicated_snap_uuid=copy, status=status,
+                               cluster_id="cl", get_id=lambda: "pred")
+
+    def test_the_finish_waits_for_the_predecessors_copy(self):
+        self.assertEqual(self._gate(self._pred()), "pending")
+
+    def test_the_finish_chains_once_the_copy_exists(self):
+        self.assertEqual(self._gate(self._pred("copy"), chain=self._pred("copy")), "ok")
+
+    def test_a_different_chain_base_starts_over(self):
+        other = SimpleNamespace(get_id=lambda: "older")
+        self.assertEqual(self._gate(self._pred("copy"), chain=other), "restart")
+
+    def test_a_predecessor_that_will_not_replicate_starts_over(self):
+        self.assertEqual(self._gate(self._pred(), live=False), "restart")
+        self.assertEqual(self._gate(self._pred(status="in_deletion")), "restart")
+        self.assertEqual(self._gate(None), "restart")
+
+    def test_no_deferred_chain_passes(self):
+        task = SimpleNamespace(function_params={}, uuid="t")
+        self.assertEqual(snapshot_replication._deferred_chain_gate(task, _snap(), False), "ok")
+
+    def _walk(self, completed):
+        base = SimpleNamespace(snap_bdev="LVS/SNAP1", target_replicated_snap_uuid="",
+                               status="online", get_id=lambda: "s1")
+        snap = SimpleNamespace(snap_bdev="LVS/SNAP2", lvol=SimpleNamespace(node_id="n0"))
+        node = MagicMock()
+        node.rpc_client.return_value.bdev_get.side_effect = [
+            {"driver_specific": {"lvol": {"base_snapshot": "SNAP1"}}},
+            {"driver_specific": {"lvol": {}}}]
+        db = MagicMock()
+        db.get_snapshots_by_node_id.return_value = [base]
+        with patch.object(snapshot_replication, "db", db), \
+                patch.object(snapshot_replication, "_transfer_completed", return_value=completed):
+            verdict, rec, _ = snapshot_replication._unreplicated_local_ancestor(node, snap, False)
+        return verdict, rec
+
+    def test_a_base_that_has_arrived_does_not_hold_the_transfer(self):
+        self.assertEqual(self._walk(True), ("ok", None))
+
+    def test_a_base_still_transferring_goes_first(self):
+        verdict, rec = self._walk(False)
+        self.assertEqual(verdict, "pending")
+        self.assertEqual(rec.get_id(), "s1")
 
 
 class TestLandingMerge(unittest.TestCase):
