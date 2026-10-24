@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup as BackupModel
 from simplyblock_core.models.backup import BackupPolicy
+from simplyblock_core.models.backup import GroupBackup as GroupBackupModel
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -138,6 +139,19 @@ def _lookup_backup(backup_id: UUID, cluster: Cluster) -> BackupModel:
 
 
 BackupResource = Annotated[BackupModel, Depends(_lookup_backup)]
+
+
+def _lookup_group_backup(group_backup_id: UUID, cluster: Cluster) -> GroupBackupModel:
+    try:
+        group_backup = _db.get_group_backup_by_id(str(group_backup_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if group_backup.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'GroupBackup {group_backup_id} not found')
+    return group_backup
+
+
+GroupBackupResource = Annotated[GroupBackupModel, Depends(_lookup_group_backup)]
 
 
 def _lookup_backup_policy(policy_id: UUID, cluster: Cluster) -> BackupPolicy:

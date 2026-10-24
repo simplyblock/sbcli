@@ -7,9 +7,14 @@ from fastapi import Request
 from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
-from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
+from simplyblock_core.controllers.backup.manifest import (
+    BackupExport,
+    BackupManifest,
+    GroupBackupExport,
+    GroupBackupManifest,
+)
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
 from simplyblock_core.models.backup_config import (
     BackupConfig,
     BackupLocation,
@@ -129,6 +134,8 @@ TaskFunctionName = Literal[
     "s3_backup",
     "s3_backup_restore",
     "s3_backup_merge",
+    "group_backup_commit",
+    "group_backup_delete",
     "cluster_expand",
     "replication_final",
     "fdb_backup",
@@ -710,6 +717,19 @@ class BackupDTO(BaseModel):
     completed_at: int
     encrypted: bool
 
+    #: The group backup this copy is a member of, when it belongs to a
+    #: consistency-group backup; null for a standalone single-volume backup. The
+    #: id is the group backup's composite ``cluster_id/uuid``, and ``group_seq``
+    #: is its generation. The operator mirrors these onto
+    #: ``StorageBackup.status.source.group`` so the members of one generation are
+    #: legible as a unit.
+    group_backup_id: str | None = None
+    group_seq: int = 0
+    #: The namespace cap of the subsystem the source volume shared (1: its own
+    #: subsystem); a restore recreates the same sharing. 0 for a record from
+    #: before the field was kept.
+    max_namespace_per_subsys: int = 0
+
     @staticmethod
     def from_model(model: Backup):
         return BackupDTO(
@@ -726,6 +746,65 @@ class BackupDTO(BaseModel):
             created_at=model.created_at,
             completed_at=model.completed_at,
             encrypted=model.encrypted,
+            group_backup_id=model.group_backup_id or None,
+            group_seq=model.group_seq,
+            max_namespace_per_subsys=model.max_namespace_per_subsys,
+        )
+
+
+#: A group backup's self-describing document as the API exchanges it: the body of
+#: the group-backups export GET and of an inline group-backups import. An alias
+#: for the same reason ``BackupExportDTO`` is one -- the wire form and the stored
+#: form are one shape, and naming it here still lets the API diverge later.
+GroupBackupExportDTO = GroupBackupExport
+
+#: A group backup's manifest as discover returns it, read from a bucket's
+#: ``groups/`` prefix with no cluster reference. An alias like ``BackupManifestDTO``.
+GroupBackupManifestDTO = GroupBackupManifest
+
+
+def _bare_uuid(composite_id: str) -> UUID:
+    """The UUID of a ``cluster_id/uuid`` record id. A DTO names the cluster once,
+    in ``cluster_id``, and every other object by its bare UUID."""
+    return UUID(composite_id.split('/')[-1])
+
+
+class GroupBackupDTO(BaseModel):
+    """A consistency-group backup: the member backups of one generation as one
+    all-or-nothing unit."""
+    id: UUID
+    cluster_id: UUID
+    #: The consistency group the generation was taken from.
+    consistency_group_id: UUID
+    consistency_group_name: str
+    group_seq: int
+    status: str
+    #: The member backups, one per member volume of the generation. Each member
+    #: backup carries its own volume; GET .../members/ returns the records.
+    member_backup_ids: list[UUID]
+    size: int
+    created_at: datetime
+    #: When the group backup committed: every member completed and the group
+    #: manifest was published. None until then.
+    completed_at: datetime | None = None
+    #: Why the group backup failed. None unless it did.
+    error_message: str | None = None
+
+    @staticmethod
+    def from_model(model: GroupBackup):
+        return GroupBackupDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            consistency_group_id=_bare_uuid(model.consistency_group_id),
+            consistency_group_name=model.consistency_group_name,
+            group_seq=model.group_seq,
+            status=model.status,
+            member_backup_ids=[_bare_uuid(b) for b in model.member_backup_ids],
+            size=model.size,
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            completed_at=(datetime.fromtimestamp(model.completed_at, tz=UTC)
+                          if model.completed_at else None),
+            error_message=model.error_message or None,
         )
 
 
