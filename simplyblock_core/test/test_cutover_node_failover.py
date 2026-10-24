@@ -80,9 +80,9 @@ def test_run_cutover_freezes_on_the_source_leader_into_the_target_leader(monkeyp
     tter = _Node("T3", events, "t3", "lvs_tgt")
     _install_nodes(monkeypatch, {"S1": src, "S2": sec, "T1": tgt, "T2": tsec, "T3": tter})
     # What the acting secondary needs to provide its hub on the target lvstore.
-    tgt.hublvol = type("Hub", (), {"nvmf_port": 4430})()
-    tsec.cluster_id = "CL2"
-    tsec.expose_bdev = lambda **kw: None
+    setattr(tgt, "hublvol", type("Hub", (), {"nvmf_port": 4430})())
+    setattr(tsec, "cluster_id", "CL2")
+    setattr(tsec, "expose_bdev", lambda **kw: None)
 
     ok, err = rfs.run_cutover(src, tgt, _Lvol(), "lvs_tgt/LVOL_1", 42, "lvs_tgt/SNAP1",
                               src_exec=sec, tgt_exec=tsec)

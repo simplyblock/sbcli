@@ -69,7 +69,7 @@ def waiting_lvol_ids(db, cluster_id, lvols=None):
     contenders = [lv for lv in migrating if lv.get_id() not in released]
 
     unit = {lv.get_id(): _unit(db, lv) for lv in contenders}
-    holder_unit = {}
+    holder_unit: dict[str, str] = {}
     for lv in sorted(contenders,
                      key=lambda v: (getattr(v, "migration_queued_at", 0) or 0, v.get_id())):
         holder_unit.setdefault(lv.node_id, unit[lv.get_id()])
