@@ -275,6 +275,103 @@ def _start_fio(bed, vols, run_dir_remote, runtime, profile="mixed.fio"):
     return starts
 
 
+_GIB = 1024 ** 3
+
+
+def _clone_on(bed, client, snap_id, name):
+    """Clone *snap_id* and connect it on *client*; returns (clone id, device).
+
+    A clone may become another namespace of a subsystem the client is already
+    connected to ("already connected" is fine), so its device is the one whose
+    namespace UUID is the clone's id, not the first of the subsystem."""
+    out = bed.sbctl(f"snapshot clone {snap_id} {name} --no-namespaced")
+    cid = out.strip().splitlines()[-1].strip()
+    for line in bed.sbctl(f"volume connect {cid}").splitlines():
+        if line.strip().startswith(("sudo nvme connect", "nvme connect")):
+            client.run(line if line.startswith("sudo") else f"sudo {line}", check=False)
+    find = ("for n in /sys/block/nvme*n*; do case $(basename $n) in *c*) continue;; esac; "
+            f"[ \"$(cat $n/uuid 2>/dev/null)\" = {cid} ] && basename $n; done")
+    for _ in range(30):
+        dev = client.run("bash -c " + shlex.quote(find), check=False).strip()
+        if dev:
+            return cid, f"/dev/{dev.splitlines()[0]}"
+        time.sleep(2)
+    raise RuntimeError(f"clone {cid}: no block device with that namespace UUID on {client.ip}")
+
+
+def _hash_chunks(client, dev, chunks, out):
+    """Start md5 of every 1 GiB chunk of *dev* in the background on *client*."""
+    script = (f"i=0; while [ $i -lt {chunks} ]; do printf '%d ' $i; "
+              f"dd if={dev} bs=1M count=1024 skip=$((i*1024)) iflag=direct status=none "
+              f"| md5sum | cut -c1-32; i=$((i+1)); done > {out}.tmp && mv {out}.tmp {out}")
+    client.run("sudo setsid nohup bash -c " + shlex.quote(script) + " > /dev/null 2>&1 < /dev/null &")
+
+
+def _verify_volume(bed, vid, v, recs, result):
+    """The newest snapshot of *vid* that has a copy on the target, against
+    that copy: md5 of every 1 GiB chunk, read through a clone of each."""
+    pairs = [r for r in recs if r["volume"] == vid and r.get("target") and r.get("replicated_at", 0) > 0]
+    if not pairs:
+        result[vid] = {"ok": None, "why": "no replicated snapshot"}
+        return
+    r = max(pairs, key=lambda x: x["created_at"])
+    client = bed.clients[v["client"]]
+    chunks = -(-int(v["size"]) // _GIB)
+    made = []
+    try:
+        src = _clone_on(bed, client, r["snapshot"], f"vfy-src-{v['name']}-{int(time.time())}")
+        made.append(src)
+        tgt = _clone_on(bed, client, r["target"], f"vfy-tgt-{v['name']}-{int(time.time())}")
+        made.append(tgt)
+        outs = [f"/tmp/vfy-{v['name']}-{side}.md5" for side in ("src", "tgt")]
+        client.run(f"sudo rm -f {outs[0]} {outs[1]}", check=False)
+        _hash_chunks(client, src[1], chunks, outs[0])
+        _hash_chunks(client, tgt[1], chunks, outs[1])
+        deadline = time.time() + 3600
+        while time.time() < deadline:
+            if client.run(f"test -f {outs[0]} && test -f {outs[1]} && echo done", check=False,
+                          idempotent=True).strip() == "done":
+                break
+            time.sleep(30)
+        else:
+            raise RuntimeError("hashing did not finish within an hour")
+        a = client.run(f"cat {outs[0]}", idempotent=True).split("\n")
+        b = client.run(f"cat {outs[1]}", idempotent=True).split("\n")
+        a = dict(x.split() for x in a if x.strip())
+        b = dict(x.split() for x in b if x.strip())
+        bad = sorted(int(k) for k in a if a[k] != b.get(k))
+        result[vid] = {"ok": not bad and len(a) == chunks == len(b), "snapshot": r["snapshot"],
+                       "copy": r["target"], "chunks": chunks, "hashed": [len(a), len(b)],
+                       "differing_gib_chunks": bad[:50]}
+    except Exception as e:                                 # noqa: BLE001
+        result[vid] = {"ok": None, "why": str(e)}
+    finally:
+        # the clones' namespaces go with them; the subsystem may be the
+        # volume's own, so it stays connected
+        for cid, _dev in made:
+            bed.mgmt.run(f"{SBCTL} volume delete {cid} --force", check=False)
+
+
+def _verify(bed, vols, run_dir):
+    """Data integrity of what replicated: every volume's newest replicated
+    snapshot against its copy on the target, byte for byte. Runs after fio
+    stopped and before replication is cleared (which deletes the snapshots)."""
+    recs = bed.agent("snapshots --volumes " + ",".join(vols))
+    result = {}
+    threads = [threading.Thread(target=_verify_volume, args=(bed, vid, v, recs, result))
+               for vid, v in vols.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    (run_dir / "integrity.json").write_text(json.dumps(result, indent=2))
+    for vid, res in result.items():
+        log(f"integrity {vid[:8]}: " + ("OK" if res.get("ok") else
+                                        f"MISMATCH in GiB chunks {res['differing_gib_chunks']}"
+                                        if res.get("ok") is False else f"not checked ({res.get('why')})"))
+    return result
+
+
 def _stop_fio(bed, vols):
     for v in vols.values():
         bed.clients[v["client"]].run("sudo pkill -INT -x fio", check=False)
@@ -327,7 +424,9 @@ def _fetch_logs(bed, run_id, run_dir, since):
     for svc in _MGMT_LOG_SERVICES:
         f = f"{REMOTE}/{run_id}-{svc}.log.gz"
         try:
-            bed.mgmt.run(f"sudo sh -c 'docker service logs --timestamps --since {iso} app_{svc} "
+            # docker service logs can stream for ever (seen after a service
+            # update); what arrived in 10 min is kept
+            bed.mgmt.run(f"sudo sh -c 'timeout 600 docker service logs --timestamps --since {iso} app_{svc} "
                          f"2>&1 | gzip > {f}' && sudo chmod a+r {f}")
             bed.mgmt.get(f, run_dir / "logs" / "mgmt" / f"{svc}.log.gz")
         except Exception as e:                             # noqa: BLE001
@@ -550,7 +649,7 @@ def run_one(bed, scenario, share, args):
                                check=False).strip().splitlines()
             if svc:
                 since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t0 - 120))
-                bed.mgmt.run(f"sudo docker service logs --since {since} {svc[0]} "
+                bed.mgmt.run(f"sudo timeout 600 docker service logs --since {since} {svc[0]} "
                              f"> {REMOTE}/{run_id}.xfer.log 2>&1", check=False)
                 bed.mgmt.get(f"{REMOTE}/{run_id}.xfer.log", run_dir / "replication-service.log")
     finally:
@@ -567,6 +666,8 @@ def run_one(bed, scenario, share, args):
         if scenario == "c":
             steps.append(("delete snapshots", lambda: _delete_snapshots(
                 bed, [s["snapshot"] for s in meta.get("snapshots", []) if not s.get("deleted")])))
+        if scenario == "b" and meta.get("policy") and getattr(args, "verify", False):
+            steps.append(("verify integrity", lambda: _verify(bed, vols, run_dir)))
         if scenario == "b" and meta.get("policy"):
             steps += [("stop collector", lambda: bed.mgmt.run(f"sudo touch {REMOTE}/{run_id}.stop",
                                                                check=False)),
@@ -683,6 +784,9 @@ def main():
         s.add_argument("--fio", default="mixed.fio", help="fio job file next to bench.py")
         s.add_argument("--logs", action="store_true",
                        help="fetch SPDK and control-plane logs of the run")
+        s.add_argument("--verify", action="store_true",
+                       help="(b) compare each volume's newest replicated snapshot with its "
+                            "copy on the target, byte for byte, at the end of the run")
     sub.add_parser("report")
     args = p.parse_args()
     {"prepare": prepare, "run": run, "matrix": matrix, "report": report}[args.cmd](args)
