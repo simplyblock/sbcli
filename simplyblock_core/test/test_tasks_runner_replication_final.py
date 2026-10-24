@@ -79,15 +79,31 @@ def _no_db_writes(monkeypatch):
     monkeypatch.setattr(LVolReplication, "write_to_db", lambda self, kv=None: None)
 
 
+def _primaries_freeze_and_receive(monkeypatch, db):
+    """Who freezes and who receives is covered by test_cutover_node_failover;
+    here both are the primaries."""
+    monkeypatch.setattr(runner, "_cutover_source",
+                        lambda lvol: (db.get_storage_node_by_id("S1"), ""))
+    monkeypatch.setattr(runner, "_cutover_target",
+                        lambda params, tgt: (tgt, ""))
+
+
 def _install(monkeypatch, nodes, rep, cutover_ret):
     db = _FakeDB(nodes, rep)
     monkeypatch.setattr(runner, "db", db)
     calls = []
 
-    def _run_cutover(src, tgt, lvol, comp, map_id, snap, operation="replicate"):
+    def _run_cutover(src, tgt, lvol, comp, map_id, snap, operation="replicate",
+                     src_exec=None, tgt_exec=None):
         calls.append((src.get_id(), tgt.get_id(), comp, map_id, snap, operation))
         return cutover_ret
     monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)
+    # Who freezes and who receives is covered by test_cutover_node_failover;
+    # here both are the primaries.
+    monkeypatch.setattr(runner, "_cutover_source",
+                        lambda lvol: (db.get_storage_node_by_id("S1"), ""))
+    monkeypatch.setattr(runner, "_cutover_target",
+                        lambda params, tgt: (tgt, ""))
     return calls
 
 
@@ -133,6 +149,7 @@ def _install_unreachable(monkeypatch, nodes, rep):
     def _run_cutover(*_args, **_kwargs):
         raise runner.replication_final_step.CutoverUnreachable("hub attach failed")
     monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)
+    _primaries_freeze_and_receive(monkeypatch, db)
 
 
 def test_an_unreachable_target_waits_without_burning_a_retry(monkeypatch):
@@ -175,14 +192,18 @@ def test_an_unreachable_target_past_the_window_burns_a_retry_and_keeps_the_windo
 
 
 def test_target_offline_defers_without_burning_a_retry(monkeypatch):
-    """An offline target is transient: deferring waits it out, where retrying
-    would exhaust the ceiling long before the node comes back."""
+    """An offline target primary before the clone exists is transient:
+    deferring waits it out, where retrying would exhaust the ceiling long
+    before the node comes back. (Once the clone exists the cutover follows the
+    target's settled leader instead -- test_cutover_node_failover.)"""
     rep = LVolReplication()
     nodes = {"S1": _node("S1"), "T1": _node("T1", status=StorageNode.STATUS_OFFLINE)}
     calls = _install(monkeypatch, nodes, rep, (True, None))
+    task = _task()
+    del task.function_params["tgt_lvol_composite"]
 
     with pytest.raises(TaskDefer, match="target node not online"):
-        runner.task_runner(_task().frozen_view(), [])
+        runner.task_runner(task.frozen_view(), [])
     assert calls == []
 
 
@@ -365,6 +386,7 @@ def _install_raising(monkeypatch, nodes, rep, exc):
     def _run_cutover(*_args, **_kwargs):
         raise exc
     monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)
+    _primaries_freeze_and_receive(monkeypatch, db)
 
 
 def test_a_dropped_connection_waits_without_burning_a_retry(monkeypatch):

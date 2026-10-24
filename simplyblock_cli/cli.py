@@ -402,6 +402,10 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__event_alerts(subparser)
         self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
+        self.init_cluster__migrate(subparser)
+        self.init_cluster__migrate_status(subparser)
+        self.init_cluster__migrate_list(subparser)
+        self.init_cluster__migrate_cancel(subparser)
         self.init_cluster__add_replication(subparser)
         self.init_cluster__replication_target_add(subparser)
         self.init_cluster__replication_target_list(subparser)
@@ -673,6 +677,30 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('name', help='The new cluster name.', type=str)
+
+    def init_cluster__migrate(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate', 'Moves volumes online to another cluster in one step: migration-mode replication, then a short-freeze cutover per volume (a migration plan)')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--target-cluster-id', help='Destination cluster id', type=str, dest='target_cluster_id', required=True).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--pool', help='Only the volumes of this pool (id). Default: every volume of the cluster.', type=str, dest='pool_id')
+        subcommand.add_argument('--lvols', help='Only these volumes: comma-separated ids', type=str, dest='lvol_ids')
+        subcommand.add_argument('--delete-source', help='Delete each source volume once its cutover completed', dest='delete_source', action='store_true')
+        subcommand.add_argument('--interval-min', help='Replication cadence in minutes for volumes the plan starts. Default: `1`.', type=int, dest='interval_min')
+        subcommand.add_argument('--dry-run', help='Show the selection, destination nodes and forecast without starting anything', dest='dry_run', action='store_true')
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__migrate_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-status', 'Shows a migration plan\'s per-volume progress and completion forecast')
+        subcommand.add_argument('plan_id', help='Migration plan id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__migrate_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-list', 'Lists the migration plans of a cluster')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__migrate_cancel(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancels a migration plan\'s cutovers that have not started freezing')
+        subcommand.add_argument('plan_id', help='Migration plan id', type=str)
 
     def init_cluster__add_replication(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-replication', 'DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster.')
@@ -1627,6 +1655,14 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__switch_write_protection(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
+                elif sub_command in ['migrate']:
+                    ret = self.cluster__migrate(sub_command, args)
+                elif sub_command in ['migrate-status']:
+                    ret = self.cluster__migrate_status(sub_command, args)
+                elif sub_command in ['migrate-list']:
+                    ret = self.cluster__migrate_list(sub_command, args)
+                elif sub_command in ['migrate-cancel']:
+                    ret = self.cluster__migrate_cancel(sub_command, args)
                 elif sub_command in ['add-replication']:
                     ret = self.cluster__add_replication(sub_command, args)
                 elif sub_command in ['replication-target-add']:

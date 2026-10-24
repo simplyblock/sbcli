@@ -660,7 +660,7 @@ def test_namespaced_siblings_replicate_to_the_same_target_node():
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.add_lvol_ha)
     assert "_sibling_replication_node" in src,         "namespaced siblings must share a replication node"
-    pick = src.index("_get_next_3_nodes(replication_cluster_id")
+    pick = src.index("_pick_replication_node(db_controller, replication_cluster_id")
     check = src.index("_sibling_replication_node")
     assert check < pick, "the sibling lookup must precede the capacity-based pick"
 
@@ -932,7 +932,7 @@ def test_policy_attach_also_keeps_a_subsystem_on_one_target_node():
 
     src = inspect.getsource(lc.replication_start)
     assert "_sibling_replication_node" in src,         "attaching a policy must honour the shared-subsystem rule too"
-    assert src.index("_sibling_replication_node") < src.index("_get_next_3_nodes"),         "the sibling lookup must precede the capacity-based pick"
+    assert src.index("_sibling_replication_node") < src.index("_pick_replication_node"),         "the sibling lookup must precede the capacity-based pick"
 
     clone = inspect.getsource(lc._create_target_lvol_clone)
     assert "_subsystem_home_node" in clone,         "the copy must not be built on a node that splits the subsystem"

@@ -1803,6 +1803,74 @@ commands:
             help: "The new cluster name."
             dest: name
             type: str
+      - name: migrate
+        help: "Moves volumes online to another cluster in one step: migration-mode replication, then a short-freeze cutover per volume (a migration plan)"
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--target-cluster-id"
+            help: "Destination cluster id"
+            dest: target_cluster_id
+            type: str
+            required: true
+            completer: _completer_get_cluster_list
+          - name: "--pool"
+            help: "Only the volumes of this pool (id). Default: every volume of the cluster."
+            dest: pool_id
+            type: str
+          - name: "--lvols"
+            help: "Only these volumes: comma-separated ids"
+            dest: lvol_ids
+            type: str
+          - name: "--delete-source"
+            help: "Delete each source volume once its cutover completed"
+            dest: delete_source
+            type: bool
+            action: store_true
+          - name: "--interval-min"
+            help: "Replication cadence in minutes for volumes the plan starts. Default: `1`."
+            dest: interval_min
+            type: int
+          - name: "--dry-run"
+            help: "Show the selection, destination nodes and forecast without starting anything"
+            dest: dry_run
+            type: bool
+            action: store_true
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: migrate-status
+        help: "Shows a migration plan's per-volume progress and completion forecast"
+        arguments:
+          - name: "plan_id"
+            help: "Migration plan id"
+            dest: plan_id
+            type: str
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: migrate-list
+        help: "Lists the migration plans of a cluster"
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: migrate-cancel
+        help: "Cancels a migration plan's cutovers that have not started freezing"
+        arguments:
+          - name: "plan_id"
+            help: "Migration plan id"
+            dest: plan_id
+            type: str
       - name: add-replication
         help: "DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster."
         arguments:

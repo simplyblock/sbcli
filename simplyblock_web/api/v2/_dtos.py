@@ -1259,3 +1259,70 @@ class AlertDTO(BaseModel):
             resolved_at=alert.get('resolved_at') or None,
             details=alert.get('details') or {},
         )
+
+
+class MigrationPlanVolumeDTO(BaseModel):
+    """One volume of a migration plan (docs/online-migration.md)."""
+    lvol_id: str
+    name: str = ""
+    #: skipped | waiting | replicating | queued | converging | cutting_over | done | failed | canceled
+    state: str
+    target_node_id: str = ""
+    error: str = ""
+    bytes_total: util.Unsigned = 0
+    bytes_remaining: util.Unsigned = 0
+    eta_seconds: util.Unsigned = 0
+
+
+class MigrationForecastDTO(BaseModel):
+    bytes_remaining: util.Unsigned = 0
+    eta_seconds: util.Unsigned = 0
+    #: Epoch seconds.
+    completes_at: util.Unsigned = 0
+    throughput_bytes_per_sec: util.Unsigned = 0
+    #: False while the forecast still runs on the default throughput.
+    throughput_measured: bool = False
+    #: False when some source lvstore's volumes are written at least about as
+    #: fast as it replicates: their lag never closes, no cutover can start,
+    #: and eta_seconds/completes_at are 0.
+    converging: bool = True
+    #: What the clients write to the volumes still being copied.
+    dirty_bytes_per_sec: util.Unsigned = 0
+    not_converging_lvs: list[str] = []
+
+
+class MigrationPlanDTO(BaseModel):
+    """A bulk online migration to another cluster. ``id`` is null for a dry run."""
+    id: str | None
+    name: str = ""
+    status: str
+    cluster_id: str
+    target_cluster_id: str
+    delete_source: bool
+    created_at: util.Unsigned = 0
+    finished_at: util.Unsigned = 0
+    volumes: list[MigrationPlanVolumeDTO]
+    forecast: MigrationForecastDTO
+    #: Risks found at planning time that did not refuse the plan.
+    warnings: list[str] = []
+
+    @staticmethod
+    def from_model(plan, forecast, dry_run=False):
+        return MigrationPlanDTO(
+            id=None if dry_run else plan.uuid,
+            name=plan.plan_name,
+            status=plan.status,
+            cluster_id=plan.cluster_id,
+            target_cluster_id=plan.target_cluster_id,
+            delete_source=plan.delete_source,
+            created_at=plan.created_at,
+            finished_at=plan.finished_at,
+            volumes=[MigrationPlanVolumeDTO(
+                lvol_id=v["lvol_id"], name=v.get("name", ""), state=v["state"],
+                target_node_id=v.get("target_node_id", ""), error=v.get("error", ""),
+                bytes_total=v.get("used_bytes", 0),
+                bytes_remaining=v.get("bytes_remaining", 0),
+                eta_seconds=v.get("eta_seconds", 0)) for v in plan.volumes],
+            forecast=MigrationForecastDTO(**forecast),
+            warnings=list(plan.warnings),
+        )

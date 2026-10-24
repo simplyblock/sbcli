@@ -3,7 +3,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, migration_turn, utils
 from simplyblock_core.controllers import (
     replication_delta,
     snapshot_controller,
@@ -635,6 +635,32 @@ def partition_by_group(pairs):
     return grouped, ungrouped
 
 
+def _cadence_capacity_hold(cluster_id):
+    """Why no cadence snapshot may be taken on *cluster_id* now, or "".
+
+    A cadence snapshot pins every block overwritten while it is outstanding,
+    and under sustained overwrites faster than replication ships them one
+    outstanding snapshot per volume pins up to the volume's whole used size
+    (twice that raw, with 1+1). Past the cluster's capacity warning threshold
+    another one only adds to that, so the cadence holds and retention can
+    reclaim what already replicated. A missing capacity reading never holds:
+    the guard must not stop replication on a cluster it cannot measure.
+    """
+    try:
+        cluster = db.get_cluster_by_id(cluster_id)
+        records = db.get_cluster_capacity(cluster, 1)
+    except Exception:                                     # noqa: BLE001
+        return ""
+    if not records:
+        return ""
+    util = getattr(records[0], "size_util", None)
+    warn = getattr(cluster, "cap_warn", 0) or 0
+    if util is None or not warn or util < warn:
+        return ""
+    return (f"cluster {cluster_id} is at {util}% capacity, at or above its "
+            f"warning threshold of {warn}%")
+
+
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -648,6 +674,18 @@ def take_due_internal_snapshots(cluster_id, now_ts):
     repl_lvols = [lv for lv in db.get_lvols(cluster_id)
                   if lv.do_replicate and lv.replication_interval_min > 0]
     if not repl_lvols:
+        return
+    # One migrating volume per source node: the others take no snapshot
+    # until the volume ahead of them on their node has cut over.
+    waiting = migration_turn.waiting_lvol_ids(db, cluster_id, repl_lvols)
+    if waiting:
+        logger.debug("Waiting for their node's migration turn: %s", sorted(waiting))
+        repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in waiting]
+        if not repl_lvols:
+            return
+    hold = _cadence_capacity_hold(cluster_id)
+    if hold:
+        logger.warning("Holding internal replication snapshots: %s", hold)
         return
     all_snaps = db.get_mini_snapshots()
 

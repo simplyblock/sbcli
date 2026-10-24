@@ -5,6 +5,7 @@ import uuid
 from simplyblock_core import (
     constants,
     db_controller,
+    migration_turn,
     snapshot_retention,
     utils,
     xfer_timing,
@@ -261,6 +262,9 @@ def _lvs_transfer_hold(task, snapshot):
 
     Two priorities share one lvstore's bandwidth:
 
+    0. A migration-mode volume waits while another volume of its source node
+       is migrating (simplyblock_core/migration_turn.py).
+
     1. A volume in its FINAL CUTOVER owns the lvstore. Its convergence rounds
        decide how long client IO freezes -- every second another volume steals
        from a round is a second of writes the frozen final step must copy --
@@ -279,6 +283,12 @@ def _lvs_transfer_hold(task, snapshot):
         return ""
     own_id = own_lvol.get_id()
     own_group = _group_id_for_lvol(own_lvol)
+
+    # --- priority 0: one migrating volume per source node ------------------
+    # A volume queued behind another on its node ships nothing yet, not even
+    # a backlog of snapshots it had before migration started.
+    if own_id in migration_turn.waiting_lvol_ids(db, task.cluster_id):
+        return "waiting for its node's migration turn"
 
     tasks = db.get_job_tasks(task.cluster_id)
 
@@ -452,11 +462,15 @@ def _resume_finish(task, snapshot):
 
 
 def _cutover_owns(lvol_id, cluster_id):
-    """True while a final cutover is running for this volume.
+    """True while a final cutover is in its endgame for this volume.
 
     Such a volume already holds its lvstore and every other transfer on it is
     held, so waiting inline for its transfer starves nothing -- and this is the
-    window the client's IO freeze is paying for.
+    window the client's IO freeze is paying for. A cutover that is merely
+    queued (a migration plan queues every volume's up front, waiting for the
+    initial copy) holds nothing yet: counting it made each initial copy block
+    the runner for the long inline budget while the other volumes' transfers
+    were not even submitted.
     """
     if not lvol_id:
         return False
@@ -469,7 +483,8 @@ def _cutover_owns(lvol_id, cluster_id):
             continue
         if other.status == JobSchedule.STATUS_DONE or other.canceled:
             continue
-        if (other.function_params or {}).get("lvol_id") == lvol_id:
+        params = other.function_params or {}
+        if params.get("lvol_id") == lvol_id and params.get("cutover_lvs"):
             return True
     return False
 
@@ -777,6 +792,25 @@ def process_snap_replicate_start(task, snapshot):
                                  f"({lead_why}), retrying",
                            backoff=True, count=_switches_exhausted(task))
         return
+    # Who may receive. The transfer goes through a hub, and SPDK demuxes hub IO
+    # by map id in the HUB's own lvstore (vbdev_hublvol_submit_request): the
+    # primary receives through its own transfer hub, an acting SECONDARY
+    # through its per-lvstore hub on the target lvstore
+    # (replication_final_step.receiving_hub). A TERTIARY never demuxes hub IO
+    # (the node_role check in vbdev_lvol_submit_request), so while one leads,
+    # the start waits -- not the transfer's fault, not counted.
+    try:
+        lvs_primary = db.get_storage_node_by_id(remote_lv.node_id)
+    except KeyError:
+        _suspend_for_retry(task, f"target lvstore primary {remote_lv.node_id} unknown, "
+                                 f"retrying", backoff=True)
+        return
+    if remote_lv_node.get_id() not in (lvs_primary.get_id(), lvs_primary.secondary_node_id):
+        _suspend_for_retry(task, f"target lvstore {remote_lv.lvs_name} is led by its "
+                                 f"tertiary {remote_lv_node.get_id()}, which cannot "
+                                 f"receive a transfer; waiting for the primary or "
+                                 f"secondary", backoff=True, count=_switches_exhausted(task))
+        return
     _note_switch(task, "target_node_id", remote_lv_node.get_id(), "target leader")
 
     # 2 attach the TARGET NODE'S TRANSFER HUBLVOL on the source. Transfers must
@@ -791,7 +825,10 @@ def process_snap_replicate_start(task, snapshot):
     with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
                            lvol=snapshot.lvol.get_id(),
                            tgt=remote_lv_node.get_id()):
-        _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
+        _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(
+            snode.rpc_client(), remote_lv_node, lvs_primary)
+    if not hub_err:
+        task.function_params["hub_ctrl"] = _hub_ctrl
     if hub_err:
         logger.error(f"Transfer hub attach failed: {hub_err}")
         _suspend_for_retry(task, f"transfer hub attach failed: {hub_err}, retrying",
@@ -1175,6 +1212,17 @@ def _stable_target_leader(remote_lv):
                       f"{', '.join(n.get_id()[:8] for n in second) or 'none'})")
     _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
     return second[0], ""
+
+
+def _attached_hub_ctrl(task, hub_node):
+    """The hub controller this task attached on the source: recorded at attach
+    (a secondary's per-lvstore hub has its own name), else -- tasks from before
+    the record -- the node's own transfer hub."""
+    ctrl = task.function_params.get("hub_ctrl")
+    if ctrl:
+        return ctrl
+    hub = getattr(hub_node, "transfer_hublvol", None)
+    return hub.bdev_name if hub and hub.bdev_name else ""
 
 
 def _note_switch(task, key, new_id, label):
@@ -2018,15 +2066,15 @@ def process_snap_replicate_finish(task, snapshot):
             hub_node = remote_snode
     _src_node = (_transfer_source_node(task, snapshot)
                  or db.get_storage_node_by_id(snapshot.lvol.node_id))
-    if hub_node.transfer_hublvol and hub_node.transfer_hublvol.bdev_name:
+    hub_ctrl = _attached_hub_ctrl(task, hub_node)
+    if hub_ctrl:
         if not _other_active_transfers_to_node(task, hub_node.get_id()):
             xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
                               lvol=snapshot.lvol.get_id())
             # Non-fatal: a resumed finish (see _resume_finish) finds the hub
             # already detached by the first attempt.
             try:
-                _src_node.rpc_client().bdev_nvme_detach_controller(
-                    hub_node.transfer_hublvol.bdev_name)
+                _src_node.rpc_client().bdev_nvme_detach_controller(hub_ctrl)
             except Exception as e:                        # noqa: BLE001
                 logger.warning("Transfer hub detach on %s failed (non-fatal): %s",
                                _src_node.get_id(), e)
@@ -2351,11 +2399,10 @@ def task_runner(task: JobSchedule):
             _rl_node = db.get_storage_node_by_id(
                 task.function_params.get("target_node_id") or remote_lv.node_id)
             snode = _transfer_source_node(task, snapshot)
-            if (snode is not None and _rl_node.transfer_hublvol
-                    and _rl_node.transfer_hublvol.bdev_name
+            _ctrl = _attached_hub_ctrl(task, _rl_node)
+            if (snode is not None and _ctrl
                     and not _other_active_transfers_to_node(task, _rl_node.get_id())):
-                snode.rpc_client().bdev_nvme_detach_controller(
-                    _rl_node.transfer_hublvol.bdev_name)
+                snode.rpc_client().bdev_nvme_detach_controller(_ctrl)
         except Exception as e:
             logger.warning("Abort-path hub detach failed (non-fatal): %s", e)
         try:

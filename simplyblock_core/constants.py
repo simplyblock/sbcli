@@ -523,6 +523,17 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # seconds. Before that the cutover waits and takes NO snapshots of its own --
 # the iterative snapshots ARE the endgame.
 REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# Migration-plan forecast fallbacks, used until the plan's own transfers and
+# cutovers have been measured (simplyblock_core/migration_forecast.py).
+REPL_FORECAST_DEFAULT_BYTES_PER_SEC = 200 * 1024 * 1024
+REPL_FORECAST_DEFAULT_CUTOVER_SEC = 60
+# An lvstore whose volumes are written at this fraction of its replication
+# throughput or more is reported as not converging: the remaining margin is
+# eaten by snapshot and convert overhead, and the lag never closes.
+REPL_CONVERGENCE_MARGIN = 0.9
+# Cadence a migration plan gives a volume that has none: the initial copy and
+# the catch-up ride the cadence snapshots, so without one nothing ever ships.
+REPL_MIGRATION_DEFAULT_INTERVAL_MIN = 1
 # Rounds must follow each other within MILLISECONDS. Returning to the task
 # scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
 # each time, which puts a floor under the delta no number of rounds can beat.
