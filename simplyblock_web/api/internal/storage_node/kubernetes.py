@@ -392,7 +392,7 @@ def spdk_process_start(body: SPDKParams):
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
             'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
-            'SERVER_IP': body.server_ip,
+            'SERVER_IP': network_attachments.server_ip(body.networks) or body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
             'RPC_PASSWORD': body.rpc_password,
@@ -598,6 +598,12 @@ def spdk_process_start(body: SPDKParams):
             resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
             msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}'"
             logger.info(msg)
+        if body.networks:
+            # The pod's interfaces exist only in its own namespace, so the control
+            # plane is told what it holds rather than reading the host's.
+            report = network_attachments.wait_for_report(
+                lambda: k8s_core_v1.read_namespaced_pod(resp.metadata.name, namespace), body.networks)
+            return utils.get_response({"message": msg, **report})
     except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 

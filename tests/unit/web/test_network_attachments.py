@@ -110,3 +110,98 @@ def test_an_interface_name_the_kernel_would_refuse_is_rejected():
 
     with pytest.raises(ValidationError):
         _params(networks=[{"name": "fabric", "interface": "a-name-longer-than-fifteen"}])
+
+
+# The pod reports for itself: its address and the interfaces Multus attached.
+
+STATUS = json.dumps([
+    {"name": "cbr0", "interface": "eth0", "ips": ["10.42.1.5"], "mac": "aa:aa", "default": True},
+    {"name": "infra/mgmt-net", "interface": "mgmt0", "ips": ["10.0.0.5"], "mac": "bb:bb"},
+    {"name": "infra/fabric", "interface": "data0", "ips": ["10.10.10.101"], "mac": "cc:cc"},
+])
+
+
+class _Pod:
+    def __init__(self, phase="Running", pod_ip="10.42.1.5", status=STATUS):
+        self.status = type("S", (), {"phase": phase, "pod_ip": pod_ip})()
+        self.metadata = type("M", (), {"annotations": {network_attachments.NETWORK_STATUS: status} if status else {}})()
+
+
+def test_the_report_names_the_pod_address_and_each_declared_interface():
+    report = network_attachments.report(_Pod(), [MGMT, DATA])
+
+    assert report == {
+        "pod_ip": "10.42.1.5",
+        "interfaces": [
+            {"name": "mgmt0", "ips": ["10.0.0.5"], "mac": "bb:bb"},
+            {"name": "data0", "ips": ["10.10.10.101"], "mac": "cc:cc"},
+        ],
+    }
+
+
+def test_the_report_leaves_out_an_interface_nobody_declared():
+    report = network_attachments.report(_Pod(), [DATA])
+
+    assert [i["name"] for i in report["interfaces"]] == ["data0"]
+
+
+def test_the_report_is_none_until_the_pod_is_running_and_holds_every_declared_interface():
+    assert network_attachments.report(_Pod(phase="Pending"), [DATA]) is None
+    assert network_attachments.report(_Pod(status=""), [DATA]) is None
+    assert network_attachments.report(_Pod(), [DATA, VF]) is None  # data1 is not held yet
+
+
+def test_waiting_for_the_report_polls_until_the_pod_holds_its_interfaces():
+    pods = iter([_Pod(phase="Pending"), _Pod(phase="Pending"), _Pod()])
+
+    report = network_attachments.wait_for_report(lambda: next(pods), [DATA], timeout=5, sleep=lambda s: None)
+
+    assert report["interfaces"][0]["name"] == "data0"
+
+
+def test_waiting_for_the_report_gives_up_with_what_was_missing():
+    import pytest
+
+    clock = iter(range(0, 1000, 10))
+    with pytest.raises(TimeoutError, match="data0"):
+        network_attachments.wait_for_report(
+            lambda: _Pod(phase="Pending"), [DATA], timeout=30, sleep=lambda s: None, now=lambda: next(clock))
+
+
+def test_a_pod_with_networks_binds_its_proxy_to_the_management_address():
+    pod = _render(NETWORKS=network_attachments.annotation([MGMT, DATA]), NETWORK_RESOURCES={},
+                  SERVER_IP=network_attachments.server_ip([MGMT, DATA]))
+
+    env = {e["name"]: e for c in pod["spec"]["containers"] if c["name"] == "spdk-proxy-container" for e in c["env"]}
+    assert env["SERVER_IP"]["value"] == "10.0.0.5"
+
+
+def test_a_pod_without_a_management_network_binds_its_proxy_to_its_own_address():
+    pod = _render(NETWORKS=network_attachments.annotation([DATA]), NETWORK_RESOURCES={},
+                  SERVER_IP=network_attachments.server_ip([DATA]))
+
+    containers = {c["name"]: c for c in pod["spec"]["containers"]}
+    env = {e["name"]: e for e in containers["spdk-proxy-container"]["env"]}
+    assert env["SERVER_IP"]["value"] == "$(POD_IP)"
+    assert env["POD_IP"]["valueFrom"]["fieldRef"]["fieldPath"] == "status.podIP"
+    names = [e["name"] for e in containers["spdk-proxy-container"]["env"]]
+    assert names.index("POD_IP") < names.index("SERVER_IP"), "$(POD_IP) expands only from an earlier entry"
+
+
+class TestTheStartEndpointReportsTheNetworksItAttached:
+    """Structural, in the manner of test_add_node_pod_cleanup: the endpoint needs a
+    cluster to run. The report itself is covered above."""
+
+    def _source(self):
+        import inspect
+
+        from simplyblock_web.api.internal.storage_node import kubernetes
+
+        return inspect.getsource(kubernetes.spdk_process_start)
+
+    def test_the_proxy_address_comes_from_the_attachments_when_there_are_any(self):
+        assert "network_attachments.server_ip(body.networks) or body.server_ip" in self._source()
+
+    def test_it_waits_for_the_pod_to_report_only_when_it_attached_networks(self):
+        source = self._source()
+        assert "if body.networks:" in source and "network_attachments.wait_for_report(" in source

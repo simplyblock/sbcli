@@ -183,6 +183,12 @@ spec:
           readOnly: true
         {% endif %}
       env:
+        {% if NETWORKS %}
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        {% endif %}
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
         - name: RPC_PORT
