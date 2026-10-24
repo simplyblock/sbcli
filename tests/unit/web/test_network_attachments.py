@@ -244,3 +244,40 @@ def test_the_start_endpoint_gives_the_job_the_agents_own_address_when_networks_a
     from simplyblock_web.api.internal.storage_node import kubernetes
 
     assert "'AGENT_IP': os.environ.get(\"POD_IP\", \"\") if body.networks else \"\"" in inspect.getsource(kubernetes.spdk_process_start)
+
+
+class TestTheAgentReportsTheWorkersNameNotItsPods:
+    """With the agent in the pod network, hostname -s answers the pod's name. The
+    control plane builds the node's per-worker DNS name from the reported hostname,
+    so it has to be the worker's, which the DaemonSet hands over as HOSTNAME."""
+
+    def test_off_the_host_network_the_worker_name_is_reported_without_its_domain(self, monkeypatch):
+        from simplyblock_web.api.internal.storage_node import kubernetes
+
+        monkeypatch.setenv("HOST_IP", "192.168.10.62")
+        monkeypatch.setenv("HOSTNAME", "vm13.simplyblock2.localdomain")
+
+        assert kubernetes.reported_hostname("simplyblock-storage-node-ds-x7k2p") == "vm13"
+
+    def test_on_the_host_network_the_hostname_is_what_it_always_was(self, monkeypatch):
+        from simplyblock_web.api.internal.storage_node import kubernetes
+
+        monkeypatch.delenv("HOST_IP", raising=False)
+        monkeypatch.setenv("HOSTNAME", "vm13.simplyblock2.localdomain")
+
+        assert kubernetes.reported_hostname("vm13") == "vm13"
+
+    def test_without_a_hostname_variable_the_command_stands(self, monkeypatch):
+        from simplyblock_web.api.internal.storage_node import kubernetes
+
+        monkeypatch.setenv("HOST_IP", "192.168.10.62")
+        monkeypatch.delenv("HOSTNAME", raising=False)
+
+        assert kubernetes.reported_hostname("pod-name") == "pod-name"
+
+    def test_the_info_endpoint_reports_it(self):
+        import inspect
+
+        from simplyblock_web.api.internal.storage_node import kubernetes
+
+        assert 'reported_hostname(node_info["hostname"])' in inspect.getsource(kubernetes.get_info)

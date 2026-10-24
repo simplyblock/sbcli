@@ -104,6 +104,17 @@ def get_nodes_config():
         return {}
 
 
+def reported_hostname(command_hostname: str) -> str:
+    """The name the control plane knows this worker by.
+
+    With the agent in the pod network, `hostname -s` answers the pod's name. The
+    DaemonSet hands the worker's name over as HOSTNAME and the worker's address as
+    HOST_IP, and the latter is what says the agent is off the host network."""
+    if os.environ.get("HOST_IP") and os.environ.get("HOSTNAME"):
+        return os.environ["HOSTNAME"].split(".")[0]
+    return command_hostname
+
+
 @api.get('/info', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'object',
@@ -115,7 +126,7 @@ def get_info():
     return utils.get_response({
         "cluster_id": get_cluster_id(),
 
-        "hostname": node_info["hostname"],
+        "hostname": reported_hostname(node_info["hostname"]),
         "system_id": node_info["system_id"],
 
         "cpu_count": node_info["cpu_info"]['count'],
