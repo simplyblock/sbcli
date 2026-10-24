@@ -3631,7 +3631,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
              spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
-             force_format=False):
+             force_format=False, networks=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -4172,7 +4172,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
                 mcp_max_unavailable=mcp_max_unavailable,
-                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret)
+                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret, networks=networks)
             time.sleep(5)
 
         except Exception as e:
@@ -4296,6 +4296,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.host_nqn = subsystem_nqn
         snode.subsystem = subsystem_nqn
         snode.data_nics = data_nics
+        snode.networks = list(networks or [])
         snode.mgmt_ip = mgmt_ip
         snode.primary_ip = mgmt_ip
         snode.rpc_port = rpc_port
@@ -8698,7 +8699,7 @@ def _restart_storage_node_impl(
             total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image,
-            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret)
+            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret, networks=snode.networks)
 
     except Exception as e:
         logger.error(e)

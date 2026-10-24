@@ -11,6 +11,7 @@ from simplyblock_core import storage_node_ops
 from simplyblock_core.controllers import node_drain_steps, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
+from simplyblock_web.network_attachments import NetworkAttachment
 
 from ... import util as util
 from ..._dependencies import Cluster, StorageNode
@@ -69,6 +70,8 @@ class StorageNodeParams(BaseModel):
     failure_domain: int | None = None
     expand: bool = False
     force_format: bool = False
+    # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
+    networks: builtins.list[NetworkAttachment] = []
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -101,6 +104,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "failure_domain": parameters.failure_domain,
             "expansion": parameters.expand,
             "force_format": parameters.force_format,
+            **({"networks": [network.model_dump() for network in parameters.networks]} if parameters.networks else {}),
         }
     )
     if not task_id_or_false:

@@ -95,6 +95,9 @@ class StorageNode(BaseNodeObject):
     cpu_hz: int = 0
     ctrl_secret: SecretStr = SecretStr("")
     data_nics: list[IFace] = default_factory(list)
+    # The networks the SPDK pod attaches to, as the operator stated them at node-add
+    # (name, namespace, interface, ips, resource). Empty for a node on the host network.
+    networks: list[dict] = default_factory(list)
     distrib_cpu_cores: list[int] = default_factory(list)
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
