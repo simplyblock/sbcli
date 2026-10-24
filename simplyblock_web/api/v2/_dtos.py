@@ -188,6 +188,10 @@ class ClusterDTO(BaseModel):
     max_fault_tolerance: int
     backup_enabled: bool
     capacity: CapacityStatDTO
+    snode_api_service: str
+    spdk_proxy_service: str
+    spdk_proxy_tls_secret: str
+    node_label_suffix: str
 
     @field_serializer('secret', when_used='json')
     def _unwrap_secret_for_json(self, value: SecretStr) -> str:
@@ -226,6 +230,10 @@ class ClusterDTO(BaseModel):
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
+            snode_api_service=model.snode_api_service,
+            spdk_proxy_service=model.spdk_proxy_service,
+            spdk_proxy_tls_secret=model.spdk_proxy_tls_secret,
+            node_label_suffix=model.node_label_suffix,
         )
 
 

@@ -160,6 +160,14 @@ class Cluster(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
+    # The Services a storage node is reached through, the SPDK proxy's
+    # certificate Secret, and the suffix on a node's hostname label in both
+    # Services. The operator names them at creation; a record without them
+    # predates them and uses the constant names.
+    snode_api_service: str = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: str = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: str = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False
@@ -258,9 +266,24 @@ class Cluster(BaseModel):
     #: falls back to the per-device record when it is still empty.
     jm_raid_layout: str = ""
     is_single_node: bool = False
+    # Whether the cluster's fresh activation made it non-HA: set when it was
+    # flagged single-node or activated with exactly one online node. Volume
+    # creation reads it to default a volume's ha_type the way the activation
+    # decided, without deciding again from how many nodes are online now.
+    activated_single_node: bool = False
     # Two-node arbitration (docs/design/two-node-arbitration.md). Off by default:
     # a dual-node cluster then keeps today's tolerance without the hold.
     two_node_arbitration: bool = False
+    # Share (percent) of the data plane's IO scheduling given to the service
+    # class reserved for snapshot replication (constants.QOS_REPLICATION_CLASS_ID).
+    qos_replication_weight: int = constants.qos_class_replication_weight_percent
+    # Who decides on a two-node cluster (docs/design/two-node-kubernetes-fencing.md):
+    # "witness" (the arbiter) or "pacemaker" (the nodes follow Pacemaker's fence;
+    # the arbiter does not act on the cluster).
+    two_node_fencing_authority: str = "witness"
+    # Mode witness: revoke a lost node's client host NQN on the winner and let
+    # Kubernetes remediate it (StorageFenced condition, out-of-service taint).
+    two_node_host_fencing: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
     # operator-supplied failure_domain tag (rack/cabinet/DC) and placement
     # spreads data/parity chunks, HA journal copies and secondary/tertiary
@@ -334,9 +357,8 @@ class Cluster(BaseModel):
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         qos_classes = db_controller.get_qos(self.get_id())
-        if len(qos_classes) > 1:
-            return True
-        return False
+        # Any user class: Default alone, or nothing at all, is no QoS.
+        return any(c.class_name != "Default" for c in qos_classes)
 
     def default_backup_bucket_name(self) -> str:
         """The bucket this cluster backs up to when its configuration names none.

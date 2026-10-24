@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core import cluster_ops
+from simplyblock_core import cluster_ops, constants
+from simplyblock_core import utils as core_utils
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
@@ -28,6 +29,7 @@ from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
 from .migration_plan import api as migration_plan_api
+from .qos import api as qos_api
 from .replication import api as replication_api
 from .storage_node import api as storage_node_api
 from .storage_pool import api as pool_api
@@ -101,6 +103,14 @@ class ClusterParams(BaseModel):
     device_mode: Literal["nvme", "lblk"] = "nvme"
     inline_checksum: bool = False
     atomic_4k: bool = False
+    # The cluster's workload names: the Services its storage nodes are reached
+    # through, the SPDK proxy's certificate Secret, and the suffix on a node's
+    # hostname label in both Services. Omitted, they are the constant names a
+    # namespace's first cluster uses.
+    snode_api_service: core_utils.K8S_DNS_LABEL = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: core_utils.K8S_DNS_LABEL = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: Annotated[str, Field(pattern=r'^(-[a-z0-9]{1,3})?$')] = ""
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
@@ -179,6 +189,10 @@ class UpdatableClusterParameters(BaseModel):
     name: str | None = None
     #: Two-node arbitration (docs/design/two-node-arbitration.md); off by default.
     two_node_arbitration: bool | None = None
+    #: docs/design/two-node-kubernetes-fencing.md: "witness" or "pacemaker".
+    two_node_fencing_authority: Literal["witness", "pacemaker"] | None = None
+    #: Host fencing + Kubernetes integration (mode witness).
+    two_node_host_fencing: bool | None = None
 
 
 @instance_api.put('/', name='clusters:update')
@@ -188,6 +202,12 @@ def update(cluster: Cluster, parameters: UpdatableClusterParameters):
     if parameters.two_node_arbitration is not None:
         flag = parameters.two_node_arbitration
         db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_arbitration", flag))
+    if parameters.two_node_fencing_authority is not None:
+        authority = parameters.two_node_fencing_authority
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_fencing_authority", authority))
+    if parameters.two_node_host_fencing is not None:
+        host_fencing = parameters.two_node_host_fencing
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_host_fencing", host_fencing))
 
     return Response(status_code=204)
 
@@ -206,9 +226,12 @@ def get_backup_config(cluster: Cluster) -> BackupConfigDTO:
 
 
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
-def delete(cluster: Cluster) -> Response:
+def delete(cluster: Cluster, force: bool = False) -> Response:
+    """Delete an empty cluster, or with force bring it down completely: every
+    storage node shut down and deleted without migration, every pool deleted
+    with its volumes, then the cluster."""
     try:
-        cluster_ops.delete_cluster(cluster.get_id())
+        cluster_ops.delete_cluster(cluster.get_id(), force=force)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return Response(status_code=204)
@@ -316,4 +339,5 @@ instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
 instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
 instance_api.include_router(migration_plan_api, prefix='/migration-plans')
+instance_api.include_router(qos_api, prefix='/qos')
 api.include_router(instance_api)

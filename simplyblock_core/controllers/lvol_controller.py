@@ -14,6 +14,7 @@ from simplyblock_core.controllers import (
     object_limits,
     ops_gate,
     pool_controller,
+    qos_controller,
     replication_recovery_points,
     snapshot_controller,
     snapshot_events,
@@ -35,6 +36,7 @@ from simplyblock_core.kms import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -652,6 +654,47 @@ def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
     return None
 
 
+def _volume_ha_type(ha_type, cluster):
+    """The HA type a new volume is created with. "default" is the cluster's,
+    except in a cluster that activated as single-node, which is non-HA whatever
+    ha_type it recorded: its volumes have no secondary to be served from, so
+    they are "single". The activation decides that and records it
+    (cluster_ops._record_activation_topology), so creation reads the same
+    decision rather than making its own. An explicit choice is kept."""
+    if ha_type != "default":
+        return ha_type
+    if cluster.is_single_node or cluster.activated_single_node:
+        return "single"
+    return cluster.ha_type
+
+
+def _fabric_active(node, fabric):
+    """Whether node serves the fabric. An unknown fabric is an error rather
+    than a fabric no node serves."""
+    if fabric == "tcp":
+        return node.active_tcp
+    if fabric == "rdma":
+        return node.active_rdma
+    raise ValueError(f"unknown fabric {fabric!r}")
+
+
+def _fabric_error(db_controller, host_node, ha_type, fabric):
+    """Why a volume of this HA type cannot be served over the fabric from
+    host_node, or None. The secondary is asked about only for an "ha" volume:
+    a host of a single-node cluster has none, and looking up its blank id
+    raised KeyError for every create there."""
+    if not _fabric_active(host_node, fabric):
+        return f"Primary node fabric {fabric} is not active"
+    if ha_type != "ha":
+        return None
+    if not host_node.secondary_node_id:
+        return "HA volume requested but the host node has no secondary"
+    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+    if not _fabric_active(s_node, fabric):
+        return f"Secondary node fabric {fabric} is not active"
+    return None
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -768,7 +811,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if cl.status not in Cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cl.status}"
 
-    if lvol_priority_class > 0:
+    if internal and lvol_priority_class == constants.QOS_REPLICATION_CLASS_ID:
+        # replication receive volume, see snapshot_replication; the caller
+        # checked qos_controller.replication_class_available
+        pass
+    elif lvol_priority_class > 0:
         class_found = False
         for qos_class in db_controller.get_qos(cl.uuid):
             if qos_class.class_id == lvol_priority_class:
@@ -788,8 +835,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         except KeyError:
             pass
 
-    if ha_type == "default":
-        ha_type = cl.ha_type
+    ha_type = _volume_ha_type(ha_type, cl)
 
     max_rw_iops = max_rw_iops or 0
     max_rw_mbytes = max_rw_mbytes or 0
@@ -962,14 +1008,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.error(error)
         return False, error
 
-    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-    attr_name = f"active_{fabric}"
-    is_active_primary = getattr(host_node, attr_name)
-    is_active_secondary = getattr(s_node, attr_name)
-    if not is_active_primary:
-        return False, f"Primary node fabric {fabric} is not active"
-    if not is_active_secondary:
-        return False, f"Secondary node fabric {fabric} is not active"
+    fabric_error = _fabric_error(db_controller, host_node, ha_type, fabric)
+    if fabric_error:
+        return False, fabric_error
 
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
@@ -1030,8 +1071,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol_dict["params"]["ndcs"] = lvol.ndcs
         lvol_dict["params"]["npcs"] = lvol.npcs
 
-    if cl.is_qos_set() and lvol.lvol_priority_class > 0:
-        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class +1
+    lvol_dict["params"]["lvol_priority_class"] = qos_controller.wire_priority_class(
+        cl.uuid, lvol.lvol_priority_class)
 
     lvol.bdev_stack = [lvol_dict]
 
@@ -1313,14 +1354,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
-    # set QOS
-    if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
-        set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+    # The volume is online and its create event is out: from here a raised
+    # RPC failure must not turn into a failed create, or callers retry a
+    # create that already committed (SFAM-2834).
+    try:
+        # set QOS
+        if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
+            set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
-    if pool.allowed_hosts:
-        for host_nqn in pool.allowed_hosts:
-            logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
-            add_host_to_lvol(lvol.get_id(), host_nqn)
+        if pool.allowed_hosts:
+            for host_nqn in pool.allowed_hosts:
+                logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
+                add_host_to_lvol(lvol.get_id(), host_nqn)
+    except RPCException as e:
+        logger.error("Volume %s created but QoS/allowed-host setup failed: %s", lvol.get_id(), e)
+        return lvol.uuid, f"Volume created but QoS/allowed-host setup failed: {e}"
 
     if replication_policy:
         # Optional at create time: assigning a policy configures replication for
@@ -1414,7 +1462,8 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                             raise
                 else:
                     ret = rpc_client.bdev_lvol_register(
-                        lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
+                        lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid,
+                        qos_controller.wire_priority_class(snode.cluster_id, lvol.lvol_priority_class))
 
             elif type == "bdev_lvol_clone":
                 if is_primary:
@@ -1448,6 +1497,17 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                                 f"clone_register acknowledged but {bdev_name} did "
                                 f"not appear within 20s on the peer")
                             ret = None
+                # bdev_lvol_clone/_clone_register take no class, so a clone
+                # would run in Default regardless of its record; apply it here.
+                wire_class = qos_controller.wire_priority_class(
+                    snode.cluster_id, lvol.lvol_priority_class)
+                if ret and wire_class:
+                    try:
+                        rpc_client.bdev_lvol_set_priority_class(
+                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", wire_class)
+                    except RPCException as e:
+                        logger.warning(f"Failed to set priority class {wire_class} on clone "
+                                       f"{lvol.lvol_bdev} on {snode.get_id()}: {e}")
 
             else:
                 logger.debug(f"Unknown BDev type: {type}")
@@ -1704,6 +1764,25 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
     if not ret:
         return _fail_after_bdev(lvol, rpc_client, msg, is_primary=is_primary)
 
+    # The blob exists from here on. Every RPC below raises on failure rather
+    # than returning False, so without this catch a failed subsystem create,
+    # host add or namespace add escaped with the blob left behind and the
+    # record never marked in_deletion (SFAM-2834).
+    try:
+        return _attach_lvol_after_bdev(
+            lvol, snode, rpc_client, is_primary, secondary_index, min_cntlid,
+            ns_uuid, primary_nsid, defer_listeners)
+    except RPCException as e:
+        logger.exception("add_lvol_on_node %s on %s failed after the bdev was created",
+                         lvol.get_id(), snode.get_id())
+        return _fail_after_bdev(lvol, rpc_client, f"RPC failed: {e}", is_primary=is_primary)
+
+
+def _attach_lvol_after_bdev(lvol, snode, rpc_client, is_primary, secondary_index, min_cntlid,
+                            ns_uuid, primary_nsid, defer_listeners):
+    """Subsystem, hosts, namespace and listeners for an lvol whose bdev stack
+    add_lvol_on_node just created. Split out only so that one handler there
+    can roll the blob back on any raised RPC failure."""
     db_controller = DBController()
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.has_qos():
@@ -2959,13 +3038,20 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
 
     if lvol.crypto_bdev:
         with create_kms_connection(cl) as kms:
-            try:
-                kms.delete_data_encryption_keys(lvol_dek_path(cl.get_id(), lvol.get_id()))
-                logger.info("Deleted lvol key")
-            except KMSException:
-                logger.exception("Failed to delete lvol key")
+            delete_lvol_key(kms, cl.get_id(), lvol.get_id())
 
     logger.info("Done")
+
+def delete_lvol_key(kms, cluster_id, lvol_id) -> None:
+    """Delete an encrypted volume's data-encryption key, which its snapshots
+    are encrypted under too. A failure is logged: the volume is going
+    either way."""
+    try:
+        kms.delete_data_encryption_keys(lvol_dek_path(cluster_id, lvol_id))
+        logger.info(f"Deleted the key of lvol {lvol_id}")
+    except KMSException:
+        logger.exception(f"Failed to delete the key of lvol {lvol_id}")
+
 
 def connect_lvol_to_pool(lvol_id, node_id):
     db_controller = DBController()
@@ -2983,15 +3069,25 @@ def connect_lvol_to_pool(lvol_id, node_id):
     rpc_client = snode.rpc_client()
 
     if pool.has_qos():
-        ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+        # Best effort, as callers treat it: a raised RPC failure must not
+        # abort the create or registration that called this.
+        try:
+            ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+        except RPCException as e:
+            logger.error(f"RPC failed bdev_lvol_add_to_group: {e}")
+            return False
         if not ret:
             logger.error("RPC failed bdev_lvol_add_to_group")
             return False
 
         # re-apply the QOS limits
-        ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
-                                            pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
-                                            pool.max_w_mbytes_per_sec)
+        try:
+            ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
+                                                     pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
+                                                     pool.max_w_mbytes_per_sec)
+        except RPCException as e:
+            logger.error(f"RPC failed bdev_set_qos_limit: {e}")
+            return False
         if not ret:
             logger.error("RPC failed bdev_set_qos_limit")
             return False
@@ -4419,8 +4515,84 @@ def is_lvol_removal_deferred_for_pending_failover(db_controller, lvol):
     return age <= constants.LVOL_DEMOTE_FAILOVER_HOLD_SEC
 
 
+def replication_start_error(lvol_id, replication_cluster_id=None, replication_pool_id=None,
+                            mode=None):
+    """Why a replication start of *lvol_id* to this destination is refused, or
+    None. The destination is checked here rather than discovered by the
+    replication tasks, which fail on it later and retry without end:
+
+      * the cluster must exist and must not be the volume's own;
+      * a named pool must belong to that cluster and be active;
+      * a volume already replicating to one cluster keeps that destination,
+        because a stop does not clear it, so another cluster is refused rather
+        than silently ignored;
+      * an encrypted volume is not moved: a migration commit deletes the
+        source, and with it the only copy of the key, which no replication
+        carries to the target.
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return f"volume {lvol_id} does not exist"
+
+    if lvol.crypto_bdev and (mode or lvol.replication_mode) == "migration":
+        return (f"volume {lvol_id} is encrypted: a migration deletes the source and its key, "
+                f"and replication does not carry the key to the target")
+
+    if replication_pool_id and not replication_cluster_id:
+        return "a replication pool needs replication_cluster_id naming its cluster"
+
+    if replication_cluster_id:
+        try:
+            db_controller.get_cluster_by_id(replication_cluster_id)
+        except KeyError:
+            return f"replication cluster {replication_cluster_id} does not exist"
+        source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        if source_node.cluster_id == replication_cluster_id:
+            return f"replication cluster {replication_cluster_id} is the volume's own cluster"
+        if lvol.replication_node_id:
+            try:
+                current = db_controller.get_storage_node_by_id(lvol.replication_node_id).cluster_id
+            except KeyError:
+                current = ""
+            if current and current != replication_cluster_id:
+                return (f"volume {lvol_id} already replicates to cluster {current}; "
+                        f"it cannot be started towards {replication_cluster_id}")
+
+    if replication_pool_id:
+        try:
+            pool = db_controller.get_pool_by_id(replication_pool_id)
+        except KeyError:
+            return f"replication pool {replication_pool_id} does not exist"
+        if pool.cluster_id != replication_cluster_id:
+            return (f"replication pool {replication_pool_id} belongs to cluster {pool.cluster_id}, "
+                    f"not {replication_cluster_id}")
+        if pool.status != Pool.STATUS_ACTIVE:
+            return f"replication pool {replication_pool_id} is not active"
+    return None
+
+
+def requested_destination_pool(db_controller, lvol, cluster_id):
+    """The pool the caller of replication start named for *lvol*, when it is a
+    pool of *cluster_id*, the destination now in question, and no policy
+    manages the volume; otherwise an empty string."""
+    # A policy owns the volume's replication once attached, and its target
+    # names the pool; one named by an earlier start by hand no longer applies.
+    if lvol.replication_policy_id:
+        return ""
+    pool_uuid = lvol.replication_pool_uuid
+    if not pool_uuid:
+        return ""
+    try:
+        pool = db_controller.get_pool_by_id(pool_uuid)
+    except KeyError:
+        return ""
+    return pool_uuid if pool.cluster_id == cluster_id else ""
+
+
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
-                      from_policy=False, placement_load=None):
+                      from_policy=False, replication_pool_id=None, placement_load=None):
     """Enable replication for a volume and pick its destination node.
 
     This is the step a replication POLICY performs for you: attaching a policy
@@ -4461,6 +4633,11 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                      lvol.get_id(), replication_cluster_id)
         return False
 
+    refused = replication_start_error(lvol_id, replication_cluster_id, replication_pool_id, mode)
+    if refused:
+        logger.error(refused)
+        return False
+
     if mode == "migration" and not (lvol.do_replicate
                                     and lvol.replication_mode == "migration"):
         # Queue position for the node's one-at-a-time turn; a volume already
@@ -4469,6 +4646,8 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     lvol.do_replicate = True
     if mode in ("failover", "migration"):
         lvol.replication_mode = mode
+    if replication_pool_id:
+        lvol.replication_pool_uuid = replication_pool_id
     if interval_min is not None and interval_min >= 0:
         lvol.replication_interval_min = interval_min
     # Persist do_replicate/mode/interval regardless of whether a replication
@@ -5144,6 +5323,10 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # the other cluster, where it names nothing and would block fail-back.
     new_lvol.replication_policy_id = ""
     new_lvol.cloned_from_snap = snapshot.get_id()
+    # Carries client IO from here on: keep the source volume's service class
+    # (never the replication class of the snapshot it is cloned from).
+    new_lvol.lvol_priority_class = qos_controller.class_on_cluster(
+        target_node.cluster_id, getattr(lvol, "lvol_priority_class", 0))
     _reset_demote_state(new_lvol)
     new_lvol.place_in_pool(db_controller.get_pool_by_id(pool_uuid))
     new_lvol.lvs_name = target_node.lvstore
@@ -5640,6 +5823,10 @@ def resolve_replication_destination(db_controller, lvol, target_node, source_nod
     """
     target_cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
 
+    requested = requested_destination_pool(db_controller, lvol, target_node.cluster_id)
+    if requested:
+        return target_cluster, requested
+
     policy = db_controller.get_replication_policy_for_lvol(lvol)
     if policy is not None:
         try:
@@ -6125,6 +6312,31 @@ def replication_commit(lvol_id, delete_source=False, plan_id="", require_baselin
         logger.error(e)
         return False
 
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    # A caller that cannot tell whether its commit arrived sends it again, and
+    # may send it to another API replica. The lookup and the enqueue happen
+    # under the volume's lock, so two commits cannot both find nothing and
+    # both enqueue; a repeat names the cutover already queued, running, or
+    # done rather than queuing a second one, which would build a second clone.
+    try:
+        with DbLock(f"replication_commit/{lvol_id}", timeout=constants.REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC):
+            return _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source,
+                                  plan_id, require_baseline)
+    except DbLockBusyError:
+        existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+        if existing:
+            return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
+        return False, "another commit of this volume is being queued"
+
+
+def _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source,
+                   plan_id="", require_baseline=False):
+    """replication_commit's lookup and enqueue, under the volume's lock."""
+    existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+    if existing:
+        return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
+
     if not lvol.replication_node_id:
         logger.error(f"LVol: {lvol_id} replication node id not found")
         return False
@@ -6133,8 +6345,6 @@ def replication_commit(lvol_id, delete_source=False, plan_id="", require_baselin
     if target_node.status != StorageNode.STATUS_ONLINE:
         logger.error(f"Target node is not online: {lvol.replication_node_id}")
         return False
-
-    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
 
     # NO snapshot here. The iterative snapshots ARE the endgame, and the
     # endgame does not start until ordinary replication has the target within
@@ -6167,6 +6377,11 @@ def replication_commit(lvol_id, delete_source=False, plan_id="", require_baselin
             "require_baseline": bool(require_baseline),
         })
     if not task:
+        # The enqueue refuses a cutover already queued, which a writer that
+        # took no lock may have queued since the lookup.
+        existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
+        if existing:
+            return {"cutover_task_queued": False, "conflict": True, "task_id": existing}
         logger.error("Failed to enqueue replication-final task")
         return False, "Failed to enqueue cutover task"
 
@@ -6449,6 +6664,8 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.from_source = True
+    new_lvol.lvol_priority_class = qos_controller.class_on_cluster(
+        source_node.cluster_id, getattr(lvol, "lvol_priority_class", 0))
     _reset_demote_state(new_lvol)
     new_lvol.node_id = source_node.get_id()
     new_lvol.nodes = [source_node.get_id(), source_node.secondary_node_id]

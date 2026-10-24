@@ -30,6 +30,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCConnectionError
 from simplyblock_core.services import replication_final_step
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
@@ -234,11 +235,19 @@ def _reconstitute_group(rep):
         logger.warning("Group reconstitution after cutover failed: %s", e)
 
 
-def _cutover_failed(task, err) -> NoReturn:
+def _cutover_failed(task, err, transient=False) -> NoReturn:
     """Turn a failed cutover attempt into the driver's retry semantics.
 
-    Raises :class:`TaskDefer` for a transient connectivity failure — suspended,
-    cooldown recorded, no retry consumed — and :class:`TaskRetry` otherwise.
+    A transient failure -- the target unreachable, or an RPC without an answer --
+    raises :class:`TaskDefer` behind a cooldown without burning a retry, for
+    REPL_CUTOVER_TRANSIENT_WINDOW_SEC from the first one, and indefinitely
+    while the target node is not online. The window is the task's, not the
+    retry's: it is not reset when a retry is burned, so it and max_retry are
+    one budget rather than a product of two.
+
+    Anything else raises :class:`TaskRetry` at once. A cutover that reached an
+    online target and failed fails the same way on every attempt; waiting in
+    front of each retry only multiplies the IO freezes.
     """
     params = task.function_params
     result = err or "cutover failed, retrying"
@@ -247,19 +256,14 @@ def _cutover_failed(task, err) -> NoReturn:
     # to diagnose (run 20260827_194551 -- 20 tasks, 160 attempts, no log line).
     task = _record(task, last_error=result)
     params = task.function_params
-    logger.warning("cutover attempt %d/%d failed for lvol %s: %s",
-                   task.retry + 1, task.max_retry,
-                   params.get("lvol_id"), result)
+    logger.warning("cutover attempt %d/%d failed for lvol %s (%s): %s",
+                   task.retry + 1, task.max_retry, params.get("lvol_id"),
+                   "transient" if transient else "not transient", result)
     # A retry re-claims the LVS on its next pass; holding the claim across the
     # wait would stall every other volume's replication for nothing.
     _release_lvs_claim(task)
 
-    # When the failure happened inside run_cutover (tgt_lvol_composite already
-    # set), it is likely a connectivity issue: the target node restarted, or the
-    # control plane hasn't yet reflected the down state in DB.  Hammering at the
-    # active poll interval burns all retries in seconds — long before the node
-    # recovers.  Instead, re-read the node status and add a cooldown.
-    if params.get("tgt_lvol_composite"):
+    if transient:
         tgt_node_id = params.get("tgt_node_id")
         node_offline = False
         if tgt_node_id:
@@ -268,24 +272,23 @@ def _cutover_failed(task, err) -> NoReturn:
                 node_offline = current_tgt.status != StorageNode.STATUS_ONLINE
             except KeyError:
                 node_offline = True
-        hub_attempts = params.get("cutover_hub_attempts", 0) + 1
-        task = _record(task, cutover_hub_attempts=hub_attempts)
-        if node_offline or hub_attempts <= constants.REPL_CUTOVER_MAX_HUB_ATTEMPTS:
-            # Transient: add a cooldown, do NOT burn task.retry.
+        now = int(time.time())
+        since = params.get("cutover_transient_since") or now
+        if "cutover_transient_since" not in params:
+            task = _record(task, cutover_transient_since=since)
+        if node_offline or now - since <= constants.REPL_CUTOVER_TRANSIENT_WINDOW_SEC:
             _record(task, cutover_retry_after=(
-                int(time.time()) + constants.REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC))
+                now + constants.REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC))
             logger.warning(
-                "cutover for lvol %s: connectivity failure (attempt %d, node_offline=%s); "
+                "cutover for lvol %s: target unreachable for %ds (node_offline=%s); "
                 "waiting %ds before retry",
-                params.get("lvol_id"), hub_attempts, node_offline,
+                params.get("lvol_id"), now - since, node_offline,
                 constants.REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC)
             raise TaskDefer(result)
-        # Exceeded transient cap with node appearing online — real failure.
         logger.warning(
-            "cutover for lvol %s: hub attach failed %d times with node appearing "
-            "online; treating as real failure and burning a retry",
-            params.get("lvol_id"), hub_attempts)
-        drop_params(task, "cutover_hub_attempts", "cutover_retry_after")
+            "cutover for lvol %s: target unreachable for %ds with the node online; "
+            "burning a retry", params.get("lvol_id"), now - since)
+        drop_params(task, "cutover_retry_after")
 
     raise TaskRetry(result)
 
@@ -587,7 +590,14 @@ def task_runner(task: JobSchedule, tasks):
                 params["tgt_snap_composite"],
                 operation=params.get("operation", "replicate"),
                 src_exec=src_exec, tgt_exec=tgt_exec)
+    except replication_final_step.CutoverUnreachable as e:
+        _cutover_failed(task, str(e), transient=True)
+    except RPCConnectionError as e:
+        # Unreachable, or no answer within the timeout: waited out.
+        _cutover_failed(task, str(e), transient=True)
     except Exception as e:
+        # Anything else was answered, an RPC error included: it fails the
+        # same way next time, and burns a retry.
         logger.exception(f"Cutover raised: {e}")
         _cutover_failed(task, str(e))
 
