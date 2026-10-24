@@ -396,6 +396,62 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
     else:
         return online_nodes
 
+def _replication_node_load(db_controller, cluster_id, lvols=None):
+    """Planned load of each online primary of *cluster_id* as a replication
+    destination: ``{node_id: {"bytes": int, "subsystems": int, "max": int}}``.
+
+    Planned means resident AND incoming: the provisioned bytes and subsystems
+    of the volumes the node is primary of, plus every volume -- in any cluster
+    -- that currently replicates into it. Those land on the node at cutover or
+    fail-over, so a pick that ignores them piles a batch onto one node.
+    """
+    if lvols is None:
+        lvols = db_controller.get_lvols()
+    live = [lv for lv in lvols
+            if lv.status not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED)]
+    load = {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        node_id = node.get_id()
+        resident = [lv for lv in live if lv.node_id == node_id]
+        incoming = [lv for lv in live
+                    if lv.do_replicate and lv.replication_node_id == node_id
+                    and lv.node_id != node_id]
+        load[node_id] = {
+            "bytes": sum(lv.size for lv in resident + incoming),
+            "subsystems": (count_lvol_subsystems(node, resident)
+                           + len({lv.nqn for lv in incoming})),
+            "max": max_subsystems_for_node(node),
+        }
+    return load
+
+
+def _pick_replication_node(db_controller, cluster_id, lvol_size, exclude=(), load=None):
+    """The online primary of *cluster_id* with the least planned load that
+    still has a subsystem slot, or None.
+
+    Least provisioned bytes first, then fewest subsystems, then node id: the
+    choice is deterministic, unlike _get_next_3_nodes' weighted dice. Pass a
+    *load* from _replication_node_load to place a batch: the pick is reserved
+    in it, so the next volume sees this one.
+    """
+    if load is None:
+        load = _replication_node_load(db_controller, cluster_id)
+    candidates = [(st["bytes"], st["subsystems"], node_id)
+                  for node_id, st in load.items()
+                  if node_id not in exclude and st["subsystems"] < st["max"]]
+    if not candidates:
+        return None
+    _, _, node_id = min(candidates)
+    load[node_id]["bytes"] += lvol_size
+    load[node_id]["subsystems"] += 1
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.get_id() == node_id:
+            return node
+    return None
+
+
 def is_hex(s: str) -> bool:
     """
     given an input checks if the value is hex encoded or not
@@ -995,8 +1051,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 f"{sibling_node_id} so the shared subsystem is not split")
             lvol.replication_node_id = sibling_node_id
         else:
-            random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size, all_lvols)
-            lvol.replication_node_id = random_nodes[0].get_id()
+            r_node = _pick_replication_node(db_controller, replication_cluster_id, lvol.size)
+            if r_node is None:
+                return False, f"No replication node available in cluster {replication_cluster_id}"
+            lvol.replication_node_id = r_node.get_id()
 
     lvol_dict: dict = {
         "type": "bdev_lvol",
@@ -4534,7 +4592,7 @@ def requested_destination_pool(db_controller, lvol, cluster_id):
 
 
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
-                      from_policy=False, replication_pool_id=None):
+                      from_policy=False, replication_pool_id=None, placement_load=None):
     """Enable replication for a volume and pick its destination node.
 
     This is the step a replication POLICY performs for you: attaching a policy
@@ -4542,6 +4600,9 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     directly on a policy-managed volume is refused, because the volume would then
     replicate on settings that silently diverge from its policy. It stays
     available for volumes that are managed without a policy.
+
+    ``placement_load`` is a _replication_node_load map shared by a batch (a
+    migration plan): each pick is reserved in it, so the batch spreads.
     """
     db_controller = DBController()
     try:
@@ -4577,6 +4638,11 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         logger.error(refused)
         return False
 
+    if mode == "migration" and not (lvol.do_replicate
+                                    and lvol.replication_mode == "migration"):
+        # Queue position for the node's one-at-a-time turn; a volume already
+        # replicating in migration mode keeps the place it has.
+        lvol.migration_queued_at = int(time.time())
     lvol.do_replicate = True
     if mode in ("failover", "migration"):
         lvol.replication_mode = mode
@@ -4667,13 +4733,15 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
             lvol.replication_node_id = chain_node_id
             lvol.write_to_db()
         else:
-            random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
-            for r_node in random_nodes:
-                if r_node.get_id() not in excluded_nodes:
-                    logger.info(f"Replicating on node: {r_node.get_id()}")
-                    lvol.replication_node_id = r_node.get_id()
-                    lvol.write_to_db()
-                    break
+            # Least planned load, counting the replicas already headed to each
+            # node (docs/online-migration.md, G5).
+            r_node = _pick_replication_node(
+                db_controller, replication_cluster_id, lvol.size,
+                exclude=set(excluded_nodes), load=placement_load)
+            if r_node is not None:
+                logger.info(f"Replicating on node: {r_node.get_id()}")
+                lvol.replication_node_id = r_node.get_id()
+                lvol.write_to_db()
         if not lvol.replication_node_id:
             logger.error(f"Replication node not found for lvol: {lvol.get_id()}")
             return False
@@ -6216,7 +6284,7 @@ def _resolve_target_map_id(target_node, lvol_bdev):
     return None
 
 
-def replication_commit(lvol_id, delete_source=False):
+def replication_commit(lvol_id, delete_source=False, plan_id="", require_baseline=False):
     """Planned cutover for migration mode (and the final step of fail-back).
 
     Enqueues the FN_REPLICATION_FINAL task, which performs an iterative
@@ -6232,6 +6300,10 @@ def replication_commit(lvol_id, delete_source=False):
     The first shrink snapshot is taken here so the pipeline starts immediately;
     the runner owns the rest. Returns a dict describing the queued cutover, or
     (False, error).
+
+    ``plan_id`` ties the task to a migration plan; ``require_baseline`` keeps
+    the endgame from starting before the volume's initial copy has replicated
+    (a plan queues every commit up front -- docs/online-migration.md).
     """
     db_controller = DBController()
     try:
@@ -6249,7 +6321,8 @@ def replication_commit(lvol_id, delete_source=False):
     # done rather than queuing a second one, which would build a second clone.
     try:
         with DbLock(f"replication_commit/{lvol_id}", timeout=constants.REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC):
-            return _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source)
+            return _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source,
+                                  plan_id, require_baseline)
     except DbLockBusyError:
         existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
         if existing:
@@ -6257,7 +6330,8 @@ def replication_commit(lvol_id, delete_source=False):
         return False, "another commit of this volume is being queued"
 
 
-def _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source):
+def _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source,
+                   plan_id="", require_baseline=False):
     """replication_commit's lookup and enqueue, under the volume's lock."""
     existing = tasks_controller.get_replication_final_task(source_node.cluster_id, lvol_id)
     if existing:
@@ -6299,6 +6373,8 @@ def _commit_locked(db_controller, lvol, lvol_id, source_node, delete_source):
             # Migration semantics on request: retire the source volume once
             # the cutover state is durable (see _finalize in the final runner).
             "delete_source": bool(delete_source),
+            "plan_id": plan_id,
+            "require_baseline": bool(require_baseline),
         })
     if not task:
         # The enqueue refuses a cutover already queued, which a writer that
