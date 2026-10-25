@@ -257,7 +257,7 @@ def check_node(snode):
         node_rpc_check = _probe(f_rpc, "rpc")
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+    logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 

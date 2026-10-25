@@ -445,6 +445,10 @@ class RPCClient:
         self.session = _session_pool.get(
             self.host, self.port, self.username, self.password, self.retry, Settings())
 
+    def net_check(self, ifname: str, ip: str) -> bool:
+        """Whether the interface has carrier and the address answers a ping sent out of
+        it, in the SPDK pod's network namespace."""
+        return self._request("sbcli_net_check", ifname=ifname, ip=ip)
 
     def get_version(self):
         return self._request("spdk_get_version")

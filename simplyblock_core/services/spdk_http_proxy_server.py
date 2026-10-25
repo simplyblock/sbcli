@@ -34,6 +34,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import ClientDisconnect
 
+from simplyblock_core import pod_net
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.secrets import redact_rpc_params
 
@@ -46,6 +47,9 @@ access_logger = logging.getLogger(f'{__name__}.access')
 STATS_INTERVAL_SEC = 3
 #: Path the Prometheus exposition is served on, matching ``simplyblock_web``.
 METRICS_ENDPOINT = '/_meta/metrics'
+
+# The method the proxy answers itself, from the pod's own network namespace.
+NET_CHECK_METHOD = 'sbcli_net_check'
 #: SPDK round-trips span a warm ``bdev_get_bdevs`` (well under a millisecond)
 #: to ``ProxySettings.timeout``, 300s by default. Histogram's default buckets
 #: stop at 10s, which would collapse the whole interesting tail into ``+Inf``:
@@ -489,6 +493,8 @@ class SpdkProxy:
         # occupies one nor gets counted as an SPDK-side failure.
         req_data = _parse_request(req)
         log.rpc_method = str(req_data['method'])
+        if log.rpc_method == NET_CHECK_METHOD:
+            return await self._answer_net_check(req_data)
         params = str(redact_rpc_params(req_data['params'])) if 'params' in req_data else ""
         logger.info(
             f"Request:{log.request_id} function: {log.rpc_method}, params: {params}")
@@ -499,6 +505,16 @@ class SpdkProxy:
                 return await self._rpc_call_inner(req, req_data, log, sock_timeout)
             finally:
                 self.metrics.slots_in_use.dec()
+
+    async def _answer_net_check(self, req_data: dict) -> str | None:
+        """Answer a network check from this pod's namespace without asking SPDK, so it
+        neither takes a concurrency slot nor waits behind SPDK's own work."""
+        params = req_data.get('params') or {}
+        result = await asyncio.to_thread(
+            pod_net.check, str(params.get('ifname', '')), str(params.get('ip', '')))
+        if 'id' not in req_data:
+            return None
+        return json.dumps({'jsonrpc': '2.0', 'id': req_data['id'], 'result': result})
 
     async def _rpc_call_inner(
         self,
