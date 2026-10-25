@@ -3779,12 +3779,19 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
-def get_mgmt_ip(node_info: Any, iface_names: str | list[str]) -> tuple[str, str] | None:
+def get_mgmt_ip(node_info: Any, iface_names: str | list[str], networks=None) -> tuple[str, str] | None:
+    """The worker's address and the interface it is on. With attached ``networks`` the
+    agent runs in the pod network and cannot see the host's interfaces, so it reports
+    the host's address itself (``host_ip``, set by the DaemonSet) and no interface."""
     if isinstance(node_info, (bytes, bytearray)):
         try:
             node_info = json.loads(node_info.decode("utf-8"))
         except Exception:
             return None
+
+    if networks:
+        host_ip = node_info.get("host_ip")
+        return (host_ip, "") if host_ip else None
 
     if isinstance(iface_names, str):
         iface_names = [iface_names]

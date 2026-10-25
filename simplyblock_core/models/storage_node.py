@@ -95,6 +95,8 @@ class StorageNode(BaseNodeObject):
     cpu_hz: int = 0
     ctrl_secret: SecretStr = SecretStr("")
     data_nics: list[IFace] = default_factory(list)
+    # Dumped storage_network.NetworkAttachment entries; empty on the host network.
+    networks: list[dict] = default_factory(list)
     distrib_cpu_cores: list[int] = default_factory(list)
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
@@ -135,6 +137,8 @@ class StorageNode(BaseNodeObject):
     max_snap: int = 0
     memory: int = 0
     mgmt_ip: str = ""
+    # SPDK RPC address of a pod on attached networks; mgmt_ip stays the worker's address.
+    spdk_ip: str = ""
     namespace: str = ""
     node_lvs: str = "lvs"
     num_partitions_per_dev: int = 1
@@ -311,6 +315,16 @@ class StorageNode(BaseNodeObject):
                     break
         return super().from_dict(data)
 
+    @property
+    def on_pod_network(self) -> bool:
+        """Whether the SPDK pod is attached to extra networks rather than on the host's."""
+        return bool(self.networks)
+
+    @property
+    def rpc_host(self) -> str:
+        """Where SPDK RPC is served: the pod's address when attached, else the worker's."""
+        return self.spdk_ip or self.mgmt_ip
+
     def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
 
@@ -329,7 +343,7 @@ class StorageNode(BaseNodeObject):
             timeout, retry = budget
             kwargs.setdefault("timeout", timeout)
             kwargs.setdefault("retry", retry)
-        host = self.mgmt_ip
+        host = self.rpc_host
         if Settings().tls_connect != "disabled":
             host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(
