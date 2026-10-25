@@ -289,6 +289,11 @@ def _check_ping_from_node(ip, ifname, node):
     # (The previous mgmt-side ICMP fallback pinged the data IP from mgmt, which
     # is typically off the data VLAN -> always False -> spurious node-down.)
     snodeapi = node.client(timeout=8, retry=1, connect_retry=0)
+    if node.network_attachment:
+        # The data NIC of a pod-networked node is the Multus attachment inside
+        # the SPDK pod; the host has no interface of that name to read a
+        # carrier from. Reachability of the address from the host is the check.
+        ifname = None
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)

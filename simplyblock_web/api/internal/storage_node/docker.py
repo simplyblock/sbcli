@@ -1184,8 +1184,12 @@ def disconnect_nqn(body: utils.DisconnectParams):
 
 
 class PingQuery(BaseModel):
-    ip: str = Field(pattern=utils.IP_PATTERN)
-    ifname: str = Field(pattern=utils.IFNAME_PATTERN)
+    ip: Annotated[str, Field(pattern=utils.IP_PATTERN)]
+    # The host interface whose carrier confirms the ping. Omitted for a data
+    # address that lives inside a pod-networked SPDK pod (a Multus attachment):
+    # the host has no such interface, and reaching the address from the host
+    # is exactly what its clients need.
+    ifname: Annotated[str | None, Field(pattern=utils.IFNAME_PATTERN)] = None
 
 @api.get('/ping_ip', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
@@ -1199,6 +1203,8 @@ def ping_ip(query: PingQuery):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if not query.ifname:
+            return utils.get_response(True)
         return utils.get_response(Path(f"/sys/class/net/{query.ifname}/carrier").read_text().strip() == "1")
     except Exception as e:
         logger.error(e)

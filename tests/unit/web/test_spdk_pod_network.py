@@ -200,3 +200,52 @@ class TestControlPlane:
         back = StorageNode(node.to_dict())
         assert (back.pod_ip, back.network_attachment) == ("10.244.5.144", "storage-vf")
         assert StorageNode().pod_ip == "" and StorageNode().network_attachment == ""
+
+
+class TestDataNicProbe:
+    """The monitor's data-NIC probe must not look for the attachment on the host."""
+
+    @staticmethod
+    def _ping(agent, **query):
+        from flask import Flask
+        with Flask(__name__).app_context():
+            return agent.ping_ip(agent.PingQuery(**query)).get_json()
+
+    def test_agent_ping_without_ifname_is_reachability_only(self, monkeypatch):
+        from simplyblock_web.api.internal.storage_node import docker as agent
+        calls = []
+        monkeypatch.setattr(agent.subprocess, "check_call", lambda cmd, **kw: calls.append(cmd))
+        assert self._ping(agent, ip="10.10.10.220")["results"] is True
+        assert calls and calls[0][-1] == "10.10.10.220"
+
+    def test_agent_ping_with_ifname_still_reads_carrier(self, monkeypatch):
+        from simplyblock_web.api.internal.storage_node import docker as agent
+        monkeypatch.setattr(agent.subprocess, "check_call", lambda cmd, **kw: None)
+        # carrier file of a nonexistent host interface -> the error path, as before
+        assert self._ping(agent, ip="10.10.10.145", ifname="does-not-exist0")["status"] is False
+
+    def test_control_plane_drops_ifname_for_pod_networked_node(self):
+        from unittest.mock import MagicMock
+
+        from simplyblock_core.controllers import health_controller
+        node = StorageNode()
+        api = MagicMock()
+        api.ping_ip.return_value = (True, None)
+        node.client = lambda **kw: api
+        node.network_attachment = "storage-vf"
+        assert health_controller._check_ping_from_node("10.10.10.220", ifname="net1", node=node) is True
+        api.ping_ip.assert_called_once_with("10.10.10.220", None)
+        node.network_attachment = ""
+        health_controller._check_ping_from_node("10.10.10.145", ifname="enp1s0", node=node)
+        api.ping_ip.assert_called_with("10.10.10.145", "enp1s0")
+
+    def test_client_omits_ifname_when_none(self):
+        from unittest.mock import MagicMock
+
+        from simplyblock_core.snode_client import SNodeClient
+        c = SNodeClient.__new__(SNodeClient)
+        c._request = MagicMock(return_value=(True, None))
+        c.ping_ip("10.10.10.220")
+        c._request.assert_called_once_with("GET", "ping_ip", {"ip": "10.10.10.220"})
+        c.ping_ip("10.10.10.145", "enp1s0")
+        c._request.assert_called_with("GET", "ping_ip", {"ip": "10.10.10.145", "ifname": "enp1s0"})

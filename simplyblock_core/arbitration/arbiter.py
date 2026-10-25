@@ -2064,8 +2064,11 @@ def default_link_probe(node: StorageNode, peer: StorageNode):
     if not node.data_nics or not peer.data_nics:
         return None
     try:
+        # A pod-networked node's data NIC lives inside its SPDK pod, so the
+        # agent cannot bind the probe to it; plain reachability is the probe.
+        ifname = None if node.network_attachment else node.data_nics[0].if_name
         ret, _ = node.client(timeout=8, retry=1, connect_retry=0).ping_ip(
-            peer.data_nics[0].ip4_address, node.data_nics[0].if_name)
+            peer.data_nics[0].ip4_address, ifname)
         return bool(ret)
     except Exception as e:                          # noqa: BLE001 - inconclusive
         logger.debug("Link probe %s -> %s failed: %s", node.get_id(), peer.get_id(), e)

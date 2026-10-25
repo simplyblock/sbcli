@@ -305,9 +305,8 @@ class SNodeClient:
         return self._request("POST", "disconnect_nqn", params)
 
 
-    def ping_ip(self, ip_address, ifname):
-        params = {
-            "ip": ip_address,
-            "ifname": ifname,
-        }
+    def ping_ip(self, ip_address, ifname=None):
+        params = {"ip": ip_address}
+        if ifname:
+            params["ifname"] = ifname
         return self._request("GET", "ping_ip", params)
