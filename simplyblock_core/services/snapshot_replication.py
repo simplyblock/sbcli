@@ -2215,7 +2215,16 @@ def process_snap_replicate_finish(task, snapshot):
         logger.info("Landing volume %s is already converted on %s; skipping "
                     "its chain and convert", remote_lv.top_bdev, sec_node.get_id())
     elif sec_node.status == StorageNode.STATUS_ONLINE:
-        if target_prev_snap and sec_node.get_id() not in _prechained:
+        if (target_prev_snap and sec_node.get_id() not in _prechained
+                and _chained_onto(sec_node, remote_lv.top_bdev, target_prev_snap['snap_bdev'])):
+            # A landing volume chained on the primary after its transfer can
+            # reach the secondary through the lvstore's metadata sync while
+            # its merge runs; add_clone then fails with "File exists" for ever
+            # (bed run 5, 2026-10-24: one volume stuck for 16 min).
+            logger.info("Landing volume %s already reads through %s on %s; skipping "
+                        "the add_clone", remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                        sec_node.get_id())
+        elif target_prev_snap and sec_node.get_id() not in _prechained:
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
             with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
                                    lvol=snapshot.lvol.get_id(), node="secondary"):
