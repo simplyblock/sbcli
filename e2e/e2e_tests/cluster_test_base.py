@@ -4,6 +4,7 @@ import random
 import re
 import shlex
 import string
+import subprocess
 import threading
 import time
 import traceback
@@ -2047,6 +2048,57 @@ class TestClusterBase:
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
 
+    # Where each thing lives inside the cluster, verified on the live
+    # OpenShift deployment rather than assumed.
+    K8S_FDB_POD_MATCH = "simplyblock-fdb-cluster-"
+    K8S_FDB_CONTAINER = "foundationdb"
+    K8S_FDB_TRACE_DIR = "/var/log/fdb-trace-logs"
+    K8S_PROM_POD = "simplyblock-prometheus-0"
+    K8S_PROM_CONTAINER = "prometheus-simplyblock-prometheus"
+    K8S_PROM_TSDB_DIR = "/data"
+    K8S_PROM_URL = "http://simplyblock-prometheus:9090"
+
+    def _k8s_pods(self, match):
+        """Running pod names in the namespace containing *match*."""
+        k8s = self._ensure_k8s_utils()
+        out, _ = k8s._exec_kubectl(
+            f"kubectl -n {k8s.namespace} get pods --no-headers "
+            "--field-selector=status.phase=Running "
+            "-o custom-columns=NAME:.metadata.name",
+            supress_logs=True, timeout=60)
+        return [p.strip() for p in (out or "").splitlines()
+                if match in p and p.strip()]
+
+    def _k8s_stream_to_file(self, pod, container, command, dest, timeout=600):
+        """Run *command* in a pod and write its raw stdout to *dest*.
+
+        kubectl exec is the only way to get a file out of a container here, and
+        the helper that wraps it decodes stdout as text -- which corrupts a tar
+        or a gzip stream. So this goes to subprocess directly and keeps bytes
+        as bytes. Returns the size written, or -1.
+        """
+        k8s = self._ensure_k8s_utils()
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        argv = ["kubectl", "-n", k8s.namespace, "exec", pod]
+        if container:
+            argv += ["-c", container]
+        argv += ["--", "sh", "-c", command]
+        try:
+            with open(dest, "wb") as fh:
+                proc = subprocess.run(argv, stdout=fh,
+                                      stderr=subprocess.PIPE, timeout=timeout)
+            size = os.path.getsize(dest)
+            if proc.returncode != 0 and size == 0:
+                os.unlink(dest)
+                self.logger.warning(
+                    "[diagnostics] %s: %s", pod,
+                    (proc.stderr or b"").decode(errors="replace")[:200])
+                return -1
+            return size
+        except Exception as e:                         # noqa: BLE001
+            self.logger.warning(f"[diagnostics] stream from {pod} failed: {e}")
+            return -1
+
     def collect_fdb_traces(self):
         """Archive FoundationDB trace files off the mgmt node, incrementally.
 
@@ -2064,7 +2116,9 @@ class TestClusterBase:
         currently-open trace is refreshed each time and compressed once it has
         been quiet for ten minutes. Trace XML gzips about 12:1.
         """
-        if getattr(self, "k8s_test", False) or not self.mgmt_nodes:
+        if getattr(self, "k8s_test", False):
+            return self._collect_fdb_traces_k8s()
+        if not self.mgmt_nodes:
             return
         mgmt = self.mgmt_nodes[0]
         dst = os.path.join(self.docker_logs_path, mgmt, "fdb_traces")
@@ -2098,6 +2152,53 @@ class TestClusterBase:
         except Exception as e:
             self.logger.warning(f"[diagnostics] fdb trace collection failed: {e}")
 
+    def _collect_fdb_traces_k8s(self):
+        """The same incremental archive, out of the FoundationDB pods.
+
+        On k8s there is no docker volume to read: the traces live in
+        /var/log/fdb-trace-logs inside each simplyblock-fdb-cluster-* pod, and
+        FDB rotates them as a ring buffer, so a run that only collects at
+        teardown keeps the last few hours and loses the window that matters.
+        Run 40080313048 lost the 10:10 window exactly this way.
+
+        One gzip per trace file, skipping what is already archived; the
+        currently-open trace is re-fetched each pass because it is still
+        growing. Trace XML gzips about 12:1, so ~115 MB a pod becomes ~10 MB.
+        """
+        pods = self._k8s_pods(self.K8S_FDB_POD_MATCH)
+        if not pods:
+            self.logger.warning(
+                "[diagnostics] no %s pods found; FDB traces not collected",
+                self.K8S_FDB_POD_MATCH)
+            return
+        root = os.path.join(self.docker_logs_path, "fdb_traces")
+        k8s = self._ensure_k8s_utils()
+        total = 0
+        for pod in pods:
+            listing = k8s.exec_in_pod_container(
+                pod, self.K8S_FDB_CONTAINER,
+                f"ls -1 {self.K8S_FDB_TRACE_DIR}/*.xml 2>/dev/null",
+                timeout=60)
+            names = [ln.strip() for ln in (listing or "").splitlines()
+                     if ln.strip().endswith(".xml")]
+            if not names:
+                continue
+            newest = names[-1]
+            for path in names:
+                base = os.path.basename(path)
+                dest = os.path.join(root, pod, base + ".gz")
+                # Already archived and no longer being written: leave it.
+                if os.path.exists(dest) and path != newest:
+                    continue
+                size = self._k8s_stream_to_file(
+                    pod, self.K8S_FDB_CONTAINER,
+                    f"gzip -c -- {shlex.quote(path)}", dest, timeout=300)
+                if size > 0:
+                    total += size
+        self.logger.info(
+            "[diagnostics] fdb traces archived from %d pod(s) (%.1f MB) -> %s",
+            len(pods), total / 1048576.0, root)
+
     def collect_pressure_stall(self, tag=""):
         """Append /proc/pressure (PSI) for every node to a per-node log.
 
@@ -2111,6 +2212,8 @@ class TestClusterBase:
         ``scripts/enable_psi.sh``). Until then this records that it is off, once
         per node, rather than failing or going silent.
         """
+        if getattr(self, "k8s_test", False):
+            return self._collect_pressure_stall_k8s(tag)
         nodes = list(self.mgmt_nodes or []) + list(self.storage_nodes or [])
         nodes += [n for n in (self.fio_node or []) if n not in nodes]
         stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -2145,6 +2248,57 @@ class TestClusterBase:
             except Exception as e:
                 self.logger.warning(f"[diagnostics] PSI read failed on {node}: {e}")
 
+    def _collect_pressure_stall_k8s(self, tag=""):
+        """PSI per worker, read through the SPDK pod.
+
+        There is no SSH to an OpenShift worker here, but the SPDK pod shares
+        the host's /proc -- which is how reading /proc/cmdline from it returns
+        the worker's kernel arguments -- so /proc/pressure read inside the pod
+        is the worker's own PSI.
+
+        RHCOS ships psi=0 on the kernel command line and /proc/pressure does
+        not exist until that is changed, which needs a MachineConfig kernel
+        argument and a rolling reboot (grubby, which the docker lab uses, does
+        not apply to RHCOS). Until that lands this records the absence once per
+        worker rather than failing, so the reason is in the run's own log.
+        """
+        k8s = self._ensure_k8s_utils()
+        pods = self._k8s_pods("snode-spdk-pod-")
+        if not pods:
+            self.logger.warning("[diagnostics] no SPDK pods; PSI not collected")
+            return
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not hasattr(self, "_psi_unavailable"):
+            self._psi_unavailable = set()
+        for pod in pods:
+            worker = k8s.exec_in_pod_container(
+                pod, "spdk-container", "hostname", timeout=30).strip() or pod
+            out = k8s.exec_in_pod_container(
+                pod, "spdk-container",
+                "if [ -d /proc/pressure ]; then "
+                "  for r in /proc/pressure/*; do "
+                "    printf '%s: ' \"$(basename $r)\"; tr '\\n' '|' < \"$r\"; echo; "
+                "  done; "
+                "else echo no_psi; fi",
+                timeout=60)
+            if "no_psi" in (out or ""):
+                if worker not in self._psi_unavailable:
+                    self._psi_unavailable.add(worker)
+                    self.logger.warning(
+                        "[diagnostics] PSI unavailable on %s: /proc/pressure is "
+                        "absent. RHCOS needs psi=1 as a MachineConfig kernel "
+                        "argument and a rolling reboot.", worker)
+                continue
+            path = os.path.join(self.docker_logs_path, worker,
+                                f"pressure_{worker}.log")
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(f"=== {stamp} {tag}\n{out}")
+            except Exception as e:                     # noqa: BLE001
+                self.logger.warning(
+                    f"[diagnostics] PSI write failed for {worker}: {e}")
+
     def collect_prometheus_snapshot(self, suffix=""):
         """Archive the Prometheus TSDB and a few decoded series off the mgmt node.
 
@@ -2160,7 +2314,9 @@ class TestClusterBase:
         is why the decoded range queries are taken as well: they go through the
         query API and are always consistent.
         """
-        if getattr(self, "k8s_test", False) or not self.mgmt_nodes:
+        if getattr(self, "k8s_test", False):
+            return self._collect_prometheus_snapshot_k8s(suffix)
+        if not self.mgmt_nodes:
             return
         mgmt = self.mgmt_nodes[0]
         dst = os.path.join(self.docker_logs_path, mgmt, "prometheus")
@@ -2190,6 +2346,65 @@ class TestClusterBase:
             )
         except Exception as e:
             self.logger.warning(f"[diagnostics] prometheus collection failed: {e}")
+
+    def _collect_prometheus_snapshot_k8s(self, suffix=""):
+        """The TSDB out of the Prometheus pod, plus decoded queries.
+
+        The pod's own image has tar but no gzip, so the tar stream is
+        compressed on this side. Retention is 15d on this deployment, so the
+        copy only has to outlive the lab -- but the lab is wiped by the next
+        run, which is the whole point of taking it.
+
+        The queries go through curl in simplyblock-admin-control against the
+        Prometheus Service, because the Prometheus container has no HTTP
+        client of its own. They are kept even when the TSDB copy succeeds:
+        the head block can be torn mid-write, and a query answer never is.
+        """
+        import gzip
+        import shutil
+
+        k8s = self._ensure_k8s_utils()
+        dst = os.path.join(self.docker_logs_path, "prometheus")
+        os.makedirs(dst, exist_ok=True)
+
+        raw = os.path.join(dst, f"tsdb{suffix}.tar")
+        size = self._k8s_stream_to_file(
+            self.K8S_PROM_POD, self.K8S_PROM_CONTAINER,
+            f"tar -C {self.K8S_PROM_TSDB_DIR} -cf - .", raw, timeout=600)
+        if size > 0:
+            try:
+                with open(raw, "rb") as src, gzip.open(raw + ".gz", "wb") as gz:
+                    shutil.copyfileobj(src, gz, 1024 * 1024)
+                os.unlink(raw)
+                size = os.path.getsize(raw + ".gz")
+            except Exception as e:                     # noqa: BLE001
+                self.logger.warning(f"[diagnostics] tsdb gzip failed: {e}")
+
+        # The same five series the docker path records, so the two platforms
+        # answer the same questions.
+        queries = ("up", "node_filesystem_avail_bytes",
+                   "node_pressure_cpu_waiting_seconds_total",
+                   "node_memory_MemAvailable_bytes", "node_load1")
+        kept = 0
+        for q in queries:
+            out, _ = k8s._exec_kubectl(
+                f"kubectl -n {k8s.namespace} exec deploy/simplyblock-admin-control "
+                "-- curl -s -m 20 --get "
+                f"{shlex.quote(self.K8S_PROM_URL + '/api/v1/query')} "
+                f"--data-urlencode {shlex.quote('query=' + q)}",
+                supress_logs=True, timeout=60)
+            if not (out or "").strip():
+                continue
+            try:
+                with open(os.path.join(dst, f"{q}{suffix}.json"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write(out)
+                kept += 1
+            except Exception:                          # noqa: BLE001
+                pass
+        self.logger.info(
+            "[diagnostics] prometheus archived (tsdb %.1f MB, %d quer(y|ies)) -> %s",
+            max(size, 0) / 1048576.0, kept, dst)
 
     def device_subsys_nqn(self, client, device):
         """The NQN of the subsystem currently backing *device*, or "".
@@ -3529,23 +3744,24 @@ class TestClusterBase:
                         for line in lines:
                             self.logger.info(f"  -> {line}")
 
-            # Final sweep: the last FDB traces (including the server's still-open
-            # one), a final PSI reading, and the Prometheus TSDB -- which is kept
-            # for only 7 days on the mgmt node, so an archive read later has
-            # nothing unless it is taken now.
-            for fn, name in (
-                (self.collect_fdb_traces, "collect_fdb_traces"),
-                (lambda: self.collect_pressure_stall(tag="final"), "collect_pressure_stall"),
-                (lambda: self.collect_prometheus_snapshot(suffix="_final"), "collect_prometheus_snapshot"),
-            ):
-                try:
-                    fn()
-                except Exception as e:
-                    self.logger.warning(f"[teardown] {name} failed: {e}")
-
             self.ssh_obj.copy_logs_and_configs_to_nfs(
                 logs_path=self.docker_logs_path, storage_nodes=self.storage_nodes
             )
+        # Final sweep: the last FDB traces (including the server's still-open
+        # one), a final PSI reading, and the Prometheus TSDB. Outside the
+        # "not k8s_test" block that used to hold it -- all three have a k8s
+        # path now, and while they did not, a k8s run collected none of the
+        # three things the control-plane team asked for.
+        for fn, name in (
+            (self.collect_fdb_traces, "collect_fdb_traces"),
+            (lambda: self.collect_pressure_stall(tag="final"), "collect_pressure_stall"),
+            (lambda: self.collect_prometheus_snapshot(suffix="_final"), "collect_prometheus_snapshot"),
+        ):
+            try:
+                fn()
+            except Exception as e:
+                self.logger.warning(f"[teardown] {name} failed: {e}")
+
         if close_ssh and not self.k8s_test:
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
