@@ -3,12 +3,20 @@ import logging
 import os
 import time
 import traceback
+from typing import Annotated
 
 import yaml
 from flask_openapi3 import APIBlueprint
 from jinja2 import Environment, PackageLoader
 from kubernetes.client import ApiException, V1DeleteOptions
 from pydantic import BaseModel, Field
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
@@ -295,6 +303,85 @@ class SPDKParams(BaseModel):
     # The Secret the SPDK proxy serves and connects with: the cluster's
     # recorded one, or the constant name from a control plane that sends none.
     spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
+    # Multus NetworkAttachmentDefinition that carries the SPDK pod's data
+    # interface. Set, the pod runs on the pod network with that attachment as
+    # ``net1`` instead of ``hostNetwork``. ``None`` defers to the agent-wide
+    # SPDK_NETWORK_ATTACHMENT env; an empty string forces hostNetwork.
+    network_attachment: Annotated[str | None, Field(max_length=253)] = None
+
+
+NETWORKS_ANNOTATION = "k8s.v1.cni.cncf.io/networks"
+NETWORK_STATUS_ANNOTATION = "k8s.v1.cni.cncf.io/network-status"
+
+
+def _spdk_network_attachment(body: SPDKParams) -> str | None:
+    """The attachment the SPDK pod's data interface comes from, or None for hostNetwork.
+
+    An explicit request value wins over the agent-wide ``SPDK_NETWORK_ATTACHMENT``
+    env (the operator's knob), so a node added on the pod network restarts on it
+    even if the env is later cleared.
+    """
+    value = body.network_attachment
+    if value is None:
+        value = os.environ.get("SPDK_NETWORK_ATTACHMENT", "")
+    return value.strip() or None
+
+
+def _attachment_address(status_json: str | None, attachment: str, namespace: str) -> dict | None:
+    """Pick ``attachment``'s entry out of a Multus network-status annotation.
+
+    Multus names entries ``<namespace>/<name>``; the attachment may be given either
+    way. Returns ``{"ip", "interface"}`` or None when the entry is absent or has
+    no address yet.
+    """
+    try:
+        entries = json.loads(status_json or "[]")
+    except ValueError:
+        return None
+    wanted = {attachment, f"{namespace}/{attachment}"}
+    if "/" in attachment:
+        wanted.add(attachment.split("/", 1)[1])
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("name") in wanted and entry.get("ips"):
+            return {"ip": entry["ips"][0], "interface": entry.get("interface", "")}
+    return None
+
+
+class _AttachmentNotReady(RuntimeError):
+    """Multus has not (yet) wired the attachment into the pod; worth polling again."""
+
+
+def _wait_for_pod_network(k8s_core_v1, pod_name: str, namespace: str, attachment: str,
+                          timeout: float = 180, poll_interval: float = 3) -> dict:
+    """Block until the SPDK pod has a pod IP and its attachment carries an address.
+
+    Returns the addresses the control plane needs for a pod-networked node: the
+    pod IP (RPC proxy) and the attachment's IP and interface (NVMe-oF listeners).
+    """
+    for attempt in Retrying(stop=stop_after_delay(timeout), wait=wait_fixed(poll_interval), reraise=True,
+                            retry=retry_if_exception_type(_AttachmentNotReady),
+                            before_sleep=before_sleep_log(logger, logging.INFO)):
+        with attempt:
+            pod = k8s_core_v1.read_namespaced_pod(pod_name, namespace)
+            phase = pod.status.phase if pod.status else None
+            if phase in ("Failed", "Succeeded"):
+                # terminal: no point polling a pod that already exited
+                raise RuntimeError(
+                    f"SPDK pod '{pod_name}' reached phase {phase} before its network "
+                    f"attachment '{attachment}' came up")
+            annotations = pod.metadata.annotations or {}
+            address = _attachment_address(annotations.get(NETWORK_STATUS_ANNOTATION), attachment, namespace)
+            if not pod.status or not pod.status.pod_ip or address is None:
+                raise _AttachmentNotReady(
+                    f"SPDK pod '{pod_name}': network attachment '{attachment}' not ready yet")
+            return {
+                "pod_name": pod_name,
+                "pod_ip": pod.status.pod_ip,
+                "data_ip": address["ip"],
+                "data_ifname": address["interface"],
+                "network_attachment": attachment,
+            }
+    raise AssertionError("unreachable: Retrying(reraise=True) raises on exhaustion")
 
 
 @api.post('/spdk_process_start', responses={
@@ -304,6 +391,7 @@ class SPDKParams(BaseModel):
 })
 def spdk_process_start(body: SPDKParams):
     settings = Settings()
+    network_attachment = _spdk_network_attachment(body)
     ssd_pcie_params = " ".join(" -A " + addr for addr in body.ssd_pcie) if body.ssd_pcie else "none"
     ssd_pcie_list = " ".join(body.ssd_pcie)
 
@@ -389,7 +477,10 @@ def spdk_process_start(body: SPDKParams):
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
             'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
-            'SERVER_IP': body.server_ip,
+            # On the pod network the node IP does not exist inside the pod: the
+            # proxy binds every pod address and is reached via the pod IP.
+            'SERVER_IP': "0.0.0.0" if network_attachment else body.server_ip,
+            'NETWORK_ATTACHMENT': network_attachment,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
             'RPC_PASSWORD': body.rpc_password,
@@ -588,11 +679,23 @@ def spdk_process_start(body: SPDKParams):
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         docs = yaml.safe_load_all(template.render(values))
+        spdk_pod_name = None
         for dep in docs:
             logger.debug(dep)
             resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
             msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}'"
             logger.info(msg)
+            if spdk_pod_name is None:
+                spdk_pod_name = resp.metadata.name
+        if network_attachment and spdk_pod_name:
+            # The control plane cannot derive this pod's addresses from the
+            # host any more: hand it the pod IP (RPC proxy) and the
+            # attachment's IP (NVMe-oF listeners) once Multus has wired them.
+            pod_network = _wait_for_pod_network(k8s_core_v1, spdk_pod_name, namespace, network_attachment)
+            logger.info(f"SPDK pod '{spdk_pod_name}' on attachment '{network_attachment}': "
+                        f"pod_ip={pod_network['pod_ip']} data_ip={pod_network['data_ip']} "
+                        f"({pod_network['data_ifname']})")
+            return utils.get_response(pod_network)
     except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 

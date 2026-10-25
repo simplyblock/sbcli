@@ -3570,6 +3570,33 @@ def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
     return True, ""
 
 
+def _spdk_pod_network(results):
+    """The addresses of a pod-networked SPDK pod, or None for a hostNetwork one.
+
+    The agent's ``spdk_process_start`` answers a plain message for a hostNetwork
+    pod and a dict carrying ``pod_ip``/``data_ip`` when the pod was given a
+    Multus network attachment (it then has no host address to derive from).
+    """
+    if isinstance(results, dict) and results.get("data_ip") and results.get("pod_ip"):
+        return results
+    return None
+
+
+def _pod_network_data_nics(pod_network):
+    """The single data NIC of a pod-networked node: the attachment's interface.
+
+    NVMe-oF listeners and peer connections use ``ip4_address``; the attachment
+    is TCP-only, RDMA over a Multus interface is not supported.
+    """
+    return [IFace({
+        'uuid': str(uuid.uuid4()),
+        'if_name': pod_network.get("data_ifname") or "net1",
+        'ip4_address': pod_network["data_ip"],
+        'status': 'up',
+        'net_type': 'ether',
+        'trtype': 'TCP'})]
+
+
 def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=None):
     """Tear down the SPDK pod add_node just started, before bailing out.
 
@@ -4240,6 +4267,21 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         logger.info(f"fabric_tcp is {fabric_tcp}")
         logger.info(f"fabric_rdma is {fabric_rdma}")
         logger.debug(f"Data nics ports are: {names}")
+        pod_network = _spdk_pod_network(results)
+        if pod_network:
+            # The SPDK pod is on the pod network: its data address is the
+            # Multus attachment the agent reported, not a NIC of the host.
+            if not fabric_tcp:
+                _abort_started_spdk(snode_api, rpc_port, cluster_id,
+                                    "A pod network attachment carries TCP only, "
+                                    "but the cluster fabric does not enable TCP.",
+                                    cluster_mode=cluster.mode)
+                return False
+            logger.info(f"SPDK pod on network attachment '{pod_network['network_attachment']}': "
+                        f"pod_ip={pod_network['pod_ip']} data_ip={pod_network['data_ip']}")
+            data_nics = _pod_network_data_nics(pod_network)
+            active_tcp = True
+            names = []
         for nic in names:
             device = node_info['network_interface'][nic]
             base_ifc_cfg = {
@@ -4298,6 +4340,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.data_nics = data_nics
         snode.mgmt_ip = mgmt_ip
         snode.primary_ip = mgmt_ip
+        snode.pod_ip = pod_network["pod_ip"] if pod_network else ""
+        snode.network_attachment = pod_network["network_attachment"] if pod_network else ""
         snode.rpc_port = rpc_port
         snode.rpc_username = rpc_user
         snode.rpc_password = rpc_pass
@@ -8440,18 +8484,21 @@ def _restart_storage_node_impl(
         old_rpc_host, old_rpc_port = _old_rpc_client.host, _old_rpc_client.port
         snode.api_endpoint = node_address
         snode.mgmt_ip = utils.resolve_address(node_address)
-        data_nics = []
-        for nic in snode.data_nics:
-            if_name = nic["if_name"]
-            device = node_info['network_interface'][if_name]
-            data_nics.append(
-                IFace({
-                    'uuid': str(uuid.uuid4()),
-                    'if_name': if_name,
-                    'ip4_address': device['ip'],
-                    'status': device['status'],
-                    'net_type': device['net_type']}))
-        snode.data_nics = data_nics
+        if not snode.network_attachment:
+            data_nics = []
+            for nic in snode.data_nics:
+                if_name = nic["if_name"]
+                device = node_info['network_interface'][if_name]
+                data_nics.append(
+                    IFace({
+                        'uuid': str(uuid.uuid4()),
+                        'if_name': if_name,
+                        'ip4_address': device['ip'],
+                        'status': device['status'],
+                        'net_type': device['net_type']}))
+            snode.data_nics = data_nics
+        # else: a pod-networked node's data NIC is the attachment inside the
+        # SPDK pod, unknown until spdk_process_start reports the new pod below.
         snode.hostname = node_info['hostname']
         evict_cached_session(old_rpc_host, old_rpc_port)
 
@@ -8698,7 +8745,10 @@ def _restart_storage_node_impl(
             total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image,
-            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret)
+            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret,
+            # A node added on the pod network restarts on it, whatever the
+            # agent's env says now.
+            network_attachment=snode.network_attachment or None)
 
     except Exception as e:
         logger.error(e)
@@ -8746,6 +8796,20 @@ def _restart_storage_node_impl(
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
+        return False
+    pod_network = _spdk_pod_network(results)
+    if pod_network:
+        # The new pod may have been handed a different address: listeners,
+        # peers and clients below all take it from data_nics.
+        snode.data_nics = _pod_network_data_nics(pod_network)
+        snode.pod_ip = pod_network["pod_ip"]
+        snode.network_attachment = pod_network["network_attachment"]
+        logger.info(f"Node {node_id}: SPDK pod on attachment '{snode.network_attachment}' "
+                    f"pod_ip={snode.pod_ip} data_ip={snode.data_nics[0].ip4_address}")
+    elif snode.network_attachment:
+        logger.error(f"Node {node_id} was added on network attachment "
+                     f"'{snode.network_attachment}' but the agent restarted SPDK with "
+                     "hostNetwork; its recorded data address would be stale")
         return False
     # The SPDK proxy behind this node's RPC port was just relaunched: every
     # pooled keep-alive socket to it is dead, and a network outage may have

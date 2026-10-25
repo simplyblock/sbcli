@@ -130,7 +130,8 @@ class SNodeClient:
                            fdb_connection: SecretStr | None = None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password: SecretStr | None = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
                            total_mem=None, system_mem=None, cluster_mode=None, socket=0, cluster_id=None,
-                           spdk_proxy_image=None, mcp_max_unavailable=None, spdk_proxy_tls_secret=None):
+                           spdk_proxy_image=None, mcp_max_unavailable=None, spdk_proxy_tls_secret=None,
+                           network_attachment=None):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -171,6 +172,8 @@ class SNodeClient:
             params["mcp_max_unavailable"] = mcp_max_unavailable
         if spdk_proxy_tls_secret:
             params["spdk_proxy_tls_secret"] = spdk_proxy_tls_secret
+        if network_attachment is not None:
+            params["network_attachment"] = network_attachment
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):

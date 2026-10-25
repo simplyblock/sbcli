@@ -136,6 +136,11 @@ class StorageNode(BaseNodeObject):
     memory: int = 0
     mgmt_ip: str = ""
     namespace: str = ""
+    # Multus NetworkAttachmentDefinition the SPDK pod's data interface comes
+    # from. Set, the pod runs on the pod network (no hostNetwork): pod_ip is
+    # where its RPC proxy answers and data_nics holds the attachment's
+    # address, not a host NIC. Empty is the classic hostNetwork node.
+    network_attachment: str = ""
     node_lvs: str = "lvs"
     num_partitions_per_dev: int = 1
     number_of_devices: int = 0
@@ -162,6 +167,9 @@ class StorageNode(BaseNodeObject):
     # (serial-first) without depending on the host config file.
     lblk_devices: list[dict] = default_factory(list)
     pollers_mask: str = ""
+    # Pod IP of a pod-networked SPDK pod (see network_attachment); empty on a
+    # hostNetwork node, whose proxy answers on mgmt_ip.
+    pod_ip: str = ""
     primary_ip: str = ""
     raid: str = ""
     # Per-node restart claim: owner token + ISO timestamp of the actor
@@ -329,7 +337,10 @@ class StorageNode(BaseNodeObject):
             timeout, retry = budget
             kwargs.setdefault("timeout", timeout)
             kwargs.setdefault("retry", retry)
-        host = self.mgmt_ip
+        # A pod-networked SPDK pod answers on its pod IP, not the node's.
+        # Under TLS the per-node proxy DNS name already resolves to the pod
+        # IP (the operator publishes EndpointSlices from pod.status.podIP).
+        host = self.pod_ip or self.mgmt_ip
         if Settings().tls_connect != "disabled":
             host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(

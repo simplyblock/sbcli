@@ -6,17 +6,30 @@ metadata:
   labels:
     app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
-  {% if MODE == "kubernetes" %}
+  {% if MODE == "kubernetes" or NETWORK_ATTACHMENT %}
   annotations:
+    {% if MODE == "kubernetes" %}
     log-collector/enabled: "true"
+    {% endif %}
+    {% if NETWORK_ATTACHMENT %}
+    k8s.v1.cni.cncf.io/networks: "{{ NETWORK_ATTACHMENT }}"
+    {% endif %}
   {% endif %}
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
   nodeSelector:
     kubernetes.io/hostname: {{ HOSTNAME }}
+  {% if NETWORK_ATTACHMENT %}
+  # Pod network: the primary CNI interface carries control traffic, the Multus
+  # attachment above carries NVMe-oF as net1. The host keeps its own data NIC
+  # for the kernel initiator the CSI driver uses.
+  hostNetwork: false
+  dnsPolicy: ClusterFirst
+  {% else %}
   hostNetwork: true
   dnsPolicy: ClusterFirstWithHostNet
+  {% endif %}
   tolerations:
     - effect: NoSchedule
       operator: Exists
