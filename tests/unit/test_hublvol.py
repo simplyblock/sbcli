@@ -701,5 +701,89 @@ class TestConnectToHublvolUnit(unittest.TestCase):
         self.rpc.bdev_nvme_attach_controller.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# TestUpgradedHublvolNqn
+# ---------------------------------------------------------------------------
+
+class TestUpgradedHublvolNqn(unittest.TestCase):
+    """A primary whose hublvol was created on R25 keeps its per-node NQN.
+
+    R25 named the primary hublvol ``{host_nqn}:lvol:{uuid}``; R26 recreates it
+    under that recorded NQN, and every peer attaches with it. sec_1 used to
+    re-derive the R26 shared scheme (``{cluster_nqn}:hublvol:{lvs}``) instead,
+    so the tertiary's failover attach to sec_1 asked for a subsystem sec_1 did
+    not have and was rejected with -5 — on every LVS of both prod clusters
+    after the 25.10 -> 26.3 upgrade (2026-10-26), leaving each tertiary on a
+    single hublvol path. Every node exposing the hublvol must use the NQN the
+    tertiary attaches with.
+    """
+
+    def setUp(self):
+        self.primary = _make_node(_PRIMARY_IP, _PRIMARY_LVS, jm_vuid=100)
+        self.primary.hublvol = _make_hublvol(_PRIMARY_LVS, _PRIMARY_PORT)
+        self.r25_nqn = f"nqn.2023-02.io.simplyblock:host-a_8080:lvol:{self.primary.hublvol.uuid}"
+        self.primary.hublvol.nqn = self.r25_nqn
+
+        self.sec1 = _make_node(_SECONDARY_IP, "LVS_1", jm_vuid=200, port=5001)
+        self.tertiary = _make_node(_TERTIARY_IP, "LVS_2", jm_vuid=300, port=5002)
+
+        self.rpc = _mock_rpc()
+        patcher = patch(
+            'simplyblock_core.models.storage_node.RPCClient',
+            return_value=self.rpc,
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+        from simplyblock_core.utils import hublvol_reconnect
+        hublvol_reconnect._process_local_locks.clear()
+        hublvol_reconnect._process_local_state.clear()
+        prev_sleep = hublvol_reconnect.INTER_ATTACH_SLEEP_SEC
+        hublvol_reconnect.INTER_ATTACH_SLEEP_SEC = 0.0
+        self.addCleanup(setattr, hublvol_reconnect, "INTER_ATTACH_SLEEP_SEC", prev_sleep)
+
+    def _created_nqns(self):
+        return [c.kwargs.get('nqn') or c.args[0]
+                for c in self.rpc.subsystem_create.call_args_list]
+
+    def test_secondary_hublvol_exposed_under_recorded_nqn(self):
+        nqn = self.sec1.create_secondary_hublvol(self.primary, _CLUSTER_NQN)
+        assert nqn == self.r25_nqn
+        assert self._created_nqns() == [self.r25_nqn]
+
+    def test_tertiary_failover_attach_targets_nqn_sec1_exposes(self):
+        """The defect end to end: what sec_1 serves is what the tertiary asks for."""
+        exposed = self.sec1.create_secondary_hublvol(self.primary, _CLUSTER_NQN)
+
+        self.tertiary.connect_to_hublvol(self.primary, failover_node=self.sec1, role="tertiary")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len(self.rpc.bdev_nvme_attach_controller.call_args_list) >= 2:
+                break
+            time.sleep(0.05)
+
+        sec1_attaches = [c for c in self.rpc.bdev_nvme_attach_controller.call_args_list
+                         if c.args[2] == _SECONDARY_IP]
+        assert sec1_attaches, "tertiary must attach a failover path to sec_1"
+        for c in sec1_attaches:
+            assert c.args[1] == exposed, (
+                f"tertiary attaches sec_1 with {c.args[1]} but sec_1 exposes {exposed}")
+
+    def test_adopted_hublvol_exposed_under_recorded_nqn(self):
+        """A takeover leader serves the peers' existing paths, so it keeps the NQN too."""
+        takeover = _make_node(_SECONDARY_IP, "LVS_self", jm_vuid=200)
+        takeover.hublvol = _make_hublvol("LVS_self", 4431)
+        self.rpc.get_bdevs.return_value = [{}]
+
+        nqn = takeover.adopt_hublvol(self.primary, _CLUSTER_NQN)
+        assert nqn == self.r25_nqn
+        assert self._created_nqns() == [self.r25_nqn]
+
+    def test_shared_scheme_when_no_nqn_recorded(self):
+        self.primary.hublvol.nqn = ""
+        assert StorageNode.lvs_hublvol_nqn(self.primary, _CLUSTER_NQN) == \
+            f"{_CLUSTER_NQN}:hublvol:{_PRIMARY_LVS}"
+
+
 if __name__ == '__main__':
     unittest.main()
