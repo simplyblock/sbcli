@@ -1,5 +1,5 @@
-name: Cross-Cluster Restore Test (Docker)
-run-name: "Cross-Cluster | ${{ inputs.TEST_CLASS || 'TestBackupCrossClusterRestore' }} | ${{ inputs.SBCLI_BRANCH || 'main' }} | ${{ inputs.MNODES || '192.168.10.210' }} | ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}+${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}"
+name: Multi-Setup E2E (Docker)
+run-name: "Multi-Setup | ${{ inputs.TEST_CLASS || 'TestBackupCrossClusterRestore' }} | ${{ inputs.SBCLI_BRANCH || 'main' }} | ${{ inputs.MNODES || '192.168.10.210' }} | ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}+${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}"
 
 on:
   workflow_dispatch:

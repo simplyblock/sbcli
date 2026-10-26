@@ -1,4 +1,4 @@
-name: K8s Native Cross-Cluster Restore Test
+name: Multi-Setup E2E (K8s Native)
 run-name: "K8s Cross-Cluster Restore | ${{ inputs.operator_repo_branch || 'main' }} | ${{ inputs.cluster_environment || 'openshift-baremetal' }} | ${{ inputs.cluster_params || 'ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
 
 # ============================================================================
@@ -18,6 +18,14 @@ run-name: "K8s Cross-Cluster Restore | ${{ inputs.operator_repo_branch || 'main'
 on:
   workflow_dispatch:
     inputs:
+      test_class:
+        description: 'Test class or group keyword to run. TestBackupCrossClusterRestore
+          is the cross-cluster restore case this workflow was built for;
+          "replication" runs the 26-case async-replication lane, which needs
+          the second cluster this workflow already builds. Needs
+          (ndcs+npcs)*2 workers in total -- each cluster takes a full stripe.'
+        required: false
+        default: 'TestBackupCrossClusterRestore'
       operator_repo_branch:
         description: 'Branch for simplyblock-operator repo'
         required: true
@@ -1632,7 +1640,7 @@ jobs:
           export SBCLI_CMD=sbctl
 
           PYTHONUNBUFFERED=1 ./e2e.py \
-            --testname TestBackupCrossClusterRestore \
+            --testname "${{ github.event.inputs.test_class || 'TestBackupCrossClusterRestore' }}" \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True --run_ha true 2>&1 | tee output.log
         env:
