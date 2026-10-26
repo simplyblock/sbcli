@@ -460,6 +460,25 @@ class StorageNode(BaseNodeObject):
         """
         return f"{cluster_nqn}:hublvol:{lvstore_name}"
 
+    @staticmethod
+    def lvs_hublvol_nqn(lvs_node, cluster_nqn):
+        """The NQN the hublvol of ``lvs_node.lvstore`` is served under, on
+        every node that exposes it (primary, sec_1, a takeover leader).
+
+        Peers attach every hublvol path with the NQN the LVS's primary
+        recorded (``HublvolReconnectCoordinator.reconcile``), so a node that
+        exposes the same hublvol under any other name serves a subsystem
+        nobody connects to. The record wins over the shared scheme: a primary
+        whose hublvol was created on R25 holds the per-node
+        ``{host_nqn}:lvol:{uuid}`` NQN, and re-deriving the scheme for sec_1
+        left every tertiary of an upgraded cluster with a single hublvol path
+        (its failover attach rejected with -5). The scheme is only the
+        fallback for a record that carries no NQN.
+        """
+        if lvs_node.hublvol and lvs_node.hublvol.nqn:
+            return lvs_node.hublvol.nqn
+        return StorageNode.hublvol_nqn_for_lvstore(cluster_nqn, lvs_node.lvstore)
+
     def prestage_hublvol_subsystem(self, nqn, model_number, port,
                                    ana_state=None, min_cntlid=1):
         """Create the NVMf subsystem + listeners for a hublvol NQN WITHOUT
@@ -634,7 +653,7 @@ class StorageNode(BaseNodeObject):
     def create_secondary_hublvol(self, primary_node, cluster_nqn):
         """Create and expose a hublvol on this node for a LVStore where this node is sec_1.
 
-        Uses the same shared NQN as the primary's hublvol so that downstream
+        Uses the primary's hublvol NQN (:meth:`lvs_hublvol_nqn`) so that downstream
         nodes (tertiary) can use NVMe multipath to failover from primary to sec_1.
         The listener ANA state is non_optimized.
         """
@@ -656,7 +675,7 @@ class StorageNode(BaseNodeObject):
                 logger.error(f'Failed to create secondary hublvol for {lvstore_name}')
                 return None
 
-        nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
+        nqn = self.lvs_hublvol_nqn(primary_node, cluster_nqn)
         hublvol_port = primary_node.hublvol.nvmf_port
 
         # The secondary's hublvol subsystem MUST use a cntlid range
@@ -709,7 +728,7 @@ class StorageNode(BaseNodeObject):
         else:
             logger.info('Adopted hublvol already exists: %s', bdev_name)
 
-        nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
+        nqn = self.lvs_hublvol_nqn(lvs_node, cluster_nqn)
         self.expose_bdev(
             nqn=nqn,
             bdev_name=bdev_name,
