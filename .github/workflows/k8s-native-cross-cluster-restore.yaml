@@ -1,5 +1,5 @@
 name: Multi-Setup E2E (K8s Native)
-run-name: "K8s Cross-Cluster Restore | ${{ inputs.operator_repo_branch || 'main' }} | ${{ inputs.cluster_environment || 'openshift-baremetal' }} | ${{ inputs.cluster_params || 'ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+run-name: "Multi-Setup | ${{ inputs.test_class || 'TestBackupCrossClusterRestore' }} | ${{ inputs.operator_repo_branch || 'main' }} | ${{ inputs.cluster_environment || 'openshift-baremetal' }} | ${{ inputs.cluster_params || 'ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
 
 # ============================================================================
 # Cross-cluster restore test — deploys TWO simplyblock clusters in separate
