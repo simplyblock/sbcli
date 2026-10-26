@@ -11944,8 +11944,8 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             try:
                 _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
                 snode.prestage_hublvol_subsystem(
-                    nqn=StorageNode.hublvol_nqn_for_lvstore(
-                        _cluster_pre.nqn, primary_node.lvstore),
+                    nqn=StorageNode.lvs_hublvol_nqn(
+                        primary_node, _cluster_pre.nqn),
                     model_number=primary_node.hublvol.model_number,
                     port=primary_node.hublvol.nvmf_port,
                     ana_state="non_optimized",
@@ -13292,8 +13292,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                          and p.get_id() not in disconnected_peers), None)
                     if _sec1_pre is not None:
                         _sec1_pre.prestage_hublvol_subsystem(
-                            nqn=StorageNode.hublvol_nqn_for_lvstore(
-                                _cluster_pre.nqn, lvs_node.lvstore),
+                            nqn=StorageNode.lvs_hublvol_nqn(
+                                lvs_node, _cluster_pre.nqn),
                             model_number=lvs_node.hublvol.model_number,
                             port=lvs_node.hublvol.nvmf_port,
                             ana_state="non_optimized",
