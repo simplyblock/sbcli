@@ -56,10 +56,19 @@ spec:
               # reboot.
               PENDING_HOST="pending-storage-pool"
 
+              # Hostnames a storage pool selects, one per line.
+              pool_hosts() {
+                kubectl get machineconfigpool "$1" \
+                  -o jsonpath='{range .spec.nodeSelector.matchExpressions[?(@.key=="kubernetes.io/hostname")].values[*]}{@}{"\n"}{end}' 2>/dev/null
+              }
+
               # ---- MachineConfigPool ----------------------------------------
-              if ! kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
-                echo "[INFO] Creating MCP $MCP_NAME, selecting no host until it has rendered"
-                cat <<MCPEOF | kubectl apply -f -
+              # Created, never applied: `kubectl apply` on a pool that already
+              # exists replaces its nodeSelector values with the placeholder below
+              # (client-side apply replaces lists on a CRD) and evicts every joined
+              # host into a reboot. A pool a sibling node-add created a moment ago
+              # is simply reused; any other failure stops the job.
+              cat <<MCPEOF > /tmp/mcp.yaml
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfigPool
               metadata:
@@ -89,6 +98,13 @@ spec:
                 # cluster serves IO.
                 maxUnavailable: {{ MCP_MAX_UNAVAILABLE }}
               MCPEOF
+              if CREATE_OUT=$(kubectl create -f /tmp/mcp.yaml 2>&1); then
+                echo "[INFO] Created MCP $MCP_NAME, selecting no host until it has rendered"
+              else
+                case "$CREATE_OUT" in
+                  *AlreadyExists*) echo "[INFO] MCP $MCP_NAME already exists" ;;
+                  *) echo "[ERROR] Creating MCP $MCP_NAME failed: $CREATE_OUT"; exit 1 ;;
+                esac
               fi
 
               # ---- MachineConfig --------------------------------------------
@@ -135,16 +151,21 @@ spec:
 
               # ---- Wait for the complete render -----------------------------
               # The render controller names the generated kubelet config
-              # 99-<pool>-generated-kubelet. The pool's target render is complete
-              # once its sources carry it and the MachineConfig. A render that
-              # does not complete in time is not waited on forever: the host joins
-              # anyway, and costs the reboot this ordering exists to avoid.
+              # 99-<pool>-generated-kubelet, with a numeric suffix when another
+              # KubeletConfig already selects the pool, so the prefix is matched.
+              # The pool's target render is complete once its sources carry it and
+              # the MachineConfig. A render that does not complete in time is not
+              # waited on forever: a merely slow one still gets the host, at the
+              # cost of the reboot this ordering exists to avoid; a render MCO has
+              # rejected never completes, and joining would put the host on a
+              # render without the kubelet settings, to fail much later at the
+              # NUMA readiness check, so that stops the job with the reason.
               KC_GENERATED="99-${MCP_NAME}-generated-kubelet"
               RENDER_WAIT=0
               while [ $RENDER_WAIT -lt 60 ]; do
                 SOURCES=$(kubectl get machineconfigpool "$MCP_NAME" \
                   -o jsonpath='{range .spec.configuration.source[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
-                if echo "$SOURCES" | grep -qx "$KC_GENERATED" && echo "$SOURCES" | grep -qx "$MC_NAME"; then
+                if echo "$SOURCES" | grep -q "^${KC_GENERATED}" && echo "$SOURCES" | grep -qx "$MC_NAME"; then
                   echo "[INFO] MCP $MCP_NAME has rendered $MC_NAME and $KC_GENERATED"
                   break
                 fi
@@ -153,19 +174,51 @@ spec:
                 sleep 5
               done
               if [ $RENDER_WAIT -ge 60 ]; then
-                echo "[WARN] MCP $MCP_NAME did not render its kubelet config in 5 minutes; joining $HOSTNAME anyway"
+                echo "[WARN] MCP $MCP_NAME did not render $MC_NAME and $KC_GENERATED in 5 minutes"
+                echo "[WARN] KubeletConfig $KC_NAME conditions: $(kubectl get kubeletconfig "$KC_NAME" -o jsonpath='{.status.conditions}' 2>&1 || true)"
+                echo "[WARN] MCP $MCP_NAME conditions: $(kubectl get machineconfigpool "$MCP_NAME" -o jsonpath='{.status.conditions}' 2>&1 || true)"
+                if kubectl get kubeletconfig "$KC_NAME" -o jsonpath='{.status.conditions[?(@.type=="Failure")].status}' 2>/dev/null | grep -q True \
+                   || kubectl get machineconfigpool "$MCP_NAME" -o jsonpath='{.status.conditions[?(@.type=="RenderDegraded")].status}' 2>/dev/null | grep -q True; then
+                  echo "[ERROR] MCO rejected the kubelet config of MCP $MCP_NAME; not joining $HOSTNAME to an incomplete render"
+                  exit 1
+                fi
+                echo "[WARN] Joining $HOSTNAME anyway"
               fi
 
               # ---- Join -----------------------------------------------------
-              EXISTING=$(kubectl get machineconfigpool "$MCP_NAME" \
-                -o jsonpath='{range .spec.nodeSelector.matchExpressions[?(@.key=="kubernetes.io/hostname")].values[*]}{@}{"\n"}{end}')
-              if echo "$EXISTING" | grep -qx "$HOSTNAME"; then
-                echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
-              else
-                kubectl patch machineconfigpool "$MCP_NAME" --type=json \
-                  -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"
-                echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
-              fi
+              # The first host takes the placeholder's slot, so a joined pool lists
+              # only real hosts; later hosts append. Both patches run server-side,
+              # so concurrent joins cannot lose each other: the second host to try
+              # the slot fails the test op and appends instead. A transient API
+              # error, here as at the pool lookup, is retried rather than left to
+              # abort the job and restart the whole flow.
+              JOIN_RETRY=0
+              while :; do
+                if EXISTING=$(pool_hosts "$MCP_NAME"); then
+                  if echo "$EXISTING" | grep -qx "$HOSTNAME"; then
+                    echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
+                    break
+                  fi
+                  if echo "$EXISTING" | grep -qx "$PENDING_HOST" && kubectl patch machineconfigpool "$MCP_NAME" --type=json \
+                      -p "[{\"op\": \"test\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/0\", \"value\": \"$PENDING_HOST\"},
+                           {\"op\": \"replace\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/0\", \"value\": \"$HOSTNAME\"}]"; then
+                    echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME in place of $PENDING_HOST"
+                    break
+                  fi
+                  if kubectl patch machineconfigpool "$MCP_NAME" --type=json \
+                      -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"; then
+                    echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
+                    break
+                  fi
+                fi
+                JOIN_RETRY=$((JOIN_RETRY + 1))
+                if [ $JOIN_RETRY -ge 15 ]; then
+                  echo "[ERROR] Could not join $HOSTNAME to MCP $MCP_NAME"
+                  exit 1
+                fi
+                echo "[WARN] Joining $HOSTNAME to MCP $MCP_NAME failed, retry $JOIN_RETRY/15 in 2s..."
+                sleep 2
+              done
 
               # ---- Enforce single storage-pool membership -------------------
               # A node belongs to exactly ONE storage MCP. A previous cluster
@@ -185,13 +238,10 @@ spec:
                 # concurrently; each job loops until ITS hostname is gone, which
                 # converges under last-write-wins for the small parallel-add fan-out.
                 while [ $RETRY -lt 15 ]; do
-                  if ! kubectl get machineconfigpool "$OTHER" \
-                       -o jsonpath='{range .spec.nodeSelector.matchExpressions[0].values[*]}{@}{"\n"}{end}' 2>/dev/null \
-                       | grep -qx "$HOSTNAME"; then
+                  if ! pool_hosts "$OTHER" | grep -qx "$HOSTNAME"; then
                     break
                   fi
-                  NEWVALS=$(kubectl get machineconfigpool "$OTHER" \
-                    -o jsonpath='{range .spec.nodeSelector.matchExpressions[0].values[*]}{@}{"\n"}{end}' 2>/dev/null \
+                  NEWVALS=$(pool_hosts "$OTHER" \
                     | grep -vx "$HOSTNAME" \
                     | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?",":""), $0} END{printf "]"}')
                   # An In-operator selector with EMPTY values is invalid
