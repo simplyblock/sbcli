@@ -85,6 +85,29 @@ def set_node_offline(node):
     _set_mgmt_node_status(node, MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE)
 
 
+def mgmt_node_reachable(node, reachable_ips):
+    """Whether a management node answers a ping and is among the reachable nodes.
+
+    A Kubernetes record has no management address (it is 0.0.0.0), so it is
+    online while the cluster has a Ready node to run the control plane on.
+    """
+    if node.mode == "kubernetes":
+        return bool(reachable_ips)
+
+    ping_check = health_controller._check_node_ping(node.mgmt_ip)
+    logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+    if not ping_check:
+        time.sleep(1)
+        ping_check = health_controller._check_node_ping(node.mgmt_ip)
+        logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+
+    if not ping_check:
+        logger.info(f"Node {node.hostname} is offline")
+        return False
+
+    return node.mgmt_ip in reachable_ips
+
+
 def main():
     logger.info("Starting Mgmt node monitor")
 
@@ -124,20 +147,7 @@ def main():
                     logger.info(f"Node status is: {node.status}, skipping")
                     continue
 
-                # 1- check node ping
-                ping_check = health_controller._check_node_ping(node.mgmt_ip)
-                logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
-                if not ping_check:
-                    time.sleep(1)
-                    ping_check = health_controller._check_node_ping(node.mgmt_ip)
-                    logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
-
-                if not ping_check:
-                    logger.info(f"Node {node.hostname} is offline")
-                    set_node_offline(node)
-                    continue
-
-                if node.mgmt_ip in reachable_ips:
+                if mgmt_node_reachable(node, reachable_ips):
                     set_node_online(node)
                 else:
                     set_node_offline(node)
