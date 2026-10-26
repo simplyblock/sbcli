@@ -922,6 +922,11 @@ jobs:
           fi
           echo "storage class for chart PVCs: ${SC_NAME}"
           kubectl get sc "${SC_NAME}" -o custom-columns=NAME:.metadata.name,PROVISIONER:.provisioner,BINDING:.volumeBindingMode
+          # Hand it to the later steps. SC_NAME is resolved here and
+          # nowhere else, and the C2 chart install needs the same class;
+          # without this it runs in its own shell with set -u and dies on
+          # "SC_NAME: unbound variable" before it installs anything.
+          echo "SC_NAME=${SC_NAME}" >> "$GITHUB_ENV"
 
           helm upgrade --install spdk-csi ./ \
             --namespace ${NS_C1} \
