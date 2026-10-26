@@ -6,6 +6,7 @@ it asks for one, and that every doubt falls back to a full transfer.
 """
 import unittest
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import replication_delta
@@ -281,7 +282,7 @@ class TestLandingMerge(unittest.TestCase):
     on the target that the finish starts and then waits for across passes."""
 
     #: what bdev_lvol_merge_base_stat answers before any job ran
-    NONE = {"state": "none", "rc": 0}
+    NONE: ClassVar[dict] = {"state": "none", "rc": 0}
 
     def _merge(self, params, start=None, stats=(NONE,), side_effect=None):
         task = SimpleNamespace(function_params=params, write_to_db=MagicMock(), uuid="t")
