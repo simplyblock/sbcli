@@ -418,8 +418,17 @@ def task_runner_node(task):
     logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
     node_api_check = health_controller._check_node_api(node)
     logger.info(f"Check: node API {node.mgmt_ip}:5000 ... {node_api_check}")
-    node_data_nic_ping_check = False
-    for data_nic in node.data_nics:
+    # A node on the pod network holds its data addresses inside the SPDK pod,
+    # and _check_ping_from_node asks that pod's proxy. A node that is down to
+    # be restarted has no pod to answer, so the probe can only be inconclusive
+    # and would hold the restart back forever (Talos lab, 2026-10-25: every
+    # node stayed "unreachable" after a reboot). The restart recreates the pod
+    # and verifies its attachment itself, so the host-side prerequisite is the
+    # management path alone.
+    node_data_nic_ping_check = node.on_pod_network
+    if node.on_pod_network:
+        logger.info("Check: data nic lives in the SPDK pod the restart recreates ... skipped")
+    for data_nic in ([] if node.on_pod_network else node.data_nics):
         if data_nic.ip4_address:
             data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
