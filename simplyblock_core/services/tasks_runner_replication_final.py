@@ -359,14 +359,18 @@ def _swap_failback_lvol_uuid(rep, failback_source_id):
         new_lvol.replication_interval_min = failback_src_interval
         new_lvol.replication_policy_id = failback_src_policy_id
 
-    # Write the clone under the original source UUID.
-    new_lvol.uuid = failback_source_id
-    new_lvol.write_to_db(db.kv_store)
-
-    # Clear the stale record at the old clone UUID.
+    # Move the clone to the original source UUID and clear the record at its
+    # old UUID in one transaction: that record holds the volume's unique
+    # (pool, name) index key, so a separate write under the new UUID raised
+    # UniqueIndexViolation -- after the cutover had already moved IO -- and
+    # every retry of the task froze the volume again (A -> B -> A, EKS bed
+    # 2026-10-26).
+    # The removal reads the stored record for its index keys.
     stale = LVol()
     stale.uuid = stale_uuid
-    stale.remove(db.kv_store)
+    stale.pool_uuid = new_lvol.pool_uuid    # its watch key
+    new_lvol.uuid = failback_source_id
+    new_lvol.write_replacing(stale, db.kv_store)
 
     # Keep the relationship's target reference consistent.
     rep.target_lvol.uuid = failback_source_id

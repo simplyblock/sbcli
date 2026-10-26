@@ -109,3 +109,21 @@ def test_snapshot_name_precheck_holds_while_building(db):
     assert db.index_state(SnapShot, 'cluster_id+snap_name') == indices.STATE_BUILDING
     assert db.snap_name_taken(CLUSTER, "taken") is True
     assert db.snap_name_taken(CLUSTER, "free") is False
+
+
+def test_a_record_moving_to_another_id_takes_its_unique_keys_along(db):
+    # A fail-back cutover moves the clone onto the original volume's UUID; the
+    # clone's record at its old UUID holds the (pool, name) key.
+    ready(LVol)
+    make_lvol("vol-a", uuid_="clone-id").write_to_db(db.kv_store)
+    old = db.get_lvol_by_id("clone-id")
+    moved = db.get_lvol_by_id("clone-id")
+    moved.uuid = "original-id"
+
+    with pytest.raises(UniqueIndexViolation):
+        moved.write_to_db(db.kv_store)      # two writes: the old key collides
+
+    moved.write_replacing(old, db.kv_store)
+
+    assert db.kv_store.get(old.get_db_id().encode()) is None
+    assert [v.get_id() for v in db.query(LVol, 'lvol_name', "vol-a")] == ["original-id"]
