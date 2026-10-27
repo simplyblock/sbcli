@@ -88,7 +88,8 @@ def test_a_source_whose_copy_has_a_live_clone_is_only_soft_deleted(db, source_lv
     _write_snapshot(db, "TGT", copy_lvol, FAILOVER)
     _write_lvol(db, "FAILED_OVER", cloned_from_snap="TGT")
 
-    assert snapshot_controller.delete("SRC") is True
+    result = snapshot_controller.delete("SRC")
+    assert result is True
 
     src = db.get_snapshot_by_id("SRC")
     assert src.deleted is True
@@ -101,7 +102,8 @@ def test_an_instance_on_the_other_cluster_holds_the_source_too(db, source_lvol, 
     _write_snapshot(db, "SRC", source_lvol, ORIGIN, instances=[copy.get_clean_dict()])
     _write_lvol(db, "FAILED_OVER", cloned_from_snap="TGT")
 
-    assert snapshot_controller.delete("SRC") is True
+    result = snapshot_controller.delete("SRC")
+    assert result is True
     assert db.get_snapshot_by_id("SRC").deleted is True
 
 
