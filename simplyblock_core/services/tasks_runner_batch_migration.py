@@ -29,7 +29,9 @@ PHASE_INTERMEDIATE (orchestrator: wait + batch-final)
 
 PHASE_CLEANUP_SOURCE (orchestrator: wait + source teardown)
     Wait for all workers to signal cleanup_source_done.
-    Delete the source NVMe-oF subsystem (workers delete individual source bdevs).
+    Delete the source snapshots workers deferred (only group siblings still
+    cloned from them) and the source NVMe-oF subsystem (workers delete their
+    own individual source bdevs).
     Advance to PHASE_COMPLETED → mark task DONE.
 
 PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
@@ -48,6 +50,7 @@ from simplyblock_core.controllers import (
     tasks_controller,
     tasks_events,
 )
+from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -991,6 +994,55 @@ def _handle_cleanup_source_barrier(group):
     return expected.issubset(done_set)
 
 
+def _delete_deferred_source_snaps(group, src_node, src_rpc, primary_src_node=None):
+    """
+    Delete the source snapshots workers deferred to the group
+    (``group.source_snaps_deferred``): ones only group siblings still cloned
+    from when their owner cleaned up. Runs after the cleanup_source barrier,
+    when every sibling's source bdev is gone and its record is on the target.
+
+    Each one is re-checked first: a sibling that failed instead of signalling
+    is still on the source and still needs its parent. Best-effort, like the
+    rest of source cleanup -- returns a list of notes for anything kept.
+    """
+    primary_src_node = primary_src_node or src_node
+    notes: list = []
+    replicas = []
+    if primary_src_node.secondary_node_id and primary_src_node.secondary_node_id != src_node.get_id():
+        try:
+            replicas.append(db.get_storage_node_by_id(primary_src_node.secondary_node_id))
+        except KeyError as e:
+            logger.warning(f"Group {group.uuid[:8]}: secondary src node lookup (non-fatal): {e}")
+    tert_node = _get_source_tertiary_node(primary_src_node)
+    if tert_node and tert_node.get_id() != src_node.get_id():
+        replicas.append(tert_node)
+    replica_rpcs = [_make_rpc(n) for n in replicas]
+
+    for snap_uuid, bdev_name in group.source_snaps_deferred.items():
+        holders = migration_controller.source_lvols_cloning_from(snap_uuid, group.source_node_id)
+        if holders:
+            logger.warning(
+                f"Group {group.uuid[:8]}: keeping source snapshot {bdev_name}: "
+                f"still cloned by {holders}")
+            notes.append(f"source snap {bdev_name} kept, still cloned by {holders}")
+            continue
+        try:
+            if not src_rpc.bdev_get(bdev_name):
+                logger.info(f"Group {group.uuid[:8]}: source snapshot {bdev_name} already gone")
+                continue
+            delete_bdev_blocking(
+                bdev_name, src_rpc,
+                secondary_rpc=replica_rpcs[0] if replica_rpcs else None,
+                tertiary_rpc=replica_rpcs[1] if len(replica_rpcs) > 1 else None,
+                all_nodes=[src_node, *replicas],
+                lvs_name=primary_src_node.lvstore)
+            logger.info(f"Group {group.uuid[:8]}: deleted deferred source snapshot {bdev_name}")
+        except (RuntimeError, RPCException) as e:
+            logger.warning(f"Group {group.uuid[:8]}: delete deferred source snapshot {bdev_name}: {e}")
+            notes.append(f"source snap {bdev_name} delete failed: {e}")
+    return notes
+
+
 def _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc, primary_src_node=None):
     """
     Delete the source NVMe-oF subsystem on all SRC replicas (active source,
@@ -1390,6 +1442,10 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
+        _cleanup_notes = _delete_deferred_source_snaps(
+            group, src_node, src_rpc, primary_src_node=primary_src_node)
+        if _cleanup_notes:
+            group.error_message = "source cleanup partial: " + "; ".join(_cleanup_notes)
         _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc,
                                   primary_src_node=primary_src_node)
 

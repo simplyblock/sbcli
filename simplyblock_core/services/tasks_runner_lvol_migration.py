@@ -2872,11 +2872,25 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
         # target before we touch the source.  If the target is unreachable, skip
         # all source snap deletions to avoid accidental data loss.
         _snaps_to_delete_src: list = []
+        _snaps_deferred_src: dict = {}
         try:
             to_delete_all = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+            # A batch group's siblings are leaving the source too, but their
+            # records still place them there until their own cleanup runs, so
+            # the owner of a snapshot they clone from (always processed first)
+            # would otherwise keep it on the source for ever -- and no sibling
+            # ever reconsiders it: it is only in the owner's plan. Hand those
+            # to the orchestrator, which deletes them after the barrier.
+            # SFAM-2840: LVS_19/SNAP_84 left behind under CLN_85/CLN_86.
+            deferred_all: set = set()
+            if migration.migration_group_id:
+                deferred_all = (migration_controller.get_snaps_safe_to_delete_on_source(
+                                    migration, moving_lvol_ids=_group_sibling_lvol_ids(migration))
+                                - to_delete_all - set(migration.intermediate_snaps))
             tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
             tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
-            for snap_uuid in to_delete_all:
+            src_lvs_name = (primary_src_node or src_node).lvstore
+            for snap_uuid in to_delete_all | deferred_all:
                 try:
                     snap = db.get_snapshot_by_id(snap_uuid)
                     _snap_bdev = snap.snap_bdev or ''
@@ -2884,13 +2898,25 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
                     _m_name   = _snap_tgt_short_name(snap)
                     _canonical = _snap_short_name(snap)
                     _am_name  = _canonical + _MIGRATION_BDEV_SUFFIX_DONE
-                    if any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
-                        _snaps_to_delete_src.append(snap_uuid)
-                    else:
+                    if not any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
                         logger.warning(
                             f"Target missing snapshot {_m_name} ({snap_uuid}); "
                             "skipping source delete to protect data")
                         _warnings.append(f"target missing snap {_m_name}; source copy kept")
+                    elif snap_uuid in to_delete_all:
+                        _snaps_to_delete_src.append(snap_uuid)
+                    else:
+                        _src_bdev = source_snap_bdevs_saved.get(snap_uuid) or _snap_bdev
+                        if not _src_bdev.startswith(f"{src_lvs_name}/"):
+                            logger.warning(
+                                f"Snapshot {snap_uuid} no longer names a source bdev "
+                                f"({_src_bdev}); cannot defer its source delete")
+                            _warnings.append(f"snap {snap_uuid}: source name unknown; source copy kept")
+                        else:
+                            logger.info(
+                                f"Source snapshot {_src_bdev} ({snap_uuid}) is still cloned by "
+                                "group siblings; deferring its delete to the group orchestrator")
+                            _snaps_deferred_src[snap_uuid] = _src_bdev
                 except KeyError:
                     pass  # already gone from DB; safe to skip
         except Exception as _ve:
@@ -2899,6 +2925,18 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
                 "skipping all source snap deletions")
             _warnings.append(f"snap target-verification failed: {_ve}")
             _snaps_to_delete_src = []
+            _snaps_deferred_src = {}
+
+        if _snaps_deferred_src:
+            try:
+                db.atomic_update(
+                    db.get_migration_group_by_id(migration.migration_group_id),
+                    lambda g: g.source_snaps_deferred.update(_snaps_deferred_src))
+            except KeyError:
+                logger.warning(
+                    f"Group {migration.migration_group_id} not found; deferred source "
+                    f"snapshots {sorted(_snaps_deferred_src.values())} will not be deleted")
+                _warnings.append("group missing; deferred source snaps kept")
 
         ctx = {
             'stage': 'cleanup_src',
