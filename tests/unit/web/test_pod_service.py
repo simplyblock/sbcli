@@ -54,6 +54,16 @@ class TestEnsuringTheService:
 
         patched = core.patch_namespaced_service.call_args.args[2]
         assert [p["port"] for p in patched["spec"]["ports"]] == [4426, 4432, 4434, 4435]
+        # a strategic merge would keep a port the node no longer serves on
+        assert core.patch_namespaced_service.call_args.kwargs["_content_type"] == "application/merge-patch+json"
+
+    def test_a_port_the_node_stopped_serving_on_is_dropped(self):
+        core = _core(_existing([4426, 4432, 9090]))
+
+        pod_service.ensure(core, "simplyblock", 4426, "c1", [4432])
+
+        patched = core.patch_namespaced_service.call_args.args[2]
+        assert [p["port"] for p in patched["spec"]["ports"]] == [4426, 4432]
 
     def test_a_read_error_other_than_not_found_propagates(self):
         core = MagicMock()
