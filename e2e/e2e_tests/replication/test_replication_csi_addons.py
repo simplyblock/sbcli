@@ -226,9 +226,7 @@ class CsiAddonsEnableAndReport(_CsiAddonsBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"arka{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         self.seed_volume(vol)
 
         # ── AR-K-001 enabling through the CR starts real replication ──────
@@ -364,9 +362,7 @@ class CsiAddonsOwnership(_CsiAddonsBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"arkown{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         pvc = self.pvc_for(vol)
         k8s = self._ensure_k8s_utils()
         ns = getattr(k8s, "namespace", "simplyblock")
@@ -454,9 +450,7 @@ class CsiAddonsPromoteDemote(_CsiAddonsBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"arkp{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         sums = self.seed_volume(vol)
         vrc = self.make_vr_class(f"vrcp-{stamp}", pname)
         vr = self.make_vr(f"vrp-{stamp}", vrc, self.pvc_for(vol))
@@ -592,9 +586,7 @@ class CsiAddonsForcedFailoverAndOutage(_CsiAddonsBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"arkf{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         sums = self.seed_volume(vol)
         vrc = self.make_vr_class(f"vrcf-{stamp}", pname)
         vr = self.make_vr(f"vrf-{stamp}", vrc, self.pvc_for(vol))

@@ -82,9 +82,7 @@ class ReplicationOverlappingIntervals(ReplicationTestBase):
         self.logger.info("[AR-P-001] %s at %s on a 1-minute cadence -- a full "
                          "transfer cannot finish in time, by construction",
                          vol, self.OVERLAP_VOLUME_SIZE)
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.OVERLAP_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.OVERLAP_VOLUME_SIZE)
         self._connect_and_mount_dual(vol, format_disk=True)
         self.policy_set(vol_id, pname)
         self.await_state(vol_id, self.STATE_REPLICATING,
@@ -203,15 +201,12 @@ class ReplicationManyVolumes(ReplicationTestBase):
         for i in range(self.COUNT):
             name = f"armv{stamp}n{i}"
             try:
-                self.sbcli_utils.add_lvol(lvol_name=name,
-                                          pool_name=self.pool_name,
-                                          size=self.SIZE)
+                _, vid = self._create_lvol_dual(name, self.SIZE)
             except Exception as exc:                  # noqa: BLE001
                 raise ReplicationPreconditionError(
                     f"[AR-P-004] could not create volume {i + 1} of "
                     f"{self.COUNT}: {str(exc)[:200]}. The lab ran out before "
                     f"the test could exercise scale; lower AR_MANY_COUNT.")
-            vid = self.sbcli_utils.get_lvol_id(lvol_name=name)
             self.policy_set(vid, pname)
             self._vols.append({"name": name, "id": vid})
         self.logger.info("[AR-P-004] %d volumes attached in %.0fs",
@@ -304,8 +299,7 @@ class ReplicationLargeVolume(ReplicationTestBase):
         vol = f"arlg{stamp}"
         self.logger.info("[AR-P-007] creating a %s volume", self.SIZE)
         try:
-            self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                      size=self.SIZE)
+            _, vol_id = self._create_lvol_dual(vol, self.SIZE)
         except Exception as exc:                      # noqa: BLE001
             self.skip_case(
                 "AR-P-007",
@@ -314,7 +308,6 @@ class ReplicationLargeVolume(ReplicationTestBase):
                 f"set AR_LARGE_SIZE to something the lab can carry.")
             self.cleanup_replication()
             return
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
         self.seed_volume(vol, files=2, file_size="256M")
 
         # ── AR-P-007 how long does one full cycle actually take ───────────
@@ -421,9 +414,7 @@ class ReplicationSoak(ReplicationTestBase):
                                 retention=self.RETENTION)
 
         vol = f"arsk{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         sums = self.seed_volume(vol)
         self.policy_set(vol_id, pname)
         self.await_state(vol_id, self.STATE_REPLICATING,

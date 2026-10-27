@@ -62,9 +62,7 @@ class ReplicationNegativeConfiguration(ReplicationTestBase):
             pol = self.policy_add(f"pself{stamp}", f"tself{stamp}",
                                   interval_min=self.REPL_INTERVAL_MIN)
             vol = f"arself{stamp}"
-            self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                      size=self.REPL_VOLUME_SIZE)
-            vid = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+            _, vid = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
             out2, err2 = self.policy_set(vid, pol)
             sleep_n_sec(45)
             rel = self.relationship_for(vid) or {}
@@ -92,9 +90,7 @@ class ReplicationNegativeConfiguration(ReplicationTestBase):
         p2 = self.policy_add(f"pn2{stamp}", tname,
                              interval_min=self.REPL_INTERVAL_MIN)
         vol = f"arnp{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vid = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vid = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         self.policy_set(vid, p1)
         self.await_state(vid, self.STATE_REPLICATING,
                          timeout=self.REPL_CYCLE_SEC, what="first policy")
@@ -172,9 +168,7 @@ class ReplicationNegativeOperations(ReplicationTestBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"arnd{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vid = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vid = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         self.policy_set(vid, pname)
         self.await_state(vid, self.STATE_REPLICATING,
                          timeout=self.REPL_CYCLE_SEC, what="initial sync")
@@ -208,9 +202,7 @@ class ReplicationNegativeOperations(ReplicationTestBase):
 
         # ── AR-N-006 delete a volume that is under replication ────────────
         vol2 = f"arndel{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol2, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        v2 = self.sbcli_utils.get_lvol_id(lvol_name=vol2)
+        _, v2 = self._create_lvol_dual(vol2, self.REPL_VOLUME_SIZE)
         self.policy_set(v2, pname)
         self.await_state(v2, self.STATE_REPLICATING,
                          timeout=self.REPL_CYCLE_SEC, what="sync before delete")

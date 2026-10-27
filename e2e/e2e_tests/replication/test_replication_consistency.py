@@ -47,9 +47,7 @@ class ConsistencyGroupPlacement(ReplicationTestBase):
         # ── AR-C-001 members are pinned to one LVS on one node ────────────
         for i in range(self.MEMBERS):
             name = f"arcg{stamp}m{i}"
-            self.sbcli_utils.add_lvol(lvol_name=name, pool_name=self.pool_name,
-                                      size=self.REPL_VOLUME_SIZE)
-            vid = self.sbcli_utils.get_lvol_id(lvol_name=name)
+            _, vid = self._create_lvol_dual(name, self.REPL_VOLUME_SIZE)
             self.policy_set(vid, pname)
             self._vols.append({"name": name, "id": vid})
         for v in self._vols:
@@ -82,9 +80,7 @@ class ConsistencyGroupPlacement(ReplicationTestBase):
         late = f"arcglate{stamp}"
         self.logger.info("[AR-C-006] adding %s to the group after creation",
                          late)
-        self.sbcli_utils.add_lvol(lvol_name=late, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        late_id = self.sbcli_utils.get_lvol_id(lvol_name=late)
+        _, late_id = self._create_lvol_dual(late, self.REPL_VOLUME_SIZE)
         self._vols.append({"name": late, "id": late_id})
         self.policy_set(late_id, pname)
         self.await_state(late_id, self.STATE_REPLICATING,
@@ -128,17 +124,22 @@ class ConsistencyGroupPlacement(ReplicationTestBase):
             # the create would test the wrong thing and pass for the wrong
             # reason.
             split = f"arcgsplit{stamp}"
-            out, err = self._cli(
-                f"{self.base_cmd} -d volume add {split} "
-                f"{self.REPL_VOLUME_SIZE} {self.pool_name} "
-                f"--host-id {other_node} 2>&1")
+            # host_id, through the dual helper: placing a volume on a named
+            # node is what the helper's host_id is for, and a raw `volume
+            # add` here would be the docker half only.
+            split_id = None
+            try:
+                _, split_id = self._create_lvol_dual(
+                    split, self.REPL_VOLUME_SIZE, host_id=other_node)
+                out, err = "", ""
+            except Exception as exc:                  # noqa: BLE001
+                out, err = "", str(exc)
             if cli_failed(out, err):
                 self.skip_case(
                     "AR-C-005",
                     f"could not place a volume on {other_node} to build the "
                     f"two-LVS case: {(out + err)[:200]}")
             else:
-                split_id = self.sbcli_utils.get_lvol_id(lvol_name=split)
                 self._vols.append({"name": split, "id": split_id})
                 out, err = self.policy_set(split_id, pname)
                 self.expect_refused(
@@ -196,9 +197,7 @@ class ConsistencyGroupGeneration(ConsistencyGroupPlacement):
         self._vols = []
         for i in range(self.MEMBERS):
             name = f"arcx{stamp}m{i}"
-            self.sbcli_utils.add_lvol(lvol_name=name, pool_name=self.pool_name,
-                                      size=self.REPL_VOLUME_SIZE)
-            vid = self.sbcli_utils.get_lvol_id(lvol_name=name)
+            _, vid = self._create_lvol_dual(name, self.REPL_VOLUME_SIZE)
             self._vols.append({"name": name, "id": vid})
             self._connect_and_mount_dual(name, format_disk=True)
             self.policy_set(vid, pname)
@@ -265,9 +264,7 @@ class ConsistencyGroupGeneration(ConsistencyGroupPlacement):
         self.logger.info("[AR-C-008] adding a member with no group snapshot "
                          "yet, then failing the group over")
         orphan = f"arcxorph{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=orphan, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        orphan_id = self.sbcli_utils.get_lvol_id(lvol_name=orphan)
+        _, orphan_id = self._create_lvol_dual(orphan, self.REPL_VOLUME_SIZE)
         self._vols.append({"name": orphan, "id": orphan_id})
         self.policy_set(orphan_id, pname)
         out, err = self.failover_policy(pname)

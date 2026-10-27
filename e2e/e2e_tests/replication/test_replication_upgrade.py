@@ -55,9 +55,7 @@ class ReplicationSurvivesControlPlaneUpgrade(ReplicationTestBase):
         pname = self.policy_add(f"pug{stamp}", tname,
                                 interval_min=self.REPL_INTERVAL_MIN)
         vol = f"arug{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         sums = self.seed_volume(vol)
         self.policy_set(vol_id, pname)
         self.await_state(vol_id, self.STATE_REPLICATING,
@@ -182,9 +180,7 @@ class ReplicationSurvivesOperatorUpgrade(ReplicationTestBase):
         pname = self.policy_add(f"pop{stamp}", tname,
                                 interval_min=self.REPL_INTERVAL_MIN)
         vol = f"arop{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         self.policy_set(vol_id, pname)
         self.await_state(vol_id, self.STATE_REPLICATING,
                          timeout=self.REPL_CYCLE_SEC, what="initial sync")
@@ -336,9 +332,7 @@ class ReplicationAnnotationToCsiAddonsMigration(ReplicationTestBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"armg{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         sums = self.seed_volume(vol)
         pvc = (self._volume_registry.get(vol, {}).get("pvc_name")
                or self._k8s_normalize_name(vol))

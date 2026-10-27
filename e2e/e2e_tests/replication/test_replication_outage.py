@@ -47,10 +47,8 @@ class _OutageBase(ReplicationTestBase):
         self._pname = self.policy_add(f"po{tag}{stamp}", self._tname,
                                       interval_min=self.REPL_INTERVAL_MIN)
         self._vol = f"aro{tag}{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=self._vol,
-                                  pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        self._vol_id = self.sbcli_utils.get_lvol_id(lvol_name=self._vol)
+        _, self._vol_id = self._create_lvol_dual(self._vol,
+                                                 self.REPL_VOLUME_SIZE)
         self._sums = self.seed_volume(self._vol)
         self.policy_set(self._vol_id, self._pname)
         self.await_state(self._vol_id, self.STATE_REPLICATING,
@@ -327,9 +325,7 @@ class ReplicationConsistencyGroupNodeLoss(_OutageBase):
         self._members = []
         for i in range(self.MEMBERS):
             name = f"arog{stamp}m{i}"
-            self.sbcli_utils.add_lvol(lvol_name=name, pool_name=self.pool_name,
-                                      size=self.REPL_VOLUME_SIZE)
-            vid = self.sbcli_utils.get_lvol_id(lvol_name=name)
+            _, vid = self._create_lvol_dual(name, self.REPL_VOLUME_SIZE)
             self.policy_set(vid, self._pname)
             self._members.append({"name": name, "id": vid})
         for m in self._members:

@@ -147,9 +147,7 @@ class ReplicationTargetsAndPolicies(ReplicationTestBase):
         # ── AR-F-005 remove a policy still followed by a volume ───────────
         vol = f"arvol{int(time.time()) % 100000}"
         self.logger.info("[AR-F-005] creating %s under policy %s", vol, pname)
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         self.policy_set(vol_id, pname)
 
         out, err = self.policy_remove(pname)
@@ -188,20 +186,20 @@ class ReplicationStartsAndReports(ReplicationTestBase):
         vol = f"arlive{int(time.time()) % 100000}"
         self.logger.info("[AR-F-006] creating %s with --replication-policy %s",
                          vol, pname)
-        out, err = self.ssh_obj.exec_command(
-            node=self.mgmt_nodes[0],
-            # There is no --replication-policy on volume add either: the
-            # policy is attached afterwards with volume
-            # replication-policy-set. AR-F-006 therefore proves "replication
-            # starts with no separate kick-off", not "at create time".
-            command=f"{self.base_cmd} -d volume add {vol} "
-                    f"{self.REPL_VOLUME_SIZE} {self.pool_name} 2>&1")
-        combined = (out or "") + (err or "")
-        if cli_failed(combined):
+        # There is no --replication-policy on volume add either: the policy
+        # is attached afterwards with volume replication-policy-set. AR-F-006
+        # therefore proves "replication starts with no separate kick-off",
+        # not "at create time".
+        #
+        # Through the dual helper, not a raw `volume add` over ssh: that is
+        # the docker half only, and on Kubernetes it would leave a volume the
+        # CSI driver never saw, with no PVC for policy_set to annotate. How
+        # the volume is made is not what this case is asserting.
+        try:
+            _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
+        except Exception as exc:                      # noqa: BLE001
             raise ReplicationPreconditionError(
-                f"[AR-F-006] could not create {vol} with a policy attached: "
-                f"{combined[:400]}")
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+                f"[AR-F-006] could not create {vol}: {str(exc)[:400]}")
 
         rel = self.await_state(vol_id, self.STATE_REPLICATING,
                                timeout=self.REPL_CYCLE_SEC,
@@ -240,9 +238,7 @@ class ReplicationStartsAndReports(ReplicationTestBase):
         vol2 = f"arpost{int(time.time()) % 100000}"
         self.logger.info("[AR-F-007] creating %s with NO policy, then attaching",
                          vol2)
-        self.sbcli_utils.add_lvol(lvol_name=vol2, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol2_id = self.sbcli_utils.get_lvol_id(lvol_name=vol2)
+        _, vol2_id = self._create_lvol_dual(vol2, self.REPL_VOLUME_SIZE)
         if self.relationship_for(vol2_id):
             raise AssertionError(
                 f"[AR-F-007] {vol2} has a replication relationship before any "
@@ -315,9 +311,7 @@ class ReplicationPolicyVariants(ReplicationTestBase):
         self.logger.info("[AR-F-012] policy with --interval-min 0")
         p_manual = self.policy_add(f"pm{stamp}", t1, interval_min=0)
         vol_m = f"armanual{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol_m, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vm_id = self.sbcli_utils.get_lvol_id(lvol_name=vol_m)
+        _, vm_id = self._create_lvol_dual(vol_m, self.REPL_VOLUME_SIZE)
         self.policy_set(vm_id, p_manual)
         # Two full intervals' worth of wall clock. With interval 0 nothing
         # should fire on its own; if a cycle happens anyway the cadence
@@ -404,9 +398,7 @@ class ReplicationPolicyVariants(ReplicationTestBase):
                                interval_min=self.REPL_INTERVAL_MIN,
                                mode="failover")
         vol_f = f"arfo{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol_f, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vf_id = self.sbcli_utils.get_lvol_id(lvol_name=vol_f)
+        _, vf_id = self._create_lvol_dual(vol_f, self.REPL_VOLUME_SIZE)
         self.policy_set(vf_id, p_fo)
         rel = self.await_state(vf_id, self.STATE_REPLICATING,
                                timeout=self.REPL_CYCLE_SEC,

@@ -49,10 +49,7 @@ class ReplicationDataIsIdentical(ReplicationTestBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"arint{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
-
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         self.logger.info("[AR-I-001] seeding %s with known content", vol)
         expected = self.seed_volume(vol)
 
@@ -132,9 +129,7 @@ class ReplicationConvergesUnderLoad(ReplicationTestBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"arload{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         self._connect_and_mount_dual(vol, format_disk=True)
 
         self.policy_set(vol_id, pname)
@@ -228,9 +223,7 @@ class ReplicationNoMetadataCorruption(ReplicationTestBase):
                                 interval_min=self.REPL_INTERVAL_MIN)
 
         vol = f"armd{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=vol, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        vol_id = self.sbcli_utils.get_lvol_id(lvol_name=vol)
+        _, vol_id = self._create_lvol_dual(vol, self.REPL_VOLUME_SIZE)
         expected = self.seed_volume(vol)
 
         self.policy_set(vol_id, pname)

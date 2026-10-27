@@ -56,9 +56,7 @@ class _RecoveryBase(ReplicationTestBase):
         self._vols = []
         for i in range(self.VOLUMES):
             name = f"ar{tag}{stamp}v{i}"
-            self.sbcli_utils.add_lvol(lvol_name=name, pool_name=self.pool_name,
-                                      size=self.REPL_VOLUME_SIZE)
-            vid = self.sbcli_utils.get_lvol_id(lvol_name=name)
+            _, vid = self._create_lvol_dual(name, self.REPL_VOLUME_SIZE)
             sums = self.seed_volume(name) if seed else {}
             self.policy_set(vid, self._pname)
             self._vols.append({"name": name, "id": vid, "sums": sums})
@@ -117,10 +115,7 @@ class ReplicationFailoverScopes(_RecoveryBase):
         other_pol = self.policy_add(f"pby{stamp}", self._tname,
                                     interval_min=self.REPL_INTERVAL_MIN)
         bystander = f"arby{stamp}"
-        self.sbcli_utils.add_lvol(lvol_name=bystander,
-                                  pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        by_id = self.sbcli_utils.get_lvol_id(lvol_name=bystander)
+        _, by_id = self._create_lvol_dual(bystander, self.REPL_VOLUME_SIZE)
         self.policy_set(by_id, other_pol)
         self.await_state(by_id, self.STATE_REPLICATING,
                          timeout=self.REPL_CYCLE_SEC, what="bystander sync")
@@ -365,9 +360,7 @@ class ReplicationMigration(_RecoveryBase):
         # refusal is being tested against a genuinely incomplete transfer
         # rather than one that finished while the test was setting up.
         fresh = f"armgfresh{int(time.time()) % 100000}"
-        self.sbcli_utils.add_lvol(lvol_name=fresh, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        fresh_id = self.sbcli_utils.get_lvol_id(lvol_name=fresh)
+        _, fresh_id = self._create_lvol_dual(fresh, self.REPL_VOLUME_SIZE)
         self._vols.append({"name": fresh, "id": fresh_id, "sums": {}})
         self.logger.info("[AR-R-012] starting a migration and committing "
                          "immediately")
@@ -404,9 +397,7 @@ class ReplicationMigration(_RecoveryBase):
 
         # ── AR-R-011 --delete-source removes the old volume ───────────────
         second = f"armgdel{int(time.time()) % 100000}"
-        self.sbcli_utils.add_lvol(lvol_name=second, pool_name=self.pool_name,
-                                  size=self.REPL_VOLUME_SIZE)
-        second_id = self.sbcli_utils.get_lvol_id(lvol_name=second)
+        _, second_id = self._create_lvol_dual(second, self.REPL_VOLUME_SIZE)
         self._vols.append({"name": second, "id": second_id, "sums": {}})
         self.logger.info("[AR-R-011] migrating %s with --delete-source", second)
         self.replication_start(second_id, self.cluster_b,
