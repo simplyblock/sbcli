@@ -45,6 +45,7 @@ def _node():
     n.max_lvol = 100
     nic = MagicMock()
     nic.ip4_address = "10.0.0.1"
+    nic.listen_address = "10.0.0.1"  # a listener binds the address it is reached on
     nic.trtype = "TCP"
     n.data_nics = [nic]
     n.get_lvol_subsys_port = MagicMock(return_value=4420)

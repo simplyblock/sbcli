@@ -1161,6 +1161,7 @@ class TestRecreateOnNonLeaderReconnectsRegardlessOfActivationMode(unittest.TestC
 
     def test_soft_reconnect_prelude_runs_with_activation_mode_false(self):
         snode = MagicMock(spec=StorageNode)
+        snode.pod_network = False  # on the host network: no Service ports to publish
         snode.get_id = MagicMock(return_value="snode-1")
         snode.lvstore = ""
         snode.lvstore_stack_secondary = ""
