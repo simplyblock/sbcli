@@ -1229,7 +1229,12 @@ jobs:
           # deployment's partition tables. Mounted/Busy is never waived, so the
           # OS disk stays refused.
           export ENABLE_PARTITIONED="${FORCE_FORMAT_4K}"
-          export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
+          # C1_WORKERS, not the whole input: the first step split the fleet
+          # in half and this cluster gets its half. Passing the full list
+          # made C1's discovery claim all six workers, which left C2's
+          # discovery probing six nodes that were already storage nodes of
+          # C1 -- "0 of 6 worker(s) reported", three times, 46 minutes.
+          export WORKER_NODES="${C1_WORKERS}"
           # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
           # reasoning that the workers boot from it and the draft would
           # otherwise offer the root disk as storage. Both halves were wrong.
@@ -1447,7 +1452,8 @@ jobs:
           # deployment's partition tables. Mounted/Busy is never waived, so the
           # OS disk stays refused.
           export ENABLE_PARTITIONED="${FORCE_FORMAT_4K}"
-          export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
+          # C2_WORKERS: the other half. See the note in the C1 step.
+          export WORKER_NODES="${C2_WORKERS}"
           # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
           # reasoning that the workers boot from it and the draft would
           # otherwise offer the root disk as storage. Both halves were wrong.
@@ -1838,6 +1844,36 @@ jobs:
         run: |
           set -euxo pipefail
 
+          # Everything this step reads out of GITHUB_ENV, defaulted here and
+          # nowhere else. These are written by earlier steps, so a run that
+          # fails before one of them has none -- and under `set -u` the
+          # summary then dies on "unbound variable" and THAT is the error
+          # GitHub reports, with the real failure a thousand lines further
+          # up. It has masked two different failures already, each time a
+          # different name, which is why this defaults the whole set rather
+          # than the one that happened to bite.
+          #
+          # The step's own locals are deliberately not in here: they are
+          # assigned a few lines below, and `set -u` catching a typo in one
+          # of those is a check worth keeping.
+          : "${C1_CLUSTER_ID:=<not created>}"
+          : "${C2_CLUSTER_ID:=<not created>}"
+          : "${C1_CLUSTER_SECRET:=}"
+          : "${C2_CLUSTER_SECRET:=}"
+          : "${C1_WORKERS:=<not split>}"
+          : "${C2_WORKERS:=<not split>}"
+          : "${NS_C1:=simplyblock}"
+          : "${NS_C2:=simplyblock-c2}"
+          : "${NDCS:=?}"
+          : "${NPCS:=?}"
+          : "${RUN_BASE_DIR:=}"
+          : "${BACKUP_BUCKET_C1:=}"
+          : "${BACKUP_BUCKET_C2:=}"
+          : "${MINIO_ENDPOINT:=}"
+          : "${TEST_TIME_HOURS:=0}"
+          : "${TEST_TIME_MINS:=0}"
+          : "${TEST_TIME_SECS:=0}"
+
           out_log="$GITHUB_WORKSPACE/e2e/output.log"
           dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
 
@@ -1914,7 +1950,7 @@ jobs:
             fi
 
             echo "### Run Info"
-            echo "- **Cluster-1 ID:** \`${C1_CLUSTER_ID:-<not created>}\` (namespace: \`${NS_C1}\`)"
+            echo "- **Cluster-1 ID:** \`${C1_CLUSTER_ID}\` (namespace: \`${NS_C1}\`)"
             echo "- **Cluster-2 ID:** \`${C2_CLUSTER_ID}\` (namespace: \`${NS_C2}\`)"
             echo "- **C1 workers:** \`${C1_WORKERS}\`"
             echo "- **C2 workers:** \`${C2_WORKERS}\`"
