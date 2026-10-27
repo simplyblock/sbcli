@@ -190,6 +190,7 @@ class ClusterDTO(BaseModel):
     device_mode: str
     inline_checksum: bool
     atomic_4k: bool
+    md_journal: bool
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
@@ -230,6 +231,7 @@ class ClusterDTO(BaseModel):
             device_mode=model.device_mode,
             inline_checksum=model.inline_checksum,
             atomic_4k=model.atomic_4k,
+            md_journal=model.md_journal,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,

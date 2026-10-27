@@ -15741,6 +15741,27 @@ def splice_stranded_tertiary(stranded_node) -> bool:
     return True
 
 
+def lvstore_stack_entry(cluster, lvs_name, bdev_name, cluster_sz):
+    """The lvstore's entry in a node's lvstore_stack.
+
+    Its params are what a restart replays to RPCClient.create_lvstore, so the
+    cluster's creation-time choices (the metadata journal) are recorded here
+    rather than read from the cluster again.
+    """
+    return {
+        "type": "bdev_lvstore",
+        "name": lvs_name,
+        "params": {
+            "name": lvs_name,
+            "bdev_name": bdev_name,
+            "cluster_sz": cluster_sz,
+            "clear_method": "none",
+            "num_md_pages_per_cluster_ratio": 1,
+            "md_journal": bool(cluster.md_journal),
+        }
+    }
+
+
 def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -15844,19 +15865,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         )
 
     lvs_name = f"LVS_{jm_vuid}"
-    lvstore_stack.append(
-        {
-            "type": "bdev_lvstore",
-            "name": lvs_name,
-            "params": {
-                "name": lvs_name,
-                "bdev_name": raid_device,
-                "cluster_sz": cluster_sz,
-                "clear_method": "none",
-                "num_md_pages_per_cluster_ratio": 1,
-            }
-        }
-    )
+    lvstore_stack.append(lvstore_stack_entry(cluster, lvs_name, raid_device, cluster_sz))
 
     snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack

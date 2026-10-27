@@ -307,6 +307,11 @@ class Cluster(BaseModel):
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
     # fallback-mode inline checksum. Frozen at cluster create time.
     atomic_4k: bool = False
+    # Journal blobstore metadata pages so a write torn by a power loss cannot
+    # leave a half-written page behind. Needed when a device is not 4K-write
+    # atomic. The lvstore records it in its super block at creation, so it is
+    # frozen at cluster create time.
+    md_journal: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

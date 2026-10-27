@@ -104,6 +104,7 @@ class ClusterParams(BaseModel):
     device_mode: Literal["nvme", "lblk"] = "nvme"
     inline_checksum: bool = False
     atomic_4k: bool = False
+    md_journal: bool = False
     # The cluster's workload names: the Services its storage nodes are reached
     # through, the SPDK proxy's certificate Secret, and the suffix on a node's
     # hostname label in both Services. Omitted, they are the constant names a
@@ -117,6 +118,12 @@ class ClusterParams(BaseModel):
     def validate_erasure_coding_scheme(self):
         if (self.distr_ndcs, self.distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
             raise ValueError("Invalid erasure coding scheme selected")
+        return self
+
+    @model_validator(mode="after")
+    def validate_atomic_4k(self):
+        if self.atomic_4k and not self.inline_checksum:
+            raise ValueError("atomic_4k requires inline_checksum")
         return self
 
     @computed_field
