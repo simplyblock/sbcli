@@ -14,6 +14,7 @@ serves on has to be published to it; ``published_ports`` is that set.
 """
 
 import ipaddress
+import time
 import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Annotated
@@ -110,16 +111,27 @@ def published_ports(node: "StorageNode") -> list[int]:
     return sorted(p for p in ports if p)
 
 
-def publish_ports(node: "StorageNode") -> None:
+#: When the node's ports were last published by this process, by node id. Only a
+#: rate limit for the monitor's repeat, which runs every few seconds: it has no
+#: correctness role, so a process-local record is enough and another process
+#: publishing too is harmless.
+_published_at: dict[str, float] = {}
+
+
+def publish_ports(node: "StorageNode", at_most_every: float = 0) -> None:
     """Hand the node's agent the ports its Service forwards. A no-op off the pod network.
 
     Called wherever the set changes: the node add, a restart, and every lvstore the node
-    starts or stops serving. The storage-node monitor repeats it, so a call that fails
-    here is caught up on the next cycle rather than retried in place."""
+    starts or stops serving. The storage-node monitor repeats it with ``at_most_every``
+    seconds between attempts, so a call that fails here is caught up later rather than
+    retried in place."""
     from simplyblock_core.snode_client import SNodeClientException
 
     if not node.pod_network:
         return
+    if at_most_every and time.monotonic() - _published_at.get(node.get_id(), -at_most_every) < at_most_every:
+        return
+    _published_at[node.get_id()] = time.monotonic()
     ports = published_ports(node)
     try:
         node.client(timeout=30, retry=1).spdk_service_publish(node.rpc_port, node.cluster_id, ports)

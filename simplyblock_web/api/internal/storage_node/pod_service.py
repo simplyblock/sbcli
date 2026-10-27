@@ -67,11 +67,11 @@ def ensure(core_v1, namespace: str, rpc_port: int, cluster_id: str, ports: list[
 
     held = sorted(p.port for p in (existing.spec.ports or []))
     if held != ports:
-        # A merge patch replaces the list. The client's default, a strategic merge,
-        # merges it by port and so never drops a port the node stopped serving on.
-        core_v1.patch_namespaced_service(name, namespace, {"spec": {"ports": [
-            {"name": p.name, "port": p.port, "targetPort": p.target_port, "protocol": p.protocol}
-            for p in _ports(ports)]}}, _content_type="application/merge-patch+json")
+        # The whole object is replaced so that the list is replaced. A patch would
+        # be a strategic merge keyed by port, and it never dropped a port the node
+        # stopped serving on.
+        existing.spec.ports = _ports(ports)
+        core_v1.replace_namespaced_service(name, namespace, existing)
         logger.info("Service %s ports %s -> %s", name, held, ports)
     return existing.spec.cluster_ip
 

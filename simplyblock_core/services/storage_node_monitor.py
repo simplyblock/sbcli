@@ -1987,10 +1987,15 @@ _lvstore_in_creation_first_seen: dict = {}
 _restart_task_defer_first_seen: dict = {}
 
 
+#: How often the monitor re-publishes a pod-network node's Service ports: a safety net
+#: for a publish that failed where the ports changed, not the main path.
+PORT_PUBLISH_INTERVAL_SEC = 60
+
+
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
     if snode.status == StorageNode.STATUS_ONLINE:
-        storage_network.publish_ports(snode)
+        storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
 
     # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
     # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
