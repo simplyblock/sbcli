@@ -146,31 +146,6 @@ jobs:
       CLUSTER_SECRET: ${{ inputs.CLUSTER_SECRET }}
 
     steps:
-      # Book the machines before touching them. Every group in the lab's
-      # ansible/inventory.yaml is one reservable cluster, and this job wipes
-      # and reboots the hosts of baremetal, so it takes it for the run and
-      # hands it back in the action's post step.
-      #
-      # Already ours is not re-booked: an engineer holding the lab for the
-      # afternoon, or an earlier job in the same chain, is entitled to it and
-      # asking again would answer 409 and fail a run that was fine. Only a
-      # booking this job made is released when it ends.
-      #
-      # Not a replacement for the lab lock, where there is one. The
-      # reservation keeps PEOPLE off these machines; the lock keeps our own
-      # concurrent runs off them. The baremetal group is the four
-      # storage nodes only, so the management node and the clients this
-      # lane also wipes are reported as uncovered rather than assumed.
-      - name: Reserve the lab
-        uses: ./.github/actions/lab-reservation
-        with:
-          cluster: ${{ env.LABRES_CLUSTER }}
-          duration: ${{ env.LABRES_DURATION }}
-          expect-hosts: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
-          disabled: ${{ env.LABRES_DISABLE }}
-        env:
-          LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
-
       - name: Runner diagnostics
         shell: bash
         run: |
@@ -199,6 +174,43 @@ jobs:
       # No `set -x` here, unlike every other step in this file. Tracing a step that
       # handles key material prints the key; GitHub's log masking is a backstop for
       # that, not a licence to rely on it.
+      # The reserve step below is a LOCAL action, so its action.yml has to
+      # be on disk before the runner can read it. This job never checks
+      # this repository out otherwise, so it takes the same sparse slice
+      # the lab lock does -- and no more, because a full checkout here
+      # would be several seconds for two files.
+      - name: Check out the lab reservation action
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/lab-reservation
+          sparse-checkout-cone-mode: false
+
+      # Book the machines before touching them. Every group in the lab's
+      # ansible/inventory.yaml is one reservable cluster, and this job wipes
+      # and reboots the hosts of baremetal, so it takes it for the run and
+      # hands it back in the action's post step.
+      #
+      # Already ours is not re-booked: an engineer holding the lab for the
+      # afternoon, or an earlier job in the same chain, is entitled to it and
+      # asking again would answer 409 and fail a run that was fine. Only a
+      # booking this job made is released when it ends.
+      #
+      # Not a replacement for the lab lock, where there is one. The
+      # reservation keeps PEOPLE off these machines; the lock keeps our own
+      # concurrent runs off them. The baremetal group is the four
+      # storage nodes only, so the management node and the clients this
+      # lane also wipes are reported as uncovered rather than assumed.
+      - name: Reserve the lab
+        uses: ./.github/actions/lab-reservation
+        with:
+          cluster: ${{ env.LABRES_CLUSTER }}
+          duration: ${{ env.LABRES_DURATION }}
+          expect-hosts: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+          disabled: ${{ env.LABRES_DISABLE }}
+        env:
+          LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
+
       - name: Install lab SSH key from secret
         shell: bash
         env:

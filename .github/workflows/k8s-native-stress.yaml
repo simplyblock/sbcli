@@ -156,30 +156,6 @@ jobs:
       SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
     steps:
-      # Book the machines before touching them. Every group in the lab's
-      # ansible/inventory.yaml is one reservable cluster, and this job wipes
-      # and reboots the hosts of openshift, so it takes it for the run and
-      # hands it back in the action's post step.
-      #
-      # Already ours is not re-booked: an engineer holding the lab for the
-      # afternoon, or an earlier job in the same chain, is entitled to it and
-      # asking again would answer 409 and fail a run that was fine. Only a
-      # booking this job made is released when it ends.
-      #
-      # Not a replacement for the lab lock, where there is one. The
-      # reservation keeps PEOPLE off these machines; the lock keeps our own
-      # concurrent runs off them. These lanes have no lock at all today,
-      # so this is their first protection.
-      - name: Reserve the lab
-        uses: ./.github/actions/lab-reservation
-        with:
-          cluster: ${{ env.LABRES_CLUSTER }}
-          duration: ${{ env.LABRES_DURATION }}
-          expect-hosts: ""
-          disabled: ${{ env.LABRES_DISABLE }}
-        env:
-          LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
-
       - name: Fix workspace permissions and reset a dirty tree
         run: |
           # Errors are NOT swallowed here. The previous version ended every
@@ -214,6 +190,30 @@ jobs:
       # A checkout that could not fully update the tree still exits 0, so the
       # only way to know is to look. Cheap, and it turns a confusing exit 127
       # hundreds of lines later into a failure that names the cause.
+      # Book the machines before touching them. Every group in the lab's
+      # ansible/inventory.yaml is one reservable cluster, and this job wipes
+      # and reboots the hosts of openshift, so it takes it for the run and
+      # hands it back in the action's post step.
+      #
+      # Already ours is not re-booked: an engineer holding the lab for the
+      # afternoon, or an earlier job in the same chain, is entitled to it and
+      # asking again would answer 409 and fail a run that was fine. Only a
+      # booking this job made is released when it ends.
+      #
+      # Not a replacement for the lab lock, where there is one. The
+      # reservation keeps PEOPLE off these machines; the lock keeps our own
+      # concurrent runs off them. These lanes have no lock at all today,
+      # so this is their first protection.
+      - name: Reserve the lab
+        uses: ./.github/actions/lab-reservation
+        with:
+          cluster: ${{ env.LABRES_CLUSTER }}
+          duration: ${{ env.LABRES_DURATION }}
+          expect-hosts: ""
+          disabled: ${{ env.LABRES_DISABLE }}
+        env:
+          LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
+
       - name: Verify the checkout is complete
         run: |
           missing=""

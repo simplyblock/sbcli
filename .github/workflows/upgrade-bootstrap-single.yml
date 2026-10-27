@@ -275,6 +275,28 @@ jobs:
       CLUSTER_SECRET: ""
 
     steps:
+      - name: Runner diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          whoami
+          pwd
+          python3 --version || true
+          git --version
+
+      # The reserve step below is a LOCAL action, so its action.yml has to
+      # be on disk before the runner can read it. This job never checks
+      # this repository out otherwise, so it takes the same sparse slice
+      # the lab lock does -- and no more, because a full checkout here
+      # would be several seconds for two files.
+      - name: Check out the lab reservation action
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/lab-reservation
+          sparse-checkout-cone-mode: false
+
       # Book the machines before touching them. Every group in the lab's
       # ansible/inventory.yaml is one reservable cluster, and this job wipes
       # and reboots the hosts of baremetal, so it takes it for the run and
@@ -299,16 +321,6 @@ jobs:
           disabled: ${{ env.LABRES_DISABLE }}
         env:
           LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
-
-      - name: Runner diagnostics
-        shell: bash
-        run: |
-          set -euxo pipefail
-          uname -a
-          whoami
-          pwd
-          python3 --version || true
-          git --version
 
       - name: Parse BOOTSTRAP_PARAMS
         shell: bash
