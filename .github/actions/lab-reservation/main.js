@@ -1,5 +1,5 @@
 const {
-  input, warn, fail, log, reserve, waitReady, setOutput, saveState,
+  input, warn, fail, log, existing, reserve, waitReady, setOutput, saveState,
 } = require('./reserve.js')
 
 async function main() {
@@ -22,21 +22,37 @@ async function main() {
     return 1
   }
 
-  const res = await reserve({
-    cluster,
-    kind,
-    duration: input('duration') || '6h',
-    clean: input('clean') === 'true',
-    bootstrap: input('bootstrap') === 'true',
-  })
+  // Already ours? Then use it. Asking again answers 409 and fails a run that
+  // was entitled to the machines all along -- an engineer holding the lab for
+  // the afternoon, or an earlier job in the same chain that took it.
+  let res = await existing(cluster)
+  let mine = false
+  if (res) {
+    log(`${res.cluster} is already reserved to this account as ${res.id} ` +
+        `(expires ${res.expires_at}); using it rather than booking again`)
+  } else {
+    res = await reserve({
+      cluster,
+      kind,
+      duration: input('duration') || '6h',
+      clean: input('clean') === 'true',
+      bootstrap: input('bootstrap') === 'true',
+    })
+    mine = true
+    // Written before the wait, not after. The reservation is ours from the
+    // 202, so a cancellation during the ready-poll would otherwise leave it
+    // held for its whole duration with nothing recording the id to release.
+    //
+    // Only a reservation this job CREATED is recorded, which is what the post
+    // step releases. Handing back one a person is sitting on, because a job
+    // borrowed it for twenty minutes, would be worse than a double booking.
+    saveState('reservation', res.id)
+    log(`reserved ${res.cluster} as ${res.id}, expires ${res.expires_at}`)
+  }
 
-  // Written before the wait, not after. The reservation is ours from the 202,
-  // so a cancellation during the ready-poll would otherwise leave it held for
-  // its whole duration with nothing recording the id to release.
-  saveState('reservation', res.id)
-  log(`reserved ${res.cluster} as ${res.id}, expires ${res.expires_at}`)
-
-  const ready = await waitReady(res.id, Number(input('ready-timeout') || '900'))
+  const ready = res.ready === true && !mine
+    ? res
+    : await waitReady(res.id, Number(input('ready-timeout') || '900'))
   const hosts = (ready.hosts || []).join(' ')
   log(`ready: ${ready.cluster} -> ${hosts}`)
 
@@ -56,6 +72,7 @@ async function main() {
   setOutput('cluster', ready.cluster)
   setOutput('hosts', hosts)
   setOutput('expires-at', ready.expires_at || '')
+  setOutput('created', String(mine))
   return 0
 }
 

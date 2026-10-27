@@ -52,6 +52,19 @@ async function describeHolder(cluster) {
   }
 }
 
+// The live reservations this key already holds. `GET /reservations` is
+// documented as "yours, live ones only", so anything it returns is a cluster
+// this account is entitled to use right now.
+async function existing(cluster) {
+  const { status, body } = await call('GET', '/reservations')
+  if (status !== 200) return null
+  const rows = Array.isArray(body) ? body : (body.reservations || [])
+  return rows.find((r) =>
+    (r.state === 'active' || r.state === 'pending') &&
+    (!cluster || r.cluster === cluster)) || null
+}
+
+
 async function reserve({ cluster, kind, duration, clean, bootstrap }) {
   const body = { duration }
   if (cluster) body.cluster = cluster
@@ -122,6 +135,6 @@ const saveState = (name, value) =>
   fs.appendFileSync(process.env.GITHUB_STATE, `${name}=${value}\n`)
 
 module.exports = {
-  BASE, input, warn, fail, log, call, reserve, waitReady, release,
+  BASE, input, warn, fail, log, call, existing, reserve, waitReady, release,
   setOutput, saveState,
 }

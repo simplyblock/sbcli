@@ -48,6 +48,8 @@ outputs:
     description: Space-separated hosts of that cluster.
   expires-at:
     description: When the reservation runs out, RFC3339.
+  created:
+    description: true when this job booked the cluster, false when it was already reserved to this account and was reused. Only a booking this job made is released when it ends.
 
 runs:
   # JavaScript rather than composite, for the same reason lab-lock is: only a

@@ -140,6 +140,18 @@ on:
 # ============================================================================
 # JOBS
 # ============================================================================
+env:
+  # The lab cluster this workflow's hosts belong to, as
+  # ansible/inventory.yaml names it. An input would be better but
+  # every one of these workflows already has a long input list; an
+  # env is overridable per run from the UI's re-run dialog and keeps
+  # the dispatch form readable.
+  LABRES_CLUSTER: openshift
+  LABRES_DURATION: "24h"
+  # Set to "true" to run without booking the lab, for the case where
+  # the reservation service itself is what is broken.
+  LABRES_DISABLE: "false"
+
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
   # Job 1: Parse TEST_CLASSES into a JSON matrix
@@ -195,6 +207,30 @@ jobs:
       SSH_PASSWORD:    ${{ secrets.SSH_PASSWORD }}
 
     steps:
+      # Book the machines before touching them. Every group in the lab's
+      # ansible/inventory.yaml is one reservable cluster, and this job wipes
+      # and reboots the hosts of openshift, so it takes it for the run and
+      # hands it back in the action's post step.
+      #
+      # Already ours is not re-booked: an engineer holding the lab for the
+      # afternoon, or an earlier job in the same chain, is entitled to it and
+      # asking again would answer 409 and fail a run that was fine. Only a
+      # booking this job made is released when it ends.
+      #
+      # Not a replacement for the lab lock, where there is one. The
+      # reservation keeps PEOPLE off these machines; the lock keeps our own
+      # concurrent runs off them. These lanes have no lock at all today,
+      # so this is their first protection.
+      - name: Reserve the lab
+        uses: ./.github/actions/lab-reservation
+        with:
+          cluster: ${{ env.LABRES_CLUSTER }}
+          duration: ${{ env.LABRES_DURATION }}
+          expect-hosts: ""
+          disabled: ${{ env.LABRES_DISABLE }}
+        env:
+          LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
+
       - name: Fix workspace permissions and reset a dirty tree
         run: |
           # Errors are NOT swallowed here. The previous version ended every
