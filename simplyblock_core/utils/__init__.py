@@ -1562,16 +1562,21 @@ def resolve_lblk_entries(configured_entries, host_devices):
     for entry in configured_entries:
         path = entry.get("path")
         if path:
+            # A caller-selected path is the device's whole identity: a path
+            # that no longer answers is a missing device, not an invitation
+            # to fall back to serial/partuuid/name and guess at a different
+            # one that happens to still be there.
             live = by_path.get(path)
+            matched_by = "path"
         else:
             live = by_serial.get(entry.get("serial"))
             matched_by = "serial"
-        if live is None and entry.get("partuuid"):
-            live = by_partuuid.get(entry["partuuid"].lower())
-            matched_by = "partuuid"
-        if live is None:
-            live = by_name.get(entry.get("name"))
-            matched_by = "name"
+            if live is None and entry.get("partuuid"):
+                live = by_partuuid.get(entry["partuuid"].lower())
+                matched_by = "partuuid"
+            if live is None:
+                live = by_name.get(entry.get("name"))
+                matched_by = "name"
         if live is None:
             missing.append(entry)
             continue
