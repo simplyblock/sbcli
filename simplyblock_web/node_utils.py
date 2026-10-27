@@ -312,7 +312,6 @@ def get_block_devices_info() -> list[dict]:
     unique per partition. Partitions without a PARTUUID get a synthetic id.
     """
     import hashlib
-    import socket
 
     logger.debug("function:get_block_devices_info start")
     out, err, rc = shell_utils.run_command(
@@ -328,7 +327,7 @@ def get_block_devices_info() -> list[dict]:
 
     root_disks = _root_disk_names()
     # A pod's own hostname is the pod's name, which changes on every restart.
-    hostname = os.environ.get("SB_NODE_NAME") or socket.gethostname()
+    hostname = shell_utils.full_hostname()
     # Read once for the whole host: every device's links sit in the same two
     # directories, so a reading per device would walk them again for each disk.
     persistent = read_persistent_links()

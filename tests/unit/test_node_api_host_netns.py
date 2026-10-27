@@ -191,3 +191,90 @@ def test_the_init_job_calls_the_host_address_when_the_agent_names_none():
 
     assert not values["AGENT_IP"]
     assert _apply_config_host(script, AGENT_IP="", NODE_IP="192.168.10.147") == "192.168.10.147"
+
+
+def _uts_answers(monkeypatch, full_name):
+    """run_command answering `nsenter --uts=... hostname` with the host's name, and failing otherwise."""
+    monkeypatch.setenv("SB_HOST_NETNS", HOST_NETNS)
+    asked = []
+
+    def run(command):
+        asked.append(command)
+        if command.startswith("nsenter") and "--uts=/host-proc/1/ns/uts" in command and command.endswith("hostname"):
+            return full_name, "", 0
+        return "agent-pod-x", "", 0
+
+    return run, asked
+
+
+def test_the_hostname_is_the_hosts_own_when_the_agent_can_enter_its_namespace(monkeypatch):
+    """The OS hostname is what a host-network agent reported, and it need not equal the node name."""
+    run, _ = _uts_answers(monkeypatch, "vm07.os-name.example")
+    monkeypatch.setenv("SB_NODE_NAME", "k8s-node-name.example")
+
+    with patch.object(utils.shell_utils, "run_command", side_effect=run):
+        assert utils.get_hostname() == "vm07"
+        assert shell.full_hostname() == "vm07.os-name.example"
+
+
+def test_the_hostname_falls_back_to_the_node_name_when_the_namespace_cannot_be_entered(monkeypatch):
+    monkeypatch.setenv("SB_HOST_NETNS", HOST_NETNS)
+    monkeypatch.setenv("SB_NODE_NAME", "vm07.simplyblock5.localdomain")
+
+    with patch.object(utils.shell_utils, "run_command", return_value=("", "nsenter: denied", 1)):
+        assert utils.get_hostname() == "vm07"
+        assert shell.full_hostname() == "vm07.simplyblock5.localdomain"
+
+
+def test_a_serialless_disk_keeps_the_identity_it_had_on_the_host_network(monkeypatch):
+    """Upgrading from a host-network agent must not re-identify disks: the seed stays the OS hostname."""
+    from simplyblock_web import node_utils
+
+    before = _synthetic_serial(node_utils, "vm07.os-name.example")  # socket.gethostname() on the host network
+    run, _ = _uts_answers(monkeypatch, "vm07.os-name.example")
+    monkeypatch.setenv("SB_NODE_NAME", "k8s-node-name.example")
+
+    def answer(command):
+        return (_SERIALLESS_DISK, "", 0) if command.startswith("lsblk") else run(command)
+
+    with patch.object(node_utils.shell_utils, "run_command", side_effect=answer), \
+            patch.object(node_utils, "_root_disk_names", return_value=set()), \
+            patch.object(node_utils, "read_persistent_links", return_value={}), \
+            patch.object(node_utils, "_read_sysfs", return_value="-1"), \
+            patch("socket.gethostname", return_value="agent-pod-x"):
+        after = node_utils.get_block_devices_info()[0]["serial"]
+
+    assert after == before
+
+
+def test_a_new_address_restart_records_the_hosts_ip_not_the_agents(monkeypatch):
+    """The per-pod DNS name resolves to the pod's IP on the pod network; mgmt_ip is the host's."""
+    node_info = {"host_ip": "192.168.10.150"}
+
+    with patch.object(utils, "resolve_address", return_value="10.42.3.9"):
+        assert utils.node_mgmt_ip(node_info, "vm10.sb-node-api.ns.svc:5000") == "192.168.10.150"
+
+
+def test_a_new_address_restart_resolves_the_address_when_the_agent_reports_no_host_ip():
+    with patch.object(utils, "resolve_address", return_value="192.168.10.150") as resolve:
+        assert utils.node_mgmt_ip({}, "192.168.10.150:5000") == "192.168.10.150"
+    resolve.assert_called_once_with("192.168.10.150:5000")
+
+
+def test_the_info_names_the_hosts_ip_when_the_agent_is_given_it(monkeypatch):
+    from simplyblock_web.api.internal.storage_node import kubernetes as k8s_agent
+
+    monkeypatch.setenv("HOST_IP", "192.168.10.147")
+    with patch.object(k8s_agent, "get_static_node_info", return_value={
+            "hostname": "vm07", "system_id": "s", "cpu_info": {"count": 1}, "cloud_info": {}}), \
+            patch.object(k8s_agent, "get_cluster_id", return_value=""), \
+            patch.object(k8s_agent, "get_nodes_config", return_value={}), \
+            patch.object(k8s_agent.core_utils, "get_numa_cores", return_value={}), \
+            patch.object(k8s_agent.core_utils, "get_nics_data", return_value={}), \
+            patch.multiple(k8s_agent.node_utils, get_memory=lambda: 0, get_huge_memory=lambda: 0,
+                           get_memory_details=dict, get_nvme_devices=list,
+                           get_nvme_pcie_list=list, get_spdk_devices=list,
+                           get_spdk_pcie_list=list):
+        info = _answer(k8s_agent.get_info)
+
+    assert info["host_ip"] == "192.168.10.147"

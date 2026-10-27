@@ -8439,7 +8439,7 @@ def _restart_storage_node_impl(
         _old_rpc_client = snode.rpc_client()
         old_rpc_host, old_rpc_port = _old_rpc_client.host, _old_rpc_client.port
         snode.api_endpoint = node_address
-        snode.mgmt_ip = utils.resolve_address(node_address)
+        snode.mgmt_ip = utils.node_mgmt_ip(node_info, node_address)
         data_nics = []
         for nic in snode.data_nics:
             if_name = nic["if_name"]

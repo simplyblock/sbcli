@@ -3778,6 +3778,16 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
+def node_mgmt_ip(node_info: Any, node_address: str) -> str:
+    """The management IP of a node reached at node_address.
+
+    On the pod network the address resolves to the agent's pod IP, which is not the host's,
+    so the agent reports the host's own (host_ip). Without it the address's own IP is the
+    host's, as it is for a host-network agent.
+    """
+    return node_info.get("host_ip") or resolve_address(node_address)
+
+
 def get_mgmt_ip(node_info: Any, iface_names: str | list[str]) -> tuple[str, str] | None:
     if isinstance(node_info, (bytes, bytearray)):
         try:

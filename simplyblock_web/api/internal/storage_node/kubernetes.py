@@ -136,6 +136,9 @@ def get_info():
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
         "network_interface": core_utils.get_nics_data(),
+        # The host's own IP, from the downward API. On the pod network the address this agent
+        # is reached at is the pod's, so a restart onto a new address needs this one.
+        "host_ip": os.environ.get("HOST_IP", ""),
 
         "cloud_instance": node_info["cloud_info"],
         "nodes_config": get_nodes_config(),
