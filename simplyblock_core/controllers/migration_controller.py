@@ -335,7 +335,7 @@ def _cleanup_created(migration):
                     if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
                         try:
                             sec_rpc.listeners_del(nqn, nic.trtype.lower(),
-                                                  nic.ip4_address, sec_port)
+                                                  nic.listen_address, sec_port)
                         except Exception:
                             pass
                 logger.info(
@@ -355,7 +355,7 @@ def _cleanup_created(migration):
             if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
                 try:
                     tgt_rpc.listeners_del(nqn, nic.trtype.lower(),
-                                          nic.ip4_address, tgt_port)
+                                          nic.listen_address, tgt_port)
                 except Exception:
                     pass
         logger.info(
