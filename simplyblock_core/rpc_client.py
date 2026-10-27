@@ -992,7 +992,7 @@ class RPCClient:
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
-                            write_protection_v2=False):
+                            write_protection_v2=False, page_copy=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -1042,6 +1042,8 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
+        if page_copy:
+            params["page_copy"] = True
         return self._request("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):

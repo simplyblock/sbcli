@@ -15807,6 +15807,10 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # same flag without having to re-fetch the cluster setting.
         if cluster.shared_placement:
             distrib_params["shared_placement"] = True
+        # Page copy (snapshot copy-on-write in the distrib): fixed at cluster
+        # creation, persisted per stack entry for the same reason.
+        if cluster.page_copy:
+            distrib_params["page_copy"] = True
         # Failure-domain placement is activated implicitly via the per-node
         # failure_domain id (>= 0) in the distrib cluster map sent by
         # distr_send_cluster_map / distr_add_nodes (see get_distr_cluster_map);
