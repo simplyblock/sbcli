@@ -1174,6 +1174,50 @@ def _target_replica_for_registration(replica_id, role, composite):
         return None
     return node
 
+class _CreateUndo:
+    """What one create_migration call created on the target, in order, so a
+    failure before the LVolMigration record exists can take exactly that
+    back. Without a record, cancel has nothing to clean from, and the target
+    bdev, replica registrations, crypto bdevs and subsystems stayed behind
+    for good (SFAM-2834). Never touches objects this call did not create:
+    a batch group's members share one nqn, so a subsystem another member
+    made is not ours to delete."""
+
+    def __init__(self):
+        self.subsystems = []      # (rpc, nqn, node_id)
+        self.crypto_bdevs = []    # (rpc, name, node_id)
+        self.bdev = None          # (composite, rpc, node, lvs_name)
+        self.replicas = {}        # role -> (rpc, node)
+
+    def run(self):
+        for rpc, nqn, node_id in reversed(self.subsystems):
+            try:
+                rpc.subsystem_delete(nqn)
+                logger.info(f"create_migration rollback: deleted subsystem {nqn} on {node_id[:8]}")
+            except Exception as e:
+                logger.warning(f"create_migration rollback: subsystem {nqn} on {node_id[:8]}: {e}")
+        for rpc, name, node_id in reversed(self.crypto_bdevs):
+            try:
+                rpc.lvol_crypto_delete(name)
+                logger.info(f"create_migration rollback: deleted crypto bdev {name} on {node_id[:8]}")
+            except Exception as e:
+                logger.warning(f"create_migration rollback: crypto bdev {name} on {node_id[:8]}: {e}")
+        if self.bdev is not None:
+            composite, rpc, node, lvs_name = self.bdev
+            sec = self.replicas.get("secondary")
+            ter = self.replicas.get("tertiary")
+            try:
+                _delete_bdev_blocking(
+                    composite, rpc,
+                    secondary_rpc=sec[0] if sec else None,
+                    tertiary_rpc=ter[0] if ter else None,
+                    all_nodes=[n for n in [node, sec and sec[1], ter and ter[1]] if n],
+                    lvs_name=lvs_name)
+                logger.info(f"create_migration rollback: deleted target bdev {composite}")
+            except Exception as e:
+                logger.warning(f"create_migration rollback: target bdev {composite}: {e}")
+
+
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None,
@@ -1194,8 +1238,20 @@ def create_migration(lvol_id, target_node_id,
          cancel_migration can tear everything down on request.
 
     Returns (migration_id, connect_strings) on success.
-    Raises ValueError on any validation or setup failure.
+    Raises ValueError on any validation or setup failure. A failure after
+    target objects were created takes back the ones this call created.
     """
+    undo = _CreateUndo()
+    try:
+        return _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo,
+                                      host_nqn, batch, group_scope, undo)
+    except Exception:
+        undo.run()
+        raise
+
+
+def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
+                           batch, group_scope, undo):
     db = DBController()
 
     try:
@@ -1294,6 +1350,7 @@ def create_migration(lvol_id, target_node_id,
             ndcs=lvol.ndcs, npcs=lvol.npcs)
         if not ret:
             raise ValueError(f"bdev_lvol_create failed for {composite} on {target_node_id}")
+        undo.bdev = (composite, tgt_rpc, tgt_node, tgt_node.lvstore)
         logger.info(f"create_migration: created bdev {composite}")
         _bdev_info = tgt_rpc.bdev_get(composite)
     else:
@@ -1334,6 +1391,7 @@ def create_migration(lvol_id, target_node_id,
                         qos_controller.wire_priority_class(
                             tgt_node.cluster_id, lvol.lvol_priority_class))
                     if ret_sec:
+                        undo.replicas["secondary"] = (_sec_rpc_reg, _pre_sec_node)
                         _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
                         logger.info(
                             f"create_migration: registered {composite} on "
@@ -1365,6 +1423,7 @@ def create_migration(lvol_id, target_node_id,
                         qos_controller.wire_priority_class(
                             tgt_node.cluster_id, lvol.lvol_priority_class))
                     if ret_ter:
+                        undo.replicas["tertiary"] = (_ter_rpc_reg, _pre_ter_node)
                         _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
                         logger.info(
                             f"create_migration: registered {composite} on "
@@ -1499,6 +1558,7 @@ def create_migration(lvol_id, target_node_id,
                                      f"{_node_id[:8]} failed: {_e}") from _e
                 if not _ret:
                     raise ValueError(f"bdev_crypto_create failed for {_crypto_short} on {_node_id[:8]}")
+                undo.crypto_bdevs.append((_rpc, _crypto_short, _node_id))
                 logger.info(f"create_migration: created crypto bdev "
                             f"{_crypto_short} on {_node_id[:8]}")
                 _ns_bdev = _crypto_short
@@ -1535,6 +1595,7 @@ def create_migration(lvol_id, target_node_id,
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=_min_cntlid,
                     max_namespaces=lvol.max_namespace_per_subsys)
                 _subsystem_created_node_ids.append(_node_id)
+                undo.subsystems.append((_rpc, nqn, _node_id))
 
             if lvol.allowed_hosts:
                 try:

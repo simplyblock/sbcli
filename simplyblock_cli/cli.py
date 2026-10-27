@@ -31,6 +31,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot()
         self.init_consistency_group()
         self.init_backup()
+        self.init_group_backup()
         self.init_qos()
         self.init_db_backup()
         super().__init__()
@@ -402,6 +403,10 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__event_alerts(subparser)
         self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
+        self.init_cluster__migrate(subparser)
+        self.init_cluster__migrate_status(subparser)
+        self.init_cluster__migrate_list(subparser)
+        self.init_cluster__migrate_cancel(subparser)
         self.init_cluster__add_replication(subparser)
         self.init_cluster__replication_target_add(subparser)
         self.init_cluster__replication_target_list(subparser)
@@ -673,6 +678,30 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('name', help='The new cluster name.', type=str)
+
+    def init_cluster__migrate(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate', 'Moves volumes online to another cluster in one step: migration-mode replication, then a short-freeze cutover per volume (a migration plan)')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--target-cluster-id', help='Destination cluster id', type=str, dest='target_cluster_id', required=True).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--pool', help='Only the volumes of this pool (id). Default: every volume of the cluster.', type=str, dest='pool_id')
+        subcommand.add_argument('--lvols', help='Only these volumes: comma-separated ids', type=str, dest='lvol_ids')
+        subcommand.add_argument('--delete-source', help='Delete each source volume once its cutover completed', dest='delete_source', action='store_true')
+        subcommand.add_argument('--interval-min', help='Replication cadence in minutes for volumes the plan starts. Default: `1`.', type=int, dest='interval_min')
+        subcommand.add_argument('--dry-run', help='Show the selection, destination nodes and forecast without starting anything', dest='dry_run', action='store_true')
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__migrate_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-status', 'Shows a migration plan\'s per-volume progress and completion forecast')
+        subcommand.add_argument('plan_id', help='Migration plan id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__migrate_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-list', 'Lists the migration plans of a cluster')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__migrate_cancel(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancels a migration plan\'s cutovers that have not started freezing')
+        subcommand.add_argument('plan_id', help='Migration plan id', type=str)
 
     def init_cluster__add_replication(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-replication', 'DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster.')
@@ -1165,6 +1194,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_consistency_group__snapshot_list(subparser)
         self.init_consistency_group__snapshot_delete(subparser)
         self.init_consistency_group__clone(subparser)
+        self.init_consistency_group__backup_create(subparser)
 
 
     def init_consistency_group__list(self, subparser):
@@ -1210,6 +1240,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
         subcommand.add_argument('seq', help='The generation number (group_seq) to clone.', type=int)
         subcommand.add_argument('--into', help='Name of the new consistency group to form from the clones. When omitted, the clones are independent volumes.', type=str, dest='into', required=False)
+
+    def init_consistency_group__backup_create(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup-create', 'Back up one generation of a consistency group to S3 as one all-or-nothing unit. Takes a fresh crash-consistent generation unless --group-seq names an existing one.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('--group-seq', help='Back up an existing generation by its sequence number. Omit to take a fresh generation.', type=int, dest='group_seq')
 
 
     def init_backup(self):
@@ -1301,6 +1336,69 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('policy_id', help='The backup policy id.', type=str)
         subcommand.add_argument('target_type', help='The target type.', type=str, choices=['pool','lvol',])
         subcommand.add_argument('target_id', help='The target id (storage pool or logical volume id).', type=str)
+
+
+    def init_group_backup(self):
+        subparser = self.add_command('group-backup', 'Consistency-group backup commands', aliases=['gb',])
+        self.init_group_backup__list(subparser)
+        self.init_group_backup__get(subparser)
+        self.init_group_backup__restore(subparser)
+        self.init_group_backup__delete(subparser)
+        self.init_group_backup__export(subparser)
+        self.init_group_backup__discover(subparser)
+        self.init_group_backup__import(subparser)
+
+
+    def init_group_backup__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'List the cluster\'s consistency-group backups.')
+        subcommand.add_argument('cluster_id', help='Cluster UUID.', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_group_backup__get(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get', 'Show one consistency-group backup and its members.')
+        subcommand.add_argument('group_backup_id', help='Group backup id (or uuid).', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_group_backup__restore(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restore', 'Restore a consistency-group backup into a NEW consistency group, all-or-nothing. Each member volume recovers asynchronously.')
+        subcommand.add_argument('group_backup_id', help='Group backup id (or uuid).', type=str)
+        subcommand.add_argument('--name', help='Name of the NEW consistency group to form from the restored volumes. Must not already exist.', type=str, dest='into_group_name', required=True)
+        subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
+        subcommand.add_argument('--node', help='The target storage node id. Omit to auto-select; every member is pinned to one store.', type=str, dest='node')
+        subcommand.add_argument('--access-key-id', help='Access key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='secret_access_key')
+
+    def init_group_backup__delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete', 'Delete a consistency-group backup: its group manifest and record. Its member backups are retired: merged into the copy of the next generation while that chains against them, deleted once nothing does.')
+        subcommand.add_argument('group_backup_id', help='Group backup id (or uuid).', type=str)
+
+    def init_group_backup__export(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'export', 'Export a consistency-group backup\'s manifests as a unit, to a JSON file for cross-cluster restore.')
+        subcommand.add_argument('group_backup_id', help='Group backup id (or uuid).', type=str)
+        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('-o', '--output', help='The output file path.', type=str, dest='output')
+
+    def init_group_backup__discover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'discover', 'List the consistency-group backups a bucket contains, reading its group manifests. Needs no cluster.')
+        subcommand.add_argument('--bucket', help='The bucket holding the group backups.', type=str, dest='bucket', required=True)
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
+
+    def init_group_backup__import(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'import', 'Register the consistency-group backups held in a bucket, or in an export file, into this cluster.')
+        subcommand.add_argument('--cluster-id', help='The target cluster to import into (required for cross-cluster restore).', type=str, dest='cluster_id')
+        subcommand.add_argument('--bucket', help='Import every group backup in this bucket. Give this or --from-file, not both.', type=str, dest='bucket')
+        subcommand.add_argument('--from-file', help='Import the group backup in this file, from \'group-backup export\'. It records which bucket its members live in, so --bucket is neither needed nor accepted.', type=str, dest='from_file')
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
 
 
     def init_qos(self):
@@ -1627,6 +1725,14 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__switch_write_protection(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
+                elif sub_command in ['migrate']:
+                    ret = self.cluster__migrate(sub_command, args)
+                elif sub_command in ['migrate-status']:
+                    ret = self.cluster__migrate_status(sub_command, args)
+                elif sub_command in ['migrate-list']:
+                    ret = self.cluster__migrate_list(sub_command, args)
+                elif sub_command in ['migrate-cancel']:
+                    ret = self.cluster__migrate_cancel(sub_command, args)
                 elif sub_command in ['add-replication']:
                     ret = self.cluster__add_replication(sub_command, args)
                 elif sub_command in ['replication-target-add']:
@@ -1827,6 +1933,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.consistency_group__snapshot_delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.consistency_group__clone(sub_command, args)
+                elif sub_command in ['backup-create']:
+                    ret = self.consistency_group__backup_create(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1854,6 +1962,25 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__policy_attach(sub_command, args)
                 elif sub_command in ['policy-detach']:
                     ret = self.backup__policy_detach(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['group-backup', 'gb']:
+                sub_command = args_dict['group-backup']
+                if sub_command in ['list']:
+                    ret = self.group_backup__list(sub_command, args)
+                elif sub_command in ['get']:
+                    ret = self.group_backup__get(sub_command, args)
+                elif sub_command in ['restore']:
+                    ret = self.group_backup__restore(sub_command, args)
+                elif sub_command in ['delete']:
+                    ret = self.group_backup__delete(sub_command, args)
+                elif sub_command in ['export']:
+                    ret = self.group_backup__export(sub_command, args)
+                elif sub_command in ['discover']:
+                    ret = self.group_backup__discover(sub_command, args)
+                elif sub_command in ['import']:
+                    ret = self.group_backup__import(sub_command, args)
                 else:
                     self.parser.print_help()
 

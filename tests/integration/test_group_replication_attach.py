@@ -141,14 +141,15 @@ def test_demote_group_ship_home_takes_ONE_group_snapshot(db, monkeypatch):
 
     def _grp_snap(g, **k):
         grp_calls.append(g.get_id())
-        ids = []
         for mid in ("v1", "v2"):
             s = SnapShot()
             s.uuid = f"snap-{mid}"
+            s.cluster_id = g.cluster_id
             s.lvol = db.get_lvol_by_id(mid)
+            s.group_id = g.get_id()
+            s.group_seq = 1
             s.write_to_db(db.kv_store)
-            ids.append(s.uuid)
-        return ids, None
+        return 1, None
     monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _grp_snap)
 
     result = cgc.demote_group(group)
@@ -169,7 +170,7 @@ def test_demote_group_superseded_source_does_not_take_a_group_snapshot(db, monke
     monkeypatch.setattr(cgc, "_members_are_superseded_source", lambda members: True)
     grp_calls = []
     monkeypatch.setattr(cgc, "create_group_snapshot_for_group",
-                        lambda g, **k: grp_calls.append(g) or ([], None))
+                        lambda g, **k: grp_calls.append(g) or (1, None))
     monkeypatch.setattr(lc, "demote_lvol", lambda lvol_id: {"demoted": True})
 
     result = cgc.demote_group(group)

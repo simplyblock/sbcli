@@ -3,8 +3,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import snapshot_controller, snapshot_events
+from simplyblock_core import constants, db_controller, migration_turn, utils
+from simplyblock_core.controllers import (
+    replication_delta,
+    snapshot_controller,
+    snapshot_events,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -544,23 +548,37 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
     # rest of the run (case 4: outstanding=0 and not one new snapshot in 20
     # minutes). The chaining bug is fixed, but the guard must not be able to
     # convert ANY future terminal failure into a silent halt.
-    if not _replication_task_is_live(full):
+    task = _live_replication_task(full)
+    if task is None:
         logger.error(
             "Internal snapshot %s of lvol %s never replicated and has no live "
             "replication task; resuming the cadence. Replication for this "
             "volume is NOT making progress -- investigate the transfer.",
             full.get_id(), lvol.get_id())
         return None
+    # Its transfer is complete and only the merge and convert on the target
+    # remain: the next snapshot may transfer meanwhile (constants.
+    # REPL_OVERLAP_MERGE), but no further -- the one before it must have its
+    # copy, so at most two snapshots of a volume are in flight.
+    if (constants.REPL_OVERLAP_MERGE and task is not _UNKNOWN_TASK
+            and task.function_params.get("transfer_done")
+            and not _older_internal_outstanding(lvol, all_snaps, newest)):
+        return None
     return full
 
 
-def _replication_task_is_live(snapshot):
-    """Whether a replication task for *snapshot* can still make progress.
+#: _live_replication_task's answer when the tasks cannot be read
+_UNKNOWN_TASK = object()
+
+
+def _live_replication_task(snapshot):
+    """The replication task for *snapshot* that can still make progress, or
+    None.
 
     A task that is DONE (successfully or having given up) or cancelled will
     never set the replicated marker, so waiting on it is waiting for ever.
-    When the tasks cannot be read at all, assume live: back-pressure staying on
-    is the conservative side of that guess.
+    When the tasks cannot be read at all, assume one is live (_UNKNOWN_TASK):
+    back-pressure staying on is the conservative side of that guess.
     """
     try:
         node = db.get_storage_node_by_id(snapshot.lvol.node_id)
@@ -568,15 +586,35 @@ def _replication_task_is_live(snapshot):
     except Exception as e:
         logger.warning("Cannot read replication tasks for %s (%s); keeping "
                        "back-pressure on", snapshot.get_id(), e)
-        return True
+        return _UNKNOWN_TASK
     for task in tasks:
         if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
             continue
         if task.function_params.get("snapshot_id") != snapshot.get_id():
             continue
         if task.status != JobSchedule.STATUS_DONE and not task.canceled:
-            return True
-    return False
+            return task
+    return None
+
+
+def _older_internal_outstanding(lvol, all_snaps, newest):
+    """Whether the internal snapshot of *lvol* before *newest* has no copy on
+    the remote side yet."""
+    prev = None
+    for s in all_snaps:
+        if (s.lvol.get_id() == lvol.get_id()
+                and s.snap_type == SnapShot.TYPE_INTERNAL
+                and s.status != SnapShot.STATUS_IN_DELETION
+                and s.created_at < newest.created_at
+                and (prev is None or s.created_at > prev.created_at)):
+            prev = s
+    if prev is None:
+        return False
+    try:
+        full = db.get_snapshot_by_id(prev.get_id())
+    except KeyError:
+        return False
+    return not (full.target_replicated_snap_uuid or full.source_replicated_snap_uuid)
 
 
 def partition_by_group(pairs):
@@ -597,6 +635,32 @@ def partition_by_group(pairs):
     return grouped, ungrouped
 
 
+def _cadence_capacity_hold(cluster_id):
+    """Why no cadence snapshot may be taken on *cluster_id* now, or "".
+
+    A cadence snapshot pins every block overwritten while it is outstanding,
+    and under sustained overwrites faster than replication ships them one
+    outstanding snapshot per volume pins up to the volume's whole used size
+    (twice that raw, with 1+1). Past the cluster's capacity warning threshold
+    another one only adds to that, so the cadence holds and retention can
+    reclaim what already replicated. A missing capacity reading never holds:
+    the guard must not stop replication on a cluster it cannot measure.
+    """
+    try:
+        cluster = db.get_cluster_by_id(cluster_id)
+        records = db.get_cluster_capacity(cluster, 1)
+    except Exception:                                     # noqa: BLE001
+        return ""
+    if not records:
+        return ""
+    util = getattr(records[0], "size_util", None)
+    warn = getattr(cluster, "cap_warn", 0) or 0
+    if util is None or not warn or util < warn:
+        return ""
+    return (f"cluster {cluster_id} is at {util}% capacity, at or above its "
+            f"warning threshold of {warn}%")
+
+
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -610,6 +674,18 @@ def take_due_internal_snapshots(cluster_id, now_ts):
     repl_lvols = [lv for lv in db.get_lvols(cluster_id)
                   if lv.do_replicate and lv.replication_interval_min > 0]
     if not repl_lvols:
+        return
+    # One migrating volume per source node: the others take no snapshot
+    # until the volume ahead of them on their node has cut over.
+    waiting = migration_turn.waiting_lvol_ids(db, cluster_id, repl_lvols)
+    if waiting:
+        logger.debug("Waiting for their node's migration turn: %s", sorted(waiting))
+        repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in waiting]
+        if not repl_lvols:
+            return
+    hold = _cadence_capacity_hold(cluster_id)
+    if hold:
+        logger.warning("Holding internal replication snapshots: %s", hold)
         return
     all_snaps = db.get_mini_snapshots()
 
@@ -670,7 +746,7 @@ def take_due_internal_snapshots(cluster_id, now_ts):
             group = db.get_consistency_group_by_id(group_id)
             logger.info("Taking consistency-group snapshot for group %s "
                         "(%d members)", group_id, len(members))
-            _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
+            _seq, err = consistency_group_controller.create_group_snapshot_for_group(group)
             if err:
                 logger.warning("Group snapshot for group %s failed: %s",
                                group_id, err)
@@ -692,8 +768,8 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
-            _id, err = snapshot_controller.add(
-                lvol.get_id(), name, snap_type=SnapShot.TYPE_INTERNAL)
+            _id, err = replication_delta.add_snapshot(
+                lvol, name, snap_type=SnapShot.TYPE_INTERNAL)
             if err:
                 logger.warning(f"Internal snapshot for {lvol.get_id()} failed: {err}")
         except Exception as e:

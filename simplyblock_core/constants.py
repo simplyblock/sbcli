@@ -523,6 +523,17 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # seconds. Before that the cutover waits and takes NO snapshots of its own --
 # the iterative snapshots ARE the endgame.
 REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# Migration-plan forecast fallbacks, used until the plan's own transfers and
+# cutovers have been measured (simplyblock_core/migration_forecast.py).
+REPL_FORECAST_DEFAULT_BYTES_PER_SEC = 200 * 1024 * 1024
+REPL_FORECAST_DEFAULT_CUTOVER_SEC = 60
+# An lvstore whose volumes are written at this fraction of its replication
+# throughput or more is reported as not converging: the remaining margin is
+# eaten by snapshot and convert overhead, and the lag never closes.
+REPL_CONVERGENCE_MARGIN = 0.9
+# Cadence a migration plan gives a volume that has none: the initial copy and
+# the catch-up ride the cadence snapshots, so without one nothing ever ships.
+REPL_MIGRATION_DEFAULT_INTERVAL_MIN = 1
 # Rounds must follow each other within MILLISECONDS. Returning to the task
 # scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
 # each time, which puts a floor under the delta no number of rounds can beat.
@@ -572,8 +583,33 @@ REPL_MAX_NODE_SWITCHES = 6
 REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # How long the submitting pass may wait inline for the transfer. The runner is
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
-# just falls back to being noticed on a later pass.
-REPL_XFER_INLINE_WAIT_SEC = 5.0
+# just falls back to being noticed on a later pass, REPL_ACTIVE_PASS_SEC later.
+REPL_XFER_INLINE_WAIT_SEC = 1.0
+# A delta's landing volume is merged with its base on the target as a job
+# (bdev_lvol_merge_base): how long the finish waits for it inline, and how
+# often it polls, before leaving it to the next pass. No inline wait: merges
+# take minutes, and every second spent here blocks the single-threaded runner
+# for every other task -- with three volumes merging, a pass took ~50 s and a
+# finished merge was acted on that much later (bed run 4, 2026-10-24). The
+# pass interval (REPL_ACTIVE_PASS_SEC) notices a finished merge instead.
+REPL_MERGE_INLINE_WAIT_SEC = 0.0
+REPL_MERGE_POLL_SEC = 1.0
+# Pass interval of the snapshot replication runner while any transfer or
+# merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
+# pass reads the task table (see test_transfer_completion_latency).
+REPL_ACTIVE_PASS_SEC = 1.0
+# Requests a replication transfer keeps in flight. A full transfer sends one
+# whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
+# (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
+# for the same in-flight bytes (256 x 64 KiB = 16 MiB). Powers of two (SPDK
+# rings).
+REPL_XFER_BATCH = 16
+REPL_XFER_PARTIAL_BATCH = 256
+# The next snapshot of a volume may transfer while the target still merges the
+# previous copy: the cycle then takes the longer of transfer and merge, not
+# their sum. Its landing volume is chained onto that copy once the copy exists
+# (snapshot_replication._finishing_predecessor).
+REPL_OVERLAP_MERGE = True
 # A volume in its final cutover already owns its lvstore and every other
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.

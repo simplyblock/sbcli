@@ -136,3 +136,55 @@ def test_a_replicated_snapshot_never_blocks(monkeypatch):
     monkeypatch.setattr(sm, "db", _db(
         _Full("S1", target="T1"), [_Task("S1", JobSchedule.STATUS_DONE)]))
     assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is None
+
+
+# --- overlap: the next transfer may run while the target merges the last copy
+
+def _db_multi(fulls, tasks):
+    class _DB:
+        def get_snapshot_by_id(self, uuid):
+            return fulls[uuid]
+
+        def get_storage_node_by_id(self, nid):
+            return type("N", (), {"cluster_id": "CL1"})()
+
+        def get_job_tasks(self, cluster_id):
+            return tasks
+    return _DB()
+
+
+def _transferred(snap_uuid):
+    t = _Task(snap_uuid)
+    t.function_params["transfer_done"] = True
+    return t
+
+
+def test_a_merging_snapshot_lets_the_next_one_transfer(monkeypatch):
+    """S2 has arrived and is only being merged on the target; S1 has its copy."""
+    monkeypatch.setattr(sm, "db", _db_multi(
+        {"S1": _Full("S1", target="T1"), "S2": _Full("S2")}, [_transferred("S2")]))
+    assert sm._outstanding_internal_snapshot(
+        _Lvol(), [_Mini("S1", 100), _Mini("S2", 200)]) is None
+
+
+def test_a_transfer_in_progress_still_blocks_the_next(monkeypatch):
+    monkeypatch.setattr(sm, "db", _db_multi(
+        {"S1": _Full("S1", target="T1"), "S2": _Full("S2")}, [_Task("S2")]))
+    out = sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1", 100), _Mini("S2", 200)])
+    assert out is not None and out.get_id() == "S2"
+
+
+def test_at_most_two_snapshots_in_flight(monkeypatch):
+    """S2 merging is not enough while S1 has no copy yet either."""
+    monkeypatch.setattr(sm, "db", _db_multi(
+        {"S1": _Full("S1"), "S2": _Full("S2")}, [_transferred("S1"), _transferred("S2")]))
+    assert sm._outstanding_internal_snapshot(
+        _Lvol(), [_Mini("S1", 100), _Mini("S2", 200)]) is not None
+
+
+def test_overlap_switched_off_waits_for_the_copy(monkeypatch):
+    monkeypatch.setattr(sm.constants, "REPL_OVERLAP_MERGE", False)
+    monkeypatch.setattr(sm, "db", _db_multi(
+        {"S1": _Full("S1", target="T1"), "S2": _Full("S2")}, [_transferred("S2")]))
+    assert sm._outstanding_internal_snapshot(
+        _Lvol(), [_Mini("S1", 100), _Mini("S2", 200)]) is not None
