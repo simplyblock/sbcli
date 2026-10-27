@@ -507,7 +507,13 @@ def spdk_process_start(body: SPDKParams):
             core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
             msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
             logger.info(msg)
-            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
+            # The OpenShift CPU-topology Job's first-time path waits up to 5 min
+            # for the pool to render, sleeps 15 min for the MCO reboot, and after
+            # the reboot waits up to 6 min for the NUMA plugin, plus stale-pool
+            # retries and pod scheduling: ~35 min at 3 s per poll, above the
+            # default 24 min, which would time out a Job about to succeed and
+            # delete it.
+            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace, timeout=700)
             logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
             batch_v1.delete_namespaced_job(
                 name=core_resp.metadata.name,
