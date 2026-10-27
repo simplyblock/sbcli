@@ -1118,6 +1118,25 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
         if not force_delete:
             return True
 
+    # A replicated copy of this snapshot on another cluster that a live volume
+    # is cloned from (a failed-over volume) holds this snapshot back: soft
+    # delete, nothing removed. Removing it would hand its delete on to that
+    # copy (snapshot_monitor, snap.instances), which then stays in_deletion
+    # behind its live clone, and the reverse replication -- which chains onto
+    # this pair -- refuses the chain for good: "chain ancestor ... is
+    # mid-deletion" (KI-12: the fail-back of run 20261026, where the healed
+    # origin's stop cleanup deleted the source half of the pair the fail-over
+    # had used). Deleting the clone finishes it (delete_held_sources).
+    if not force_delete:
+        held_by = _replicated_copy_with_live_clone(snap)
+        if held_by:
+            logger.info("Soft delete snapshot %s: its replicated copy %s has a live clone; "
+                        "deleted once that clone is gone", snapshot_uuid, held_by)
+            snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+            snap.deleted = True
+            snap.write_to_db(db_controller.kv_store)
+            return True
+
     # Block during restart Phase 5
     snode = None
     try:
@@ -1843,6 +1862,43 @@ def _has_live_clone(snapshot_uuid):
         if lvol.cloned_from_snap == snapshot_uuid and lvol.status != LVol.STATUS_IN_DELETION:
             return True
     return False
+
+
+def _replicated_copies(snap):
+    """The ids of *snap*'s replicated copies on other clusters: its pair link
+    and the instances recorded there (instances are dicts once read back, the
+    objects themselves before)."""
+    ids = [snap.target_replicated_snap_uuid] if snap.target_replicated_snap_uuid else []
+    for inst in snap.instances:
+        field = inst.get if isinstance(inst, dict) else lambda k, o=inst: getattr(o, k, "")
+        uuid, cluster_id = field("uuid"), field("cluster_id")
+        if uuid and cluster_id and cluster_id != snap.cluster_id and uuid not in ids:
+            ids.append(uuid)
+    return ids
+
+
+def _replicated_copy_with_live_clone(snap):
+    """The id of a replicated copy of *snap* that a live volume is cloned
+    from, or ""."""
+    return next((c for c in _replicated_copies(snap) if _has_live_clone(c)), "")
+
+
+def delete_held_sources(copy_id):
+    """Finish the deletes that a live clone of the replicated copy *copy_id*
+    held back (_delete_locked): called when a clone of it is being deleted,
+    i.e. after the fail-back, when the old primary's volume goes. Once no live
+    clone is left, each soft-deleted source of the copy is deleted; its delete
+    hands on to the copy, which the snapshot monitor removes once the clone is
+    gone."""
+    if _has_live_clone(copy_id):
+        return
+    for snap in db_controller.get_snapshots():
+        if (snap.deleted and snap.status != SnapShot.STATUS_IN_DELETION
+                and copy_id in _replicated_copies(snap)):
+            logger.info("Deleting snapshot %s: no live clone of its replicated copy %s is left",
+                        snap.get_id(), copy_id)
+            if not delete(snap.get_id()):
+                logger.warning("Could not delete snapshot %s", snap.get_id())
 
 
 def delete_replicated(snapshot_id):
