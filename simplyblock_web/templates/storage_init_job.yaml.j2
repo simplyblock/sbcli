@@ -45,6 +45,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            # Where the node API answers. On the pod network that is the agent's pod IP, not
+            # the host's; empty means the host's, which is where a host-network agent is.
+            - name: AGENT_IP
+              value: "{{ AGENT_ADDRESS | default('', true) }}"
           volumeMounts:
             - name: host-proc
               mountPath: /proc
@@ -87,7 +91,8 @@ spec:
                 fi
               done
 
-              echo "--- Sending config to $NODE_IP ---"
+              AGENT_HOST="${AGENT_IP:-$NODE_IP}"
+              echo "--- Sending config to $AGENT_HOST ---"
               if [ "$OS_ID" != "talos" ]; then
                 {% if TLS_CONNECT == "disabled" %}
                 {% set SCHEME = "http" %}
@@ -99,7 +104,7 @@ spec:
                 {% set SCHEME = "https" %}
                 {% set CURL_TLS_FLAGS = "-k --cert /etc/simplyblock/tls/tls.crt --key /etc/simplyblock/tls/tls.key" %}
                 {% endif %}
-                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST {{ CURL_TLS_FLAGS }} {{ SCHEME }}://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
+                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST {{ CURL_TLS_FLAGS }} {{ SCHEME }}://$AGENT_HOST:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
                 echo "HTTP status: $RESPONSE"
                 if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
                   echo "Failed to apply config"

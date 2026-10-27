@@ -416,6 +416,8 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
             'SPDK_PROXY_TLS_SECRET': body.spdk_proxy_tls_secret,
+            # The agent's own address (POD_IP, from the downward API); on the host network it is the host's.
+            'AGENT_ADDRESS': os.environ.get('POD_IP', ''),
         }
 
         if ubuntu_host:

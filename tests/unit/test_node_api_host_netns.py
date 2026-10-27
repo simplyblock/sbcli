@@ -144,3 +144,50 @@ def test_a_disk_without_a_serial_is_seeded_by_the_hostname_when_no_node_name_is_
     from simplyblock_web import node_utils
 
     assert _synthetic_serial(node_utils, "host-a") != _synthetic_serial(node_utils, "host-b")
+
+
+def _init_job_script(**values):
+    """The init Job's env and shell script, rendered the way spdk_process_start renders them."""
+    from pathlib import Path
+
+    import yaml
+    from jinja2 import Environment, FileSystemLoader
+
+    templates = Path(__file__).resolve().parents[2] / "simplyblock_web" / "templates"
+    env = Environment(loader=FileSystemLoader(str(templates)), trim_blocks=True, lstrip_blocks=True)
+    rendered = env.get_template("storage_init_job.yaml.j2").render(
+        HOSTNAME="worker-1", NAMESPACE="storage", CLUSTER_ID="c1", RPC_PORT=8080,
+        TLS_SERVE=True, TLS_CONNECT="authenticated", **values)
+    (job,) = [d for d in yaml.safe_load_all(rendered) if d]
+    container = job["spec"]["template"]["spec"]["containers"][0] if "containers" in job["spec"]["template"]["spec"] \
+        else job["spec"]["template"]["spec"]["initContainers"][0]
+    return {e["name"]: e.get("value") for e in container["env"]}, container["args"][-1]
+
+
+def _apply_config_host(script, **env):
+    """The host the Job's apply_config call goes to, with the Job's env given."""
+    import re
+    import subprocess
+
+    assignment = re.search(r'^\s*(AGENT_HOST=.*)$', script, re.M)
+    url = re.search(r'://(\S+?):5000/snode/apply_config', script)
+    assert assignment and url, "the Job names no agent host"
+    out = subprocess.run(
+        ["sh", "-c", f'{assignment.group(1)}; echo "{url.group(1)}"'],
+        env={"PATH": "/usr/bin:/bin", **env}, capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+def test_the_init_job_calls_the_agent_at_its_own_address_on_the_pod_network():
+    """The agent is not on the host's address there, so the Job it creates must not call that."""
+    values, script = _init_job_script(AGENT_ADDRESS="10.42.1.7")
+
+    assert values["AGENT_IP"] == "10.42.1.7"
+    assert _apply_config_host(script, AGENT_IP="10.42.1.7", NODE_IP="192.168.10.147") == "10.42.1.7"
+
+
+def test_the_init_job_calls_the_host_address_when_the_agent_names_none():
+    values, script = _init_job_script()
+
+    assert not values["AGENT_IP"]
+    assert _apply_config_host(script, AGENT_IP="", NODE_IP="192.168.10.147") == "192.168.10.147"
