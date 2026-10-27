@@ -331,9 +331,9 @@ class ReplicationLargeVolume(ReplicationTestBase):
                          "relocation")
         self._disconnect_and_cleanup_dual(vol)
         t1 = time.time()
-        out, err = self._cli(
-            f"{self.base_cmd} -d volume replication-failback {vol_id} "
-            f"--source-cluster-id {self.cluster_a} 2>&1")
+        # Through the wrapper, which branches: ReplicationOps on k8s, the
+        # CLI on docker. Calling _cli here bypassed both.
+        out, err = self.failback(vol_id, source_cluster_id=self.cluster_a)
         if cli_failed(out, err):
             self.skip_case(
                 "AR-P-008",
@@ -450,8 +450,14 @@ class ReplicationSoak(ReplicationTestBase):
                 lags.append(lag)
 
             try:
-                out, _ = self._cli(f"{self.base_cmd} snapshot list 2>&1")
-                n = sum(1 for ln in out.splitlines() if vol in ln)
+                # VolumeSnapshots on k8s, `snapshot list` on docker. The
+                # count is of lines naming the volume either way.
+                if self.k8s_test:
+                    out, _ = self._ensure_k8s_utils()._exec_kubectl(
+                        "kubectl get volumesnapshot -o name", supress_logs=True)
+                else:
+                    out, _ = self._cli(f"{self.base_cmd} snapshot list 2>&1")
+                n = sum(1 for ln in (out or "").splitlines() if vol in ln)
                 snap_counts.append(n)
             except Exception:                         # noqa: BLE001
                 pass

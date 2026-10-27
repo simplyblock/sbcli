@@ -373,6 +373,16 @@ class ReplicationPolicyVariants(ReplicationTestBase):
         # moving a value between the two surfaces.
         self.logger.info("[AR-F-014] offering the CRD duration spelling '5m' "
                          "to the CLI")
+        if self.k8s_test:
+            # The case exists because the CRD spells an interval "5m" and
+            # the CLI wants minutes as an integer. On the Kubernetes path
+            # "5m" IS the spelling ReplicationPolicy.spec.interval takes,
+            # so there is no mismatch here to catch.
+            self.skip_case(
+                "AR-F-014",
+                "this asserts on the CLI's handling of the CRD duration "
+                "spelling; on k8s the CRD spelling is the only one there is.")
+            return
         out, err = self._cli(
             f"{self.base_cmd} -d cluster replication-policy-add "
             f"{self.cluster_a} pd{stamp} {t1} --interval-min 5m 2>&1")
@@ -410,6 +420,19 @@ class ReplicationPolicyVariants(ReplicationTestBase):
         # The target copy must not be independently writable while
         # replication is live. A writable target is a split-brain waiting to
         # happen: both sides accept writes and the next cycle overwrites one.
+        if self.k8s_test:
+            # Natively this is a PVC resize on the target cluster, and the
+            # target has no PVC: it is a volume the control plane made, not
+            # one provisioned through the CSI driver on this side. There is
+            # no native way to attempt the mutation, so there is nothing to
+            # be refused.
+            self.skip_case(
+                "AR-F-015",
+                "resizing the replication target is a PVC patch natively, "
+                "and the target volume has no PVC on this cluster -- the "
+                "mutation cannot be attempted, so no refusal can be "
+                "asserted.")
+            return
         out, err = self._cli(
             f"{self.base_cmd} -d volume resize {target_id} 4G 2>&1")
         self.expect_refused(

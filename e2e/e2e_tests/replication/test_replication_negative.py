@@ -41,6 +41,19 @@ class ReplicationNegativeConfiguration(ReplicationTestBase):
         # ── AR-N-001 replicate a volume to its own cluster ────────────────
         self.logger.info("[AR-N-001] adding a target that points at cluster A "
                          "itself")
+        if self.k8s_test:
+            # A ReplicationPair with sourceCluster == targetCluster is the
+            # native shape of this, and the operator's webhook is what
+            # would refuse it -- a different assertion from the CLI's, on
+            # a different error. Worth a case of its own rather than
+            # pretending this one covered it.
+            self.skip_case(
+                "AR-N-001",
+                "self-targeting is a CLI refusal; the native equivalent is a "
+                "ReplicationPair whose source and target are the same "
+                "cluster, which the webhook rejects with its own message. "
+                "Needs its own case.")
+            return
         out, err = self._cli(
             f"{self.base_cmd} -d cluster replication-target-add "
             f"{self.cluster_a} tself{stamp} {self.cluster_a} 2>&1")
@@ -124,6 +137,15 @@ class ReplicationNegativeConfiguration(ReplicationTestBase):
         # ── AR-N-003 target pool missing or too small ─────────────────────
         self.logger.info("[AR-N-003] target-add naming a pool that does not "
                          "exist on cluster B")
+        if self.k8s_test:
+            # ReplicationPair has no target-pool field at all -- only
+            # sourceCluster and targetCluster -- so there is no bad pool to
+            # name and nothing for the operator to refuse.
+            self.skip_case(
+                "AR-N-003",
+                "ReplicationPair carries no target pool, so a non-existent "
+                "one cannot be offered on the Kubernetes path.")
+            return
         out, err = self._cli(
             f"{self.base_cmd} -d cluster replication-target-add "
             f"{self.cluster_a} tbad{stamp} {self.cluster_b} "
@@ -208,9 +230,14 @@ class ReplicationNegativeOperations(ReplicationTestBase):
                          timeout=self.REPL_CYCLE_SEC, what="sync before delete")
 
         self.logger.info("[AR-N-006] deleting %s while it is replicating", vol2)
-        out, err = self._cli(f"{self.base_cmd} -d volume delete {v2} "
-                             f"--force 2>&1")
-        combined = ((out or "") + (err or ""))
+        # _delete_lvol_dual: the PVC on k8s, `volume delete` on docker.
+        # AR-N-006 asserts on what happens to the RELATIONSHIP when a
+        # replicating volume is deleted, not on how the delete was issued.
+        try:
+            self._delete_lvol_dual(vol2, skip_error=True)
+            combined = ""
+        except Exception as exc:                      # noqa: BLE001
+            combined = str(exc)
         sleep_n_sec(45)
         still_related = self.relationship_for(v2)
         exists = any(l.get("lvol_name") == vol2
