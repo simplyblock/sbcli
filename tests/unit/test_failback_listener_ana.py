@@ -101,7 +101,7 @@ class EnsureListenerTest(unittest.TestCase):
 
 
 def _node(node_id, ips=("10.0.0.2",), port=4428, rpc=None):
-    nics = [SimpleNamespace(ip4_address=ip, trtype="TCP") for ip in ips]
+    nics = [SimpleNamespace(ip4_address=ip, listen_address=ip, trtype="TCP") for ip in ips]
     node = MagicMock()
     node.get_id.return_value = node_id
     node.data_nics = nics
