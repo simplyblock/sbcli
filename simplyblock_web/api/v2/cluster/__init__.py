@@ -104,7 +104,7 @@ class ClusterParams(BaseModel):
     device_mode: Literal["nvme", "lblk"] = "nvme"
     inline_checksum: bool = False
     atomic_4k: bool = False
-    md_journal: bool = False
+    md_journal: bool = True
     # The cluster's workload names: the Services its storage nodes are reached
     # through, the SPDK proxy's certificate Secret, and the suffix on a node's
     # hostname label in both Services. Omitted, they are the constant names a

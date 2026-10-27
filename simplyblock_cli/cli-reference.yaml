@@ -1045,14 +1045,15 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
-          - name: "--enable-md-journal"
+          - name: "--disable-md-journal"
             help: >
-              Journal blobstore metadata pages so a write torn by a power loss cannot leave a half-written page behind.
-              Needed when a device is not 4K-write atomic: no 4K format to reformat to, and no atomic write unit
-              covering 4K. Cannot be enabled or disabled after cluster creation.
+              Create the cluster without the metadata journal, which otherwise protects blobstore metadata pages
+              against a write torn by a power loss. Safe only when every device completes a 4K write whole: a 4K
+              format, or an atomic write unit covering 4K. Cannot be enabled or disabled after cluster creation.
             dest: md_journal
             type: bool
-            action: store_true
+            default: true
+            action: store_false
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1298,14 +1299,15 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
-          - name: "--enable-md-journal"
+          - name: "--disable-md-journal"
             help: >
-              Journal blobstore metadata pages so a write torn by a power loss cannot leave a half-written page behind.
-              Needed when a device is not 4K-write atomic: no 4K format to reformat to, and no atomic write unit
-              covering 4K. Cannot be enabled or disabled after cluster creation.
+              Create the cluster without the metadata journal, which otherwise protects blobstore metadata pages
+              against a write torn by a power loss. Safe only when every device completes a 4K write whole: a 4K
+              format, or an atomic write unit covering 4K. Cannot be enabled or disabled after cluster creation.
             dest: md_journal
             type: bool
-            action: store_true
+            default: true
+            action: store_false
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.

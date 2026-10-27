@@ -310,7 +310,9 @@ class Cluster(BaseModel):
     # Journal blobstore metadata pages so a write torn by a power loss cannot
     # leave a half-written page behind. Needed when a device is not 4K-write
     # atomic. The lvstore records it in its super block at creation, so it is
-    # frozen at cluster create time.
+    # frozen at cluster create time. Both create paths turn it on unless told
+    # otherwise; False here is what a record written before the field existed
+    # reads as, a cluster whose lvstores were created without it.
     md_journal: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
