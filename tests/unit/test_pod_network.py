@@ -111,6 +111,19 @@ class TestTheServiceForwardsEveryPortTheNodeServesOn:
 
         client.spdk_service_publish.assert_called_once_with(4426, "c1", [4426, 4427, 4432, 4433])
 
+    def test_the_monitors_repeat_is_rate_limited_per_node(self):
+        node = _node(data_nics=[POD_NIC])
+        client = MagicMock()
+        storage_network._published_at.clear()
+
+        with patch.object(StorageNode, "client", return_value=client):
+            storage_network.publish_ports(node, at_most_every=60)
+            storage_network.publish_ports(node, at_most_every=60)
+            storage_network.publish_ports(_node(uuid="n2", data_nics=[POD_NIC]), at_most_every=60)
+            storage_network.publish_ports(node)  # an explicit publish is never held back
+
+        assert client.spdk_service_publish.call_count == 3
+
     def test_a_node_off_the_pod_network_publishes_nothing(self):
         with patch.object(StorageNode, "client") as client:
             storage_network.publish_ports(_node(data_nics=[VF_NIC]))

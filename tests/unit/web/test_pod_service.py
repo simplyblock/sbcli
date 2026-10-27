@@ -45,25 +45,25 @@ class TestEnsuringTheService:
 
         assert pod_service.ensure(core, "simplyblock", 4426, "c1", [4432]) == "10.103.252.64"
         core.create_namespaced_service.assert_not_called()
-        core.patch_namespaced_service.assert_not_called()
+        core.replace_namespaced_service.assert_not_called()
 
     def test_new_ports_are_patched_onto_the_existing_service_keeping_its_address(self):
         core = _core(_existing([4426, 4432]))
 
         pod_service.ensure(core, "simplyblock", 4426, "c1", [4432, 4434, 4435])
 
-        patched = core.patch_namespaced_service.call_args.args[2]
-        assert [p["port"] for p in patched["spec"]["ports"]] == [4426, 4432, 4434, 4435]
-        # a strategic merge would keep a port the node no longer serves on
-        assert core.patch_namespaced_service.call_args.kwargs["_content_type"] == "application/merge-patch+json"
+        replaced = core.replace_namespaced_service.call_args.args[2]
+        assert [p.port for p in replaced.spec.ports] == [4426, 4432, 4434, 4435]
 
     def test_a_port_the_node_stopped_serving_on_is_dropped(self):
+        # a patch would be a strategic merge keyed by port and would keep 9090
         core = _core(_existing([4426, 4432, 9090]))
 
         pod_service.ensure(core, "simplyblock", 4426, "c1", [4432])
 
-        patched = core.patch_namespaced_service.call_args.args[2]
-        assert [p["port"] for p in patched["spec"]["ports"]] == [4426, 4432]
+        replaced = core.replace_namespaced_service.call_args.args[2]
+        assert [p.port for p in replaced.spec.ports] == [4426, 4432]
+        core.patch_namespaced_service.assert_not_called()
 
     def test_a_read_error_other_than_not_found_propagates(self):
         core = MagicMock()
