@@ -2649,7 +2649,11 @@ jobs:
       - name: Cleanup build folder
         if: always()
         run: |
-          rm -rf ./* || true
-          rm -rf ./.??* || true
+          # Everything except .github. The lab-reservation action is a
+          # LOCAL action, and the runner reads its post.js off the workspace
+          # when the post step runs -- which is AFTER this one. Deleting it
+          # fails the post step and the reservation is never given back, so
+          # the lab stays locked for the whole duration nobody is using it.
+          find . -mindepth 1 -maxdepth 1 ! -name .github -exec rm -rf {} + || true
           rm -f "$HOME/.kube/config-${{ github.run_id }}"
           rm -f "${RUNNER_TEMP:-$HOME}/sshkeys/ci_lab_key-${{ github.run_id }}" "${RUNNER_TEMP:-$HOME}/sshkeys/ci_lab_key-${{ github.run_id }}.pub" || true
