@@ -72,6 +72,9 @@ class StorageNodeParams(BaseModel):
     force_format: bool = False
     # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
     networks: Annotated[builtins.list[NetworkAttachment], Field(default_factory=builtins.list)]
+    # The SPDK pod serves on the pod network itself, fronted by a Service, with no
+    # attachment. Exclusive with networks.
+    pod_network: bool = False
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -105,6 +108,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "expansion": parameters.expand,
             "force_format": parameters.force_format,
             **({"networks": [network.model_dump() for network in parameters.networks]} if parameters.networks else {}),
+            **({"pod_network": True} if parameters.pod_network else {}),
         }
     )
     if not task_id_or_false:

@@ -2087,7 +2087,7 @@ def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
         # second time -- SPDK refuses that with "Listener already exists".
         try:
             outcome = nvmf_listener.ensure_listener(
-                rpc_client, lvol.nqn, trtype, iface.ip4_address, listener_port,
+                rpc_client, lvol.nqn, trtype, iface.listen_address, listener_port,
                 ana_state=ana_state)
         except Exception as e:
             logger.error("listener %s %s:%s for %s: %s", trtype,
@@ -2243,7 +2243,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
             # created once in ana_state, otherwise left as it is.
             try:
                 nvmf_listener.ensure_listener(
-                    rpc_client, lvol.nqn, iface.trtype, iface.ip4_address,
+                    rpc_client, lvol.nqn, iface.trtype, iface.listen_address,
                     recreate_lvs_port, ana_state=ana_state)
             except Exception as e:
                 logger.error("listener for %s on %s:%s: %s", lvol.nqn,
@@ -6504,7 +6504,7 @@ def suspend_lvol(lvol_id):
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible",
+                lvol.nqn, iface.listen_address, lvol.subsys_port, ana="inaccessible",
                 anagrpid=lvol.ns_id)
             if not ret:
                 logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
@@ -6517,7 +6517,7 @@ def suspend_lvol(lvol_id):
                 if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                     ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible",
+                        lvol.nqn, iface.listen_address, lvol.subsys_port, ana="inaccessible",
                         anagrpid=lvol.ns_id)
                     if not ret:
                         logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
@@ -6540,7 +6540,7 @@ def resume_lvol(lvol_id):
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=True,
+                lvol.nqn, iface.listen_address, lvol.subsys_port, is_optimized=True,
                 anagrpid=lvol.ns_id)
             if not ret:
                 logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
@@ -6553,7 +6553,7 @@ def resume_lvol(lvol_id):
                 if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                     ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=False,
+                        lvol.nqn, iface.listen_address, lvol.subsys_port, is_optimized=False,
                         anagrpid=lvol.ns_id)
                     if not ret:
                         logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")

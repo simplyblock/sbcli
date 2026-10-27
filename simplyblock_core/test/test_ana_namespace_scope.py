@@ -74,6 +74,8 @@ def test_namespace_zero_is_still_sent(monkeypatch):
 class _Nic:
     def __init__(self, ip="10.0.0.1", trtype="TCP"):
         self.ip4_address = ip
+        # Off the pod network a listener binds the address it is reached on.
+        self.listen_address = ip
         self.trtype = trtype
 
 

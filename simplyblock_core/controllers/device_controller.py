@@ -676,7 +676,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
                 device_obj.nvmf_ip = iface.ip4_address
                 break
     else:
@@ -1577,7 +1577,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     if iface.ip4_address:
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                         try:
-                            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
                         except RPCException as e:
                             logger.warning("Failed to create listener for %s on IP %s: %s",
                                            subsystem_nqn, iface.ip4_address, e)

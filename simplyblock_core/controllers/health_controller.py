@@ -943,7 +943,7 @@ def check_node(node_id, with_devices=True):
     data_nics_check = True
     for data_nic in snode.data_nics:
         if data_nic.ip4_address:
-            ping_check = _check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
+            ping_check = _check_ping_from_node(data_nic.listen_address, ifname=data_nic.if_name, node=snode)
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 

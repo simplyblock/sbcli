@@ -27,7 +27,7 @@ def _offline_node(on_pod_network):
     node.cluster_id = "cl-1"
     node.status = StorageNode.STATUS_OFFLINE
     node.mgmt_ip = "192.168.10.145"
-    node.data_nics = [MagicMock(ip4_address="10.10.10.223", if_name="data0")]
+    node.data_nics = [MagicMock(ip4_address="10.10.10.223", listen_address="10.10.10.223", if_name="data0")]
     if on_pod_network:
         node.networks = [{"name": "storage-vf", "interface": "data0"}]
     return node
