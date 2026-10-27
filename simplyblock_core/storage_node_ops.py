@@ -732,6 +732,12 @@ _restart_coordinator_sem = threading.BoundedSemaphore(
     constants.RESTART_COORDINATOR_MAX_CONCURRENCY)
 
 
+def _evict_node_rpc_sessions(snode):
+    """Drop this process's pooled RPC sessions to ``snode``'s SPDK proxy."""
+    client = snode.rpc_client()
+    evict_cached_session(client.host, client.port)
+
+
 def _bounded_thread(target, args=(), name=None, sem=None):
     """threading.Thread whose worker first acquires a global concurrency slot,
     bounding how many connect/reconnect workers run at once across all
@@ -1847,11 +1853,38 @@ def _create_device_partitions(rpc_client, nvme, snode: StorageNode, num_partitio
     return True
 
 
+def _run_threads_collecting(jobs):
+    """Run ``(key, target, args)`` jobs in parallel threads and return the
+    list of keys whose job failed (returned a falsy value or raised).
+
+    Device stacks used to be built in bare threads whose return values were
+    never read, so a failed ``bdev_alceml_create`` vanished and the restart
+    went on to mark that device ONLINE although it did not exist in SPDK
+    (SFAM-2834): peers connected to it, migrations started against it and
+    the node's own distribs then failed to open it.
+    """
+    results: dict = {}
+
+    def _run(key, target, args):
+        try:
+            results[id(key)] = target(*args)
+        except Exception as e:
+            logger.exception(f"{getattr(target, '__name__', target)} failed: {e}")
+            results[id(key)] = None
+
+    threads = [threading.Thread(target=_run, args=job) for job in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return [key for key, _, _ in jobs if not results.get(id(key))]
+
+
 def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     db_controller = DBController()
     new_devices = []
     devices_to_partition = []
-    thread_list = []
+    jobs: list = []
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
             continue
@@ -1860,26 +1893,25 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
             new_devices.append(nvme)
             continue
         if nvme.is_partition:
-            t = threading.Thread(target=_create_storage_device_stack, args=(snode.rpc_client(), nvme, snode, False,))
-            thread_list.append(t)
+            jobs.append((nvme, _create_storage_device_stack, (snode.rpc_client(), nvme, snode, False,)))
             new_devices.append(nvme)
-            t.start()
         else:
             devices_to_partition.append(nvme)
             partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
             if len(partitioned_devices) != (1 + snode.num_partitions_per_dev):
                 logger.info(f"Creating partitions for {nvme.nvme_bdev}")
-                t = threading.Thread(
-                    target=_create_device_partitions,
-                    args=(snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
-                          snode.jm_percent, snode.partition_size, index + 1,))
-                thread_list.append(t)
-                t.start()
+                # Outcome is checked below by re-reading the partitions.
+                jobs.append((nvme, _create_device_partitions,
+                             (snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
+                              snode.jm_percent, snode.partition_size, index + 1,)))
 
-    for thread in thread_list:
-        thread.join()
+    partition_jobs = {id(d) for d in devices_to_partition}
+    failed = [d for d in _run_threads_collecting(jobs) if id(d) not in partition_jobs]
+    if failed:
+        logger.error(f"Failed to create device stack for: {[d.get_id() for d in failed]}")
+        return False
 
-    thread_list = []
+    jobs = []
     for nvme in devices_to_partition:
         partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
         if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
@@ -1887,17 +1919,16 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
             # remove 1st partition for jm
             partitioned_devices.pop(0)
             for dev in partitioned_devices:
-                t = threading.Thread(target=_create_storage_device_stack,
-                                     args=(snode.rpc_client(), dev, snode, False,))
-                thread_list.append(t)
+                jobs.append((dev, _create_storage_device_stack, (snode.rpc_client(), dev, snode, False,)))
                 new_devices.append(dev)
-                t.start()
         else:
             logger.error("Failed to create partitions")
             return False
 
-    for thread in thread_list:
-        thread.join()
+    failed = _run_threads_collecting(jobs)
+    if failed:
+        logger.error(f"Failed to create device stack for: {[d.get_id() for d in failed]}")
+        return False
 
     # assign device order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
@@ -1983,7 +2014,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
     rpc_client = snode.rpc_client(timeout=5 * 60)
 
-    thread_list = []
+    jobs: list = []
     for index, nvme in enumerate(snode.nvme_devices):
         if nvme.status == NVMeDevice.STATUS_JM:
             continue
@@ -1995,16 +2026,16 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
 
-        t = threading.Thread(
-            target=_create_storage_device_stack,
-            args=(rpc_client, nvme, snode, not clear_data,))
-        thread_list.append(t)
+        jobs.append((nvme, _create_storage_device_stack, (rpc_client, nvme, snode, not clear_data,)))
 
-    for thread in thread_list:
-        thread.start()
-
-    for thread in thread_list:
-        thread.join()
+    # Every device that reaches this point was found on the node and is
+    # flipped ONLINE later in the restart, so a missing stack must fail the
+    # restart here -- before peers, migrations and the cluster act on it.
+    # A failed restart kills SPDK, so the next attempt starts clean.
+    failed = _run_threads_collecting(jobs)
+    if failed:
+        logger.error(f"Failed to create device stack for: {[d.get_id() for d in failed]}")
+        return False
 
     snode.nvme_devices = new_devices
     snode.write_to_db()
@@ -4083,8 +4114,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if lblk_mode:
             # No driver rebind in lblk mode — the AIO bdev needs the device
             # on its kernel driver. Resolve the configured selection against
-            # the live host (serial-first), then --force-format wipes
-            # partitioned disks (re-validated host-side: busy => refused).
+            # the live host (by the stable path it was selected by, serial-first
+            # otherwise), then --force-format wipes partitioned disks
+            # (re-validated host-side: busy => refused).
             blk_inventory, err = snode_api.get_blockdevices()
             if not blk_inventory:
                 logger.error(f"Failed to list block devices on {node_addr}: {err}")
@@ -4094,7 +4126,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             if missing:
                 logger.error(
                     f"Configured block device(s) not found on host: "
-                    f"{[(e.get('name'), e.get('serial')) for e in missing]}")
+                    f"{[(e.get('path') or e.get('name'), e.get('serial')) for e in missing]}")
                 return False
             for blk_info in lblk_resolved:
                 if blk_info.get("has_partitions"):
@@ -4139,7 +4171,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                           else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
                 total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
-                mcp_max_unavailable=mcp_max_unavailable)
+                mcp_max_unavailable=mcp_max_unavailable,
+                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret)
             time.sleep(5)
 
         except Exception as e:
@@ -4254,6 +4287,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.cr_name = cr_name
         snode.cr_namespace = cr_namespace
         snode.cr_plural = cr_plural
+        snode.record_workload_names(cluster)
         snode.ssd_pcie = ssd_pcie if not lblk_mode else []
         # lblk mode: persist the configured selection (with serial identity)
         # so restart can re-resolve devices without the host config file.
@@ -4525,12 +4559,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error("Failed to prepare cluster devices")
                 return False
 
-        # set qos values if enabled
-        if cluster.is_qos_set():
-            logger.info("Setting Alcemls QOS weights")
-            ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
-            if not ret:
-                logger.error("Failed to set Alcemls QOS")
+        # set qos values: always, the replication service class needs its share
+        # even without user classes (see qos_controller.get_qos_weights_list)
+        logger.info("Setting Alcemls QOS weights")
+        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+        if not ret:
+            logger.error("Failed to set Alcemls QOS")
+            # fatal only where user classes depend on it, as before
+            if cluster.is_qos_set():
                 return False
 
         # --- Cluster-wide mesh critical section -------------------------
@@ -4771,6 +4807,35 @@ REMOVABLE_STATUSES = (
 #: so phase 1 has something to stop. Everything else is either already
 #: stopped by an earlier step (the departing statuses) or not answering
 #: (OFFLINE, UNREACHABLE), where a shutdown could only fail.
+def force_delete_storage_node(node_id) -> bool:
+    """Delete a storage node as part of bringing its cluster down, killing its
+    SPDK first whatever its status, and report whether SPDK was confirmed
+    stopped.
+
+    The node is marked removed before anything else, which stops a restart
+    driver from bringing SPDK back, and its tasks, migrations among them, are
+    cancelled. SPDK is then killed directly rather than through
+    shutdown_storage_node, whose guards refuse a node with an active restart
+    or a running migration: those protect a cluster that goes on, and this
+    one does not. A kill that cannot be confirmed, the node's API not
+    answering, is reported, and the node is deleted anyway."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="cluster delete")
+    for task in tasks_controller.get_active_node_tasks(snode.cluster_id, node_id):
+        tasks_controller.cancel_task(task.uuid)
+    try:
+        stopped = bool(_kill_spdk_until_dead(snode))
+    except Exception:
+        logger.exception(f"Killing SPDK on node {node_id} failed")
+        stopped = False
+    if not stopped:
+        logger.error(f"SPDK on node {node_id} could not be confirmed stopped; "
+                     f"deleting the node's records anyway")
+    delete_storage_node(node_id, force=True)
+    return stopped
+
+
 REMOVAL_SHUTS_DOWN_FROM = (
     StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN)
 
@@ -8720,7 +8785,8 @@ def _restart_storage_node_impl(
                       else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
             total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
-            spdk_proxy_image=snode.spdk_proxy_image)
+            spdk_proxy_image=snode.spdk_proxy_image,
+            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret)
 
     except Exception as e:
         logger.error(e)
@@ -8769,6 +8835,10 @@ def _restart_storage_node_impl(
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
+    # The SPDK proxy behind this node's RPC port was just relaunched: every
+    # pooled keep-alive socket to it is dead, and a network outage may have
+    # eaten the FIN that would let urllib3 notice (SFAM-2834).
+    _evict_node_rpc_sessions(snode)
     time.sleep(5)
 
     if small_bufsize:
@@ -8883,11 +8953,13 @@ def _restart_storage_node_impl(
 
     node_info, _ = snode_api.info()
     if lblk_mode:
-        # Re-resolve the persisted selection against the live host,
-        # SERIAL-FIRST (kernel names shift across reboots; the stored name
-        # is only the fallback for serial-less devices), then rebuild the
-        # AIO bdevs. A missing device degrades to STATUS_REMOVED in the
-        # reconcile below — same semantics as a missing NVMe controller.
+        # Re-resolve the persisted selection against the live host, then
+        # rebuild the AIO bdevs. A device selected by a stable path is looked
+        # up by that path alone; any other SERIAL-FIRST (kernel names shift
+        # across reboots; the stored name is only the fallback for
+        # serial-less devices). A missing device degrades to STATUS_REMOVED
+        # in the reconcile below — same semantics as a missing NVMe
+        # controller.
         blk_inventory, blk_err = snode_api.get_blockdevices()
         if not blk_inventory:
             logger.error(f"Failed to list block devices: {blk_err}")
@@ -8895,7 +8967,7 @@ def _restart_storage_node_impl(
         lblk_resolved, lblk_missing = utils.resolve_lblk_entries(
             snode.lblk_devices, blk_inventory)
         for entry in lblk_missing:
-            logger.warning(f"Configured block device {entry.get('name')} "
+            logger.warning(f"Configured block device {entry.get('path') or entry.get('name')} "
                            f"(serial {entry.get('serial')}) not found on host")
         nvme_devs = utils.addAioDevices(rpc_client, snode, lblk_resolved)
         if not nvme_devs:
@@ -8942,8 +9014,10 @@ def _restart_storage_node_impl(
         else:
             ret = _prepare_cluster_devices_partitions(snode, snode.nvme_devices)
         if not ret:
+            # Same rule as the plain restart below: a device whose stack was
+            # not built must never reach the ONLINE flip (SFAM-2834).
             logger.error("Failed to prepare cluster devices")
-            # return False
+            return False
     else:
         ret = _prepare_cluster_devices_on_restart(snode, clear_data=clear_data)
         if not ret:
@@ -8952,12 +9026,14 @@ def _restart_storage_node_impl(
 
     snode.write_to_db()
 
-    # set qos values if enabled
-    if cluster.is_qos_set():
-        logger.info("Setting Alcemls QOS weights")
-        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
-        if not ret:
-            logger.error("Failed to set Alcemls QOS")
+    # set qos values: always, the replication service class needs its share
+    # even without user classes (see qos_controller.get_qos_weights_list)
+    logger.info("Setting Alcemls QOS weights")
+    ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
+    if not ret:
+        logger.error("Failed to set Alcemls QOS")
+        # fatal only where user classes depend on it, as before
+        if cluster.is_qos_set():
             return False
 
     logger.info("Connecting to remote devices")
@@ -12638,8 +12714,8 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             try:
                 _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
                 snode.prestage_hublvol_subsystem(
-                    nqn=StorageNode.hublvol_nqn_for_lvstore(
-                        _cluster_pre.nqn, primary_node.lvstore),
+                    nqn=StorageNode.lvs_hublvol_nqn(
+                        primary_node, _cluster_pre.nqn),
                     model_number=primary_node.hublvol.model_number,
                     port=primary_node.hublvol.nvmf_port,
                     ana_state="non_optimized",
@@ -12982,13 +13058,21 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # (primary). Leaving it as primary makes SPDK reject a later
         # bdev_lvol_connect_hublvol with "-22 nonsecondary node".
         sec_role = "tertiary" if is_tertiary else "secondary"
-        if not snode_rpc_client.bdev_lvol_set_lvs_opts(
+        try:
+            lvs_opts_ok = snode_rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
                 subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
                 hublvol_port=primary_node.get_hublvol_port(primary_node.lvstore),
                 role=sec_role,
-        ):
+            )
+        except RPCException as e:
+            # Best effort, as before RPCs raised: a raise here escaped with
+            # the leader's port still blocked (SFAM-2834).
+            logger.error("bdev_lvol_set_lvs_opts(%s) raised for %s on %s: %s",
+                         sec_role, primary_node.lvstore, snode.get_id(), e)
+            lvs_opts_ok = True
+        if not lvs_opts_ok:
             logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
                          sec_role, primary_node.lvstore, snode.get_id())
 
@@ -13251,6 +13335,20 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
 
         return True
     finally:
+        # Safety net: anything that raised inside the block window (rather
+        # than going through _abort_and_unblock) left the healthy leader's
+        # client port fenced until the monitor's stale-block watchdog -- long
+        # past client KATO. Same guard as the abort path.
+        try:
+            if _leader_block["t0"] is not None and _may_unblock_peer_port(
+                    leader_node, leader_lvs_port, primary_node.jm_vuid, db_controller,
+                    "Restart exit with port still blocked"):
+                leader_node.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(leader_lvs_port)
+                _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
+                _mark_leader_unblocked()
+                _flush_port_events()
+        except Exception as ue:
+            logger.error("Failed to unblock leader port on restart exit: %s", ue)
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
         # An unbounded fence is bad; a fence budget leaking onto this thread's
@@ -14131,8 +14229,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                          and p.get_id() not in disconnected_peers), None)
                     if _sec1_pre is not None:
                         _sec1_pre.prestage_hublvol_subsystem(
-                            nqn=StorageNode.hublvol_nqn_for_lvstore(
-                                _cluster_pre.nqn, lvs_node.lvstore),
+                            nqn=StorageNode.lvs_hublvol_nqn(
+                                lvs_node, _cluster_pre.nqn),
                             model_number=lvs_node.hublvol.model_number,
                             port=lvs_node.hublvol.nvmf_port,
                             ana_state="non_optimized",
@@ -16065,10 +16163,10 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             ret = True
 
         elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
-                ret = rpc_client.create_lvstore(**params)
+                ret = _create_or_none(rpc_client.create_lvstore, name, **params)
 
         elif type == "bdev_ptnonexcl":
-            ret = rpc_client.bdev_PT_NoExcl_create(**params)
+            ret = _create_or_none(rpc_client.bdev_PT_NoExcl_create, name, **params)
 
         elif type == "bdev_raid":
             if thread_list:
@@ -16083,7 +16181,8 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
                 return False, f"Failed to (re)create distrib(s) after retry: {failed}"
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
-            ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
+            ret = _create_or_none(rpc_client.bdev_raid_create, name, name, distribs_list,
+                                  strip_size_kb=strip_size_kb)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
@@ -16093,6 +16192,10 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             bdev['status'] = "created"
             created_bdevs.insert(0, bdev)
         else:
+            # Distribs may still be creating; let them land so the rollback
+            # removes them instead of racing their creation.
+            for t in thread_list:
+                t.join()
             _rollback()
             return False, f"Failed to create BDev: {name}"
 
@@ -16106,6 +16209,18 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
         _rollback()
         return False, f"Failed to (re)create distrib(s) after retry: {failed}"
     return True, None
+
+
+def _create_or_none(create, label, /, *args, **kwargs):
+    """Run a bdev create RPC; a raise is logged and reported as None, so the
+    caller's rollback runs. RPCs raise on failure rather than returning False,
+    and an escaping raise skipped the rollback, leaking the distribs and
+    their JM contexts (SFAM-2834)."""
+    try:
+        return create(*args, **kwargs)
+    except RPCException as e:
+        logger.error(f"Failed to create BDev {label}: {e}")
+        return None
 
 
 def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):

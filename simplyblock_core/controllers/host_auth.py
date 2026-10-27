@@ -61,11 +61,13 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     return key_names
 
 
-def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
+def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client, scope=""):
     """Write DHCHAP key files to a storage node and register them in SPDK's keyring.
 
     Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
-    to the SPDK keyring name for use in subsystem_add_host.
+    to the SPDK keyring name for use in subsystem_add_host. ``scope`` is
+    appended to the key names (subsystem_access names keys per subsystem,
+    because the key material is per volume); empty keeps the host-scoped names.
     """
     snode_api = snode.client()
     # Sanitize host NQN for use as filename
@@ -76,7 +78,7 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
         key_value = host_entry.get(key_type)
         if not key_value:
             continue
-        key_name = f"{key_type}_{safe_host}"
+        key_name = f"{key_type}_{safe_host}" + (f"_{scope}" if scope else "")
         # allowed_hosts is a list of plain dicts, so the key material arrives
         # untyped; wrap it here or it reaches SNodeClient's request log in clear.
         result, error = snode_api.write_key_file(key_name, SecretStr(key_value))

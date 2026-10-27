@@ -85,6 +85,12 @@ EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
 #: imperatively.
 NQN = Annotated[str, Field(pattern=NQN_PATTERN)]
 
+#: A Kubernetes object name that is also a DNS label, as a Service's is.
+K8S_DNS_LABEL = Annotated[str, Field(pattern=r'^[a-z]([-a-z0-9]*[a-z0-9])?$', max_length=63)]
+#: A Kubernetes object name that is a DNS subdomain, as a Secret's is.
+K8S_DNS_SUBDOMAIN = Annotated[str, Field(
+    pattern=r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$', max_length=253)]
+
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
@@ -218,6 +224,12 @@ def get_docker_client(cluster_id=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes(cluster_id)
+    if not nodes and cluster_id:
+        # Management nodes belong to the deployment, not to one cluster: only
+        # the first cluster's bootstrap records one, so a cluster attached
+        # later with `cluster add` has none of its own. Any of them reaches
+        # the same swarm.
+        nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         raise RuntimeError("No mgmt nodes was found in the cluster!")
 
@@ -1541,14 +1553,19 @@ def resolve_lblk_entries(configured_entries, host_devices):
     rather than returned as resolved — a fallback match by name/partuuid
     must clear the same safety bar `filter_eligible_block_devices` enforces
     at add-node time, not just "something is attached at that name now"."""
+    by_path = _index_by_selector(host_devices)
     by_serial = {d["serial"]: d for d in host_devices}
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
                    if d.get("partuuid")}
     resolved, missing = [], []
     for entry in configured_entries:
-        live = by_serial.get(entry.get("serial"))
-        matched_by = "serial"
+        path = entry.get("path")
+        if path:
+            live = by_path.get(path)
+        else:
+            live = by_serial.get(entry.get("serial"))
+            matched_by = "serial"
         if live is None and entry.get("partuuid"):
             live = by_partuuid.get(entry["partuuid"].lower())
             matched_by = "partuuid"
@@ -1571,12 +1588,14 @@ def resolve_lblk_entries(configured_entries, host_devices):
             "name": live["name"],
             "current_path": live["device_path"],
             "serial": live.get("serial") or entry.get("serial"),
-            "by_id": live.get("by_id_path") or entry.get("by_id", ""),
+            "by_id": path or live.get("by_id_path") or entry.get("by_id", ""),
             "size": int(live.get("size") or entry.get("size") or 0),
             "numa": int(live.get("numa_node", entry.get("numa", -1))),
             "model": live.get("model", ""),
             "has_partitions": bool(live.get("has_partitions")),
         }
+        if path:
+            resolved_entry["path"] = path
         if entry.get("type") == "part" or live.get("type") == "part":
             resolved_entry["type"] = "part"
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
@@ -1598,9 +1617,10 @@ def addAioDevices(rpc_client, snode, blk_entries):
         bdev_name = aio_bdev_name_for_serial(entry["serial"])
         ret = rpc_client.bdev_get(bdev_name)
         if not ret:
-            # Prefer the by-id path as the filename so a udev rename between
-            # resolution and create cannot swap devices under us.
-            filename = entry.get("by_id") or entry["current_path"]
+            # A path the caller selected the device by is opened as given.
+            # Otherwise prefer the by-id path as the filename so a udev rename
+            # between resolution and create cannot swap devices under us.
+            filename = entry.get("path") or entry.get("by_id") or entry["current_path"]
             ret = rpc_client.bdev_aio_create(bdev_name, filename)
             if not ret:
                 raise Exception(
@@ -1638,7 +1658,7 @@ def addAioDevices(rpc_client, snode, blk_entries):
                 'nvme_controller': "",
                 'bdev_type': "aio",
                 'device_path': entry["current_path"],
-                'by_id_path': entry.get("by_id", ""),
+                'by_id_path': entry.get("path") or entry.get("by_id", ""),
                 'node_id': snode.get_id(),
                 'cluster_id': snode.cluster_id,
                 'status': NVMeDevice.STATUS_ONLINE
@@ -2019,6 +2039,7 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
         include_serials=include_serials, force_format=force_format)
     for dev, reason in rejected:
         logger.debug(f"block device {dev['name']} skipped: {reason}")
+    requested = set(include_names or [])
     result = {}
     for dev in selected:
         if dev.get("serial_synthetic"):
@@ -2033,6 +2054,12 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
             "size": int(dev["size"]),
             "numa": int(dev.get("numa_node", -1)),
         }
+        # The stable path the caller selected the device by is its identity
+        # from here on: add-node and every restart look it up by that path
+        # alone, and the AIO bdev is opened on it (resolve_lblk_entries).
+        given = sorted(requested & device_selectors(dev))
+        if given:
+            entry["path"] = given[0]
         if dev.get("type") == "part":
             entry["type"] = "part"
             entry["partuuid"] = dev.get("partuuid", "")

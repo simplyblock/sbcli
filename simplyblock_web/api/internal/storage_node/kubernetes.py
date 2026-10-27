@@ -292,6 +292,9 @@ class SPDKParams(BaseModel):
     socket: int | None = Field(None, ge=0)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)
+    # The Secret the SPDK proxy serves and connects with: the cluster's
+    # recorded one, or the constant name from a control plane that sends none.
+    spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
 
 
 @api.post('/spdk_process_start', responses={
@@ -412,6 +415,7 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CONNECT': settings.tls_connect,
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
+            'SPDK_PROXY_TLS_SECRET': body.spdk_proxy_tls_secret,
         }
 
         if ubuntu_host:

@@ -135,9 +135,18 @@ VUIDS = {"LVS_1": 1, "LVS_6": 6}
 
 
 class World:
-    def __init__(self, db, seed: int = 1, bugs: set | None = None, caps=None):
+    def __init__(self, db, seed: int = 1, bugs: set | None = None, caps=None,
+                 host_fencing: bool = False, stale_host_lists: bool = False):
         from .simnode import DEPLOYED_CAPS
         self.db = db
+        # kubernetes-fencing contract, mode witness: host fencing on the cluster,
+        # and the host fences the operator saw revoked: [(t, fenced, winner)]
+        self.host_fencing = host_fencing
+        self.host_fences_seen: list = []
+        # review on #1527: volume subsystems that allow any host AND list both
+        # client hosts (add_host_to_lvol lists a host without switching
+        # allow_any_host off); the volumes authorize both hosts in the DB.
+        self.stale_host_lists = stale_host_lists
         self.seed = seed
         self.bugs = set(bugs or ())
         self.caps = frozenset(DEPLOYED_CAPS if caps is None else caps)
@@ -312,6 +321,7 @@ class World:
         from simplyblock_core.models.iface import IFace
         from simplyblock_core.models.lvol_model import LVol
         from simplyblock_core.models.nvme_device import NVMeDevice
+        from simplyblock_core.models.pool import Pool
         from simplyblock_core.models.storage_node import StorageNode
 
         db = self.db
@@ -324,6 +334,7 @@ class World:
         cl.blk_size, cl.page_size_in_blocks = 4096, 4096
         cl.nqn = "nqn.2023-02.io.simplyblock:" + cl.uuid[:8]
         cl.two_node_arbitration = True
+        cl.two_node_host_fencing = self.host_fencing
         cl.write_to_db(db.kv_store)
         self.cluster = cl
 
@@ -351,6 +362,7 @@ class World:
             n.lvstore_stack = [{"type": "bdev_distr", "name": "distr_%s_0" % lvs,
                                 "params": {"name": "distr_%s_0" % lvs}}]
             n.health_check = True
+            n.client_host_nqns = [client_host(name)]
             n.is_secondary_node = False
             n.lvstore_ports = {k: {"lvol_subsys_port": v[0], "hublvol_port": v[1]}
                                for k, v in LVS_PORTS.items()}
@@ -371,6 +383,15 @@ class World:
         for n in recs:
             n.write_to_db(db.kv_store)
 
+        # The volumes belong to a pool, as real ones do: the database reads a
+        # cluster's volumes through its pools (host fencing reads them).
+        pool = Pool()
+        pool.uuid = str(_uuid.uuid4())
+        pool.cluster_id = cl.uuid
+        pool.pool_name = "pool0"
+        pool.status = Pool.STATUS_ACTIVE
+        pool.write_to_db(db.kv_store)
+
         # One volume per LVS; vol1 (the bed's fio target) lives on LVS_6 / sn2.
         # LVS_6's subsystem carries a second namespace (ANA group 2, F18).
         self.vols = {}
@@ -386,6 +407,9 @@ class World:
             lv.ha_type = "ha"
             lv.nqn = cl.nqn + ":lvol:" + lvs
             lv.ns_id = ns
+            lv.pool_uuid = pool.uuid
+            if self.stale_host_lists:
+                lv.allowed_hosts = [{"nqn": client_host(n.hostname)} for n in recs]
             lv.fabric = "tcp"
             lv.size = 1 << 30
             lv.top_bdev = "%s/%s" % (lvs, vname)
@@ -412,6 +436,11 @@ class World:
                     sim.ana[(cport, grp)] = "optimized" if primary == sim.uuid else "non_optimized"
             for dev in n.nvme_devices:
                 sim.devices[dev.alceml_bdev] = True
+            for lvs in LVS_PORTS:
+                for nqn in (cl.nqn + ":lvol:" + lvs, StorageNode.hublvol_nqn_for_lvstore(cl.nqn, lvs)):
+                    hosts = [client_host(r.hostname) for r in recs] \
+                        if self.stale_host_lists and ":lvol:" in nqn else []
+                    sim.subsystems[nqn] = {"allow_any_host": True, "hosts": hosts}
             for v in VUIDS.values():
                 from .simnode import LvsHa
                 sim.ha[v] = LvsHa(since_ms=self.vt.ms())
@@ -538,6 +567,8 @@ class World:
         self.vt.after(0.02, self.arbiter_tick)
         self.cp.start()
         self.client.start()
+        if self.host_fencing:
+            self.vt.after(1.0, self.operator_tick)
 
     def run(self, seconds: float):
         self.vt.run_until(self.vt.now + seconds)
@@ -549,6 +580,53 @@ class World:
                 return True
             self.vt.run_until(self.vt.now + step)
         return predicate()
+
+    # ---- the operator (kubernetes-fencing contract, section 3.4) -----------------------------------
+
+    def connected_hosts(self, node: SimNode, nqn: str) -> list:
+        """Client hosts with a live controller on ``node``'s subsystem: each
+        storage node's host connects to both nodes while it runs and is admitted."""
+        return [client_host(h.name) for h in self.nodes
+                if h.proc != "down" and node.admits(nqn, client_host(h.name))]
+
+    def operator_tick(self):
+        """The fence agent: notes revoked host fences (it would set StorageFenced
+        and NHC would taint the node) and releases a releasable fence once the
+        node runs again (it is clean: the reboot or kubelet killed its pods).
+        Checks that a revoked host is really locked out on the winner."""
+        from simplyblock_core.models.arbitration import (
+            HF_RELEASABLE,
+            HF_RESTORING,
+            HF_REVOKED,
+        )
+        rec = self.db.get_cluster_arbitration(self.cluster.uuid)
+        by_uuid = {n.uuid: n for n in self.nodes}
+        for nid, entry in sorted((rec.host_fences or {}).items() if rec else ()):
+            fenced, winner = by_uuid.get(nid), by_uuid.get(entry.get("on", ""))
+            if fenced is None or winner is None:
+                continue
+            if entry.get("state") == HF_REVOKED:
+                if not any(f == fenced.name for _, f, _w in self.host_fences_seen):
+                    self.host_fences_seen.append((self.vt.time(), fenced.name, winner.name))
+                    self.log("operator: StorageFenced=True on %s (revoked on %s)"
+                             % (fenced.name, winner.name))
+                if winner.up:
+                    for nqn in winner.subsystems:
+                        if ":lvol:" in nqn and winner.admits(nqn, client_host(fenced.name)):
+                            self.violate("host of %s still admitted on %s %s after its host "
+                                         "fence was revoked" % (fenced.name, winner.name, nqn))
+            elif entry.get("state") == HF_RELEASABLE and fenced.up:
+                def put(fresh, nid=nid):
+                    fences = dict(fresh.host_fences or {})
+                    cur = dict(fences.get(nid) or {})
+                    if cur.get("state") != HF_RELEASABLE:
+                        return False
+                    cur.update(state=HF_RESTORING, release_requested=True)
+                    fences[nid] = cur
+                    fresh.host_fences = fences
+                self.db.atomic_update(rec, put)
+                self.log("operator: %s is clean, host fence release requested" % fenced.name)
+        self.vt.after(1.0, self.operator_tick)
 
     # ---- invariants and health ----------------------------------------------------------------------
 
@@ -607,6 +685,19 @@ class World:
                                                        str(t.function_result)[:60]))
         if rec.rebuild:
             out.append("rebuild pending %s" % sorted(rec.rebuild))
+        if self.host_fencing:
+            if rec.host_fences:
+                out.append("host fences %s" % {k[:8]: v.get("state") for k, v in rec.host_fences.items()})
+            for n in self.nodes:
+                for nqn, sub in sorted(n.subsystems.items()):
+                    if not sub["allow_any_host"]:
+                        out.append("%s %s not restored to any host" % (n.name, nqn.rsplit(":", 1)[-1]))
+                    if self.stale_host_lists and ":lvol:" in nqn and n.up:
+                        missing = [h.name for h in self.nodes
+                                   if client_host(h.name) not in sub["hosts"]]
+                        if missing:
+                            out.append("%s %s lost the listed hosts of %s"
+                                       % (n.name, nqn.rsplit(":", 1)[-1], missing))
         return out
 
     def mark_fault(self):
@@ -619,4 +710,9 @@ class World:
         return errno.errorcode.get(abs(code), str(code))
 
 
-__all__ = ["FENCED", "HOLDING", "SOLO", "World"]
+def client_host(name: str) -> str:
+    """Kernel NVMe host NQN of the Kubernetes node a storage node runs on."""
+    return "nqn.2014-08.org.nvmexpress:uuid:sim-host-" + name
+
+
+__all__ = ["FENCED", "HOLDING", "SOLO", "World", "client_host"]
