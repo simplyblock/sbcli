@@ -1045,6 +1045,15 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
+          - name: "--disable-md-journal"
+            help: >
+              Create the cluster without the metadata journal, which otherwise protects blobstore metadata pages
+              against a write torn by a power loss. Safe only when every device completes a 4K write whole: a 4K
+              format, or an atomic write unit covering 4K. Cannot be enabled or disabled after cluster creation.
+            dest: md_journal
+            type: bool
+            default: true
+            action: store_false
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1290,6 +1299,15 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
+          - name: "--disable-md-journal"
+            help: >
+              Create the cluster without the metadata journal, which otherwise protects blobstore metadata pages
+              against a write torn by a power loss. Safe only when every device completes a 4K write whole: a 4K
+              format, or an atomic write unit covering 4K. Cannot be enabled or disabled after cluster creation.
+            dest: md_journal
+            type: bool
+            default: true
+            action: store_false
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.

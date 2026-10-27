@@ -812,13 +812,17 @@ class RPCClient:
     def reset_device(self, device_name):
         return self._request("bdev_nvme_reset_controller", name=device_name)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, md_journal,
+                       num_md_pages_per_cluster_ratio=1):
+        # md_journal has no default and is always sent: the cluster decides
+        # it, never the data plane's own default.
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+            "md_journal": bool(md_journal),
         }
         return self._request("bdev_lvol_create_lvstore", **params)
 
