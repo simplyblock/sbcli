@@ -115,6 +115,7 @@ class TestTheServiceForwardsEveryPortTheNodeServesOn:
     def test_the_monitors_repeat_is_rate_limited_per_node(self):
         node = _node(data_nics=[POD_NIC])
         client = MagicMock()
+        client.spdk_service_publish.return_value = ("10.0.0.1", None)
         storage_network._published_at.clear()
 
         with patch.object(StorageNode, "client", return_value=client):
