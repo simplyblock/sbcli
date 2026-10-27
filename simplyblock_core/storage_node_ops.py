@@ -8325,8 +8325,6 @@ def _reconcile_discovered_devices(snode, nvme_devs):
             db_dev.md_size = found_dev.md_size
             db_dev.md_supported = found_dev.md_supported
 
-            # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
-            #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
             active_devices.append(db_dev)
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
