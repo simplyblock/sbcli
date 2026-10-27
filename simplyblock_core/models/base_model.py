@@ -590,6 +590,30 @@ class BaseModel:
             watches.watch_index_version_key(type(self), scope, self.get_id()),
         )
 
+    def write_replacing(self, old, kv_store):
+        """Write this record and remove *old*, the same entity under another id,
+        in one transaction.
+
+        A record that changes its id must hand its unique index keys over: as
+        two writes, the new one collided with the keys the old one still held.
+        """
+        index_list = self.active_indexes(kv_store)
+        if not (self._WATCHED or index_list):
+            old.remove(kv_store)
+            return self.write_to_db(kv_store)
+        import fdb
+        old_key = old.get_db_id().encode()
+        key = self.get_db_id().encode()
+        value = json.dumps(self.to_dict(unwrap_secrets=True)).encode()
+
+        @fdb.transactional
+        def _tx(tr):
+            BaseModel._remove_tx(tr, old_key, type(old), old, index_list, *old._watch_keys())
+            BaseModel._write_tx(tr, key, value, type(self), self, index_list, *self._watch_keys())
+
+        _tx(kv_store)
+        return True
+
     def remove(self, kv_store):
         key = self.get_db_id().encode()
         index_list = self.active_indexes(kv_store)

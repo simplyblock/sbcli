@@ -7,7 +7,11 @@ from pydantic import BaseModel, Field, RootModel
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers import (
+    lvol_controller,
+    qos_controller,
+    snapshot_controller,
+)
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_model import LVol
@@ -54,7 +58,8 @@ class _CreateParams(BaseModel):
     max_w_mbytes: util.Unsigned = 0
     ha_type: Literal['single', 'ha'] | None = None
     host_id: str | None = None
-    priority_class: Literal[0, 1] = 0
+    #: Service class, by id or name (see /clusters/{id}/qos); 0 is Default.
+    priority_class: int | str = 0
     namespaced: bool | None = False
     pvc_name: str | None = None
     ndcs: util.Unsigned = 0
@@ -112,6 +117,10 @@ def add(
         pass
 
     if isinstance(data, _CreateParams):
+        try:
+            priority_class = qos_controller.resolve_class(cluster.get_id(), data.priority_class)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
         with util.sync_http_errors():
             volume_id_or_false, error = lvol_controller.add_lvol_ha(
                 name=data.name,
@@ -127,7 +136,7 @@ def add(
                 ha_type=data.ha_type if data.ha_type is not None else 'default',
                 use_comp=False,
                 distr_vuid=0,
-                lvol_priority_class=data.priority_class,
+                lvol_priority_class=priority_class,
                 namespaced=data.namespaced,
                 pvc_name=data.pvc_name,
                 ndcs=data.ndcs,

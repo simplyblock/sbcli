@@ -25,6 +25,7 @@ import pytest
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import (
     consistency_group_controller,
+    replication_delta,
     snapshot_controller,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -417,7 +418,10 @@ class TestGuards:
         publish._volume(db, cluster, owner, pool, active_site="")   # does not replicate
         caplog.set_level(logging.INFO)
 
-        with patch.object(snapshot_controller, "add", return_value=("snap-1", None)) as add:
+        # the write counts a replication snapshot is bracketed with are RPCs
+        # of their own, outside what this test is about
+        with patch.object(snapshot_controller, "add", return_value=("snap-1", None)) as add, \
+                patch.object(replication_delta, "local_write_counts", return_value={}):
             _tick(cluster)
 
         # today's path: straight into the snapshot, which does its own lookup

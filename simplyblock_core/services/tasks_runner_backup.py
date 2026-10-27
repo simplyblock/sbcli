@@ -16,9 +16,10 @@ from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import device as backup_device
+from simplyblock_core.controllers.backup import group_backup
 from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.models.backup import Backup
+from simplyblock_core.models.backup import Backup, GroupBackup
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -413,10 +414,62 @@ def _run_merge(task):
     raise TaskDefer("Merge in progress")
 
 
+def _run_group_backup_commit(task):
+    """Commit a consistency-group backup once its members are done.
+
+    Does no data-plane RPC. It watches the member backups -- which the FN_BACKUP
+    runner drives independently -- and publishes the group manifest when every
+    one has completed, the all-or-nothing barrier. It defers while
+    any member is still in flight, aborts if a member failed, and treats a
+    manifest-publish failure as retryable S3 trouble rather than a group failure.
+    """
+    group_backup_id = task.function_params.get("group_backup_id")
+    if not group_backup_id:
+        raise TaskAbort("Missing group_backup_id")
+
+    try:
+        state = group_backup.try_commit_group_backup(group_backup_id)
+    except (ManifestError, PreconditionError) as e:
+        raise TaskRetry(f"Could not publish group manifest: {e}")
+
+    if state == group_backup.CommitState.PENDING:
+        raise TaskDefer("Group backup members still in flight")
+    if state == group_backup.CommitState.FAILED:
+        raise TaskAbort("Group backup failed: a member backup did not complete")
+
+    set_result(task, "Group backup completed")
+
+
+def _run_group_backup_delete(task):
+    """Retire a deleting group backup's members, then remove its manifest and
+    record.
+
+    Does no data-plane RPC of its own: a member's merge is its own
+    FN_BACKUP_MERGE task, which this waits on. Defers while a member is still
+    being retired, and treats a manifest or member failure as retryable; a task
+    that ends unfinished settles the group backup in :func:`finalize_resource`.
+    """
+    group_backup_id = task.function_params.get("group_backup_id")
+    if not group_backup_id:
+        raise TaskAbort("Missing group_backup_id")
+
+    try:
+        state = group_backup.advance_group_backup_delete(group_backup_id)
+    except (ManifestError, PreconditionError) as e:
+        raise TaskRetry(f"Could not finish deleting the group backup: {e}")
+
+    if state == group_backup.DeleteState.PENDING:
+        raise TaskDefer("Group backup members still being retired")
+
+    set_result(task, "Group backup deleted")
+
+
 _HANDLERS = {
     JobSchedule.FN_BACKUP: _run_backup,
     JobSchedule.FN_BACKUP_RESTORE: _run_restore,
     JobSchedule.FN_BACKUP_MERGE: _run_merge,
+    JobSchedule.FN_GROUP_BACKUP_COMMIT: _run_group_backup_commit,
+    JobSchedule.FN_GROUP_BACKUP_DELETE: _run_group_backup_delete,
 }
 
 
@@ -487,6 +540,32 @@ def finalize_resource(task):
             old_backup.status = Backup.STATUS_COMPLETED
             old_backup.write_to_db()
 
+    elif task.function_name == JobSchedule.FN_GROUP_BACKUP_COMMIT:
+        group_backup_id = task.function_params.get("group_backup_id")
+        if not group_backup_id:
+            return
+        try:
+            gb = db.get_group_backup_by_id(group_backup_id)
+        except KeyError:
+            return
+        # The commit task ended (timeout, retry ceiling, abort, cancellation)
+        # while the group was still unresolved: fail it as a unit. A member
+        # backup that is still running is the FN_BACKUP runner's to terminate;
+        # this only closes the group record so nothing reads it as in progress
+        # forever.
+        if gb.status in (GroupBackup.STATUS_PENDING, GroupBackup.STATUS_IN_PROGRESS):
+            gb.status = GroupBackup.STATUS_FAILED
+            gb.error_message = reason
+            gb.write_to_db()
+
+    elif task.function_name == JobSchedule.FN_GROUP_BACKUP_DELETE:
+        group_backup_id = task.function_params.get("group_backup_id")
+        if not group_backup_id:
+            return
+        # Restored if no member was touched, marked broken if one was; a no-op
+        # once the delete finished and the record is gone.
+        group_backup.abandon_group_backup_delete(group_backup_id, reason)
+
 
 SPEC = RunnerSpec(
     name="tasks-runner-backup",
@@ -503,7 +582,8 @@ SPEC = RunnerSpec(
 #: "max retry reached (8/8)" and would end any other task older than the
 #: backup timeout (2026-09-29).
 BACKUP_FUNCTIONS = (JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE,
-                    JobSchedule.FN_BACKUP_MERGE)
+                    JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_GROUP_BACKUP_COMMIT,
+                    JobSchedule.FN_GROUP_BACKUP_DELETE)
 
 
 def main():

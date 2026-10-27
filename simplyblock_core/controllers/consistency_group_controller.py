@@ -55,6 +55,11 @@ class ConsistencyGroupError(Exception):
     pass
 
 
+class IncompleteGenerationError(ConsistencyGroupError):
+    """A generation lacks an online snapshot of a volume that was a member at
+    that sequence."""
+
+
 # --------------------------------------------------------------------------- #
 # Group lifecycle (driven by the policy controller)
 # --------------------------------------------------------------------------- #
@@ -97,14 +102,34 @@ def delete_group(group):
     fail-back could resolve no members.
 
     Raises ConsistencyGroupError when the group still has an open member.
+
+    An open member whose volume record no longer exists is dangling, not live:
+    a volume that joined through :func:`add_member_to_group` alone carried no
+    ``group_id``, so its deletion could not close its epoch, and the entry
+    outlived the volume (restored members, live 2026-10-20: "still has 3
+    member(s)" for three volumes long gone). Dangling entries do not hold the
+    group; they are dropped with it.
     """
     open_members = [lid for lid, m in (group.members or {}).items()
                     if m.get("removed_seq", 0) == 0]
-    if open_members:
+    live, dangling = [], []
+    for lid in open_members:
+        try:
+            db.get_lvol_by_id(lid)
+        except KeyError:
+            dangling.append(lid)
+        else:
+            live.append(lid)
+    if live:
         raise ConsistencyGroupError(
             f"consistency group {group.group_name or group.uuid[:8]} still has "
-            f"{len(open_members)} member(s); detach or hand them off before "
+            f"{len(live)} member(s); detach or hand them off before "
             f"deleting it")
+    if dangling:
+        logger.warning("Consistency group %s (%s): %d open member(s) have no volume "
+                       "record any more (%s); dropping them with the group",
+                       group.uuid[:8], group.group_name or "-", len(dangling),
+                       ", ".join(d[:8] for d in dangling))
     group.remove(db.kv_store)
     logger.info("Deleted consistency group %s (%s)", group.uuid[:8],
                 group.group_name or "-")
@@ -353,6 +378,39 @@ def _reset_generation_if_emptied(group, members):
     return {}
 
 
+def _update_group(group, mutate):
+    """Apply ``mutate`` to the group's record as one read-modify-write.
+
+    Every writer of a group record used to ``read(); change; write_to_db()``,
+    and the write is the WHOLE record, so two writers racing on one group lose
+    one of the changes. A relocate's Disable (``detach_group_policy``) reads
+    the group, then spends seconds stopping each member, while the fail-back
+    promote on the peer deletes the demoted predecessors and ``delete_lvol``
+    closes each one's epoch. The detach's stale write reopened the first
+    deleted member's epoch, the second close then no longer emptied the group,
+    and the next fail-over's resync failed the deleted member back for hours
+    ("LVol … not found", run 20261020-1920-ebs, Gitea test 8).
+
+    ``db.atomic_update`` re-reads the record inside the transaction and
+    replays ``mutate`` on conflict, so ``mutate`` must only change the object
+    it is handed: no I/O, no logging. Returns the record as written, or
+    ``None`` when it no longer exists (nothing is written then: a deleted
+    group has no membership to close and no policy to unlink). A ``db`` with
+    no store or no ``atomic_update`` (the unit-tier fakes) takes the plain
+    write, as before.
+    """
+    updater = getattr(db, "atomic_update", None)
+    if updater is None or getattr(db, "kv_store", None) is None:
+        mutate(group)
+        group.write_to_db(db.kv_store)
+        return group
+    fresh = updater(group, mutate)
+    if fresh is None:
+        logger.warning("Consistency group %s no longer exists; its update is dropped",
+                       group.uuid[:8])
+    return fresh
+
+
 def remove_member_from_group(group, lvol_id):
     """Close the member's epoch at the current generation (detach semantics).
 
@@ -360,13 +418,22 @@ def remove_member_from_group(group, lvol_id):
     untouched (design §8.2), only the epoch's ``removed_seq`` is set -- until the
     member is the last one out, at which point the group is reset to generation 0
     (see :func:`_reset_generation_if_emptied`).
+
+    The close is computed on the record as stored, not on ``group`` as handed
+    in (see :func:`_update_group`): the caller's copy may predate a concurrent
+    policy detach or another member's close.
     """
     if group is None:
         return
-    members = dict(group.members or {})
-    entry = members.get(lvol_id)
-    if entry and entry.get("removed_seq", 0) == 0:
-        if group.last_group_seq < entry.get("joined_seq", 1):
+    outcome: dict = {}
+
+    def _close(fresh):
+        outcome.clear()
+        members = dict(fresh.members or {})
+        entry = members.get(lvol_id)
+        if not entry or entry.get("removed_seq", 0) != 0:
+            return False
+        if fresh.last_group_seq < entry.get("joined_seq", 1):
             # No generation ever contained this member, so there is no history
             # to preserve, and a closed-empty window is unrepresentable:
             # removed_seq == 0 is the open-epoch sentinel, so stamping
@@ -374,19 +441,30 @@ def remove_member_from_group(group, lvol_id):
             # open and the member would count as one forever (2026-09-11: a
             # restored group at generation 0 kept every deleted member).
             del members[lvol_id]
-            group.members = _reset_generation_if_emptied(group, members)
-            group.write_to_db(db.kv_store)
-            logger.info("Volume %s left consistency group %s before any "
-                        "generation contained it; membership entry dropped",
-                        lvol_id, group.uuid[:8])
-            return
-        entry = dict(entry)
-        entry["removed_seq"] = group.last_group_seq
-        members[lvol_id] = entry
+            outcome["dropped"] = True
+        else:
+            entry = dict(entry)
+            entry["removed_seq"] = fresh.last_group_seq
+            members[lvol_id] = entry
+            outcome["removed_seq"] = entry["removed_seq"]
+        if not any(m.get("removed_seq", 0) == 0 for m in members.values()):
+            outcome["emptied"] = fresh.last_group_seq
+            members = {}
+        fresh.members = members
+        return True
+
+    if _update_group(group, _close) is None or not outcome:
+        return
+    if outcome.get("dropped"):
+        logger.info("Volume %s left consistency group %s before any "
+                    "generation contained it; membership entry dropped",
+                    lvol_id, group.uuid[:8])
+    else:
         logger.info("Volume %s left consistency group %s (included up to "
-                    "generation %d)", lvol_id, group.uuid[:8], entry["removed_seq"])
-        group.members = _reset_generation_if_emptied(group, members)
-        group.write_to_db(db.kv_store)
+                    "generation %d)", lvol_id, group.uuid[:8], outcome["removed_seq"])
+    if "emptied" in outcome:
+        logger.info("Consistency group %s has no live members; closed epochs cleared, "
+                    "generation counter kept at %d", group.uuid[:8], outcome["emptied"])
 
 
 def remove_member(policy_id, lvol_id):
@@ -585,9 +663,10 @@ def attach_group_policy(group, policy_id):
         raise ConsistencyGroupError(f"replication policy {policy_id} not found")
     target = db.get_replication_target_by_id(pol.target_id)
 
-    group = db.get_consistency_group_by_id(group.get_id())
-    group.policy_id = pol.get_id()
-    group.write_to_db(db.kv_store)
+    policy_id = pol.get_id()
+    group = _update_group(group, lambda g: setattr(g, "policy_id", policy_id))
+    if group is None:
+        raise ConsistencyGroupError(f"consistency group {policy_id} no longer exists")
 
     open_members = [m for m in list_members(group) if not m.get("removed_seq")]
     for member in open_members:
@@ -683,8 +762,10 @@ def detach_group_policy(group):
         if member.get("removed_seq"):
             continue
         replication_policy_controller.stop_member_replication(member["lvol_id"])
-    group.policy_id = ""
-    group.write_to_db(db.kv_store)
+    # Stopping the members takes seconds, and a member may leave the group
+    # meanwhile (a fail-back promote deleting it): unlink the policy on the
+    # record as it is NOW, never by writing the copy read above back.
+    group = _update_group(group, lambda g: setattr(g, "policy_id", "")) or group
     logger.info("Consistency group %s detached from its replication policy",
                 group.uuid[:8])
     return group
@@ -898,20 +979,14 @@ def demote_group(group):
                     lvol_controller.replication_failback(m.get_id())
 
         group = db.get_consistency_group_by_id(group.get_id())
-        created_ids, err = create_group_snapshot_for_group(group)
+        group_seq, err = create_group_snapshot_for_group(group)
         if err:
             return {"demoted": False, "error": err,
                     "members": [{"lvol_id": m.get_id(), "demoted": False, "error": err}
                                 for m in members]}
 
-        by_lvol = {}
-        for sid in created_ids or []:
-            try:
-                s = db.get_snapshot_by_id(sid)
-            except KeyError:
-                continue
-            if s.lvol:
-                by_lvol[s.lvol.get_id()] = sid
+        by_lvol = {s.lvol.get_id(): s.get_id()
+                   for s in generation_snapshots(group, group_seq) if s.lvol}
         for m in members:
             sid = by_lvol.get(m.get_id())
             if not sid:
@@ -976,10 +1051,13 @@ def failback_group(group, source_cluster_id=None):
                           "to fail back: the resync was addressed to the retired group, "
                           "resolve to the live peer group first")}
 
+    # Only the members that exist as volumes: an open entry whose record is
+    # gone (a stale epoch, run 20261020-1920-ebs) has nothing to fail back and
+    # must not fail the live members' re-protect with it.
     members = []
     configured = True
-    for member in list_members(group):
-        lvol_id = member["lvol_id"]
+    for lvol in member_lvols:
+        lvol_id = lvol.get_id()
         result = lvol_controller.replication_failback(lvol_id, source_cluster_id=source_cluster_id)
         if isinstance(result, tuple) or not result:
             configured = False
@@ -1042,14 +1120,38 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
     return create_group_snapshot_for_group(group, snap_type=snap_type, lock=lock)
 
 
-def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, lock=True):
+def generation_for_request(group, request_id):
+    """The sequence of the generation taken with ``request_id``.
+
+    None when no generation of this group carries the id, and always None for
+    an empty id, so a take without an id never matches one.
+    """
+    if not request_id:
+        return None
+    return next((s.group_seq for s in _group_snapshots(group)
+                 if s.group_request_id == request_id), None)
+
+
+def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, lock=True,
+                                    request_id=""):
     """Take ONE crash-consistent snapshot of every group member.
 
-    Returns (list_of_snapshot_ids, None) or (None, error). All-or-nothing:
+    Returns (group_seq, None) or (None, error): the generation is what was
+    taken, and generation_snapshots(group, group_seq) its member snapshots.
+    All-or-nothing:
     a failure anywhere rolls back every snapshot bdev of this tick (SPDK
     already GC'd if the failure was inside the RPC; registration/record
     failures are rolled back here) and the generation counter does not move.
+
+    ``request_id`` makes the take idempotent for a caller that may retry it
+    after losing the answer: it is stamped on every member snapshot, and a take
+    with an id some generation of this group already carries returns that
+    generation without taking another.
     """
+    taken = generation_for_request(group, request_id)
+    if taken is not None:
+        return taken, None
+
     members, precheck_err = _precheck_members(group)
     if precheck_err is not None:
         return None, precheck_err
@@ -1112,6 +1214,11 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
     # so a take that just released it is seen.
     with object_mutation_lock(pool.cluster_id, group.get_id(), enabled=lock):
         group = db.get_consistency_group_by_id(group.get_id())
+        # Checked again under the lock: a concurrent take with the same id may
+        # have committed between the check above and acquiring it.
+        taken = generation_for_request(group, request_id)
+        if taken is not None:
+            return taken, None
         group_seq = group.last_group_seq + 1
         now_ts = int(time.time())
         plan = []
@@ -1227,6 +1334,7 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
             snap.snap_type = snap_type
             snap.group_id = group.get_id()
             snap.group_seq = group_seq
+            snap.group_request_id = request_id
             snap.create_dt = str(datetime.now())
             snap.write_to_db(db.kv_store)
 
@@ -1257,7 +1365,7 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 
         logger.info("Consistency group %s: generation %d complete (%d snapshots)",
                     group.uuid[:8], group_seq, len(created_ids))
-        return created_ids, None
+        return group_seq, None
 
 
 # --------------------------------------------------------------------------- #
@@ -1265,9 +1373,11 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 # --------------------------------------------------------------------------- #
 
 def _group_snapshots(group):
-    """Every member snapshot that belongs to this group, any generation."""
-    return [s for s in db.get_snapshots(group.cluster_id)
-            if s.group_id == group.get_id() and s.group_seq]
+    """Every member snapshot that belongs to this group, any generation, on the
+    group's own cluster. A replicated copy on the peer cluster carries the same
+    group id and is not one of this group's snapshots."""
+    return [s for s in db.get_group_snapshots(group.get_id())
+            if s.group_seq and s.cluster_id == group.cluster_id]
 
 
 def list_members(group):
@@ -1295,6 +1405,40 @@ def list_members(group):
             "online": online,
         })
     return rows
+
+
+def generation_snapshots(group, seq):
+    """The member snapshots of generation ``seq`` of ``group``, in any status.
+
+    The one lookup of a generation's snapshots. It does not check that the
+    generation is whole; :func:`resolve_complete_generation` does.
+    """
+    return [s for s in _group_snapshots(group) if s.group_seq == seq]
+
+
+def resolve_complete_generation(group, seq):
+    """Resolve generation ``seq`` of ``group`` to its member snapshots, requiring
+    it whole: an ONLINE snapshot of every volume that was a member at ``seq``
+    (the membership epochs, ``included_in_seq``). Returns those snapshots.
+
+    Raises:
+        ConsistencyGroupError: the generation has no member snapshots.
+        IncompleteGenerationError: a member at ``seq`` has no online snapshot in
+            it; the error names the missing volumes.
+    """
+    snaps = generation_snapshots(group, seq)
+    if not snaps:
+        raise ConsistencyGroupError(
+            f"consistency group {group.get_id()} has no member snapshots at generation {seq}")
+    online = [s for s in snaps if s.status == SnapShot.STATUS_ONLINE and s.lvol]
+    present = {s.lvol.get_id() for s in online}
+    expected = {lvol_id for lvol_id in (group.members or {}) if group.included_in_seq(lvol_id, seq)}
+    missing = sorted(expected - present)
+    if missing:
+        raise IncompleteGenerationError(
+            f"generation {seq} of consistency group {group.get_id()} has no online "
+            f"snapshot of member(s) {', '.join(missing)}")
+    return online
 
 
 def list_generations(group):
@@ -1339,7 +1483,7 @@ def delete_generation(group, seq):
         replication_recovery_points,
         snapshot_controller,
     )
-    targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
+    targets = generation_snapshots(group, seq)
     if not targets:
         return None, f"generation {seq} of group {group.uuid[:8]} not found"
     newest_seq, _, _ = replication_recovery_points.newest_group_generation(group.get_id(), db=db)
@@ -1369,7 +1513,7 @@ def clone_generation(group, seq, into_name=None):
     :func:`add_member_to_group`. Returns (new_lvol_ids, None) or (None, error).
     """
     from simplyblock_core.controllers import snapshot_controller
-    targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
+    targets = generation_snapshots(group, seq)
     if not targets:
         return None, f"generation {seq} of group {group.uuid[:8]} not found"
     new_group = ensure_group(group.cluster_id, into_name) if into_name else None

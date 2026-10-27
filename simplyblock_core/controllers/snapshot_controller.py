@@ -1861,6 +1861,15 @@ def list_replication_tasks(cluster_id):
     return utils.print_table(data)
 
 
+def _has_live_clone(snapshot_uuid):
+    """True when a volume that is not itself being deleted is cloned from
+    *snapshot_uuid* (the same rule as delete's soft-delete check)."""
+    for lvol in db_controller.get_mini_lvols():
+        if lvol.cloned_from_snap == snapshot_uuid and lvol.status != LVol.STATUS_IN_DELETION:
+            return True
+    return False
+
+
 def delete_replicated(snapshot_id):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
@@ -1870,6 +1879,17 @@ def delete_replicated(snapshot_id):
 
     try:
         target_replicated_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        # A failed-over volume is a clone of its replicated snapshot, and the
+        # replication back home chains from it: the copy must outlive its
+        # source here. Deleting it soft-deletes it (it has clones), and every
+        # reverse replication then stops on "chain ancestor ... is
+        # mid-deletion" (run 20261021-1331-ebs: the re-protect after a
+        # failover, when the healed origin's stop deleted its source half
+        # right after keeping the copy for its clone).
+        if _has_live_clone(target_replicated_snap.uuid):
+            logger.info("Keeping replicated snapshot %s: a volume is cloned from it "
+                        "(its source %s is being deleted)", target_replicated_snap.uuid, snap.uuid)
+            return True
         logger.info("Deleting replicated snapshot %s", target_replicated_snap.uuid)
         ret = delete(target_replicated_snap.uuid)
         if not ret:

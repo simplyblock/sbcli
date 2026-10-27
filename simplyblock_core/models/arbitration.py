@@ -21,6 +21,13 @@ LVS_HOLDING = "holding"
 LVS_SOLO = "solo"
 LVS_FENCED = "fenced"
 
+#: Host fence states (docs/design/two-node-kubernetes-fencing.md, section 3.2).
+HF_REVOKING = "revoking"
+HF_REVOKED = "revoked"
+HF_RELEASABLE = "releasable"
+HF_RESTORING = "restoring"
+HF_UNAVAILABLE = "unavailable"   # no client host NQN known for the node
+
 
 class ClusterArbitration(BaseModel):
     cluster_id: str = ""
@@ -74,6 +81,15 @@ class ClusterArbitration(BaseModel):
     #: bdev_lvol_set_leader restores leadership and the primary's ANA):
     #: {lvs_name: {"node": id, "epoch": int, "at": ms, "ok": bool, "why": str}}.
     leadership_restored: dict = default_factory(dict)
+    #: Host fences (docs/design/two-node-kubernetes-fencing.md, section 3.2):
+    #: {fenced node id: {"state": revoking|revoked|releasable|restoring|unavailable,
+    #: "on": winner id, "host_nqns": [str], "epoch": int, "since": ms,
+    #: "revoked_at": ms, "reasserted_at": ms, "release_requested": bool,
+    #: "subsystems": {nqn: {"mode": "any"|"list", "added": [host nqns],
+    #: "removed": [host nqns]}},
+    #: "error": str}}. The operator sets StorageFenced on a node whose entry is
+    #: ``revoked``; an entry is removed once its release is done.
+    host_fences: dict = default_factory(dict)
 
     def get_id(self):
         return self.cluster_id

@@ -24,7 +24,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCRemoteError
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
     TaskAbort,
@@ -200,8 +200,14 @@ def _run_sync_op(task):
         # size after the fan-out, so this always applies the latest
         # target even if the lvol was resized again meanwhile.
         size_in_mib = utils.convert_size(lvol.size, 'MiB')
-        if not node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
-                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib):
+        try:
+            ok = node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+        except RPCException as e:
+            # Uncounted, like a falsy result: a raise used to count against
+            # max_retry and the replica was left smaller than the leader.
+            raise TaskDefer(f"resize RPC failed, retrying: {e}") from e
+        if not ok:
             raise TaskDefer("resize RPC failed, retrying")
         set_result(task, f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB")
     else:

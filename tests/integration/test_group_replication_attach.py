@@ -141,14 +141,15 @@ def test_demote_group_ship_home_takes_ONE_group_snapshot(db, monkeypatch):
 
     def _grp_snap(g, **k):
         grp_calls.append(g.get_id())
-        ids = []
         for mid in ("v1", "v2"):
             s = SnapShot()
             s.uuid = f"snap-{mid}"
+            s.cluster_id = g.cluster_id
             s.lvol = db.get_lvol_by_id(mid)
+            s.group_id = g.get_id()
+            s.group_seq = 1
             s.write_to_db(db.kv_store)
-            ids.append(s.uuid)
-        return ids, None
+        return 1, None
     monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _grp_snap)
 
     result = cgc.demote_group(group)
@@ -169,7 +170,7 @@ def test_demote_group_superseded_source_does_not_take_a_group_snapshot(db, monke
     monkeypatch.setattr(cgc, "_members_are_superseded_source", lambda members: True)
     grp_calls = []
     monkeypatch.setattr(cgc, "create_group_snapshot_for_group",
-                        lambda g, **k: grp_calls.append(g) or ([], None))
+                        lambda g, **k: grp_calls.append(g) or (1, None))
     monkeypatch.setattr(lc, "demote_lvol", lambda lvol_id: {"demoted": True})
 
     result = cgc.demote_group(group)
@@ -301,3 +302,81 @@ def test_failback_group_refuses_a_group_with_no_live_members(db, monkeypatch):
     assert result["configured"] is False
     assert result["members"] == []
     assert "no live members" in result["error"]
+
+
+def test_detach_keeps_a_member_closed_by_a_concurrent_delete(db, monkeypatch):
+    # Regression (run 20261020-1920-ebs, Gitea test 8): a relocate's Disable
+    # (detach_group_policy) reads the group, spends seconds stopping each
+    # member, then wrote the WHOLE stale record back. The fail-back promote on
+    # the peer deletes the demoted predecessors meanwhile, and delete_lvol
+    # closes each one's epoch on a fresh read. The detach's stale write undid
+    # the first close: the deleted member read as open again, the second
+    # close no longer emptied the group, and the next fail-over's resync
+    # tried to fail the deleted member back ("LVol … not found", 858 times).
+    policy = _seed_policy(db)
+    group = _seed_group(db, ["v1", "v2"])
+    group.policy_id = policy.get_id()
+    group.write_to_db(db.kv_store)
+
+    def _stop(lvol_id):
+        # The concurrent delete lands while the detach is stopping members.
+        if lvol_id == "v1":
+            fresh = db.get_consistency_group_by_id(group.get_id())
+            cgc.remove_member_from_group(fresh, "v1")
+
+    monkeypatch.setattr(rpc, "stop_member_replication", _stop)
+
+    cgc.detach_group_policy(group)
+
+    reloaded = db.get_consistency_group_by_id(group.get_id())
+    assert reloaded.policy_id == ""
+    assert reloaded.members["v1"]["removed_seq"] == 2, (
+        f"the detach reopened the deleted member's epoch: {reloaded.members}")
+    assert [m["lvol_id"] for m in cgc.list_members(reloaded)] == ["v2"]
+
+
+def test_remove_member_keeps_a_concurrent_detach(db):
+    # The other direction of the same race: a member leaves on a group object
+    # read before a detach unlinked the policy. The close must not write the
+    # policy pointer back.
+    policy = _seed_policy(db)
+    group = _seed_group(db, ["v1", "v2"])
+    group.policy_id = policy.get_id()
+    group.write_to_db(db.kv_store)
+    stale = db.get_consistency_group_by_id(group.get_id())
+
+    detached = db.get_consistency_group_by_id(group.get_id())
+    detached.policy_id = ""
+    detached.write_to_db(db.kv_store)
+
+    cgc.remove_member_from_group(stale, "v1")
+
+    reloaded = db.get_consistency_group_by_id(group.get_id())
+    assert reloaded.policy_id == "", "the member's close wrote the detached policy back"
+    assert reloaded.members["v1"]["removed_seq"] == 2
+
+
+def test_failback_group_skips_a_member_whose_volume_record_is_gone(db, monkeypatch):
+    # Defense in depth for the same incident: a membership entry whose volume
+    # record no longer exists cannot be failed back, and must not fail the
+    # live members' fail-back with it. The first pass already drops such
+    # entries when it checks for live members; the second pass did not.
+    from simplyblock_core.controllers import lvol_controller as lc
+    group = _seed_group(db, ["gone", "live"])
+    _seed_lvol(db, "live", NODE, LVS, group_id=group.get_id())
+    calls = []
+
+    def _failback(lvol_id, source_cluster_id=None):
+        calls.append(lvol_id)
+        try:
+            db.get_lvol_by_id(lvol_id)
+        except KeyError:
+            return False
+        return True
+
+    monkeypatch.setattr(lc, "replication_failback", _failback)
+    result = cgc.failback_group(group, source_cluster_id="grp-attach-peer-1")
+
+    assert calls == ["live"], calls
+    assert result["configured"] is True, result
+    assert [m["lvol_id"] for m in result["members"]] == ["live"]

@@ -26,6 +26,11 @@ from simplyblock_core.models.arbitration import (
     ARB_HEALING,
     ARB_PARTITIONED,
     ARB_STEADY,
+    HF_RELEASABLE,
+    HF_RESTORING,
+    HF_REVOKED,
+    HF_REVOKING,
+    HF_UNAVAILABLE,
     LVS_FENCED,
     LVS_HOLDING,
     LVS_NORMAL,
@@ -112,7 +117,9 @@ class Arbiter:
                  devices_ok: Callable | None = None,
                  rebuild_task_errors: Callable | None = None,
                  restore_leadership: Callable | None = None,
-                 notify: Callable | None = None):
+                 notify: Callable | None = None,
+                 host_fence_revoke: Callable | None = None,
+                 host_fence_release: Callable | None = None):
         self.db = db
         self.clock = clock
         self.readmit = readmit or default_readmit
@@ -161,6 +168,13 @@ class Arbiter:
         self.lead_tried_at: dict = {}
         #: (cluster_id, node, code, message) -> None: cluster event log
         self.notify = notify or default_notify
+        #: (db, winner, loser host nqn) -> {nqn: change}: revoke the loser's
+        #: client host on the winner (kubernetes-fencing contract, 3.2)
+        self.host_fence_revoke = host_fence_revoke or default_host_fence_revoke
+        #: (db, winner, subsystems, loser host nqn) -> None: undo a revocation
+        self.host_fence_release = host_fence_release or default_host_fence_release
+        #: fenced node id -> ms of the last revocation or release attempt
+        self.host_fence_tried_at: dict = {}
         #: node_id -> ms when its rebuild was first seen failing on unavailable devices
         self.rebuild_stuck_since: dict = {}
         #: node_id -> NodeSignals
@@ -213,6 +227,8 @@ class Arbiter:
     def eligible(self, cluster) -> list | None:
         """The two member nodes if the cluster is arbitrated, else None."""
         if not getattr(cluster, "two_node_arbitration", False):
+            return None
+        if not witness_authority(cluster):
             return None
         nodes = self.members(cluster.get_id())
         return nodes if len(nodes) == 2 else None
@@ -289,7 +305,7 @@ class Arbiter:
             planned_loss=nid in (rec.planned_loss or {}),
         )
 
-    def snapshot(self, rec: ClusterArbitration, nodes: list) -> dec.Snapshot:
+    def snapshot(self, rec: ClusterArbitration, nodes: list, cluster=None) -> dec.Snapshot:
         a, b = (self.node_view(n, rec) for n in nodes)
         cid = rec.cluster_id
         return dec.Snapshot(
@@ -302,6 +318,10 @@ class Arbiter:
             winner=(rec.verdicts[-1].get("winner", "")
                     if rec.state == ARB_DEGRADED and rec.verdicts else ""),
             stale_nodes=tuple(sorted(rec.rebuild or {})),
+            # kubernetes-fencing contract, 3.3: with host fencing a partition
+            # has a winner; every other cluster keeps fence_both.
+            partition_policy=(dec.PARTITION_WINNER if host_fencing_on(cluster)
+                              else dec.PARTITION_FENCE_BOTH),
         )
 
     # ---- node configuration and leases ---------------------------------------
@@ -389,6 +409,8 @@ class Arbiter:
                     self._apply_unfence(rec, nodes, node, ctx, result)
             elif kind == "leadership":
                 self._apply_leadership(key[1], ctx, result)
+            elif kind in ("hostfence", "hostrelease"):
+                self._apply_host_fence(rec, kind, key[1], ctx, result)
 
     def _apply_configure(self, nid: str, ctx: dict, result: tuple) -> None:
         kind, value = result
@@ -674,6 +696,7 @@ class Arbiter:
                      "fence": {str(k): v for k, v in verdict.fence.items()},
                      "fence_all": {str(k): list(v) for k, v in verdict.fence_all.items()},
                      "reason": verdict.reason,
+                     "host_fence": bool(verdict.host_fence),
                      "from_state": snap.state,
                      "signals": {"a": vars(snap.a), "b": vars(snap.b)}},
                     constants.TWO_NODE_VERDICT_HISTORY)
@@ -1308,6 +1331,195 @@ class Arbiter:
         self.db.atomic_update(rec, put)
         logger.error("Cluster %s: %s", rec.cluster_id, verdict.reason)
 
+    # ---- host fencing (kubernetes-fencing contract, section 3.2) -------------
+
+    def progress_host_fence(self, rec: ClusterArbitration, nodes: list) -> None:
+        """Drive every host fence one step: arm it on an eligible verdict,
+        revoke and re-assert on the winner, mark it releasable once the storage
+        no longer needs it, and release it once the operator asked.
+
+        Called only for clusters with ``two_node_host_fencing``. Node RPCs run
+        on the work pool; this method only reads and writes the record."""
+        now = self.clock()
+        by_id = {n.get_id(): n for n in nodes}
+        fences = {k: dict(v) for k, v in (rec.host_fences or {}).items()}
+        last = rec.verdicts[-1] if rec.verdicts else {}
+        loser, winner = last.get("loser", ""), last.get("winner", "")
+        in_force = (rec.state == ARB_DEGRADED and bool(last.get("host_fence"))
+                    and bool(loser) and bool(winner))
+        changed = False
+
+        if in_force and loser in by_id:
+            entry = fences.get(loser)
+            # Only once the winner itself has lost the peer: a precautionary
+            # grant (the peer unreachable from the hub only, its JM still
+            # healthy on the winner) never fences a host whose VMs still run.
+            lost = (self.signals.get(winner) or ev.NodeSignals()).reports_peer_unhealthy()
+            current = client_hosts(by_id[loser])
+            winner_hosts = client_hosts(by_id[winner]) if winner in by_id else []
+            if lost and (entry is None or entry.get("on") != winner
+                         or entry.get("state") == HF_UNAVAILABLE):
+                fences[loser] = self._arm_host_fence(rec, by_id[loser], winner, winner_hosts,
+                                                     entry, now)
+                changed = entry is None or fences[loser] != entry
+            elif (entry is not None and entry.get("state") in (HF_REVOKING, HF_REVOKED)
+                  and set(current) - set(entry.get("host_nqns") or [])
+                  and not set(current) & set(winner_hosts)):
+                # The operator reported another identity of the host: it is not
+                # fenced until that one is revoked too.
+                entry.update(host_nqns=sorted(set(current) | set(entry.get("host_nqns") or [])),
+                             state=HF_REVOKING)
+                changed = True
+
+        for nid, entry in list(fences.items()):
+            state = entry.get("state")
+            needed = in_force and nid == loser and entry.get("on") == winner
+            if state == HF_UNAVAILABLE and not needed:
+                del fences[nid]
+                changed = True
+            elif state == HF_REVOKED and not needed and self._host_back(nid):
+                entry.update(state=HF_RELEASABLE, releasable_at=now)
+                if nid in by_id:
+                    self.notify(rec.cluster_id, by_id[nid], "TWO_NODE_HOST_FENCE_RELEASABLE",
+                                "Host fence of %s may be released (storage healed)" % nid)
+                changed = True
+            elif state in (HF_RELEASABLE, HF_RESTORING) and needed:
+                # Lost again before the release ran: the fence stays.
+                entry.update(state=HF_REVOKED, release_requested=False)
+                changed = True
+        if changed:
+            rec = self._put_host_fences(rec, fences)
+            fences = {k: dict(v) for k, v in (rec.host_fences or {}).items()}
+
+        for nid, entry in fences.items():
+            winner_node = by_id.get(entry.get("on", ""))
+            if winner_node is None:
+                continue
+            state = entry.get("state")
+            retry_ok = now - self.host_fence_tried_at.get(nid, 0) >= 1000
+            reassert = now - int(entry.get("reasserted_at") or 0) >= \
+                int(constants.TWO_NODE_HOST_FENCE_REASSERT_S) * 1000
+            hosts = list(entry.get("host_nqns") or [])
+            ctx = {"host_nqns": hosts, "node": by_id.get(nid)}
+            if retry_ok and (state == HF_REVOKING or (state == HF_REVOKED and reassert)):
+                if self._work(("hostfence", nid), ctx, self.host_fence_revoke, self.db,
+                              winner_node, hosts):
+                    self.host_fence_tried_at[nid] = now
+            elif retry_ok and state == HF_RESTORING:
+                if self._work(("hostrelease", nid), ctx, self.host_fence_release, self.db,
+                              winner_node, dict(entry.get("subsystems") or {})):
+                    self.host_fence_tried_at[nid] = now
+        self._drain_work(rec, nodes)
+
+    def _arm_host_fence(self, rec: ClusterArbitration, loser: StorageNode, winner: str,
+                        winner_hosts: list, old: dict | None, now: int) -> dict:
+        host_nqns = client_hosts(loser)
+        # A host NQN the winner reports too (a cloned image's kernel hostnqn, a
+        # wrong report) cannot tell the two hosts apart: revoking it would cut
+        # the survivor off, and leaving it would leave the loser in. Neither is
+        # a fence, so Kubernetes is not told to act (review on #1527).
+        shared = sorted(set(host_nqns) & set(winner_hosts))
+        why = ""
+        if not host_nqns:
+            why = "no client host NQN reported for the node"
+        elif shared:
+            why = "host NQNs shared with the winner %s: %s" % (winner, ", ".join(shared))
+        if why:
+            if not old or old.get("state") != HF_UNAVAILABLE or old.get("error") != why:
+                self.notify(rec.cluster_id, loser, "TWO_NODE_HOST_FENCE_UNAVAILABLE",
+                            "Host of %s not fenced, Kubernetes not asked to remediate it: %s"
+                            % (loser.get_id(), why))
+            if old and old.get("state") == HF_UNAVAILABLE and old.get("error") == why:
+                return old
+            return {"state": HF_UNAVAILABLE, "on": winner, "host_nqns": [], "epoch": rec.epoch,
+                    "since": now, "error": why}
+        # A fence already in place on the same winner keeps what it changed,
+        # so its release still undoes every pass.
+        same = (old or {}).get("on") == winner
+        logger.warning("Host fence of %s (%s) on %s at epoch %s", loser.get_id(),
+                       ",".join(host_nqns), winner, rec.epoch)
+        return {"state": HF_REVOKING, "on": winner, "host_nqns": host_nqns, "epoch": rec.epoch,
+                "since": now, "revoked_at": 0, "reasserted_at": 0, "release_requested": False,
+                "subsystems": dict((old or {}).get("subsystems") or {}) if same else {},
+                "error": ""}
+
+    def _host_back(self, nid: str) -> bool:
+        """The fenced node serves again: reachable, not lost, and no LVS fenced
+        or holding (it went through the heal or the restart flow)."""
+        if not self.reachable.get(nid, False) or self.spdk_lost.get(nid):
+            return False
+        sig = self.signals.get(nid)
+        if sig is None or not sig.lvs_state:
+            return False
+        return not any(s in (LVS_FENCED, LVS_HOLDING) for s in sig.lvs_state.values())
+
+    def _put_host_fences(self, rec: ClusterArbitration, fences: dict) -> ClusterArbitration:
+        def put(fresh):
+            for nid, entry in fences.items():
+                # A release the API requested meanwhile is kept.
+                cur = (fresh.host_fences or {}).get(nid) or {}
+                if cur.get("release_requested") and entry.get("state") == HF_RELEASABLE:
+                    entry.update(release_requested=True, state=HF_RESTORING)
+            fresh.host_fences = fences
+        return self.db.atomic_update(rec, put)
+
+    def _apply_host_fence(self, rec: ClusterArbitration, kind: str, nid: str, ctx: dict,
+                          result: tuple) -> None:
+        """Bookkeeping of a revocation or release (decision thread)."""
+        status, value = result
+        now = self.clock()
+        fresh = self.db.get_cluster_arbitration(rec.cluster_id)
+        entry = dict((fresh.host_fences or {}).get(nid) or {})
+        if not entry or sorted(entry.get("host_nqns") or []) != sorted(ctx.get("host_nqns") or []):
+            return                                  # superseded meanwhile
+        release = kind == "hostrelease"
+        if status == "err":
+            logger.warning("Host fence %s of %s failed: %s",
+                           "release" if release else "revocation", nid, value)
+            entry["error"] = str(value)[:512]
+            self._put_one_host_fence(fresh, nid, entry)
+            return
+        if release:
+            if entry.get("state") != HF_RESTORING:
+                return
+
+            def drop(f):
+                f.host_fences = {k: v for k, v in (f.host_fences or {}).items() if k != nid}
+                f.record_verdict({"epoch": f.epoch, "at": now, "kind": "host_fence_released",
+                                  "winner": entry.get("on", ""), "loser": nid,
+                                  "reason": "the operator released the host fence"},
+                                 constants.TWO_NODE_VERDICT_HISTORY)
+            self.db.atomic_update(fresh, drop)
+            left_out = list(value or [])
+            note = ("; no longer authorized, left out: %s" % ", ".join(left_out)) if left_out else ""
+            logger.warning("Host fence of %s released on %s%s", nid, entry.get("on", ""), note)
+            if ctx.get("node") is not None:
+                self.notify(rec.cluster_id, ctx["node"], "TWO_NODE_HOST_FENCE_RELEASED",
+                            "Host fence of %s released on %s%s" % (nid, entry.get("on", ""), note))
+            return
+        if entry.get("state") not in (HF_REVOKING, HF_REVOKED):
+            return
+        subs = host_fence_merge(entry.get("subsystems") or {}, value or {})
+        first = not entry.get("revoked_at")
+        entry.update(state=HF_REVOKED, subsystems=subs, reasserted_at=now, error="")
+        if first:
+            entry["revoked_at"] = now
+        self._put_one_host_fence(fresh, nid, entry)
+        if first and ctx.get("node") is not None:
+            self.notify(rec.cluster_id, ctx["node"], "TWO_NODE_HOST_FENCED",
+                        "Host %s of node %s revoked on %s (%d subsystems); Kubernetes may "
+                        "remediate the node" % (",".join(entry.get("host_nqns") or []), nid,
+                                                entry.get("on"), len(subs)))
+
+    def _put_one_host_fence(self, rec: ClusterArbitration, nid: str, entry: dict) -> None:
+        def put(fresh):
+            fences = dict(fresh.host_fences or {})
+            if nid not in fences:
+                return False
+            fences[nid] = entry
+            fresh.host_fences = fences
+        self.db.atomic_update(rec, put)
+
     # ---- the loop -----------------------------------------------------------
 
     def arbitrated_clusters(self) -> list:
@@ -1320,8 +1532,10 @@ class Arbiter:
         now = self.clock()
         if now < self._idle_until_ms:
             return []
+        # Mode pacemaker (kubernetes-fencing contract, 4.2): the nodes follow
+        # Pacemaker's fence; the arbiter does not act on the cluster at all.
         clusters = [c for c in self.db.get_clusters()
-                    if getattr(c, "two_node_arbitration", False) is True]
+                    if getattr(c, "two_node_arbitration", False) is True and witness_authority(c)]
         self._idle_until_ms = 0 if clusters else now + int(constants.TWO_NODE_IDLE_RESCAN_S * 1000)
         return clusters
 
@@ -1357,11 +1571,11 @@ class Arbiter:
             nodes = self.eligible(cluster)
             if nodes:
                 try:
-                    self.tick_cluster(cluster.get_id(), nodes)
+                    self.tick_cluster(cluster.get_id(), nodes, cluster)
                 except Exception:                   # noqa: BLE001 - next tick retries
                     logger.exception("Arbitration tick failed for cluster %s", cluster.get_id())
 
-    def tick_cluster(self, cluster_id: str, nodes: list) -> dec.Verdict | None:
+    def tick_cluster(self, cluster_id: str, nodes: list, cluster=None) -> dec.Verdict | None:
         rec = self.record(cluster_id, nodes)
         self.consume_events(cluster_id)
         # The per-node view is reconciled from jc_ha_status before anything
@@ -1387,10 +1601,10 @@ class Arbiter:
                 self.undelivered.pop(cluster_id, None)
             return pending
 
-        snap = self.snapshot(rec, nodes)
+        snap = self.snapshot(rec, nodes, cluster)
         self._track_health(rec, snap)
         rec = self.db.get_cluster_arbitration(cluster_id)
-        snap = self.snapshot(rec, nodes)
+        snap = self.snapshot(rec, nodes, cluster)
         verdict = dec.decide(snap)
 
         if verdict.kind in (dec.V_PARTITION, dec.V_DEGRADED):
@@ -1433,6 +1647,8 @@ class Arbiter:
         self.recover_partition(rec, nodes)
         self.persist_leases(rec)
         self.maybe_reconcile_leadership(cluster_id, nodes)
+        if host_fencing_on(cluster):
+            self.progress_host_fence(self.db.get_cluster_arbitration(cluster_id), nodes)
         return verdict
 
     def maybe_reconcile_leadership(self, cluster_id: str, nodes: list) -> None:
@@ -1518,7 +1734,7 @@ class Arbiter:
         vuids = sorted(set(self.leaders(rec, nodes)))
         verdict = dec.Verdict(dec.V_DEGRADED, "degraded", raise_epoch=True, winner=winner,
                               loser=loser, grant={v: winner for v in vuids},
-                              fence={v: loser for v in vuids},
+                              fence={v: loser for v in vuids}, host_fence=True,
                               reason="operator override: " + rec.override.get("reason", ""))
 
         def clear(fresh):
@@ -1582,6 +1798,73 @@ class Arbiter:
         self.db.atomic_update(rec, put)
         self.readmitted.pop(rec.cluster_id, None)
         logger.info("Cluster %s healed; arbitration back to steady", rec.cluster_id)
+
+
+def witness_authority(cluster) -> bool:
+    """The arbiter decides for this cluster (mode ``witness``, the default).
+    Mode ``pacemaker``: the nodes follow Pacemaker's fence and the arbiter
+    stays out (docs/design/two-node-kubernetes-fencing.md, section 4.2)."""
+    authority = getattr(cluster, "two_node_fencing_authority", "") or constants.TWO_NODE_AUTHORITY_WITNESS
+    return authority != constants.TWO_NODE_AUTHORITY_PACEMAKER
+
+
+def host_fencing_on(cluster) -> bool:
+    """Host fencing and the Kubernetes integration (contract section 3)."""
+    return (cluster is not None and getattr(cluster, "two_node_host_fencing", False) is True
+            and witness_authority(cluster))
+
+
+def client_hosts(node: StorageNode) -> list:
+    """The kernel NVMe host NQNs of the Kubernetes node a storage node runs on,
+    as the operator reported them (contract section 3.1)."""
+    return sorted({h.strip() for h in (getattr(node, "client_host_nqns", None) or [])
+                   if h and h.strip()})
+
+
+def host_fence_merge(old: dict, new: dict) -> dict:
+    from simplyblock_core.arbitration import host_fence
+    return host_fence.merge(old, new)
+
+
+def _volume_nqns(db, cluster_id: str) -> set:
+    return {lv.nqn for lv in db.get_lvols(cluster_id) if getattr(lv, "nqn", "")}
+
+
+def default_host_fence_revoke(db, winner: StorageNode, host_nqns: list) -> dict:
+    """Revoke ``host_nqns`` on every volume subsystem of ``winner``. Hosts
+    the database authorizes on a subsystem keep access when an allow-any
+    subsystem becomes an allow-list (``subsystem_access.intended_access``)."""
+    from simplyblock_core.arbitration import host_fence
+    from simplyblock_core.controllers import subsystem_access
+    keep = set(client_hosts(winner))
+    rpc = winner.rpc_client(timeout=int(constants.TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S), retry=0)
+    cluster_nqn = getattr(db.get_cluster_by_id(winner.cluster_id), "nqn", "") or ""
+    prefix = cluster_nqn + ":lvol:" if cluster_nqn else ""
+    intended = subsystem_access.intended_access(db, winner.cluster_id)
+    authorized = {nqn: set(it.hosts) for nqn, it in intended.items()}
+    return host_fence.revoke(rpc, set(intended), host_nqns, keep, prefix, authorized)
+
+
+def default_host_fence_release(db, winner: StorageNode, subsystems: dict) -> list:
+    """Undo a revocation on ``winner``. A loser that was listed gets its
+    access back only where the database still authorizes it, with its keys
+    (``subsystem_access.grant``); one removed from the pool or volume during
+    the fence stays out. Returns the hosts left out."""
+    from simplyblock_core.arbitration import host_fence
+    from simplyblock_core.controllers import subsystem_access
+    rpc = winner.rpc_client(timeout=int(constants.TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S), retry=0)
+    intended = subsystem_access.intended_access(db, winner.cluster_id)
+
+    def readd(nqn, host_nqn):
+        it = intended.get(nqn)
+        grant = it.hosts.get(host_nqn) if it is not None else None
+        if grant is None:
+            logger.warning("Host fence release: %s is no longer authorized on %s; left out",
+                           host_nqn, nqn)
+            return False
+        subsystem_access.grant(rpc, winner, nqn, grant, db)
+        return True
+    return host_fence.release(rpc, subsystems, readd)
 
 
 def default_readmit(node: StorageNode) -> None:
@@ -1809,7 +2092,7 @@ def default_reconcile_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=
 
 
 #: ``inflight`` kinds that run on the work pool (campaign c7, F16).
-_WORK_KINDS = ("configure", "unfence", "leadership")
+_WORK_KINDS = ("configure", "unfence", "leadership", "hostfence", "hostrelease")
 
 #: Events that mean the node lost its peer or stopped serving; logged as warnings.
 _WARN_STATUSES = {ev.ST_UNHEALTHY, "ha_hold_started", "ha_self_fenced", "ha_lease_expired", "ha_fenced"}

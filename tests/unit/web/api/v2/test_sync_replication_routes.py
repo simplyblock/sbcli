@@ -124,6 +124,7 @@ def sync_controller(monkeypatch):
 @pytest.fixture()
 def lvol_controller(monkeypatch):
     mock = MagicMock()
+    mock.replication_start_error.return_value = None
     monkeypatch.setattr(volume_module, 'lvol_controller', mock)
     monkeypatch.setattr(volume_replication_module, 'lvol_controller', mock)
     monkeypatch.setattr(consistency_group_module, 'lvol_controller', mock)

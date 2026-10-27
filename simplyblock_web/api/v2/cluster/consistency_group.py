@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from simplyblock_core import constants
 from simplyblock_core.controllers import (
@@ -244,16 +244,31 @@ def list_generations(cluster: Cluster, group: ConsistencyGroupResource) -> built
             for r in consistency_group_controller.list_generations(group)]
 
 
+class _GenerationTakeParams(BaseModel):
+    #: The caller's id for this take. A retry with the same id answers with the
+    #: generation the first call took instead of taking another.
+    request_id: str = Field('', max_length=128)
+
+
 @instance_api.post('/snapshots', name='clusters:consistency-groups:snapshots:take',
                    response_model=ConsistencyGroupGenerationDTO)
-def take_generation(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupGenerationDTO:
-    """Take one crash-consistent generation across every current member (§5)."""
-    _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
+def take_generation(cluster: Cluster, group: ConsistencyGroupResource,
+                    body: _GenerationTakeParams | None = None) -> ConsistencyGroupGenerationDTO:
+    """Take one crash-consistent generation across every current member.
+
+    With a ``request_id``, a retry of a take whose answer was lost returns the
+    generation already taken under that id.
+    """
+    request_id = body.request_id if body is not None else ''
+    seq, err = consistency_group_controller.create_group_snapshot_for_group(
+        group, request_id=request_id)
     if err is not None:
         raise HTTPException(422, err)
     fresh = db.get_consistency_group_by_id(group.get_id())
-    rows = consistency_group_controller.list_generations(fresh)
-    return _generation_dto(rows[-1])
+    for row in consistency_group_controller.list_generations(fresh):
+        if row["group_seq"] == seq:
+            return _generation_dto(row)
+    raise HTTPException(404, f'generation {seq} not found')
 
 
 @instance_api.get('/snapshots/{seq}', name='clusters:consistency-groups:snapshots:detail',
@@ -282,9 +297,11 @@ def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
     """Enable or disable group replication (design-csi-addons-replication.md
     §14.4): a policy id attaches the whole group to that group replication
     policy; ``null`` detaches it (the group and its members stay grouped by
-    label). A refused attach (not a consistency-group policy, missing policy) is
-    a 409. A no-op on a sync-replication cluster, where every volume is
-    replicated to the other site.
+    label). A refused attach is a 409: not a consistency-group policy, a missing
+    policy, or a member that cannot start replicating under it (a policy whose
+    target is the group's own cluster, refused by replication_start). Unmapped,
+    the last was an unhandled 500 (run 20261020-1300-ebs, test 2). A no-op on a
+    sync-replication cluster, where every volume is replicated to the other site.
     """
     if cluster.sync_replication:
         return Response(status_code=204)
@@ -294,7 +311,8 @@ def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
         try:
             consistency_group_controller.attach_group_policy(
                 group, str(body.replication_policy_id))
-        except ConsistencyGroupError as e:
+        except (ConsistencyGroupError,
+                replication_policy_controller.ReplicationConfigError) as e:
             raise HTTPException(409, str(e))
     return Response(status_code=204)
 

@@ -1158,7 +1158,7 @@ def _attempt_batch_migration_retry(task, group):
             max_retries=leader.max_retries,
             deadline_seconds=group.deadline_seconds,
             retry_on_failure=True)
-    except (ValueError, PreconditionError, MigrationConflictError, KeyError) as e:
+    except (ValueError, PreconditionError, MigrationConflictError, KeyError, RPCException) as e:
         # Preconditions still not met -- pace the next recheck the same way
         # instead of retrying create_batch_migration on every runner tick.
         task.function_params['retry_on_failure_next_attempt_at'] = now + constants.LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC
@@ -1468,7 +1468,12 @@ def main():
                         logger.info(f"Batch-migration task {task.uuid} owned by another runner host; skipping")
                         continue
                     with tasks_controller.task_lease_heartbeat(task):
-                        task_runner(task)
+                        try:
+                            task_runner(task)
+                        except Exception:
+                            # One task's unexpected raise must not take the
+                            # runner (and every other migration) down.
+                            logger.exception(f"Batch-migration task {task.uuid} raised")
 
         time.sleep(3)
 

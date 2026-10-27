@@ -36,6 +36,10 @@ class NvmeConnectEntry(BaseModel):
     # Set when the volume has been failed over; the CSI driver uses this UUID
     # for device lookup instead of the original source lvol UUID.
     target_lvol_id: str | None = None
+    # Two-node arbitrated cluster: the CSI driver passes keep_alive_tmo and
+    # fast_io_fail_tmo to nvme connect only then, so every other cluster keeps
+    # its hosts' current settings (docs/design/two-node-arbitration.md 9.1).
+    two_node: bool = False
 
 
 class HostConnectAuth(BaseModel):
@@ -146,4 +150,5 @@ def build_nvme_connect_entry(
         connect=connect_cmd,
         tls=bool(host_entry and host_entry.psk.get_secret_value()),
         allowed_hosts=allowed_hosts if allowed_hosts is not None else [],
+        two_node=bool(getattr(cluster, "two_node_arbitration", False) is True),
     )

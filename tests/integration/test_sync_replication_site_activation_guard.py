@@ -847,8 +847,9 @@ class TestRebuiltMembers:
         leader = _leader(rpcs, b[2])
         group = _group(db, cluster, a[1])
         with patch.object(consistency_group_controller, "_find_lvs_leader", return_value=_fresh(db, b[2])):
-            ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
-        assert err is None and len(ids) == 1
+            seq, err = consistency_group_controller.create_group_snapshot_for_group(group)
+        assert err is None
+        assert len(consistency_group_controller.generation_snapshots(group, seq)) == 1
         leader.bdev_lvol_snapshot_group.assert_called_once()
         assert _registered(rpcs, a) == {a[1].get_id(), a[0].get_id()}
 
@@ -876,8 +877,9 @@ class TestRebuiltMembers:
         leader = _leader(rpcs, b[2])
         group = _group(db, cluster, a[1])
         with patch.object(consistency_group_controller, "_find_lvs_leader", return_value=_fresh(db, b[2])):
-            ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
-        assert err is None and len(ids) == 1
+            seq, err = consistency_group_controller.create_group_snapshot_for_group(group)
+        assert err is None
+        assert len(consistency_group_controller.generation_snapshots(group, seq)) == 1
         leader.bdev_lvol_snapshot_group.assert_called_once()
         for node in a:
             assert rpcs[node.get_id()].method_calls == [], node.get_id()

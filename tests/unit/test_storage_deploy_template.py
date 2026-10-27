@@ -37,6 +37,7 @@ def _render_storage_deploy(tls_provider: str) -> str:
         MEM2_MEGA=1024,
         TLS_ENABLED=True,
         TLS_PROVIDER=tls_provider,
+        SPDK_PROXY_TLS_SECRET="simplyblock-spdk-proxy-tls",
     )
 
 
@@ -71,7 +72,7 @@ class TestStorageDeployTemplate(unittest.TestCase):
 
     def test_cert_manager_mounts_secret_directly(self):
         rendered = _render_storage_deploy("cert-manager")
-        self.assertIn("secretName: simplyblock-spdk-proxy-tls", rendered)
+        self.assertIn('secretName: "simplyblock-spdk-proxy-tls"', rendered)
         self.assertNotIn("simplyblock-certificate-authority", rendered)
         self.assertNotIn("projected:", rendered)
         self.assertIn('name: SB_TLS_PROVIDER', rendered)
