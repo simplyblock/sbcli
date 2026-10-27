@@ -265,6 +265,30 @@ class TestDeviceHealthInfo:
             client.get(f'{BASE}/{DEVICE_ID}/health-info')
 
 
+class TestDeviceSmartLog:
+
+    def test_returns_smart_log(self, client, device, device_controller):
+        device_controller.get_device_smart_log.return_value = {'cdw0': 0, 'data': 'AAA='}
+
+        response = client.get(f'{BASE}/{DEVICE_ID}/smart-log')
+
+        assert response.status_code == 200
+        assert response.json() == {'cdw0': 0, 'data': 'AAA='}
+        device_controller.get_device_smart_log.assert_called_once_with(DEVICE_ID)
+
+    def test_unknown_device_returns_404(self, client, db, storage_node, device_controller):
+        response = client.get(f'{BASE}/{DEVICE_ID}/smart-log')
+
+        assert response.status_code == 404
+        device_controller.get_device_smart_log.assert_not_called()
+
+    def test_missing_smart_log_raises(self, client, device, device_controller):
+        device_controller.get_device_smart_log.return_value = None
+
+        with pytest.raises(ValueError):
+            client.get(f'{BASE}/{DEVICE_ID}/smart-log')
+
+
 class TestWatchDevices:
 
     def test_list_dispatches_watch_devices(self, client, device, device_controller, watch_stream):

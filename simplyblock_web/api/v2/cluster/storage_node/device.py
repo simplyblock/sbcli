@@ -179,4 +179,12 @@ def health_info(cluster: Cluster, storage_node: StorageNode, device: Device) -> 
     return DeviceHealthInfoDTO.from_model(device, ret)
 
 
+@instance_api.get('/smart-log', name='clusters:storage_nodes:devices:get-device-smart-log')
+def smart_log(cluster: Cluster, storage_node: StorageNode, device: Device):
+    ret = device_controller.get_device_smart_log(device.get_id())
+    if not ret:
+        raise ValueError('Failed to get device smart log')
+    return ret
+
+
 api.include_router(instance_api)
