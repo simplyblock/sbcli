@@ -18,8 +18,7 @@ from kubernetes.client import (
     V1ServiceSpec,
 )
 
-from simplyblock_core import constants
-from simplyblock_core import utils as core_utils
+from simplyblock_core import constants, storage_network
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -29,8 +28,8 @@ logger.setLevel(constants.LOG_LEVEL)
 CLUSTER_LABEL = "simplyblock.io/cluster"
 
 
-def service_name(rpc_port: int, cluster_id: str) -> str:
-    return f"snode-spdk-svc-{rpc_port}-{core_utils.first_six_chars(cluster_id)}"
+#: Named by the control plane's rule, which also deletes the Service by that name.
+service_name = storage_network.service_name
 
 
 def _ports(ports: list[int]) -> list[V1ServicePort]:

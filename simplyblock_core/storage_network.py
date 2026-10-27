@@ -97,6 +97,12 @@ def from_report(report: dict, known: Sequence[IFace] = ()) -> tuple[str, list[IF
     }) for i in data]
 
 
+def service_name(rpc_port: int, cluster_id: str) -> str:
+    """The Service the node agent keeps in front of a pod-network node's SPDK pod,
+    named as the pod is: by its RPC port and the cluster's short id."""
+    return f"snode-spdk-svc-{rpc_port}-{utils.first_six_chars(cluster_id)}"
+
+
 def published_ports(node: "StorageNode") -> list[int]:
     """Every port the node's Service has to forward: its RPC, its device subsystems'
     and every lvstore it serves, as primary or secondary. Sorted, so two computations

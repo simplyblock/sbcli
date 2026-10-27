@@ -4,7 +4,7 @@ from typing import Annotated, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import storage_node_ops
@@ -75,6 +75,12 @@ class StorageNodeParams(BaseModel):
     # The SPDK pod serves on the pod network itself, fronted by a Service, with no
     # attachment. Exclusive with networks.
     pod_network: bool = False
+
+    @model_validator(mode="after")
+    def _one_way_off_the_host_network(self):
+        if self.networks and self.pod_network:
+            raise ValueError("a node is added with networks or on the pod network, not both")
+        return self
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})

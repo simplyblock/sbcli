@@ -3571,6 +3571,43 @@ def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
     return True, ""
 
 
+def _delete_spdk_service_via_k8s(rpc_port, cluster_id):
+    """Delete the Service in front of a pod-network node's SPDK pod straight from
+    the Kubernetes API. The agent that created it runs on the host being torn
+    down, which in the common removal case is gone; see _delete_spdk_pod_via_k8s.
+    A Service that does not exist is already what was asked for.
+
+    Returns ``(ok, err)``."""
+    name = storage_network.service_name(rpc_port, cluster_id)
+    try:
+        k8s_core = utils.get_k8s_core_client()
+    except Exception as e:
+        return False, f"no Kubernetes API client available: {e}"
+    try:
+        k8s_core.delete_namespaced_service(name, constants.K8S_NAMESPACE)
+        logger.info(f"Deleted Service {name} directly via the Kubernetes API")
+    except ApiException as e:
+        if e.status != 404:
+            return False, f"failed to delete Service {name}: {e.body}"
+    except Exception as e:
+        return False, f"failed to delete Service {name}: {e}"
+    return True, None
+
+
+def _delete_spdk_service(snode, rpc_port, cluster_id):
+    """Remove the Service of a pod-network node: through the API server, and
+    through the agent only when that fails."""
+    ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
+    if ok:
+        return
+    logger.warning(f"Direct Kubernetes delete of the Service on port {rpc_port} failed ({err}); "
+                   "falling back to the node agent")
+    try:
+        snode.client(timeout=30, retry=1).spdk_service_delete(rpc_port, cluster_id)
+    except SNodeClientException as e:
+        logger.warning("The Service of the node on port %s was not deleted: %s", rpc_port, e)
+
+
 def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=None):
     """Tear down the SPDK pod add_node just started, before bailing out.
 
@@ -3599,6 +3636,12 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     logger.error(f"add_node aborting after SPDK start: {reason}")
 
     if cluster_mode == "kubernetes":
+        # A pod-network add created a Service before the pod, and nothing names
+        # it once the add is abandoned. Best effort: a node on the host network
+        # has none and the delete answers not-found.
+        ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
+        if not ok:
+            logger.warning(f"The Service of the aborted add on port {rpc_port} was not deleted: {err}")
         ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
         if ok:
             logger.info(
@@ -4795,10 +4838,7 @@ def delete_storage_node(node_id, force=False):
 
     if snode.pod_network:
         # The Service held the node's address; with the record gone nothing names it.
-        try:
-            snode.client(timeout=30, retry=1).spdk_service_delete(snode.rpc_port, snode.cluster_id)
-        except SNodeClientException as e:
-            logger.warning("The Service of node %s was not deleted: %s", node_id, e)
+        _delete_spdk_service(snode, snode.rpc_port, snode.cluster_id)
     snode.remove(db_controller.kv_store)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -15949,7 +15989,9 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         }
         snode.lvstore_status = "in_creation"
         snode.write_to_db()
-        storage_network.publish_ports(snode)
+    # Outside the lock: it protects the allocation and the write, and the agent
+    # call that follows can take up to its timeout.
+    storage_network.publish_ports(snode)
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
     if err:

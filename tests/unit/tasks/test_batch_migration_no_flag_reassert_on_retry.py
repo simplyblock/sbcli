@@ -44,6 +44,7 @@ def _path_entry(node_id):
     return {
         "rpc": MagicMock(),
         "ips": ["192.168.1.1"],
+        "listen_ips": ["192.168.1.1"],  # host network: listeners bind the connect address
         "port": 4420,
         "trtype": "tcp",
         "node_id": node_id,

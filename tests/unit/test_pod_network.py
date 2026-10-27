@@ -206,6 +206,17 @@ class TestTheV2NodeAdd:
         assert "networks" not in add.call_args.args[1]
 
 
+class TestTheV2NodeAddRefusesBothWaysOffTheHostNetwork:
+    def test_networks_and_pod_network_together_are_rejected_before_a_task_exists(self):
+        from pydantic import ValidationError
+
+        from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
+
+        with pytest.raises(ValidationError, match="not both"):
+            StorageNodeParams(node_address="a:1", interface_name="", pod_network=True,
+                              networks=[{"name": "fabric", "interface": "data0"}])
+
+
 class TestTheWorkersAddressOfANodeOnThePodNetwork:
     def test_the_agent_reports_its_hosts_address(self):
         from simplyblock_core import utils
@@ -213,3 +224,108 @@ class TestTheWorkersAddressOfANodeOnThePodNetwork:
         info = {"host_ip": "192.168.10.62", "network_interface": {"eth0": {"ip": "10.42.1.9"}}}
 
         assert utils.get_mgmt_ip(info, "eth0", None, pod_network=True) == ("192.168.10.62", "")
+
+
+# The listen-versus-connect split reaches the migration and replication services,
+# which build their own path entries from the NICs.
+
+def _pod_node(uuid, rpc_port, lvs="LVS_1"):
+    return StorageNode({"uuid": uuid, "rpc_port": rpc_port, "lvol_subsys_port": 4432, "lvstore": lvs,
+                        "status": StorageNode.STATUS_ONLINE, "mgmt_ip": "192.168.10.1",
+                        "data_nics": [POD_NIC], "active_tcp": True})
+
+
+class TestTheMigrationPathsBindTheListenAddressAndConnectToTheService:
+    def test_a_migration_path_entry_carries_both(self):
+        from simplyblock_core.services.tasks_runner_lvol_migration import _build_paths
+
+        src, tgt = _pod_node("src", 4420), _pod_node("tgt", 4422)
+        src_paths, tgt_paths, _ = _build_paths(src, tgt, MagicMock(), MagicMock())
+
+        for path in (src_paths[0], tgt_paths[0]):
+            assert path["ip"] == "10.103.252.64" and path["ips"] == ["10.103.252.64"]
+            assert path["listen_ips"] == ["10.244.5.31"]
+
+    def test_a_replication_path_entry_carries_both_and_flips_on_the_listen_address(self):
+        from simplyblock_core.services import replication_final_step as step
+
+        node = _pod_node("n1", 4420)
+        rpc = MagicMock()
+        with patch.object(StorageNode, "rpc_client", return_value=rpc):
+            path = step._path_entry(node, "LVS_1")
+            step._flip(path, "optimized", "nqn.test", "lead", ns_id=1)
+
+        assert (path["ip"], path["listen_ip"]) == ("10.103.252.64", "10.244.5.31")
+        rpc.nvmf_subsystem_listener_set_ana_state.assert_called_once_with(
+            "nqn.test", "10.244.5.31", 4432, trtype="TCP", ana="optimized", anagrpid=1)
+
+    def test_a_host_network_path_has_the_same_address_for_both(self):
+        from simplyblock_core.services import replication_final_step as step
+
+        node = StorageNode({"uuid": "h1", "lvol_subsys_port": 4432, "data_nics": [VF_NIC]})
+        with patch.object(StorageNode, "rpc_client", return_value=MagicMock()):
+            path = step._path_entry(node, "LVS_1")
+
+        assert path["ip"] == path["listen_ip"] == "10.10.10.223"
+
+
+class TestTheArbiterProbesThePeersOwnAddress:
+    def test_on_the_pod_network_the_proxy_pings_the_peers_pod_address(self):
+        from simplyblock_core.arbitration.arbiter import default_link_probe
+
+        node, peer = _pod_node("a", 4420), _pod_node("b", 4422)
+        rpc = MagicMock()
+        rpc.net_check.return_value = True
+        with patch.object(StorageNode, "rpc_client", return_value=rpc), patch.object(StorageNode, "client") as agent:
+            assert default_link_probe(node, peer) is True
+
+        rpc.net_check.assert_called_once_with("eth0", "10.244.5.31")
+        agent.assert_not_called()
+
+    def test_on_the_host_network_the_agent_pings_as_before(self):
+        from simplyblock_core.arbitration.arbiter import default_link_probe
+
+        node = StorageNode({"uuid": "a", "data_nics": [VF_NIC]})
+        peer = StorageNode({"uuid": "b", "data_nics": [{"if_name": "data0", "ip4_address": "10.10.10.220", "trtype": "TCP"}]})
+        agent = MagicMock()
+        agent.ping_ip.return_value = (True, None)
+        with patch.object(StorageNode, "client", return_value=agent):
+            assert default_link_probe(node, peer) is True
+
+        agent.ping_ip.assert_called_once_with("10.10.10.220", "data0")
+
+
+class TestTheServiceIsDeletedThroughTheAPIServer:
+    def test_the_name_is_the_pods_rule(self):
+        assert storage_network.service_name(4426, "15260308-01ab-4256-a01c-8bbf121bbeed") == "snode-spdk-svc-4426-152603"
+
+    def test_deletion_goes_to_the_api_server_not_the_agent(self):
+        from kubernetes.client import ApiException
+
+        from simplyblock_core import storage_node_ops
+
+        core = MagicMock()
+        node = _pod_node("n1", 4426)
+        with patch.object(storage_node_ops.utils, "get_k8s_core_client", return_value=core), \
+                patch.object(StorageNode, "client") as agent:
+            storage_node_ops._delete_spdk_service(node, 4426, "15260308-01ab-4256-a01c-8bbf121bbeed")
+
+        core.delete_namespaced_service.assert_called_once_with("snode-spdk-svc-4426-152603", storage_node_ops.constants.K8S_NAMESPACE)
+        agent.assert_not_called()
+
+        core.delete_namespaced_service.side_effect = ApiException(status=404)
+        with patch.object(storage_node_ops.utils, "get_k8s_core_client", return_value=core), \
+                patch.object(StorageNode, "client") as agent:
+            storage_node_ops._delete_spdk_service(node, 4426, "15260308-01ab-4256-a01c-8bbf121bbeed")
+        agent.assert_not_called()
+
+    def test_the_agent_is_the_fallback_when_the_api_server_cannot_be_reached(self):
+        from simplyblock_core import storage_node_ops
+
+        node = _pod_node("n1", 4426)
+        agent = MagicMock()
+        with patch.object(storage_node_ops.utils, "get_k8s_core_client", side_effect=RuntimeError("no kubeconfig")), \
+                patch.object(StorageNode, "client", return_value=agent):
+            storage_node_ops._delete_spdk_service(node, 4426, "c1")
+
+        agent.spdk_service_delete.assert_called_once_with(4426, "c1")

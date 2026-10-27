@@ -29,12 +29,22 @@ _FINAL_STEP_BATCH = 2
 
 
 def _get_transfer_nic(node):
-    """Return (trtype, ip_address) for the preferred data interface of *node*."""
+    """Return (trtype, ip_address) for the preferred data interface of *node*: the
+    address peers connect to."""
     trtype = "RDMA" if node.active_rdma else "TCP"
     for nic in node.data_nics:
         if nic.ip4_address:
             return trtype, nic.ip4_address
     return trtype, node.mgmt_ip
+
+
+def _get_transfer_listen_ip(node):
+    """The address the node's target binds on its preferred data interface, which
+    is what a listener RPC names; on the pod network it is not the connect address."""
+    for nic in node.data_nics:
+        if nic.ip4_address:
+            return nic.listen_address
+    return node.mgmt_ip
 
 
 # Statuses in which a member may still be serving the volume and must be
@@ -72,6 +82,7 @@ def _path_entry(node, lvstore):
         'node_id': node.get_id(),
         'rpc': node.rpc_client(),
         'ip': ip,
+        'listen_ip': _get_transfer_listen_ip(node),
         'trtype': trtype,
         'port': node.get_lvol_subsys_port(lvstore),
     }
@@ -80,7 +91,7 @@ def _path_entry(node, lvstore):
 def _node_paths(primary_node, lvstore, lead=None, statuses=(StorageNode.STATUS_ONLINE,)):
     """Build ordered ANA path entries for the members of *primary_node*'s lvstore.
 
-    Each entry: {'node_id', 'rpc', 'ip', 'trtype', 'port'}. *lead* -- the
+    Each entry: {'node_id', 'rpc', 'ip', 'listen_ip', 'trtype', 'port'}. *lead* -- the
     member serving or receiving the IO, the primary by default -- is first;
     members whose status is not in *statuses* are left out (*lead* only when
     it is not in *statuses* itself).
@@ -101,9 +112,9 @@ def _flip(path, state, nqn, label, ns_id=None):
     """
     try:
         path['rpc'].nvmf_subsystem_listener_set_ana_state(
-            nqn, path['ip'], path['port'], trtype=path['trtype'], ana=state,
+            nqn, path['listen_ip'], path['port'], trtype=path['trtype'], ana=state,
             anagrpid=ns_id)
-        logger.info(f"ANA {nqn} ns {ns_id} {label} {path['ip']}:{path['port']} → {state}")
+        logger.info(f"ANA {nqn} ns {ns_id} {label} {path['listen_ip']}:{path['port']} → {state}")
     except Exception as e:
         logger.error(f"ANA flip {label} failed (non-fatal): {e}")
 
