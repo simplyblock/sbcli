@@ -4945,9 +4945,10 @@ class K8sUtils:
         after *wait* seconds; the caller must read that as "do not cut this
         node", never as success.
 
-        The log comes back either way, because it is the only copy anybody
-        will ever judge: a terminated Job never reaches "succeeded", and the
-        Job itself is replaced when the client resumes.
+        The log is read before the signal and comes back even when the
+        stop fails, because it is the only copy anybody will ever judge: a
+        terminated Job never reaches "succeeded", and the Job itself is
+        replaced when the client resumes.
         """
         ns = namespace or self.namespace
         out = {"pod": "", "node": "", "stopped": False, "logs": "",
@@ -4958,6 +4959,16 @@ class K8sUtils:
             return out
         out["pod"] = pod
         out["node"] = self.get_pod_node_name(pod, namespace=ns)
+
+        # Read it BEFORE the signal. A container that is already exiting can
+        # refuse the read, and a Job with a non-zero backoffLimit replaces
+        # the pod -- `kubectl logs` would then answer for a replacement that
+        # has only just started, and the record we came for is gone.
+        try:
+            out["logs"] = self.get_pod_logs(pod, namespace=ns, tail=2000) or ""
+        except Exception as exc:                          # noqa: BLE001
+            out["reason"] = f"log read failed before stop: {str(exc)[:100]}"
+
         try:
             self.exec_in_pod(
                 pod, "pkill -TERM -x fio || pkill -TERM fio || true",
@@ -4990,11 +5001,20 @@ class K8sUtils:
         else:
             out["reason"] = f"fio still running in {pod} after {wait}s"
 
-        try:
-            out["logs"] = self.get_pod_logs(pod, namespace=ns, tail=2000) or ""
-        except Exception as exc:                          # noqa: BLE001
+        # Bonus read: fio writes its closing summary on the way out, so the
+        # log is usually a little longer now. Keep whichever is longer, and
+        # do not read at all if the Job has moved to a different pod -- that
+        # one's log is about a run we never saw.
+        if self.get_job_pod_name(job_name, namespace=ns) == pod:
+            try:
+                after = self.get_pod_logs(pod, namespace=ns, tail=2000) or ""
+                if len(after) > len(out["logs"]):
+                    out["logs"] = after
+            except Exception:                             # noqa: BLE001
+                pass
+        if not out["logs"].strip():
             out["reason"] = (
-                f"{out['reason']} (log read failed: {str(exc)[:100]})".strip())
+                f"{out['reason']} (no log could be read from {pod})".strip())
         self.logger.info(
             "[K8sUtils] stop fio in %s on %s: %s%s", job_name,
             out["node"] or "?", "stopped" if out["stopped"] else "STILL UP",

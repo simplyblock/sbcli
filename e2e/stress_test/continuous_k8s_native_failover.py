@@ -2323,6 +2323,16 @@ class K8sNativeFailoverTest(TestClusterBase):
             # replaced on resume, and a terminated Job never reaches
             # "succeeded" so validate_fio_job skips it. err=110 counts here
             # -- the cluster is still whole at this point.
+            if not (res.get("logs") or "").strip():
+                # Warned, not recorded as a finding: an unreadable log is the
+                # harness failing to look, and failing the run for it would
+                # turn a flaky `kubectl logs` into a red cluster. It still has
+                # to be said out loud, because the alternative reading of a
+                # silent pass here is that the client was clean.
+                self.logger.warning(
+                    f"[quiesce] {name}: stopped for the outage but its log "
+                    f"could not be read, so nothing vouches for the IO it "
+                    f"had already done ({res.get('reason') or 'no reason'})")
             hits = self.k8s_utils.fio_io_errors_in(
                 res.get("logs"), source=f"{label} {name} (job {job})")
             if hits:
