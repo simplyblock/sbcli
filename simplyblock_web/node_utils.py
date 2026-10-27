@@ -327,7 +327,8 @@ def get_block_devices_info() -> list[dict]:
         return []
 
     root_disks = _root_disk_names()
-    hostname = socket.gethostname()
+    # A pod's own hostname is the pod's name, which changes on every restart.
+    hostname = os.environ.get("SB_NODE_NAME") or socket.gethostname()
     # Read once for the whole host: every device's links sit in the same two
     # directories, so a reading per device would walk them again for each disk.
     persistent = read_persistent_links()

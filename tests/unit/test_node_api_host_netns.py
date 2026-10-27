@@ -110,3 +110,37 @@ def test_the_static_node_info_takes_the_node_name_too(monkeypatch):
     with patch.object(_node_info.shell_utils, "run_command", return_value=("agent-pod-x", "", 0)):
         assert _node_info.get_static_node_info()["hostname"] == "vm07"
     _node_info.get_static_node_info.cache_clear()
+
+
+_SERIALLESS_DISK = (
+    '{"blockdevices": [{"name": "vdb", "type": "disk", "size": 1000, "serial": null, "wwn": null,'
+    ' "mountpoint": null, "model": "M", "rota": false, "ro": false, "vendor": "V", "pkname": null,'
+    ' "partuuid": null}]}'
+)
+
+
+def _synthetic_serial(node_utils_module, pod_hostname):
+    """The serial a disk with neither serial nor WWN is given, read with the process's hostname set."""
+    with patch.object(node_utils_module.shell_utils, "run_command", return_value=(_SERIALLESS_DISK, "", 0)), \
+            patch.object(node_utils_module, "_root_disk_names", return_value=set()), \
+            patch.object(node_utils_module, "read_persistent_links", return_value={}), \
+            patch.object(node_utils_module, "_read_sysfs", return_value="-1"), \
+            patch("socket.gethostname", return_value=pod_hostname):
+        return node_utils_module.get_block_devices_info()[0]["serial"]
+
+
+def test_a_disk_without_a_serial_keeps_its_identity_when_the_pod_is_replaced(monkeypatch):
+    """Its synthetic serial is seeded by the hostname, which on the pod network is the pod's name."""
+    from simplyblock_web import node_utils
+
+    monkeypatch.setenv("SB_NODE_NAME", "worker-1.example")
+    first_pod = _synthetic_serial(node_utils, "agent-abc12")
+    replacement = _synthetic_serial(node_utils, "agent-xyz98")
+
+    assert first_pod == replacement
+
+
+def test_a_disk_without_a_serial_is_seeded_by_the_hostname_when_no_node_name_is_set():
+    from simplyblock_web import node_utils
+
+    assert _synthetic_serial(node_utils, "host-a") != _synthetic_serial(node_utils, "host-b")
