@@ -105,6 +105,7 @@ class TestTheServiceForwardsEveryPortTheNodeServesOn:
     def test_publishing_hands_the_agent_the_set(self):
         node = _node(data_nics=[POD_NIC])
         client = MagicMock()
+        client.spdk_service_publish.return_value = ("10.0.0.1", None)
 
         with patch.object(StorageNode, "client", return_value=client):
             storage_network.publish_ports(node)
@@ -139,6 +140,17 @@ class TestTheServiceForwardsEveryPortTheNodeServesOn:
             storage_network.publish_ports(node)
 
         assert "agent down" in caplog.text
+
+    def test_a_refusal_the_agent_answers_in_its_body_is_logged_too(self, caplog):
+        # the agent reports a failure as (results, error) in a 200, not as an exception
+        node = _node(data_nics=[POD_NIC])
+        client = MagicMock()
+        client.spdk_service_publish.return_value = ([], "Service for port 4426 not published: Forbidden")
+
+        with patch.object(StorageNode, "client", return_value=client), caplog.at_level("WARNING"):
+            storage_network.publish_ports(node)
+
+        assert "Forbidden" in caplog.text
 
 
 @pytest.fixture
