@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import traceback
+from typing import Annotated
 
 import yaml
 from flask_openapi3 import APIBlueprint
@@ -15,7 +16,8 @@ from simplyblock_core import utils as core_utils
 from simplyblock_core.settings import Settings
 from simplyblock_core.storage_network import NetworkAttachment
 from simplyblock_core.utils import shell as shell_utils
-from simplyblock_web import network_attachments, node_utils, node_utils_k8s, utils
+from simplyblock_web import node_utils, node_utils_k8s, utils
+from simplyblock_web.api.internal.storage_node import network_attachments
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from .._node_info import get_static_node_info
@@ -310,7 +312,7 @@ class SPDKParams(BaseModel):
     # recorded one, or the constant name from a control plane that sends none.
     spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
     # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
-    networks: list[NetworkAttachment] = Field(default_factory=list)
+    networks: Annotated[list[NetworkAttachment], Field(default_factory=list)]
 
 
 @api.post('/spdk_process_start', responses={
