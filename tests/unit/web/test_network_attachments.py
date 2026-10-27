@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 import tests.unit.test_storage_deploy_template as deploy_template
 from simplyblock_core.storage_network import NetworkAttachment
-from simplyblock_web import network_attachments
+from simplyblock_web.api.internal.storage_node import network_attachments
 
 MGMT = NetworkAttachment(name="mgmt-net", namespace="infra", interface="mgmt0", ips=["10.0.0.5/24"])
 DATA = NetworkAttachment(name="fabric", namespace="infra", interface="data0", ips=["10.10.10.101/24"])
@@ -128,18 +128,16 @@ def test_the_report_is_none_until_the_pod_is_running_and_holds_every_declared_in
 def test_waiting_for_the_report_polls_until_the_pod_holds_its_interfaces():
     pods = iter([_Pod(phase="Pending"), _Pod(phase="Pending"), _Pod()])
 
-    with patch.object(network_attachments.time, "sleep"):
+    with patch.object(network_attachments, "POLL_INTERVAL_SEC", 0):
         report = network_attachments.wait_for_report(lambda: next(pods), [DATA], timeout=5)
 
     assert report["interfaces"][0]["name"] == "data0"
 
 
 def test_waiting_for_the_report_gives_up_with_what_was_missing():
-    clock = iter(range(0, 1000, 10))
-    with patch.object(network_attachments.time, "sleep"), \
-            patch.object(network_attachments.time, "monotonic", side_effect=lambda: next(clock)), \
+    with patch.object(network_attachments, "POLL_INTERVAL_SEC", 0.01), \
             pytest.raises(TimeoutError, match="data0"):
-        network_attachments.wait_for_report(lambda: _Pod(phase="Pending"), [DATA], timeout=30)
+        network_attachments.wait_for_report(lambda: _Pod(phase="Pending"), [DATA], timeout=0.05)
 
 
 def test_the_wait_ends_before_the_node_client_gives_up_and_retries():

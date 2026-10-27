@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from simplyblock_core import pod_net
+from simplyblock_core.utils import pod_net
 from tests.unit.test_spdk_proxy_unit import make_proxy
 
 

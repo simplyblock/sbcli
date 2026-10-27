@@ -1,6 +1,6 @@
 import builtins
 from threading import Thread
-from typing import Union
+from typing import Annotated, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -71,7 +71,7 @@ class StorageNodeParams(BaseModel):
     expand: bool = False
     force_format: bool = False
     # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
-    networks: builtins.list[NetworkAttachment] = Field(default_factory=builtins.list)
+    networks: Annotated[builtins.list[NetworkAttachment], Field(default_factory=builtins.list)]
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})

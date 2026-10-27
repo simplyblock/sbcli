@@ -3,7 +3,8 @@ the pod spec needs for them: the annotation Multus reads. A pod with none stays 
 the host network."""
 
 import json
-import time
+
+from tenacity import RetryError, Retrying, retry_if_result, stop_after_delay, wait_fixed
 
 from simplyblock_core.storage_network import MANAGEMENT_INTERFACE, NetworkAttachment
 
@@ -12,6 +13,7 @@ NETWORK_STATUS = "k8s.v1.cni.cncf.io/network-status"
 POD_IP_REFERENCE = "$(POD_IP)"
 #: Below SNodeClient's 300 s request timeout, so its retry never lands on a start that is still waiting.
 REPORT_TIMEOUT_SEC = 240
+POLL_INTERVAL_SEC = 2
 
 
 def annotation(attachments: list[NetworkAttachment]) -> str:
@@ -58,11 +60,12 @@ def wait_for_report(read_pod, attachments: list[NetworkAttachment],
                     timeout: float = REPORT_TIMEOUT_SEC) -> dict:
     """Poll the pod until it reports, or raise TimeoutError naming the interfaces it
     never held."""
-    deadline = time.monotonic() + timeout
-    while (result := report(read_pod(), attachments)) is None:
-        if time.monotonic() >= deadline:
-            raise TimeoutError(
-                "the SPDK pod did not hold interface(s) "
-                + ", ".join(a.interface for a in attachments) + f" within {timeout:.0f}s")
-        time.sleep(2)
-    return result
+    try:
+        return Retrying(
+            retry=retry_if_result(lambda result: result is None),
+            stop=stop_after_delay(timeout), wait=wait_fixed(POLL_INTERVAL_SEC),
+        )(lambda: report(read_pod(), attachments))
+    except RetryError as e:
+        raise TimeoutError(
+            "the SPDK pod did not hold interface(s) "
+            + ", ".join(a.interface for a in attachments) + f" within {timeout:.0f}s") from e
