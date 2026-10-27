@@ -35,6 +35,7 @@ import re
 import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
+from e2e_tests.replication.k8s_native import K8sReplication
 from utils.common_utils import cli_failed, sleep_n_sec
 
 
@@ -47,7 +48,7 @@ class ReplicationPreconditionError(Exception):
     """
 
 
-class ReplicationTestBase(TestClusterBase):
+class ReplicationTestBase(K8sReplication, TestClusterBase):
     """Two clusters under one control plane, plus the replication vocabulary."""
 
     # ── sizing ────────────────────────────────────────────────────────────
@@ -363,7 +364,11 @@ class ReplicationTestBase(TestClusterBase):
 
     def target_add(self, name, target_cluster=None, target_pool=None,
                    timeout=None):
-        """``cluster replication-target-add``. Returns the target name."""
+        """``cluster replication-target-add``, or a ReplicationPair."""
+        if self.k8s_test:
+            return self.k8s_target_add(name, target_cluster or self.cluster_b,
+                                       target_pool=target_pool,
+                                       timeout=timeout)
         cmd = (f"{self.base_cmd} -d cluster replication-target-add "
                f"{self.cluster_a} {name} {target_cluster or self.cluster_b}")
         if target_pool:
@@ -381,16 +386,25 @@ class ReplicationTestBase(TestClusterBase):
         return name
 
     def target_list(self, cluster_id=None):
+        if self.k8s_test:
+            return self.k8s_target_list(cluster_id)
         out, _ = self._cli(f"{self.base_cmd} cluster replication-target-list "
                            f"--cluster-id {cluster_id or self.cluster_a}")
         return out
 
     def target_remove(self, name):
+        if self.k8s_test:
+            return self.k8s_target_remove(name)
         return self._cli(f"{self.base_cmd} -d cluster replication-target-remove {name}")
 
     def policy_add(self, name, target, interval_min=None, mode=None,
                    consistency_group=False, retention=None, rpo_target=None):
-        """``cluster replication-policy-add``. Returns the policy name."""
+        """``cluster replication-policy-add``, or a ReplicationPolicy."""
+        if self.k8s_test:
+            return self.k8s_policy_add(
+                name, target, interval_min=interval_min, mode=mode,
+                consistency_group=consistency_group, retention=retention,
+                rpo_target=rpo_target)
         # --target is a REQUIRED FLAG, not a positional. Passing it
         # positionally is an argparse error.
         cmd = (f"{self.base_cmd} -d cluster replication-policy-add "
@@ -427,25 +441,38 @@ class ReplicationTestBase(TestClusterBase):
         return name
 
     def policy_list(self):
+        if self.k8s_test:
+            return self.k8s_policy_list()
         out, _ = self._cli(f"{self.base_cmd} cluster replication-policy-list")
         return out
 
     def policy_remove(self, name):
+        if self.k8s_test:
+            return self.k8s_policy_remove(name)
         return self._cli(f"{self.base_cmd} -d cluster replication-policy-remove {name}")
 
     def policy_set(self, volume_id, policy):
+        if self.k8s_test:
+            return self.k8s_policy_set(volume_id, policy)
         return self._cli(f"{self.base_cmd} -d volume replication-policy-set "
                          f"{volume_id} {policy}")
 
     def policy_clear(self, volume_id):
+        if self.k8s_test:
+            return self.k8s_policy_clear(volume_id)
         return self._cli(f"{self.base_cmd} -d volume replication-policy-clear "
                          f"{volume_id}")
 
     def replication_info(self, volume_id):
+        if self.k8s_test:
+            # The slot IS the info on this side; one read, one shape.
+            return self.k8s_relationship(volume_id)
         out, _ = self._cli(f"{self.base_cmd} volume replication-info {volume_id}")
         return out
 
     def replication_relationship(self, volume_id):
+        if self.k8s_test:
+            return self.k8s_relationship(volume_id)
         out, _ = self._cli(f"{self.base_cmd} volume replication-relationship "
                            f"{volume_id} --json")
         return out
@@ -460,6 +487,11 @@ class ReplicationTestBase(TestClusterBase):
         view the nearest real thing is the policy and target listings, so
         that is what this returns when no volume is named.
         """
+        if self.k8s_test:
+            if volume_id:
+                return self.k8s_relationship(volume_id)
+            return chr(10).join(["pairs:", self.k8s_target_list(),
+                                 "policies:", self.k8s_policy_list()])
         if volume_id:
             out, _ = self._cli(f"{self.base_cmd} volume replication-status "
                                f"{volume_id}")
@@ -645,11 +677,15 @@ class ReplicationTestBase(TestClusterBase):
 
     def failover_target(self, target_id):
         """``cluster replication-target-failover`` -- every volume on the pair."""
+        if self.k8s_test:
+            return self.k8s_failover_target(target_id)
         return self._cli(f"{self.base_cmd} -d cluster "
                          f"replication-target-failover {target_id} 2>&1")
 
     def failover_policy(self, policy_id):
         """``cluster replication-policy-failover`` -- every volume on the policy."""
+        if self.k8s_test:
+            return self.k8s_failover_policy(policy_id)
         return self._cli(f"{self.base_cmd} -d cluster "
                          f"replication-policy-failover {policy_id} 2>&1")
 
@@ -660,6 +696,9 @@ class ReplicationTestBase(TestClusterBase):
         takes a full copy. The CLI help says exactly that, and AR-R-006 vs
         AR-R-007 are the two halves of it.
         """
+        if self.k8s_test:
+            return self.k8s_failback(volume_id,
+                                     source_cluster_id=source_cluster_id)
         cmd = f"{self.base_cmd} -d volume replication-failback {volume_id}"
         if source_cluster_id:
             cmd += f" --source-cluster-id {source_cluster_id}"
@@ -667,6 +706,8 @@ class ReplicationTestBase(TestClusterBase):
 
     def commit(self, volume_id, delete_source=False):
         """``volume replication-commit`` -- the cut-over itself."""
+        if self.k8s_test:
+            return self.k8s_commit(volume_id, delete_source=delete_source)
         cmd = f"{self.base_cmd} -d volume replication-commit {volume_id}"
         if delete_source:
             cmd += " --delete-source"
@@ -674,7 +715,16 @@ class ReplicationTestBase(TestClusterBase):
 
     def replication_start(self, volume_id, cluster_id, mode=None,
                           interval_min=None):
-        """``volume replication-start`` -- this is the migration entry point."""
+        """``volume replication-start`` -- this is the migration entry point.
+
+        Native equivalent: annotating the PVC. The operator attaches the
+        volume as soon as the annotation names a ready policy, so there is
+        no separate start -- which is why this routes to policy_set rather
+        than to the gap list.
+        """
+        if self.k8s_test:
+            return self.k8s_replication_start(
+                volume_id, cluster_id, mode=mode, interval_min=interval_min)
         cmd = (f"{self.base_cmd} -d volume replication-start {volume_id} "
                f"--replication-cluster-id {cluster_id}")
         if mode:
@@ -684,16 +734,24 @@ class ReplicationTestBase(TestClusterBase):
         return self._cli(cmd + " 2>&1")
 
     def replication_stop(self, volume_id):
+        if self.k8s_test:
+            # Removing the annotation detaches and deletes the snapshots on
+            # both sides, which is what stop does.
+            return self.k8s_policy_clear(volume_id)
         return self._cli(f"{self.base_cmd} -d volume replication-stop "
                          f"{volume_id} 2>&1")
 
     def replication_trigger(self, volume_id):
         """Force a cycle now instead of waiting out the interval."""
+        if self.k8s_test:
+            self.k8s_no_native("replication_trigger")
         return self._cli(f"{self.base_cmd} -d volume replication-trigger "
                          f"{volume_id} 2>&1")
 
     def policy_snapshot(self, policy_id):
         """``cluster replication-policy-snapshot`` -- one generation, all members."""
+        if self.k8s_test:
+            self.k8s_no_native("policy_snapshot")
         return self._cli(f"{self.base_cmd} -d cluster "
                          f"replication-policy-snapshot {policy_id} 2>&1")
 
