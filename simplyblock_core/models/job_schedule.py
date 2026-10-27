@@ -101,6 +101,15 @@ class JobSchedule(BaseModel):
     # (tasks_controller.add_sync_resync_task). Unbounded (max_retry=-1): a
     # failed catch-up re-runs with backoff once the lagging zone is back.
     FN_SYNC_RESYNC = "sync_resync"
+    # Sync replication: fence a lost site as a whole (the site-level fence
+    # route, design-stretched §10.2) - the disaster site steps of a forced
+    # promote, run once for the site and moving no leadership
+    # (tasks_runner_sync_promote, which owns both functions so the steps have
+    # one implementation). ``node_id`` is empty; ``function_params``: ``site``
+    # (the site fenced), ``lvol_ids`` (always empty: no volume is excepted
+    # from the fence) and, once the steps are done, ``fenced`` (True). One
+    # active task per site (tasks_controller.add_sync_site_fence_task).
+    FN_SYNC_SITE_FENCE = "sync_site_fence"
 
     canceled: bool = False
     cluster_id: str = ""

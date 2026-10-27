@@ -31,6 +31,8 @@ from simplyblock_core.exceptions import (
     PreconditionError,
     SyncLeadershipMovingError,
     SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+    SyncSiteConflictError,
     reject_on_sync_replication,
 )
 from simplyblock_core.kms import (
@@ -276,7 +278,7 @@ def max_subsystems_for_node(node):
 
 
 def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
-                      pool_id=None, exclude_ids=None):
+                      pool_id=None, exclude_ids=None, site=None):
     """Pick candidate primary nodes for an lvol: up to three, best first,
     weighted by how little each is already carrying.
 
@@ -293,6 +295,10 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
     already tried, and it must never offer the node currently acting as the
     migration's source (an offline primary's replica stands in for it, and that
     replica is ONLINE and otherwise eligible).
+
+    ``site`` (sync replication) restricts the candidates to the nodes of that
+    site: a volume is born on the site of the caller that creates it (its LVS
+    is then led from there), not on whichever site the weights pick.
     """
     db_controller = DBController()
     exclude_ids = set(exclude_ids or [])
@@ -308,6 +314,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
         if node.is_secondary_node:  # pass
             continue
         if node.get_id() in exclude_ids:
+            continue
+        if site is not None and node.site != site:
             continue
         if node.status == node.STATUS_ONLINE:
             subsys_count = count_lvol_subsystems(node, all_lvols)
@@ -660,6 +668,44 @@ def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
     return None
 
 
+def _resolve_host_node(db_controller, host_id_or_name):
+    """The storage node ``host_id_or_name`` names - by id, else by hostname
+    (the first match) - or None when it names none."""
+    try:
+        return db_controller.get_storage_node_by_id(host_id_or_name)
+    except KeyError:
+        nodes = db_controller.get_storage_nodes_by_hostname(host_id_or_name)
+        return nodes[0] if nodes else None
+
+
+def check_create_site(cluster, site, host_id_or_name=None) -> None:
+    """The ``site`` a volume create asks to be born on (stretched sync
+    replication): a site of ``cluster``, which must be a sync-replication
+    cluster, and - when the create also names its owner node - the site of
+    that node. A node that does not exist is left to the create, which
+    reports it as before.
+
+    Raises SyncReplicationUnsupportedError on a cluster without sync
+    replication, SyncReplicationSiteError for a site the cluster does not
+    have (no node of it), SyncSiteConflictError when ``host_id_or_name``
+    is a node of another site."""
+    db_controller = DBController()
+    if not cluster.sync_replication:
+        raise SyncReplicationUnsupportedError(
+            f"cluster {cluster.get_id()} is not a sync-replication cluster; a volume site "
+            f"applies only there")
+    sites = {n.site for n in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()) if n.site}
+    if site not in sites:
+        raise SyncReplicationSiteError(
+            f"site {site!r} is not a site of cluster {cluster.get_id()} (sites: {sorted(sites)})")
+    host = _resolve_host_node(db_controller, host_id_or_name) if host_id_or_name else None
+    if host is not None and host.site != site:
+        raise SyncSiteConflictError(
+            f"storage node {host.get_id()} is on site {host.site!r}, the volume was requested "
+            f"on site {site!r}",
+            node_id=host.get_id(), node_site=host.site, site=site)
+
+
 def _volume_ha_type(ha_type, cluster):
     """The HA type a new volume is created with. "default" is the cluster's,
     except in a cluster that activated as single-node, which is non-HA whatever
@@ -706,9 +752,24 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
-                replication_policy=None, consistency_group=None, internal=False):
+                replication_policy=None, consistency_group=None, internal=False, site=None):
+    """Create a volume; ``(volume id, None)`` or ``(False, the reason)``.
+
+    ``site`` (sync replication, design-stretched §9.5): the volume is born on
+    that site - the owner node is chosen among the online nodes of the site,
+    and an explicit ``host_id_or_name`` must be one of them. Checked before
+    anything else (check_create_site, which raises its refusals rather than
+    returning them). A node a consistency group or a group policy pins the
+    volume to wins over ``site``, as a clone inherits its source: the pin
+    is the store every member must share."""
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
+    if site:
+        try:
+            site_pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+        except KeyError:
+            return False, f"Pool not found: {pool_id_or_name}"
+        check_create_site(db_controller.get_cluster_by_id(site_pool.cluster_id), site, host_id_or_name)
     if max_namespace_per_subsys is None:
         # A namespaced lvol whose new subsystem allows only one namespace can
         # never be joined by later namespaced lvols, silently degenerating to
@@ -992,10 +1053,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced),
-                                  pool_id=pool.get_id())
+                                  pool_id=pool.get_id(), site=site or None)
         if not nodes:
+            if site:
+                return False, (f"No nodes found with enough resources to create the LVol: no online "
+                               f"node of site {site} can take it")
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+    elif site and host_node.site != site:
+        # Only a pin gets here (an explicit host on another site was refused
+        # by check_create_site): the group's store decides the site.
+        logger.info("LVol %s: pinned to node %s on site %s; requested site %s not applied",
+                    name, host_node.get_id(), host_node.site, site)
 
     site_activation = activation_gate.site_activation_blocks(cl, host_node)
     if site_activation:

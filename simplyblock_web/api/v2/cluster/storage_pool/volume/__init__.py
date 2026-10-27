@@ -79,6 +79,12 @@ class _CreateParams(BaseModel):
     # passes the PVC's storage.simplyblock.io/consistency-group label here.
     consistency_group: str | None = None
     encrypt: bool = False
+    # Sync replication (stretched clusters): the site the volume is born on.
+    # The owner node is chosen among the online nodes of that site; 400 for a
+    # site the cluster does not have (or on a cluster without sync
+    # replication), 409 when host_id names a node of another site. Ignored
+    # when a volume of that name exists (the existing-name answer stands).
+    site: str | None = None
 
 
 class _CloneParams(BaseModel):
@@ -115,33 +121,35 @@ def add(
             priority_class = qos_controller.resolve_class(cluster.get_id(), data.priority_class)
         except ValueError as e:
             raise HTTPException(422, str(e))
-        volume_id_or_false, error = lvol_controller.add_lvol_ha(
-            name=data.name,
-            size=data.size,
-            pool_id_or_name=pool.get_id(),
-            use_crypto=data.encrypt,
-            max_size=0,
-            max_rw_iops=data.max_rw_iops,
-            max_rw_mbytes=data.max_rw_mbytes,
-            max_r_mbytes=data.max_r_mbytes,
-            max_w_mbytes=data.max_w_mbytes,
-            host_id_or_name=data.host_id,
-            ha_type=data.ha_type if data.ha_type is not None else 'default',
-            use_comp=False,
-            distr_vuid=0,
-            lvol_priority_class=priority_class,
-            namespaced=data.namespaced,
-            pvc_name=data.pvc_name,
-            ndcs=data.ndcs,
-            npcs=data.npcs,
-            allowed_hosts=data.allowed_hosts,
-            fabric=data.fabric,
-            max_namespace_per_subsys=data.max_namespace_per_subsys,
-            do_replicate=data.do_replicate,
-            replication_cluster_id=data.replication_cluster_id,
-            replication_policy=data.replication_policy,
-            consistency_group=data.consistency_group,
-        )
+        with util.sync_http_errors():
+            volume_id_or_false, error = lvol_controller.add_lvol_ha(
+                name=data.name,
+                size=data.size,
+                pool_id_or_name=pool.get_id(),
+                use_crypto=data.encrypt,
+                max_size=0,
+                max_rw_iops=data.max_rw_iops,
+                max_rw_mbytes=data.max_rw_mbytes,
+                max_r_mbytes=data.max_r_mbytes,
+                max_w_mbytes=data.max_w_mbytes,
+                host_id_or_name=data.host_id,
+                ha_type=data.ha_type if data.ha_type is not None else 'default',
+                use_comp=False,
+                distr_vuid=0,
+                lvol_priority_class=priority_class,
+                namespaced=data.namespaced,
+                pvc_name=data.pvc_name,
+                ndcs=data.ndcs,
+                npcs=data.npcs,
+                allowed_hosts=data.allowed_hosts,
+                fabric=data.fabric,
+                max_namespace_per_subsys=data.max_namespace_per_subsys,
+                do_replicate=data.do_replicate,
+                replication_cluster_id=data.replication_cluster_id,
+                replication_policy=data.replication_policy,
+                consistency_group=data.consistency_group,
+                site=data.site or None,
+            )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
             data.snapshot_id,

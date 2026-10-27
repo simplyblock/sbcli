@@ -172,6 +172,20 @@ class TestGetStorageNode:
 
         assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['tertiary_node_id'] is None
 
+    def test_the_node_site_is_reported(self, client, db, storage_node):
+        """Regression: 2026-10-22-node-dto-hides-site. On a stretched cluster each
+        site's operator lists the other site's nodes as remote records, and it
+        can tell them apart only by the node's site; the model carried it and the
+        DTO dropped it."""
+        storage_node.site = 'b'
+
+        assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['site'] == 'b'
+
+    def test_a_node_without_a_site_reports_an_empty_string(self, client, db, storage_node):
+        storage_node.site = ''
+
+        assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['site'] == ''
+
 
 class TestDeleteStorageNode:
 

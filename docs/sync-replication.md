@@ -271,6 +271,22 @@ ids in `volumes`, before anything is fenced or queued; on demote and promote so 
 belongs to another cluster than the group (the status routes do not check that). The cluster and the site are judged from the group itself, so an empty group answers like a
 populated one: demote 204, promote 200 with no members.
 
+### Volume create, site routes and reachability
+
+Prefix `C = /api/v2/clusters/{cluster_id}`. These serve a stretched cluster (one backend cluster whose
+sites live in two Kubernetes clusters, `design-stretched-sync-replication-ramen.md` §5.4, §9.5, §10.2).
+
+| Route | Answer |
+|---|---|
+| `POST C/storage-pools/{pool_id}/volumes/` body `{..., "site": S}` | The volume is born on S: its owner node is chosen among the **online** nodes of S. **400** for a site the cluster has no node on, and for any `site` on a cluster without sync replication. **409** when `host_id` names a node of another site; `detail` carries `node_id`, `node_site` and `site`. A node a consistency group (or a group policy) pins the volume to wins over `site`, as a clone inherits its source. A name that exists answers as without `site` (**409** `Volume <name> exists`, plain `detail`). No `site` (or `""`): unchanged. |
+| `POST C/sites/{site}/fence` | The [site steps](#disaster-fail-over-site-t-lost) of a disaster fail-over, run once for the whole site by an `sync_site_fence` task of the promote runner, with no volume excepted and **no leadership moved**. **202** `{"task_id"}` (`Location`: the task) while the task runs - the call that queues it included, call again; **200** `SiteRecordDTO` once the cluster records the site `done`; **409** while refused - a node of the site has a running status, another site is recorded, the monitor drains the site, a site activation runs for it, no other site has an online node, or the last fence task failed its proof (reported once, with `task_id`; the next call queues a new attempt). **400** unknown site / not a sync cluster. A forced promote afterwards finds the steps `done` and skips them. |
+| `POST C/sites/{site}/unfence` | A confirmation, not an action: **200** `SiteRecordDTO` once the cluster no longer records the site (the site activation clears it when the nodes are back), **409** while it does (any state). |
+| `GET C/sites/{site}/status` | **200** `SiteRecordDTO`: `site`, `lost`, `state` (`""` / `draining` / `down` / `fencing` / `done`), `fence_task_id` (the latest fence task, or `null`), `nodes` (`id`, `status`, `mgmt_ip`; removed ones excepted). |
+| `GET C/reachability[?site=S]` | **200** `[{"id", "mgmt_ip", "site", "reachable"}]`: the storage-node monitor's management-address probe (the ping of `mgmt_ip`, its first node check) run once now against the nodes of S (every node without `site`; removed ones excepted). Records nothing. **400** unknown site, or any `site` on a cluster without sync replication. |
+
+While a site fence task is open the monitor holds the site's return (its gate reads "a sync site fence
+task is not done"), as it does for an open promote task.
+
 ### Errors
 
 - The sync refusals are answered with FastAPI's `detail` object:
@@ -279,7 +295,8 @@ populated one: demote 204, promote 200 with no members.
   - `volumes`: the volumes that block a promote (not demoted, still served on the source site) or
     group members that were not found;
   - `task_id`: the promote task of a 409 "promote in progress", or of a failed promote reported once
-    (with `volumes`).
+    (with `volumes`); on a refused site fence, the failed fence task reported once (`null` otherwise);
+  - `node_id`, `node_site`, `site`: a volume create whose `host_id` is on another site than `site`.
 - Other errors keep their usual shapes: a failed ANA RPC is a **500**
   `{"status": "An error occured while processing the request", "detail": "..."}`; a sync precondition
   raised outside these routes' translation is a **400** `{"error": "Preconditions are not met",
