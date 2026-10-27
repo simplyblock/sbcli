@@ -1,0 +1,59 @@
+name: Lab reservation
+description: Reserve a lab cluster with labreservation.simplyblock.ai for the life of this job.
+
+inputs:
+  cluster:
+    description: Cluster name as the lab inventory spells it, e.g. baremetal or openshift. Give this or `kind`, never both.
+    required: false
+    default: ""
+  kind:
+    description: Ask for any free cluster of this kind instead of naming one. The server picks, so you are not racing someone else's listing.
+    required: false
+    default: ""
+  duration:
+    description: 1h, 3h, 6h, 12h or 24h. A bare number means hours.
+    required: false
+    default: "6h"
+  clean:
+    description: Have the service wipe the hosts before the reservation reports ready. Our own workflows do their own cleanup, so this is off.
+    required: false
+    default: "false"
+  bootstrap:
+    description: Have k3s stood up after the wipe. Implies clean. Not for lanes that deploy their own Kubernetes.
+    required: false
+    default: "false"
+  expect-hosts:
+    description: Hosts this job will actually touch. Checked against the reservation and reported if the group does not cover them.
+    required: false
+    default: ""
+  require-hosts:
+    description: Fail rather than warn when `expect-hosts` is not covered.
+    required: false
+    default: "false"
+  ready-timeout:
+    description: Seconds to wait for the reservation to report ready.
+    required: false
+    default: "900"
+  disabled:
+    description: Emergency bypass. Skips the reservation and warns.
+    required: false
+    default: "false"
+
+outputs:
+  id:
+    description: Reservation id, for extending or releasing by hand.
+  cluster:
+    description: The cluster that was reserved, which with `kind` is whichever the server picked.
+  hosts:
+    description: Space-separated hosts of that cluster.
+  expires-at:
+    description: When the reservation runs out, RFC3339.
+
+runs:
+  # JavaScript rather than composite, for the same reason lab-lock is: only a
+  # JS action gets `post`, and `post` is how the reservation is given back when
+  # the job ends however it ends.
+  using: node20
+  main: main.js
+  post: post.js
+  post-if: always()
