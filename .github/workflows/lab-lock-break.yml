@@ -1,0 +1,170 @@
+name: Lab Lock — Break
+run-name: "Lab lock break | ${{ inputs.hosts }}"
+
+# Clear a lab lock a dead run left behind.
+#
+# The lock has no lease, no expiry and no liveness probe, by design: "held
+# means held", and anything left by a run that died is cleared by an
+# operator. The operator path in .github/actions/lab-lock/README.md is an
+# ssh to each host, which needs lab credentials on the machine you are
+# sitting at. This is that same path, run where the credentials already are.
+#
+# It exists because the release is not guaranteed. The lock action's post
+# step is `post-if: always()`, so a cancel normally releases -- but only if
+# the running step exits inside GitHub's cancellation grace. Run
+# 40404230630 was cancelled during "Collect distrib debug dumps", several
+# hundred sequential `docker cp` calls over ssh; the step did not stop in
+# time, the runner hard-killed the job, and every remaining step including
+# the post one was left `pending`. Seven hosts stayed locked by a run that
+# had been finished for half an hour.
+#
+# The README's instruction before using --force is "only use it once you
+# have confirmed the holding run is not live". That is a judgement a human
+# makes by opening a URL, and it is the whole safety of this operation, so
+# it is checked here rather than trusted: the holder's run id is read out
+# of each lock and its status asked of the API. A holder that is still
+# in_progress stops the job. force_anyway exists for the case the check
+# cannot decide -- a lock written by something that is not a workflow run,
+# or a run in another repository -- and says so in the log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: 'Space-separated hosts to clear. Give the WHOLE set the dead run held: clearing one at a time just moves the failure to the next host.'
+        required: true
+        default: '192.168.10.165 192.168.10.166 192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204 192.168.10.210'
+      force_anyway:
+        description: 'Break even if the holding run cannot be confirmed finished. Only when you have confirmed it by hand.'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  break-lock:
+    name: Break lab lock
+    runs-on: [self-hosted]
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the lab lock script
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            e2e/lab_lock.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Install lab SSH key from secret
+        shell: bash
+        env:
+          LAB_SSH_PRIVATE_KEY: ${{ secrets.LAB_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # Same placement as e2e-bootstrap.yml: $RUNNER_TEMP is job-private
+          # and cleaned up, and concurrent jobs on this runner share $HOME.
+          if [ -z "${LAB_SSH_PRIVATE_KEY:-}" ]; then
+            echo "no LAB_SSH_PRIVATE_KEY; falling back to SSH_PASSWORD"
+            exit 0
+          fi
+          keydir="${RUNNER_TEMP:-$HOME}/sshkeys"
+          install -d -m 700 "$keydir"
+          dest="$keydir/lock_key-${{ github.run_id }}"
+          printf '%s' "$LAB_SSH_PRIVATE_KEY" | tr -d '\r' > "$dest"
+          printf '\n' >> "$dest"
+          chmod 600 "$dest"
+          eval "$(ssh-agent -s)"
+          ssh-add "$dest"
+          echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=${SSH_AGENT_PID}" >> "$GITHUB_ENV"
+
+      - name: Who holds these locks
+        id: status
+        shell: bash
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -uo pipefail
+          chmod +x e2e/lab_lock.sh
+          echo "::group::lock status before"
+          ./e2e/lab_lock.sh status --hosts "${{ inputs.hosts }}" | tee /tmp/lock-status.txt
+          echo "::endgroup::"
+
+          # Every distinct run id named by a lock on any of these hosts. The
+          # lock records `owner` as "<repo>#<run_id>", so the ids are what
+          # the API can be asked about.
+          ids=$(grep -oE '"owner":[[:space:]]*"[^"]+#[0-9]+"' /tmp/lock-status.txt \
+                | grep -oE '[0-9]+"$' | tr -d '"' | sort -u | tr '\n' ' ')
+          echo "holders: ${ids:-<none>}"
+          echo "ids=${ids}" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to break a lock whose run is still alive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          IDS="${{ steps.status.outputs.ids }}"
+          if [ -z "${IDS// /}" ]; then
+            echo "No run id in any lock on these hosts."
+            echo "Either they are already free, or something that is not a"
+            echo "workflow run wrote the lock. Nothing to confirm; proceeding."
+            exit 0
+          fi
+
+          alive=""
+          for id in $IDS; do
+            state=$(gh api "repos/${{ github.repository }}/actions/runs/${id}" \
+                      --jq '"\(.status)/\(.conclusion)"' 2>/dev/null) || state="unknown"
+            echo "  run ${id}: ${state}"
+            case "${state}" in
+              completed/*) : ;;
+              *)           alive="${alive} ${id}" ;;
+            esac
+          done
+
+          if [ -n "${alive// /}" ]; then
+            if [ "${{ inputs.force_anyway }}" = "true" ]; then
+              echo "::warning::run(s)${alive} are not confirmed finished; breaking anyway because force_anyway was set"
+            else
+              echo "::error::run(s)${alive} still hold these hosts and are not finished."
+              for id in $alive; do
+                echo "  https://github.com/${{ github.repository }}/actions/runs/${id}"
+              done
+              echo "Breaking a live lock puts two runs on the same machines,"
+              echo "which is the failure the lock exists to prevent. Open the"
+              echo "run(s) above. If one is genuinely dead and the API still"
+              echo "says otherwise, re-dispatch with force_anyway."
+              exit 1
+            fi
+          fi
+
+      - name: Break
+        shell: bash
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ./e2e/lab_lock.sh break --force --hosts "${{ inputs.hosts }}"
+
+      - name: Confirm they are free
+        if: always()
+        shell: bash
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -uo pipefail
+          echo "::group::lock status after"
+          ./e2e/lab_lock.sh status --hosts "${{ inputs.hosts }}"
+          echo "::endgroup::"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Lab lock break"
+            echo ""
+            echo "- **Hosts:** \`${{ inputs.hosts }}\`"
+            echo "- **Holders found:** \`${{ steps.status.outputs.ids || 'none' }}\`"
+            echo "- **force_anyway:** \`${{ inputs.force_anyway }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
