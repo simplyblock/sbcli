@@ -812,19 +812,18 @@ class RPCClient:
     def reset_device(self, device_name):
         return self._request("bdev_nvme_reset_controller", name=device_name)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1,
-                       md_journal=False):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1, *,
+                       md_journal):
+        # md_journal has no default and is always sent: the cluster decides
+        # it, never the data plane's own default.
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+            "md_journal": bool(md_journal),
         }
-        # Sent only when on: a data plane built before the option rejects a
-        # parameter it does not know, and off is its default.
-        if md_journal:
-            params["md_journal"] = True
         return self._request("bdev_lvol_create_lvstore", **params)
 
     def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0, uuid=None):

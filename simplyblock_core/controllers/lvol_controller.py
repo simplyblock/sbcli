@@ -1443,7 +1443,8 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                 ret = _create_crypto_lvol(rpc_client, lvol, cluster)
 
             elif type == "bdev_lvstore":
-                ret = rpc_client.create_lvstore(**params)
+                from simplyblock_core.storage_node_ops import lvstore_create_params
+                ret = rpc_client.create_lvstore(**lvstore_create_params(params))
 
             elif type == "bdev_lvol":
                 if is_primary:

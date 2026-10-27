@@ -15762,6 +15762,16 @@ def lvstore_stack_entry(cluster, lvs_name, bdev_name, cluster_sz):
     }
 
 
+def lvstore_create_params(params):
+    """The create_lvstore arguments a stored lvstore_stack entry replays to.
+
+    An entry written before the metadata journal existed has no md_journal
+    key. Its lvstore was created without the journal, so the replay states
+    off rather than leaving the choice to the data plane.
+    """
+    return {"md_journal": False, **params}
+
+
 def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -16139,7 +16149,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             ret = True
 
         elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
-                ret = _create_or_none(rpc_client.create_lvstore, name, **params)
+                ret = _create_or_none(rpc_client.create_lvstore, name, **lvstore_create_params(params))
 
         elif type == "bdev_ptnonexcl":
             ret = _create_or_none(rpc_client.bdev_PT_NoExcl_create, name, **params)

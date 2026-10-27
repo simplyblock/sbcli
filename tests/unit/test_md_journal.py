@@ -13,8 +13,9 @@ These tests pin:
      and both create paths default on), while a record written before the
      flag existed still reads as off: its lvstores were created without the
      journal, and a data plane of that age rejects the key;
-  2. the RPC sends ``md_journal`` only when it is on, because a data plane
-     built before the option rejects a parameter it does not know;
+  2. the RPC always states ``md_journal``, on or off, and the wrapper has no
+     default for it: an omitted key would hand the decision to the data
+     plane's own default, which nothing here controls;
   3. the lvstore stack entry carries the cluster's flag, so a restart replays
      the decision the cluster was created with;
   4. ``atomic_4k`` without ``inline_checksum`` is refused at create: the data
@@ -73,14 +74,15 @@ class TestCreateLvstoreRPC(unittest.TestCase):
             c.create_lvstore("LVS_1", "raid0_1", 4096, "none", **kw)
         return captured
 
-    def test_on_sends_the_key(self):
+    def test_on_sends_true(self):
         self.assertIs(self._params_for(md_journal=True)["md_journal"], True)
 
-    def test_off_sends_nothing(self):
-        self.assertNotIn("md_journal", self._params_for(md_journal=False))
+    def test_off_sends_false(self):
+        self.assertIs(self._params_for(md_journal=False)["md_journal"], False)
 
-    def test_absent_sends_nothing(self):
-        self.assertNotIn("md_journal", self._params_for())
+    def test_the_caller_has_to_state_it(self):
+        with self.assertRaises(TypeError):
+            self._params_for()
 
 
 class TestLvstoreStackEntry(unittest.TestCase):
@@ -107,6 +109,24 @@ class TestLvstoreStackEntry(unittest.TestCase):
         self.assertEqual(captured["lvs_name"], "LVS_1")
         self.assertEqual(captured["bdev_name"], "raid0_1")
         self.assertIs(captured["md_journal"], True)
+
+    def test_replays_a_record_from_before_the_flag_as_off(self):
+        """A stack entry written before the flag existed has no md_journal
+        key; its lvstore was created without the journal, and the replay
+        states that instead of failing on the missing argument."""
+        params = {'name': 'LVS_1', 'bdev_name': 'raid0_1', 'cluster_sz': 8192,
+                  'clear_method': 'none', 'num_md_pages_per_cluster_ratio': 1}
+        replayed = storage_node_ops.lvstore_create_params(params)
+        self.assertIs(replayed["md_journal"], False)
+        self.assertNotIn("md_journal", params)
+
+    def test_replays_a_recorded_flag_unchanged(self):
+        for flag in (True, False):
+            with self.subTest(md_journal=flag):
+                entry = storage_node_ops.lvstore_stack_entry(
+                    Cluster({'md_journal': flag}), "LVS_1", "raid0_1", 8192)
+                replayed = storage_node_ops.lvstore_create_params(entry["params"])
+                self.assertIs(replayed["md_journal"], flag)
 
 
 class TestAtomic4kNeedsInlineChecksum(unittest.TestCase):
