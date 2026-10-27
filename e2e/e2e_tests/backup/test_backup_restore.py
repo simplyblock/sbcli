@@ -3518,10 +3518,18 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             )
             self.ssh_obj.exec_command(node=ip, command=install_cmd)
             sleep_n_sec(5)
-            configure_cmd = (
-                f"{sbcli_cmd} --dev -d sn configure "
-                f"--max-subsys {max_subsys}"
-            )
+            # NOT --max-subsys. It is a cluster-level setting (`cluster
+            # create` / `add` / `update`), it is passed on the `cluster add`
+            # below, and `storage-node configure` rejects it outright on
+            # sbctl 19.2.35:
+            #
+            #   sbctl: error: unrecognized arguments: --max-subsys 50
+            #
+            # argparse fails the whole command, so /etc/simplyblock is never
+            # written and the `sn deploy` on the next line dies with "Config
+            # file not found!". SNodeAPI then never listens, add-node gets
+            # ECONNREFUSED on :5000, and the cluster never activates.
+            configure_cmd = f"{sbcli_cmd} --dev -d sn configure"
             self.ssh_obj.exec_command(node=ip, command=configure_cmd)
             deploy_cmd = f"{sbcli_cmd} sn deploy --ifname {ifname}"
             self.ssh_obj.exec_command(node=ip, command=deploy_cmd)
@@ -3537,6 +3545,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             f" --ha-type {ha_type}"
             f" --data-chunks-per-stripe {ndcs}"
             f" --parity-chunks-per-stripe {npcs}"
+            # See the configure command above: this is where --max-subsys
+            # belongs, and cluster B was not getting it at all.
+            f" --max-subsys {max_subsys}"
         )
         if extra_cluster_args:
             create_cmd += f" {extra_cluster_args}"

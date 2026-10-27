@@ -150,10 +150,20 @@ class ReplicationTestBase(TestClusterBase):
                 command=f"pip install --force-reinstall "
                         f"git+https://github.com/simplyblock-io/sbcli.git@{branch}")
             sleep_n_sec(5)
+            # NOT --max-subsys. It is a cluster-level setting (`cluster
+            # create` / `add` / `update`), it is passed on the `cluster add`
+            # below, and `storage-node configure` rejects it outright on
+            # sbctl 19.2.35:
+            #
+            #   sbctl: error: unrecognized arguments: --max-subsys 50
+            #
+            # argparse fails the whole command, so /etc/simplyblock is never
+            # written and the `sn deploy` on the next line dies with "Config
+            # file not found!". SNodeAPI then never listens, add-node gets
+            # ECONNREFUSED on :5000, and the cluster never activates.
             self.ssh_obj.exec_command(
                 node=ip,
-                command=f"{self.base_cmd} --dev -d sn configure "
-                        f"--max-subsys {os.environ.get('BOOTSTRAP_MAX_SUBSYS', '1024')}")
+                command=f"{self.base_cmd} --dev -d sn configure")
             self.ssh_obj.exec_command(
                 node=ip, command=f"{self.base_cmd} sn deploy --ifname {ifname}")
         sleep_n_sec(30)
@@ -161,7 +171,12 @@ class ReplicationTestBase(TestClusterBase):
         create = (f"{self.base_cmd} --dev -d cluster add"
                   f" --ha-type {os.environ.get('HA_TYPE', 'ha')}"
                   f" --data-chunks-per-stripe {os.environ.get('NDCS', str(self.ndcs))}"
-                  f" --parity-chunks-per-stripe {os.environ.get('NPCS', str(self.npcs))}")
+                  f" --parity-chunks-per-stripe {os.environ.get('NPCS', str(self.npcs))}"
+                  # Cluster-wide, and the only place the CLI takes it. Without
+                  # it cluster B ran on the default while cluster A carried the
+                  # run's value, so the two halves of a cross-cluster test were
+                  # not configured alike.
+                  f" --max-subsys {os.environ.get('BOOTSTRAP_MAX_SUBSYS', '1024')}")
         extra = os.environ.get("EXTRA_CLUSTER_ARGS", "")
         if extra:
             create += f" {extra}"

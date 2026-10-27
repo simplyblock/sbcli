@@ -89,6 +89,13 @@ Environment variables, all optional unless marked:
                          enforced.
     CP_API_DEPLOYMENT    deployment serving add_node, default
                          simplyblock-webappapi; only used to apply SPDK_IMAGE
+    CP_NAMESPACE         where the ControlPlane lives, default NAMESPACE.
+                         One operator and one control plane serve a whole
+                         Kubernetes cluster, so a second StorageCluster in a
+                         second namespace has none of its own to wait for --
+                         see operator/internal/upgrade/scope.go. Only the
+                         readiness wait and its dump use this; everything
+                         else is genuinely namespaced.
 """
 
 from __future__ import annotations
@@ -101,6 +108,12 @@ import sys
 import time
 
 NS = os.environ.get("NAMESPACE", "simplyblock")
+
+#: The namespace holding the ControlPlane, which is not always this one. The
+#: operator's manager caches no namespace and its RBAC is a ClusterRole, so
+#: one installation reconciles every namespace; a two-cluster topology is one
+#: control plane and two StorageClusters, not two of each.
+CP_NS = os.environ.get("CP_NAMESPACE", "").strip() or NS
 DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "yes")
 
 API = "storage.simplyblock.io/v1alpha2"
@@ -148,8 +161,9 @@ def log(msg: str) -> None:
     print(f"[bringup] {msg}", flush=True)
 
 
-def kubectl(*args: str, check: bool = True, stdin: str | None = None) -> str:
-    cmd = ["kubectl", "-n", NS, *args]
+def kubectl(*args: str, check: bool = True, stdin: str | None = None,
+            ns: str | None = None) -> str:
+    cmd = ["kubectl", "-n", ns or NS, *args]
     if DRY_RUN:
         # A dry run must not touch the cluster at all, reads included: it is
         # run to check the document this script would build, often from a
@@ -192,6 +206,22 @@ def kubectl(*args: str, check: bool = True, stdin: str | None = None) -> str:
     if check:
         raise RuntimeError(last)
     return ""
+
+
+def kubectl_cp(*args):
+    """kubectl_out against CP_NS rather than NS.
+
+    Identical to kubectl_out when the two are the same, which is every
+    single-cluster run.
+    """
+    cmd = ["kubectl", "-n", CP_NS, *args]
+    if DRY_RUN:
+        return "", ""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return "", "kubectl is not on PATH"
+    return proc.stdout.strip(), proc.stderr
 
 
 def kubectl_out(*args):
@@ -950,11 +980,11 @@ def wait_control_plane_ready(timeout=1800):
     complained = False
 
     while time.time() < deadline:
-        phase, err = kubectl_out("get", "controlplane", "-o",
-                                 "jsonpath={.items[0].status.phase}")
+        phase, err = kubectl_cp("get", "controlplane", "-o",
+                                "jsonpath={.items[0].status.phase}")
         if phase:
-            step, _ = kubectl_out("get", "controlplane", "-o",
-                                  "jsonpath={.items[0].status.step.state}")
+            step, _ = kubectl_cp("get", "controlplane", "-o",
+                                 "jsonpath={.items[0].status.step.state}")
             reading = f"{phase}/{step or '-'}"
             if reading != last:
                 log(f"control plane: {reading}")
@@ -972,21 +1002,21 @@ def wait_control_plane_ready(timeout=1800):
                 #
                 # So this proceeds, loudly. Waiting on Available would deadlock
                 # against a condition only a successful deploy can clear.
-                msg, _ = kubectl_out("get", "controlplane", "-o",
-                                     "jsonpath={.items[0].status.message}")
+                msg, _ = kubectl_cp("get", "controlplane", "-o",
+                                    "jsonpath={.items[0].status.message}")
                 log(f"WARNING: control plane is Degraded, proceeding anyway: "
                     f"{msg or 'no message'}")
                 return
         elif not complained:
             # Say it once, with whatever the API actually said, rather than
             # silently retrying for half an hour.
-            names, _ = kubectl_out("get", "controlplane", "-o",
-                                   "jsonpath={.items[*].metadata.name}")
+            names, _ = kubectl_cp("get", "controlplane", "-o",
+                                  "jsonpath={.items[*].metadata.name}")
             if names.strip():
                 log(f"control plane {names.strip()} exists but reports no "
                     f"phase yet")
             else:
-                log("no ControlPlane object in this namespace yet"
+                log(f"no ControlPlane object in {CP_NS} yet"
                     + (f" (kubectl said: {err.strip()[:160]})" if err.strip()
                        else ""))
             complained = True
@@ -1063,7 +1093,9 @@ def dump_control_plane_state() -> None:
     def show(title, *args, limit=40):
         log(f"---- {title}")
         try:
-            out = kubectl(*args, check=False)
+            # CP_NS, not NS: every read below is about the control plane, and
+            # on a second cluster that is someone else's namespace.
+            out = kubectl(*args, check=False, ns=CP_NS)
         except Exception as exc:                       # noqa: BLE001
             log(f"     (could not read: {str(exc)[:120]})")
             return
@@ -1077,7 +1109,8 @@ def dump_control_plane_state() -> None:
             log(f"     ... {len(lines) - limit} more line(s)")
 
     log("")
-    log("state at the point the control plane stopped advancing:")
+    log(f"state at the point the control plane stopped advancing "
+        f"(namespace {CP_NS}):")
     show("control plane", "get", "controlplane", "-o", "wide")
     show("control plane status", "get", "controlplane", "-o",
          "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"

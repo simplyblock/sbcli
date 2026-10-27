@@ -923,9 +923,11 @@ jobs:
           echo "storage class for chart PVCs: ${SC_NAME}"
           kubectl get sc "${SC_NAME}" -o custom-columns=NAME:.metadata.name,PROVISIONER:.provisioner,BINDING:.volumeBindingMode
           # Hand it to the later steps. SC_NAME is resolved here and
-          # nowhere else, and the C2 chart install needs the same class;
-          # without this it runs in its own shell with set -u and dies on
-          # "SC_NAME: unbound variable" before it installs anything.
+          # nowhere else, so any step that reads it runs in its own shell
+          # with set -u and would die on "SC_NAME: unbound variable". The
+          # C2 chart install was the one that did; it is gone, and this
+          # stays because the next step to want the class should find it
+          # rather than re-derive it.
           echo "SC_NAME=${SC_NAME}" >> "$GITHUB_ENV"
 
           helm upgrade --install spdk-csi ./ \
@@ -947,44 +949,78 @@ jobs:
             --set controlplane.observability.minio.storageClass=${SC_NAME} \
             $TLS_FLAGS $CSI_FLAGS
 
-      # ── Install Helm Chart (operator) in C2 namespace ───────────────────
+      # ── The C2 namespace: a probe identity, and nothing else ────────────
 
-      - name: Install Helm Chart for simplyblock-operator (C2 namespace)
+      # No second helm install. The chart cannot be installed twice in one
+      # Kubernetes cluster -- 21 cluster-scoped objects and 6 in kube-system
+      # carry fixed names, so the second release cannot take ownership of
+      # them and helm aborts (SFAM-2841):
+      #
+      #   Error: Unable to continue with install: ServiceAccount
+      #   "simplyblock-numa-resource-plugin" in namespace "kube-system"
+      #   exists and cannot be imported into the current release
+      #
+      # It was never the right shape either. The operator's manager caches
+      # no namespace and its RBAC is a ClusterRole, so the one install in
+      # ${NS_C1} already reconciles a StorageCluster in any namespace;
+      # operator/internal/upgrade/scope.go states that, and that a second
+      # operator "would watch the same cluster-wide set of objects as the
+      # first and fight it". simplyBlockDeployGCP's e2e.yaml is the worked
+      # example of the supported shape: one operator, two StorageClusters.
+      #
+      # What C2's namespace does need is the identity its probes run as.
+      # templates/nodeprobe-rbac.yaml creates that trio in exactly one
+      # namespace -- discovery.namespace, defaulting to the release's -- so
+      # a discovery raised in ${NS_C2} would start probe Jobs as a service
+      # account that is not there. The three objects below are the chart's,
+      # copied verbatim apart from the namespace, plus regcred: the probe
+      # pod pulls from a private registry and the SA has to carry it before
+      # discovery runs, which is several steps before the blanket SA patch
+      # further down.
+      - name: Give the C2 namespace a probe identity
         run: |
-          set -euxo pipefail
-          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
-
-          TLS_FLAGS=""
-          if [ "${TLS_ENABLED}" = "true" ]; then
-            TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
-          fi
-
-          CSI_FLAGS=""
-          if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set driver.image.repository=${{ github.event.inputs.csi_repository }}"
-          fi
-          if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${{ github.event.inputs.csi_tag }}"
-          fi
-
-          helm upgrade --install spdk-csi-c2 ./ \
-            --namespace ${NS_C2} \
-            --create-namespace \
-            --debug \
-            --timeout 10m \
-            --set deployment.profile=standalone \
-            --set controlplane.csiHostpathDriver.enabled=true \
-            --set controlplane.storageclass.name=${SC_NAME}-c2 \
-            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
-            --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
-            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
-            --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
-            --set csiConfig.simplybk.ip="http://simplyblock-webappapi.${NS_C2}:5000" \
-            --set prometheus.server.persistentVolume.storageClass=${SC_NAME} \
-            --set controlplane.observability.enabled=true \
-            --set opensearch.persistence.storageClass=${SC_NAME} \
-            --set controlplane.observability.minio.storageClass=${SC_NAME} \
-            $TLS_FLAGS $CSI_FLAGS
+          set -euo pipefail
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: simplyblock-nodeprobe-sa
+            namespace: ${NS_C2}
+            labels:
+              storage.simplyblock.io/component: nodeprobe
+          imagePullSecrets:
+            - name: regcred
+          ---
+          kind: Role
+          apiVersion: rbac.authorization.k8s.io/v1
+          metadata:
+            name: simplyblock-nodeprobe-role
+            namespace: ${NS_C2}
+            labels:
+              storage.simplyblock.io/component: nodeprobe
+          rules:
+            # One report per worker per run, created once and replaced if the
+            # Job retried its pod. The chart grants exactly this and no more.
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              verbs: ["create", "update"]
+          ---
+          kind: RoleBinding
+          apiVersion: rbac.authorization.k8s.io/v1
+          metadata:
+            name: simplyblock-nodeprobe-rolebinding
+            namespace: ${NS_C2}
+            labels:
+              storage.simplyblock.io/component: nodeprobe
+          subjects:
+            - kind: ServiceAccount
+              name: simplyblock-nodeprobe-sa
+              namespace: ${NS_C2}
+          roleRef:
+            kind: Role
+            name: simplyblock-nodeprobe-role
+            apiGroup: rbac.authorization.k8s.io
+          EOF
 
       # ── Patch service accounts + imagePullSecrets in BOTH namespaces ────
 
@@ -1006,7 +1042,11 @@ jobs:
 
       - name: Wait for operator pods to be ready
         run: |
-          for NS in ${NS_C1} ${NS_C2}; do
+          # ${NS_C1} only. The admin-control pod is the control plane, and
+          # there is one of it for the whole Kubernetes cluster now; waiting
+          # for one in ${NS_C2} would wait out the loop against a namespace
+          # that is never going to have one.
+          for NS in ${NS_C1}; do
             echo "=== Waiting for operator in ${NS} ==="
             for i in $(seq 1 60); do
               POD=$(kubectl -n ${NS} get pods \
@@ -1326,7 +1366,17 @@ jobs:
           # draft is immutable once approved, so everything has to be set first;
           # the script does that in order.
           export NAMESPACE
-          export CLUSTER_NAME="simplyblock-cluster"
+          # Named apart from C1. Both clusters land in ONE control plane now,
+          # and a Kubernetes namespace is not something it has: two objects
+          # called simplyblock-cluster are two clusters with one name in it.
+          # The pool below is renamed for the same reason, and that one bites
+          # harder -- `volume add` resolves a pool by bare name, so two called
+          # simplyblock-pool make the lookup ambiguous and the command fail.
+          export CLUSTER_NAME="simplyblock-cluster-c2"
+          # Where the ControlPlane is. The script waits for it to be Available
+          # before approving a draft and reads it from its own namespace;
+          # ${NS_C2} has none, because the chart is installed once.
+          export CP_NAMESPACE="${NS_C1}"
           export DEVICE_MODE NDCS NPCS VCPU_COUNT MAX_SUBSYS
           export MGMT_IFC DATA_NICS
           export JM_COUNT
@@ -1413,14 +1463,14 @@ jobs:
           ${VAULT_SETTINGS}
           EOF
           echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
-          kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
+          kubectl -n ${NAMESPACE} patch storagecluster ${CLUSTER_NAME} \
             --type=merge --patch-file /tmp/cluster-extra.yaml
 
           # reservedSystemCPU was a StorageNodeSet field and is now part of the
           # cluster's storage-node workload, so it has no v1alpha1 home and is
           # patched on v1alpha2 directly.
           if [ -n "${RESERVED_SYSTEM_CPU}" ]; then
-            kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
+            kubectl -n ${NAMESPACE} patch storagecluster ${CLUSTER_NAME} \
               --type=merge \
               -p "{\"spec\":{\"storageNodes\":{\"reservedSystemCPU\":\"${RESERVED_SYSTEM_CPU}\"}}}"
           fi
@@ -1430,10 +1480,10 @@ jobs:
           apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
-            name: simplyblock-pool
+            name: simplyblock-pool-c2
             namespace: ${NAMESPACE}
           spec:
-            clusterRef: simplyblock-cluster
+            clusterRef: ${CLUSTER_NAME}
           ${ENCRYPTION_POOL_YAML}
           EOF
 
@@ -1462,9 +1512,16 @@ jobs:
 
       - name: Wait for storage daemonsets and restart (both namespaces)
         run: |
+          # The daemonset is named for its StorageCluster, and the two
+          # clusters no longer share a name, so the suffix follows the
+          # namespace rather than being a constant.
           for NS in ${NS_C1} ${NS_C2}; do
             echo "=== Waiting for storage daemonset in ${NS} ==="
-            DS_NAME="simplyblock-storage-node-ds-simplyblock-cluster"
+            if [ "${NS}" = "${NS_C2}" ]; then
+              DS_NAME="simplyblock-storage-node-ds-simplyblock-cluster-c2"
+            else
+              DS_NAME="simplyblock-storage-node-ds-simplyblock-cluster"
+            fi
             for i in $(seq 1 60); do
               if kubectl get daemonset ${DS_NAME} -n ${NS} &>/dev/null; then
                 echo "Daemonset found in ${NS}, waiting for rollout..."
@@ -1551,59 +1608,86 @@ jobs:
       - name: Wait for Cluster-2 to become active
         timeout-minutes: 80
         run: |
-          NAMESPACE=${NS_C2}
+          # C2 is read through C1's control plane. There is one for the whole
+          # Kubernetes cluster, so there is no admin-control pod in ${NS_C2}
+          # to exec into -- what lives there is C2's StorageCluster and its
+          # storage-node pods.
+          #
+          # Two waits, in the order the GCP reference uses. The CR is first
+          # because it is the only one of the two that can report a refusal:
+          # a cluster whose expansion was declined reaches a phase and stays
+          # there, while `cluster list` simply never shows it and the poll
+          # spends its whole budget without ever saying why.
+          echo "=== Waiting for the C2 StorageCluster in ${NS_C2} ==="
+          C2_CR="simplyblock-cluster-c2"
           MAX_POLL=300
-          echo "=== Waiting for C2 cluster active in ${NAMESPACE} ==="
+          for i in $(seq 1 $MAX_POLL); do
+            PHASE=$(kubectl -n ${NS_C2} get storagecluster "${C2_CR}" \
+              -o jsonpath='{.status.phase}' 2>/dev/null) || true
+            if [ "${PHASE}" = "Online" ]; then
+              echo "C2 StorageCluster is Online"
+              break
+            fi
+            echo "C2 StorageCluster: ${PHASE:-<no phase>} ($i/$MAX_POLL)"
+            sleep 10
+          done
+          if [ "${PHASE:-}" != "Online" ]; then
+            echo "::error::C2 StorageCluster never reached Online (last: ${PHASE:-<none>})"
+            kubectl -n ${NS_C2} get storagecluster -o wide || true
+            kubectl -n ${NS_C2} get storagenodes -o wide || true
+            kubectl -n ${NS_C2} get pods -o wide || true
+            exit 1
+          fi
 
+          echo "=== Reading C2 back off the control plane in ${NS_C1} ==="
+          # Without C1's id, "the one that is not C1" is "the first one",
+          # which is C1 half the time and would hand the test one cluster
+          # twice -- the exact state AR-N-001 exists to refuse, arriving as
+          # a confusing test failure rather than as this one line.
+          if [ -z "${C1_CLUSTER_ID:-}" ]; then
+            echo "::error::C1_CLUSTER_ID is not set; the C1 activation step must run first"
+            exit 1
+          fi
           ADMIN_POD=""
           for i in $(seq 1 60); do
-            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+            ADMIN_POD=$(kubectl -n ${NS_C1} get pods \
               -l app=simplyblock-admin-control \
               -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            if [ -n "$ADMIN_POD" ]; then
-              PHASE=$(kubectl -n $NAMESPACE get pod "$ADMIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null) || true
-              if [ "$PHASE" = "Running" ]; then break; fi
-            fi
+            [ -n "$ADMIN_POD" ] && break
             sleep 10
           done
+          if [ -z "$ADMIN_POD" ]; then
+            echo "::error::no admin-control pod in ${NS_C1}"
+            exit 1
+          fi
 
-          IFS=',' read -ra C2_NODES <<< "${C2_WORKERS}"
-          EXPECTED_SNODES=${#C2_NODES[@]}
+          # C2 is the active cluster that is not C1. C1_CLUSTER_ID was written
+          # to GITHUB_ENV by the C1 wait above, so this does not depend on
+          # ordering within the listing -- which is what picking "the second
+          # uuid" would have done, and the listing is not ordered.
           for i in $(seq 1 $MAX_POLL); do
-            READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
-            if [ "$READY" -ge "$EXPECTED_SNODES" ]; then break; fi
-            echo "snode-spdk: $READY/$EXPECTED_SNODES ($i/$MAX_POLL)"
-            sleep 10
-          done
-
-          for i in $(seq 1 $MAX_POLL); do
-            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
-              -l app=simplyblock-admin-control \
-              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list) || true
-            if echo "$OUTPUT" | grep -qi "active"; then
-              echo "C2 cluster is active!"
-              # Same as the C1 block above.
-              C2_ID=$(printf '%s\n' "$OUTPUT" | tr -d '\r' \
-                | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
-                | head -1)
-              C2_SECRET=""
-              if [ -n "$C2_ID" ]; then
-                C2_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                  sbctl cluster get-secret "$C2_ID" 2>/dev/null \
-                  | tr -d '\r' | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' \
-                  | tail -n 1 | xargs) || true
-              fi
+            OUTPUT=$(kubectl -n ${NS_C1} exec "$ADMIN_POD" -- sbctl cluster list) || true
+            C2_ID=$(printf '%s\n' "$OUTPUT" | tr -d '\r' \
+              | grep -iE '\bactive\b' \
+              | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+              | grep -v "^${C1_CLUSTER_ID}$" | head -1) || true
+            if [ -n "$C2_ID" ]; then
+              C2_SECRET=$(kubectl -n ${NS_C1} exec "$ADMIN_POD" -- \
+                sbctl cluster get-secret "$C2_ID" 2>/dev/null \
+                | tr -d '\r' | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' \
+                | tail -n 1 | xargs) || true
+              echo "C2 cluster is active: ${C2_ID}"
               echo "C2_CLUSTER_ID=${C2_ID}" >> $GITHUB_ENV
               echo "C2_CLUSTER_SECRET=${C2_SECRET}" >> $GITHUB_ENV
               echo "CLUSTER2_ID=${C2_ID}" >> $GITHUB_ENV
               echo "CLUSTER2_SECRET=${C2_SECRET}" >> $GITHUB_ENV
               exit 0
             fi
-            echo "C2 not active ($i/$MAX_POLL)..."
+            echo "C2 not active in the control plane yet ($i/$MAX_POLL)..."
             sleep 10
           done
-          echo "ERROR: C2 cluster did not become active"
+          echo "::error::C2 is Online in Kubernetes but never appeared active in the control plane"
+          kubectl -n ${NS_C1} exec "$ADMIN_POD" -- sbctl cluster list || true
           exit 1
 
       # ── Patch fluent-bit + CSI daemonsets ───────────────────────────────
@@ -1794,7 +1878,7 @@ jobs:
             fi
 
             echo "### Run Info"
-            echo "- **Cluster-1 ID:** \`${C1_CLUSTER_ID}\` (namespace: \`${NS_C1}\`)"
+            echo "- **Cluster-1 ID:** \`${C1_CLUSTER_ID:-<not created>}\` (namespace: \`${NS_C1}\`)"
             echo "- **Cluster-2 ID:** \`${C2_CLUSTER_ID}\` (namespace: \`${NS_C2}\`)"
             echo "- **C1 workers:** \`${C1_WORKERS}\`"
             echo "- **C2 workers:** \`${C2_WORKERS}\`"
