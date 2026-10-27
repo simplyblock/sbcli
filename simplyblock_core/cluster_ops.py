@@ -361,7 +361,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    atomic_4k=False,
                    cluster_vip=None,
                    page_copy=False,
-                   md_journal=False,
+                   md_journal=True,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -637,7 +637,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 inline_checksum=False,
                 atomic_4k=False,
                 page_copy=False,
-                md_journal=False,
+                md_journal=True,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -707,7 +707,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 inline_checksum=False,
                 atomic_4k=False,
                 page_copy=False,
-                md_journal=False,
+                md_journal=True,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,

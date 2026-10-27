@@ -9,8 +9,10 @@ from the persisted stack exactly as it was created.
 
 These tests pin:
 
-  1. the cluster flag defaults off, so a record written before it existed
-     reads as a cluster without the journal;
+  1. a new cluster journals unless it is created without (the API, the CLI,
+     and both create paths default on), while a record written before the
+     flag existed still reads as off: its lvstores were created without the
+     journal, and a data plane of that age rejects the key;
   2. the RPC sends ``md_journal`` only when it is on, because a data plane
      built before the option rejects a parameter it does not know;
   3. the lvstore stack entry carries the cluster's flag, so a restart replays
@@ -20,6 +22,7 @@ These tests pin:
      setting that silently does nothing.
 """
 
+import inspect
 import unittest
 from unittest.mock import patch
 
@@ -32,11 +35,32 @@ from simplyblock_core.rpc_client import RPCClient
 
 class TestClusterFlag(unittest.TestCase):
 
-    def test_default_is_off(self):
-        self.assertFalse(Cluster().md_journal)
-
     def test_an_old_record_reads_as_off(self):
         self.assertFalse(Cluster({'inline_checksum': True}).md_journal)
+
+    def test_both_create_paths_default_on(self):
+        for create in (cluster_ops.create_cluster, cluster_ops.add_cluster, cluster_ops._add_cluster_impl):
+            with self.subTest(create=create.__name__):
+                self.assertIs(inspect.signature(create).parameters['md_journal'].default, True)
+
+
+class TestCLI(unittest.TestCase):
+
+    def _parse(self, *argv):
+        from simplyblock_cli import cli as cli_module
+        wrapper = cli_module.CLIWrapper.__new__(cli_module.CLIWrapper)
+        cli_module.CLIWrapper.__init__(wrapper)
+        return wrapper.parser.parse_args(list(argv))
+
+    def test_create_and_add_journal_by_default(self):
+        for command in ("create", "add"):
+            with self.subTest(command=command):
+                self.assertIs(self._parse("cluster", command).md_journal, True)
+
+    def test_disable_turns_it_off(self):
+        for command in ("create", "add"):
+            with self.subTest(command=command):
+                self.assertIs(self._parse("cluster", command, "--disable-md-journal").md_journal, False)
 
 
 class TestCreateLvstoreRPC(unittest.TestCase):
