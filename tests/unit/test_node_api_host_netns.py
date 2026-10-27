@@ -169,7 +169,7 @@ def _apply_config_host(script, **env):
     import re
     import subprocess
 
-    assignment = re.search(r'^\s*(AGENT_HOST=.*)$', script, re.M)
+    assignment = re.search(r'^\s*(AGENT_HOST=.*)$', script, re.MULTILINE)
     url = re.search(r'://(\S+?):5000/snode/apply_config', script)
     assert assignment and url, "the Job names no agent host"
     out = subprocess.run(
