@@ -132,6 +132,32 @@ class K8sNativeFailoverTest(TestClusterBase):
         #: it, nothing is expected to move and the checks would be vacuous.
         self.EVICTION_THRESHOLD_SEC = 300
 
+        #: Outages that sever the WORKER, not just the storage node on it.
+        #:
+        #: interface_full_network_interrupt is iptables in the host's
+        #: netfilter tables with no port match, so it also cuts the kernel
+        #: nvme-tcp initiator on that worker: every FIO pod scheduled there
+        #: loses every path to every volume, whoever owns it. Those pods are
+        #: stopped before the cut and started again after, because holding
+        #: them to FIO_MAX_LATENCY through it measures where the scheduler
+        #: put them rather than anything about the product.
+        #:
+        #: storage_node_reboot is deliberately NOT here. It evicts, so k8s
+        #: reschedules the client onto a surviving worker, and that
+        #: reschedule is itself worth testing.
+        self.CLIENT_SEVERING_OUTAGES = ("interface_full_network_interrupt",)
+
+        #: How long one client gets to put fio down before we cut its
+        #: network, and how long all of them get together. The total matters
+        #: because this runs inside the outage thread, which the caller joins
+        #: with a 600s timeout: four clients each taking the full per-job
+        #: wait would spend most of that before the outage even started.
+        self.FIO_QUIESCE_WAIT_SEC = 90
+        self.FIO_QUIESCE_TOTAL_SEC = 240
+
+        #: {"pending": [...], "findings": [...], "seq": n}, lazily built.
+        self._quiesce_store = None
+
 
         # ── Tracking dicts ──
         # pvc_name → {job_name, configmap_name, snapshots: [snap_name, ...], node_id}
@@ -2222,6 +2248,179 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── Outage methods ───────────────────────────────────────────────────────
 
+    # ── Quiescing clients that an outage would cut off ───────────────────
+
+    def _quiesce_state(self):
+        """Lazily built so subclasses need not remember to initialise it."""
+        if getattr(self, "_quiesce_store", None) is None:
+            self._quiesce_store = {"pending": [], "findings": [], "seq": 0}
+        return self._quiesce_store
+
+    def _fio_jobs_on_worker(self, k8s_node):
+        """Every live FIO job whose pod currently sits on *k8s_node*."""
+        found = []
+        for label, details in (("pvc", self.pvc_details),
+                               ("clone", self.clone_details)):
+            for name, info in list(details.items()):
+                job = info.get("job_name")
+                if not job:
+                    continue
+                try:
+                    pod = self.k8s_utils.get_job_pod_name(job)
+                    if pod and self.k8s_utils.get_pod_node_name(
+                            pod) == k8s_node:
+                        found.append((label, name, info))
+                except Exception as exc:                  # noqa: BLE001
+                    self.logger.warning(
+                        f"[quiesce] could not locate the pod for job {job}: "
+                        f"{str(exc)[:140]}")
+        return found
+
+    def _quiesce_fio_on_worker(self, node_ip, outage_type):
+        """Stop FIO on the worker about to be isolated. True if safe to cut.
+
+        False means at least one client on that worker is still writing. The
+        caller must then run a different outage -- cutting anyway reproduces
+        the false failure this exists to prevent.
+        """
+        self._ensure_k8s_utils()
+        state = self._quiesce_state()
+        k8s_node = self.k8s_utils._get_k8s_node_name(node_ip)
+        if not k8s_node:
+            self.logger.warning(
+                f"[quiesce] cannot resolve a k8s node for {node_ip}; "
+                f"refusing to run {outage_type} blind")
+            return False
+
+        jobs = self._fio_jobs_on_worker(k8s_node)
+        if not jobs:
+            self.logger.info(
+                f"[quiesce] no FIO pods on {k8s_node}; {outage_type} can "
+                f"proceed untouched")
+            return True
+
+        self.logger.info(
+            f"[quiesce] {len(jobs)} FIO job(s) on {k8s_node}; stopping them "
+            f"before {outage_type}")
+        budget_end = time.time() + self.FIO_QUIESCE_TOTAL_SEC
+        stopped, stuck = [], []
+        for label, name, info in jobs:
+            job = info["job_name"]
+            left = budget_end - time.time()
+            if left <= 0:
+                # Counted as stuck, not skipped. Running out of budget means
+                # we do not know this client is down, and the whole point of
+                # the check is to refuse the cut when we do not know.
+                stuck.append(
+                    f"{name}: quiesce budget "
+                    f"({self.FIO_QUIESCE_TOTAL_SEC}s) spent on earlier "
+                    f"clients")
+                continue
+            res = self.k8s_utils.stop_fio_in_job(
+                job, wait=int(min(self.FIO_QUIESCE_WAIT_SEC, max(10, left))))
+
+            # Judged now, because nothing will judge it later: the Job is
+            # replaced on resume, and a terminated Job never reaches
+            # "succeeded" so validate_fio_job skips it. err=110 counts here
+            # -- the cluster is still whole at this point.
+            hits = self.k8s_utils.fio_io_errors_in(
+                res.get("logs"), source=f"{label} {name} (job {job})")
+            if hits:
+                state["findings"].extend(hits)
+                self.logger.error(
+                    f"[quiesce] {name}: {len(hits)} IO error(s) in the log "
+                    f"BEFORE the outage -- recorded, not discarded")
+            try:
+                self._save_fio_pod_logs(job, f"{name}-quiesced",
+                                        pvc_name=name)
+            except Exception:                             # noqa: BLE001
+                pass
+
+            if res.get("stopped"):
+                stopped.append({"label": label, "name": name, "info": info,
+                                "node": k8s_node})
+            else:
+                stuck.append(f"{name}: {res.get('reason') or 'unknown'}")
+
+        state["pending"].extend(stopped)
+        if stuck:
+            self.logger.warning(
+                f"[quiesce] could not stop {len(stuck)} client(s) on "
+                f"{k8s_node}: {'; '.join(stuck[:3])}. Not cutting this "
+                f"node's network.")
+            # Whatever did stop goes straight back: the outage is not
+            # happening, so leaving those volumes idle would be a silent gap
+            # in the iteration rather than a deliberate one.
+            self._resume_quiesced_fio()
+            return False
+
+        self.logger.info(
+            f"[quiesce] {len(stopped)} client(s) on {k8s_node} are down; "
+            f"{outage_type} may proceed")
+        return True
+
+    def _resume_quiesced_fio(self):
+        """Start FIO again on every client we stopped. Idempotent, cheap.
+
+        Called from the top of perform_n_plus_k_outages and of
+        validate_fio_jobs rather than wired into one recovery path: those
+        two are the places that need IO to be running, they are on every
+        route through the loop, and a client nobody restarted is a volume
+        the rest of the run quietly stops testing.
+        """
+        state = self._quiesce_state()
+        if not state["pending"]:
+            return
+        self._ensure_k8s_utils()
+        pending, state["pending"] = state["pending"], []
+        state["seq"] += 1
+        tag = f"q{state['seq']}"
+        self.logger.info(
+            f"[quiesce] restarting {len(pending)} client(s) stopped for an "
+            f"outage")
+
+        for item in pending:
+            label, name, info = item["label"], item["name"], item["info"]
+            old_job, old_cm = info.get("job_name"), info.get("configmap_name")
+            new_job, new_cm = f"fio-{name}-{tag}", f"fiocfg-{name}-{tag}"
+            try:
+                if old_job:
+                    self.k8s_utils.delete_job(old_job)
+                if old_cm:
+                    self.k8s_utils.delete_configmap(old_cm)
+            except Exception:                             # noqa: BLE001
+                pass
+            try:
+                fio_config, warmup_config = self._build_fio_config(name)
+                nid = (info.get("node_id") if label == "pvc"
+                       else self._get_pvc_node_id(name))
+                avoid = (self._get_k8s_node_for_storage_node(nid)
+                         if nid else None)
+                self.k8s_utils.create_fio_job(
+                    new_job, name, new_cm, fio_config,
+                    image=self.FIO_IMAGE,
+                    # Same as the checkpoint relaunch. Reusing the files a
+                    # killed job left behind is what produced the verify
+                    # failure in run 20261019-211527: a new seed over an old
+                    # file reads as corruption.
+                    cleanup_before_fio=True,
+                    avoid_node=avoid,
+                    warmup_config=warmup_config,
+                )
+            except Exception as exc:                      # noqa: BLE001
+                # Not swallowed. A client that never came back is a hole in
+                # the rest of the run, and the next checkpoint should say so
+                # rather than cover less ground without mentioning it.
+                state["findings"].append(
+                    f"{label} {name}: FIO was stopped for an outage and "
+                    f"could not be restarted: {str(exc)[:160]}")
+                self.logger.error(
+                    f"[quiesce] could not restart FIO for {name}: {exc}")
+                continue
+            info["job_name"] = new_job
+            info["configmap_name"] = new_cm
+            self.logger.info(f"[quiesce] {name}: FIO restarted as {new_job}")
+
     def _build_reverse_secondary_map(self):
         rev = defaultdict(set)
         for p, s in self.sn_primary_secondary_map.items():
@@ -2567,6 +2766,11 @@ class K8sNativeFailoverTest(TestClusterBase):
             # FTT=1: pick from primaries only (secondary blocked)
             candidates = list(self.sn_primary_secondary_map.keys())
 
+        # Anything stopped for the previous outage starts again here, before
+        # the next one is chosen. A client left down is a volume the rest of
+        # the run silently stops testing.
+        self._resume_quiesced_fio()
+
         self.current_outage_nodes = []
 
         if len(candidates) < self.npcs:
@@ -2619,10 +2823,25 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self._k8s_stop_spdk_pod(node_ip, node)
                 elif outage_type == "graceful_shutdown":
                     self._graceful_shutdown_node(node)
-                elif outage_type == "interface_full_network_interrupt":
-                    duration = random.choice([30, 300, 600])
-                    node_outage_dur = self._k8s_network_outage(node_ip, duration)
-                    self._note_eviction_expected(node_ip, duration)
+                elif outage_type in self.CLIENT_SEVERING_OUTAGES:
+                    # Take the clients on this worker down first. If any of
+                    # them will not stop, we do not cut: running it anyway
+                    # reproduces the false failure this exists to prevent,
+                    # with the difference that we would have known. The
+                    # iteration still gets an outage, just a pod-level one
+                    # that leaves the worker's networking alone.
+                    if self._quiesce_fio_on_worker(node_ip, outage_type):
+                        duration = random.choice([30, 300, 600])
+                        node_outage_dur = self._k8s_network_outage(
+                            node_ip, duration)
+                        self._note_eviction_expected(node_ip, duration)
+                    else:
+                        self.logger.warning(
+                            f"[quiesce] {outage_type} on {node} downgraded "
+                            f"to container_stop: a client on that worker "
+                            f"could not be quiesced")
+                        outage_type = "container_stop"
+                        self._k8s_stop_spdk_pod(node_ip, node)
                 elif outage_type == "storage_node_reboot":
                     self._k8s_reboot_node(node_ip, node)
                 elif outage_type == "operator_shutdown":
@@ -2653,8 +2872,13 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         outage_combinations = []
         for node, outage_type, node_ip, _rpc_port in node_plans:
-            _, node_outage_dur = outage_results.get(node, (outage_type, 0))
-            outage_combinations.append((node, outage_type, node_outage_dur))
+            # outage_results carries the type that actually RAN, which is not
+            # always the one planned -- a network cut is downgraded when its
+            # worker's clients cannot be quiesced. Reporting the planned name
+            # would put an outage in the summary that never happened.
+            ran_type, node_outage_dur = outage_results.get(
+                node, (outage_type, 0))
+            outage_combinations.append((node, ran_type, node_outage_dur))
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
@@ -3542,6 +3766,10 @@ class K8sNativeFailoverTest(TestClusterBase):
         """
         self._ensure_k8s_utils()
 
+        # A checkpoint must never validate a job we stopped ourselves: it
+        # would read our own SIGTERM as a failure. Resume first, then judge.
+        self._resume_quiesced_fio()
+
         # Save all FIO logs and mapping summary before validation
         self._save_all_fio_logs()
         self._save_fio_mapping_summary()
@@ -3580,15 +3808,27 @@ class K8sNativeFailoverTest(TestClusterBase):
                         self.logger.error(
                             f"[validate_fio] {label} {name!r} (job {job}): {exc}")
 
-            if failures:
+            # Errors found in a log we terminated ourselves are reported
+            # here and nowhere else. The Job they came from was replaced on
+            # resume, so validate_fio_job can no longer see it -- dropping
+            # them would mean a volume that failed before an outage passed
+            # the run because we happened to stop its client first.
+            quiesce_hits = list(self._quiesce_state()["findings"])
+            self._quiesce_state()["findings"] = []
+
+            if failures or quiesce_hits:
                 total = len(self.pvc_details) + len(self.clone_details)
                 lines = [
                     f"  {label} {name} (job {job}): {exc}"
                     for label, name, job, exc in failures
                 ]
+                lines += [f"  [quiesced client] {h}" for h in quiesce_hits]
                 raise AssertionError(
                     f"FIO validation failed on {len(failures)} of {total} "
-                    f"volume(s):" + chr(10) + chr(10).join(lines))
+                    f"volume(s)"
+                    + (f", plus {len(quiesce_hits)} error(s) in client(s) "
+                       f"stopped for an outage" if quiesce_hits else "")
+                    + ":" + chr(10) + chr(10).join(lines))
             self.logger.info(
                 f"[validate_fio] all "
                 f"{len(self.pvc_details) + len(self.clone_details)} "

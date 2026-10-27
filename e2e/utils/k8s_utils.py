@@ -4889,6 +4889,118 @@ class K8sUtils:
             timeout=timeout
         )
 
+    # ── Quiescing a FIO client before an outage that would isolate it ───
+    #
+    # cut_storage_network writes its DROP rules into the HOST's tables (the
+    # SPDK pod is hostNetwork) with no port match, so the kernel nvme-tcp
+    # initiator on that worker loses every path to every volume, whichever
+    # storage node owns it. Judging the FIO pods that happen to be scheduled
+    # there against a latency ceiling afterwards measures where the scheduler
+    # put them -- run 40507342839 failed three volumes exactly that way. See
+    # sbcli-rca-archive/k8s_rapid_client_isolated_by_its_own_outage_rca_20261027.md
+    #
+    # So the caller stops fio on that worker first. Not SIGSTOP: fio times a
+    # synchronous IO across the pwrite() it is blocked in, so the stopped
+    # seconds would be charged to that IO's latency -- the exact err=110 we
+    # are avoiding. SIGTERM is fio's own clean stop, and it exits 128+15.
+
+    #: Lines that exist only because we sent the signal.
+    _FIO_SIGNAL_RE = re.compile(
+        r"fio: terminating on signal \d+"
+        r"|fio: job .*(?:aborted|interrupted)",
+        re.I)
+
+    #: A real failure of the workload, signal or no signal.
+    FIO_IO_ERROR_MARKERS = (
+        "io_u error", "verify failed", "bad magic header", "hdr_fail",
+        "data mismatch", "checksum error", "input/output error",
+    )
+    _FIO_ERRNO_RE = re.compile(r"\berr=\s*([1-9]\d*)")
+
+    def fio_io_errors_in(self, logs: str, source: str = "") -> list:
+        """Real IO errors in a fio log, forgiving only our own SIGTERM.
+
+        ``err=110`` is NOT forgiven. The client is stopped BEFORE the outage
+        starts, so a latency breach recorded in this log happened while the
+        cluster was still whole, and that is a finding in its own right
+        rather than a consequence of the cut.
+        """
+        hits = []
+        for line in (logs or "").splitlines():
+            s = line.strip()
+            if not s or self._FIO_SIGNAL_RE.search(s):
+                continue
+            low = s.lower()
+            if (any(m in low for m in self.FIO_IO_ERROR_MARKERS)
+                    or self._FIO_ERRNO_RE.search(low)):
+                hits.append(f"{source}: {s[:160]}" if source else s[:160])
+        return hits
+
+    def stop_fio_in_job(self, job_name: str, namespace: str | None = None,
+                        wait: int = 90) -> dict:
+        """SIGTERM fio inside a Job's pod and hand back what it left behind.
+
+        Returns ``{"pod", "node", "stopped", "logs", "reason"}``. ``stopped``
+        is False when the pod could not be reached or fio was still running
+        after *wait* seconds; the caller must read that as "do not cut this
+        node", never as success.
+
+        The log comes back either way, because it is the only copy anybody
+        will ever judge: a terminated Job never reaches "succeeded", and the
+        Job itself is replaced when the client resumes.
+        """
+        ns = namespace or self.namespace
+        out = {"pod": "", "node": "", "stopped": False, "logs": "",
+               "reason": ""}
+        pod = self.get_job_pod_name(job_name, namespace=ns)
+        if not pod:
+            out["reason"] = f"no pod for job {job_name}"
+            return out
+        out["pod"] = pod
+        out["node"] = self.get_pod_node_name(pod, namespace=ns)
+        try:
+            self.exec_in_pod(
+                pod, "pkill -TERM -x fio || pkill -TERM fio || true",
+                namespace=ns, timeout=30)
+        except Exception as exc:                          # noqa: BLE001
+            out["reason"] = f"could not exec into {pod}: {str(exc)[:140]}"
+            return out
+
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            alive = ""
+            try:
+                alive = self.exec_in_pod_container(
+                    pod, "",
+                    "pgrep -x fio >/dev/null 2>&1 && echo RUNNING || echo GONE",
+                    namespace=ns, timeout=15).strip()
+            except Exception:                             # noqa: BLE001
+                pass
+            if alive.endswith("GONE"):
+                out["stopped"] = True
+                break
+            # The pod leaving Running is the same answer by another route,
+            # and it is the one we get once the container has exited and
+            # exec has stopped working.
+            if self.get_pod_status_detail(pod, namespace=ns).get("phase") in (
+                    "Succeeded", "Failed"):
+                out["stopped"] = True
+                break
+            time.sleep(3)
+        else:
+            out["reason"] = f"fio still running in {pod} after {wait}s"
+
+        try:
+            out["logs"] = self.get_pod_logs(pod, namespace=ns, tail=2000) or ""
+        except Exception as exc:                          # noqa: BLE001
+            out["reason"] = (
+                f"{out['reason']} (log read failed: {str(exc)[:100]})".strip())
+        self.logger.info(
+            "[K8sUtils] stop fio in %s on %s: %s%s", job_name,
+            out["node"] or "?", "stopped" if out["stopped"] else "STILL UP",
+            f" -- {out['reason']}" if out["reason"] else "")
+        return out
+
     def find_files_in_pvc(self, pod_name: str,
                           mount_path: str = "/spdkvol",
                           namespace: str | None = None) -> list:
