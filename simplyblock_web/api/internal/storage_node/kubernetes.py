@@ -17,7 +17,7 @@ from simplyblock_core.settings import Settings
 from simplyblock_core.storage_network import NetworkAttachment
 from simplyblock_core.utils import shell as shell_utils
 from simplyblock_web import node_utils, node_utils_k8s, utils
-from simplyblock_web.api.internal.storage_node import network_attachments
+from simplyblock_web.api.internal.storage_node import network_attachments, pod_service
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from .._node_info import get_static_node_info
@@ -313,6 +313,50 @@ class SPDKParams(BaseModel):
     spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
     # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
     networks: Annotated[list[NetworkAttachment], Field(default_factory=list)]
+    # The pod serves on the pod network itself, fronted by a Service, with no attachment.
+    pod_network: bool = False
+    # The ports the Service forwards at start: the node's known ports, which a restart
+    # has and a first add lacks. The RPC port is always forwarded.
+    published_ports: Annotated[list[Annotated[int, Field(ge=1, lt=65536)]], Field(default_factory=list)]
+
+
+class ServicePublishParams(BaseModel):
+    rpc_port: Annotated[int, Field(ge=1, lt=65536)]
+    cluster_id: str
+    ports: list[Annotated[int, Field(ge=1, lt=65536)]]
+
+
+@api.post('/spdk_service_publish', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def spdk_service_publish(body: ServicePublishParams):
+    """Set the ports a pod-network node's Service forwards; answers its cluster address."""
+    try:
+        address = pod_service.ensure(core_utils.get_k8s_core_client(), node_utils_k8s.get_namespace(),
+                                     body.rpc_port, body.cluster_id, body.ports)
+    except ApiException as e:
+        return utils.get_response(False, f"Service for port {body.rpc_port} not published: {e.reason}")
+    return utils.get_response(address)
+
+
+@api.get('/spdk_service_delete', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_service_delete(query: utils.RPCPortParams):
+    """Remove a pod-network node's Service. Only a node's removal does this: the
+    address is lost with it, and a restarted pod keeps it only while it exists."""
+    if not query.cluster_id:
+        return utils.get_response(False, "param required: cluster_id")
+    try:
+        pod_service.delete(core_utils.get_k8s_core_client(), node_utils_k8s.get_namespace(),
+                           query.rpc_port, query.cluster_id)
+    except ApiException as e:
+        return utils.get_response(False, f"Service for port {query.rpc_port} not deleted: {e.reason}")
+    return utils.get_response(True)
 
 
 @api.post('/spdk_process_start', responses={
@@ -407,7 +451,7 @@ def spdk_process_start(body: SPDKParams):
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
             'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
-            'SERVER_IP': network_attachments.server_ip(body.networks) or body.server_ip,
+            'SERVER_IP': network_attachments.server_ip(body.networks, body.pod_network) or body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
             'RPC_PASSWORD': body.rpc_password,
@@ -434,8 +478,10 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
             'SPDK_PROXY_TLS_SECRET': body.spdk_proxy_tls_secret,
-            'AGENT_IP': os.environ.get("POD_IP", "") if body.networks else "",
+            'AGENT_IP': os.environ.get("POD_IP", "") if (body.networks or body.pod_network) else "",
             'NETWORKS': network_attachments.annotation(body.networks),
+            'POD_NETWORK': body.pod_network,
+            'FULL_CLUSTER_ID': body.cluster_id,
         }
 
         if ubuntu_host:
@@ -611,6 +657,13 @@ def spdk_process_start(body: SPDKParams):
                 logger.info(f"Node '{node_name}' is cordoned, waiting for uncordon... attempt {attempt + 1}/36")
                 time.sleep(10)
 
+        service_ip = ""
+        if body.pod_network:
+            # Before the pod: the Service's address is what the pod reports, and it
+            # has to exist for the control plane to reach the proxy at all.
+            service_ip = pod_service.ensure(k8s_core_v1, namespace, body.rpc_port, body.cluster_id,
+                                            body.published_ports)
+
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         docs = yaml.safe_load_all(template.render(values))
@@ -619,9 +672,11 @@ def spdk_process_start(body: SPDKParams):
             pod_name = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace).metadata.name
             msg = f"Pod created: '{pod_name}' in namespace '{namespace}'"
             logger.info(msg)
-        if body.networks:
+        if body.networks or body.pod_network:
             report = network_attachments.wait_for_report(
                 lambda: k8s_core_v1.read_namespaced_pod(pod_name, namespace), body.networks)
+            if service_ip:
+                report["service_ip"] = service_ip
             return utils.get_response({"message": msg, **report})
     except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")

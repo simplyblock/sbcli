@@ -1,6 +1,6 @@
 """The networks an SPDK pod attaches to, as the operator states them, and what
 the pod spec needs for them: the annotation Multus reads. A pod with none stays on
-the host network."""
+the host network, unless it serves on the pod network itself (``pod_network``)."""
 
 import json
 
@@ -29,12 +29,12 @@ def annotation(attachments: list[NetworkAttachment]) -> str:
     return json.dumps([a.model_dump() for a in attachments])
 
 
-def server_ip(attachments: list[NetworkAttachment]) -> str:
+def server_ip(attachments: list[NetworkAttachment], pod_network: bool = False) -> str:
     """The address the SPDK proxy binds. The management network's, when there is one,
     and otherwise the pod's own, which only the pod knows and Kubernetes expands from
-    POD_IP. "" when the pod has no attachments and the control plane's own value stands."""
+    POD_IP. "" when the pod is on the host network and the control plane's own value stands."""
     if not attachments:
-        return ""
+        return POD_IP_REFERENCE if pod_network else ""
     for a in attachments:
         if a.interface == MANAGEMENT_INTERFACE and a.ips:
             return a.ips[0].split("/")[0]
@@ -45,9 +45,14 @@ def report(pod, attachments: list[NetworkAttachment]) -> dict | None:
     """What the SPDK pod holds, for the control plane: its own address and the declared
     interfaces Multus attached, from the pod's network-status. None until the pod is
     running and holds every declared interface, because the annotation is written once
-    when the attach finishes and a partial report would record the wrong addresses."""
+    when the attach finishes and a partial report would record the wrong addresses.
+
+    A pod with no attachments serves on the pod network: its own address is the whole
+    report, and it is ready as soon as the pod runs."""
     if pod.status.phase != "Running" or not pod.status.pod_ip:
         return None
+    if not attachments:
+        return {"pod_ip": pod.status.pod_ip, "interfaces": []}
     raw = (pod.metadata.annotations or {}).get(NETWORK_STATUS)
     if not raw:
         return None
@@ -82,6 +87,8 @@ def wait_for_report(read_pod, attachments: list[NetworkAttachment],
             stop=stop_after_delay(timeout), wait=wait_fixed(POLL_INTERVAL_SEC),
         )(attempt)
     except RetryError as e:
+        if not attachments:
+            raise TimeoutError(f"the SPDK pod was not running with an address within {timeout:.0f}s") from e
         raise TimeoutError(
             "the SPDK pod did not hold interface(s) "
             + ", ".join(a.interface for a in attachments) + f" within {timeout:.0f}s") from e

@@ -656,7 +656,7 @@ def exec_port_allow_task(task):
     for data_nic in node.data_nics:
         if data_nic.ip4_address:
             data_ping = health_controller._check_ping_from_node(
-                data_nic.ip4_address, ifname=data_nic.if_name, node=node)
+                data_nic.listen_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping}")
             data_results.append(data_ping)
     if data_results and not any(r is True for r in data_results):

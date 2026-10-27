@@ -57,6 +57,9 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     # dedicated-secondary-node / physical-label branches.
     n.is_secondary_node = is_secondary_node
     n.physical_label = physical_label
+    # A truthy child mock here would make every port change publish Service
+    # ports; these nodes are on the host network and have no Service.
+    n.pod_network = False
     # Same hazard: left as a child mock this reads truthy, and the removal
     # would skip phase 3b believing a drain had already reallocated the
     # replicas. A node that no drain has touched has it False.

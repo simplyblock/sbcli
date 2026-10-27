@@ -6,6 +6,9 @@ metadata:
   labels:
     app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
+    {% if FULL_CLUSTER_ID %}
+    simplyblock.io/cluster: {{ FULL_CLUSTER_ID }}
+    {% endif %}
   {% if MODE == "kubernetes" or NETWORKS %}
   annotations:
     {% if MODE == "kubernetes" %}
@@ -20,7 +23,7 @@ spec:
   serviceAccountName: simplyblock-storage-node-sa
   nodeSelector:
     kubernetes.io/hostname: {{ HOSTNAME }}
-  {% if NETWORKS %}
+  {% if NETWORKS or POD_NETWORK %}
   dnsPolicy: ClusterFirst
   {% else %}
   hostNetwork: true
@@ -177,7 +180,7 @@ spec:
           readOnly: true
         {% endif %}
       env:
-        {% if NETWORKS %}
+        {% if NETWORKS or POD_NETWORK %}
         - name: POD_IP
           valueFrom:
             fieldRef:

@@ -430,7 +430,7 @@ def task_runner_node(task):
         logger.info("Check: data nic lives in the SPDK pod the restart recreates ... skipped")
     for data_nic in ([] if node.on_pod_network else node.data_nics):
         if data_nic.ip4_address:
-            data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=node)
+            data_ping_check = health_controller._check_ping_from_node(data_nic.listen_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
             # data_ping_check is tri-state (True/False/None): None means the
             # SnodeAPI call itself errored/timed out (inconclusive), not that
