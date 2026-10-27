@@ -6,6 +6,7 @@ it asks for one, and that every doubt falls back to a full transfer.
 """
 import unittest
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import replication_delta
@@ -280,7 +281,10 @@ class TestLandingMerge(unittest.TestCase):
     delta's blocks; the rest comes from the base before the convert, as a job
     on the target that the finish starts and then waits for across passes."""
 
-    def _merge(self, params, start=None, stats=(), side_effect=None):
+    #: what bdev_lvol_merge_base_stat answers before any job ran
+    NONE: ClassVar[dict] = {"state": "none", "rc": 0}
+
+    def _merge(self, params, start=None, stats=(NONE,), side_effect=None):
         task = SimpleNamespace(function_params=params, write_to_db=MagicMock(), uuid="t")
         lv = SimpleNamespace(get_id=lambda: "landing", top_bdev="LVS/LAND")
         node = MagicMock()
@@ -299,7 +303,7 @@ class TestLandingMerge(unittest.TestCase):
 
     def test_a_delta_is_merged_once(self):
         res, rpc, task = self._merge({"partial_base": 7}, start={"state": "running"},
-                                     stats=[{"state": "done", "rc": 0, "clusters": 3}])
+                                     stats=[self.NONE, {"state": "done", "rc": 0, "clusters": 3}])
         self.assertEqual(res, "ok")
         rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND")
         self.assertEqual(task.function_params["merged_landing"], "landing")
@@ -309,13 +313,32 @@ class TestLandingMerge(unittest.TestCase):
 
     def test_a_long_merge_is_left_to_the_next_pass(self):
         res, _, task = self._merge({"partial_base": 7}, start={"state": "running"},
-                                   stats=[{"state": "running"}] * 50)
+                                   stats=[self.NONE] + [{"state": "running"}] * 50)
         self.assertEqual(res, "pending")
         self.assertNotIn("merged_landing", task.function_params)
 
     def test_a_lost_record_repeats_the_transfer(self):
         res, _, _ = self._merge({"partial_base": 7}, start={"state": "failed", "rc": -116})
         self.assertEqual(res, "restart")
+
+    def test_a_lost_record_is_seen_before_a_relaunch(self):
+        # SPDK relaunches a failed job and answers "running"; the relaunch
+        # fails again at once. Starting first hid the -ESTALE on every pass.
+        res, rpc, _ = self._merge({"partial_base": 7}, start={"state": "running"},
+                                  stats=[{"state": "failed", "rc": -116}])
+        self.assertEqual(res, "restart")
+        rpc.bdev_lvol_merge_base.assert_not_called()
+
+    def test_a_running_merge_is_not_started_again(self):
+        res, rpc, _ = self._merge({"partial_base": 7}, stats=[{"state": "running"}] * 50)
+        self.assertEqual(res, "pending")
+        rpc.bdev_lvol_merge_base.assert_not_called()
+
+    def test_a_failed_merge_is_started_again(self):
+        res, rpc, _ = self._merge({"partial_base": 7}, start={"state": "running"},
+                                  stats=[{"state": "failed", "rc": -5}] + [{"state": "running"}] * 50)
+        self.assertEqual(res, "pending")
+        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND")
 
     def test_other_failures_retry_the_finish(self):
         from simplyblock_core.rpc_client import RPCRemoteError

@@ -2025,7 +2025,14 @@ def _merge_landing(task, remote_lv, remote_snode):
         return "ok"
     rpc = remote_snode.rpc_client()
     try:
-        st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev)
+        # Look before starting: a start relaunches a failed job and answers
+        # "running" before the relaunch fails again. With no inline wait every
+        # pass then saw only "running", and a landing volume that lost its
+        # delta record (-ESTALE, e.g. after a target restart) stayed "merging"
+        # forever instead of being transferred again (bed 2026-10-26).
+        st = rpc.bdev_lvol_merge_base_stat(remote_lv.top_bdev) or {}
+        if st.get("state") not in ("running", "done") and st.get("rc") != _SPDK_ESTALE:
+            st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev)
         deadline = time.time() + constants.REPL_MERGE_INLINE_WAIT_SEC
         while (st or {}).get("state") == "running" and time.time() < deadline:
             time.sleep(constants.REPL_MERGE_POLL_SEC)
