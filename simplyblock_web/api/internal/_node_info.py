@@ -46,7 +46,7 @@ def get_static_node_info() -> StaticNodeInfo:
     known not to apply, avoiding up to a few seconds of network timeout on
     the first call after boot).
     """
-    hostname, _, _ = shell_utils.run_command("hostname -s")
+    hostname = shell_utils.hostname()
     system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
     cloud_info: dict[str, Any] = {}

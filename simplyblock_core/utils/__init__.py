@@ -113,8 +113,7 @@ def get_system_id():
 
 
 def get_hostname():
-    out, _, _ = shell_utils.run_command("hostname -s")
-    return out
+    return shell_utils.hostname()
 
 
 def get_ips():
@@ -134,7 +133,7 @@ def get_nvme_info(dev_name):
 
 def get_nics_data():
     logger.debug("function:get_nics_data start")
-    out, err, rc = shell_utils.run_command("ip -j address show")
+    out, err, rc = shell_utils.run_command(" ".join(shell_utils.host_net_command(["ip", "-j", "address", "show"])))
     if rc != 0:
         logger.error(err)
         return []

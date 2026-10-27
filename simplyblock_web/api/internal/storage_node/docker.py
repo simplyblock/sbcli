@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 from typing import Annotated, Any
 
-import psutil
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
@@ -1124,10 +1123,7 @@ def ifc_is_roce(query: NicQuery):
 def ifc_is_tcp(query: NicQuery):
     try:
         nic = query.nic if hasattr(query, "nic") else str(query)
-        addrs = psutil.net_if_addrs().get(nic, [])
-        for addr in addrs:
-            if addr.family == socket.AF_INET:
-                return utils.get_response(True)
+        return utils.get_response(bool(core_utils.get_nics_data().get(nic, {}).get("ip")))
     except Exception as e:
         logger.error(e)
     return utils.get_response(False)
@@ -1195,7 +1191,7 @@ class PingQuery(BaseModel):
 def ping_ip(query: PingQuery):
     try:
         subprocess.check_call(
-            ["ping", "-c", "3", "-W", "1", query.ip],
+            shell_utils.host_net_command(["ping", "-c", "3", "-W", "1", query.ip]),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
