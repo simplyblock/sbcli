@@ -4,7 +4,13 @@ the host network."""
 
 import json
 
-from tenacity import RetryError, Retrying, retry_if_result, stop_after_delay, wait_fixed
+from tenacity import (
+    RetryError,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 from simplyblock_core.storage_network import MANAGEMENT_INTERFACE, NetworkAttachment
 
@@ -56,15 +62,25 @@ def report(pod, attachments: list[NetworkAttachment]) -> dict | None:
     return {"pod_ip": pod.status.pod_ip, "interfaces": interfaces}
 
 
+class _NotHeldYet(Exception):
+    """The pod does not hold every declared interface yet."""
+
+
 def wait_for_report(read_pod, attachments: list[NetworkAttachment],
                     timeout: float = REPORT_TIMEOUT_SEC) -> dict:
     """Poll the pod until it reports, or raise TimeoutError naming the interfaces it
     never held."""
+    def attempt() -> dict:
+        result = report(read_pod(), attachments)
+        if result is None:
+            raise _NotHeldYet
+        return result
+
     try:
         return Retrying(
-            retry=retry_if_result(lambda result: result is None),
+            retry=retry_if_exception_type(_NotHeldYet),
             stop=stop_after_delay(timeout), wait=wait_fixed(POLL_INTERVAL_SEC),
-        )(lambda: report(read_pod(), attachments))
+        )(attempt)
     except RetryError as e:
         raise TimeoutError(
             "the SPDK pod did not hold interface(s) "

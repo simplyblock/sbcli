@@ -34,8 +34,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import ClientDisconnect
 
-from simplyblock_core.utils import pod_net
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils import pod_net
 from simplyblock_core.utils.secrets import redact_rpc_params
 
 logger = logging.getLogger(__name__)
