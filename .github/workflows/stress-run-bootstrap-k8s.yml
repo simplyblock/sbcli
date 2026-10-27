@@ -120,7 +120,7 @@ env:
   # every one of these workflows already has a long input list; an
   # env is overridable per run from the UI's re-run dialog and keeps
   # the dispatch form readable.
-  LABRES_CLUSTER: openshift
+  LABRES_CLUSTER: openshift_enterprise
   LABRES_DURATION: "24h"
   # Set to "true" to run without booking the lab, for the case where
   # the reservation service itself is what is broken.

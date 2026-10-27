@@ -96,7 +96,7 @@ env:
   # every one of these workflows already has a long input list; an
   # env is overridable per run from the UI's re-run dialog and keeps
   # the dispatch form readable.
-  LABRES_CLUSTER: baremetal
+  LABRES_CLUSTER: baremetal host_165 host_166 host_210
   LABRES_DURATION: "6h"
   # Set to "true" to run without booking the lab, for the case where
   # the reservation service itself is what is broken.
@@ -206,7 +206,11 @@ jobs:
         with:
           cluster: ${{ env.LABRES_CLUSTER }}
           duration: ${{ env.LABRES_DURATION }}
-          expect-hosts: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+          # The whole set the docker lanes wipe and reboot, not just the
+          # storage nodes: the management node and the two clients are
+          # reservable in their own right, and a run that booked only
+          # baremetal left the machines fio runs on free to be taken.
+          expect-hosts: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204 192.168.10.210 192.168.10.165 192.168.10.166"
           disabled: ${{ env.LABRES_DISABLE }}
         env:
           LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}

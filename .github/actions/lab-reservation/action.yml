@@ -3,7 +3,11 @@ description: Reserve a lab cluster with labreservation.simplyblock.ai for the li
 
 inputs:
   cluster:
-    description: Cluster name as the lab inventory spells it, e.g. baremetal or openshift. Give this or `kind`, never both.
+    description: >-
+      One or more cluster names, space- or comma-separated, spelled as the
+      reservations console spells them. A lane's hosts are often several
+      clusters: the docker lab is baremetal plus host_210 plus a client
+      each. Give this or `kind`, never both.
     required: false
     default: ""
   kind:
@@ -41,15 +45,15 @@ inputs:
 
 outputs:
   id:
-    description: Reservation id, for extending or releasing by hand.
+    description: Comma-separated reservation ids, for extending or releasing by hand.
   cluster:
-    description: The cluster that was reserved, which with `kind` is whichever the server picked.
+    description: The clusters that were reserved, space-separated.
   hosts:
     description: Space-separated hosts of that cluster.
   expires-at:
-    description: When the reservation runs out, RFC3339.
+    description: When the FIRST of the reservations runs out, RFC3339 -- the one that bounds the run.
   created:
-    description: true when this job booked the cluster, false when it was already reserved to this account and was reused. Only a booking this job made is released when it ends.
+    description: Comma-separated ids of the bookings THIS job made, which are the only ones released when it ends. Empty when every cluster was already reserved to this account and reused.
 
 runs:
   # JavaScript rather than composite, for the same reason lab-lock is: only a
