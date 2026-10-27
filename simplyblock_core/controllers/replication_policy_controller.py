@@ -1004,7 +1004,8 @@ def _failback_group(group, policy, peer=None):
                      "members to clone home", group.group_name, peer.group_name)
         return []
     try:
-        seq, pinned = _resolve_group_failback_generation(peer, peer_members)
+        seq, pinned = _resolve_group_failback_generation(
+            peer, peer_members, home_cluster_id=group.cluster_id)
     except ReplicationConfigError as e:
         logger.error("Fail-back of consistency group %s refused: %s",
                      group.group_name, e)
@@ -1036,7 +1037,7 @@ def _resolve_active_peer_group(group, policy):
     return db.get_consistency_group_by_name(peer_cluster_id, group.group_name)
 
 
-def _resolve_group_failback_generation(peer_group, peer_members):
+def _resolve_group_failback_generation(peer_group, peer_members, home_cluster_id=""):
     """The newest generation of *peer_group* every member has replicated home --
     the demote cut the peer shipped for fail-back.
 
@@ -1048,8 +1049,14 @@ def _resolve_group_failback_generation(peer_group, peer_members):
     fail-back's members are the failed-over targets, all settled, and all are what
     we clone home. Raises ReplicationConfigError when no generation is fully
     replicated home for every member yet (the demote cut is still shipping).
+
+    A copy counts only when it is ON *home_cluster_id* (when given): a copy
+    recorded elsewhere -- on the peer's own cluster, when its replication was
+    aimed at itself (#34) -- is not shipped home, however complete its task, and
+    cloning from it fails on the home node with "No such device".
     """
     member_ids = {m.get_id() for m in peer_members}
+    off_home = 0
     replicated = {
         task.function_params.get("snapshot_id")
         for task in db.get_job_tasks(peer_group.cluster_id)
@@ -1073,6 +1080,10 @@ def _resolve_group_failback_generation(peer_group, peer_members):
         if (target_copy.status == SnapShot.STATUS_IN_DELETION
                 or getattr(target_copy, "deleted", False)):
             continue
+        copy_cluster = getattr(target_copy, "cluster_id", "")
+        if home_cluster_id and copy_cluster and copy_cluster != home_cluster_id:
+            off_home += 1
+            continue
         by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
 
     for seq in sorted(by_seq, reverse=True):
@@ -1084,6 +1095,10 @@ def _resolve_group_failback_generation(peer_group, peer_members):
         best = max(by_seq)
         absent = sorted(member_ids - set(by_seq[best]))
         missing = f"; generation {best} lacks {', '.join(absent)}"
+    if off_home:
+        missing += (f"; {off_home} replicated cop{'y is' if off_home == 1 else 'ies are'} "
+                    f"not on the home cluster {home_cluster_id} -- the peer's replication "
+                    "is not aimed home (#34)")
     raise ReplicationConfigError(
         f"No generation of consistency group {peer_group.group_name} is fully "
         f"replicated home for all {len(member_ids)} member(s); the demote cut "

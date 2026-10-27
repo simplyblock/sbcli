@@ -1,0 +1,3 @@
+# per-run measurements and state of a bed; written by bench.py, never committed
+results/
+__pycache__/

@@ -59,7 +59,7 @@ func (s *fdbStore) ArbitratedClusters() ([]Cluster, error) {
 	var out []Cluster
 	for _, v := range vals {
 		var c Cluster
-		if json.Unmarshal(v, &c) == nil && c.TwoNodeArbitration && c.UUID != "" {
+		if json.Unmarshal(v, &c) == nil && c.Arbitrated() && c.UUID != "" {
 			out = append(out, c)
 		}
 	}

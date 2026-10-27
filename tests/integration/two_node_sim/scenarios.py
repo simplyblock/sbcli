@@ -136,6 +136,13 @@ class Scenario:
     caps: frozenset = frozenset()
     notes: str = ""
     extra: dict = field(default_factory=dict)
+    # kubernetes-fencing contract (mode witness): host fencing on the cluster,
+    # and the nodes whose host must be fenced in the run (() = none; an int: that
+    # many, whichever they are). None: not checked.
+    host_fencing: bool = False
+    host_fenced: tuple | int | None = None
+    # review on #1527: subsystems allow any host and list both hosts
+    stale_host_lists: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +351,30 @@ BED = [
              heal_s=300),
 ]
 
+#: docs/design/two-node-kubernetes-fencing.md, mode witness. A host is fenced
+#: (revoked on the winner, then StorageFenced and the out-of-service taint) only
+#: when its state is unknown; never for an SPDK-only or planned loss. A partition
+#: has a winner (contract 3.3): the other node's host is fenced. Every fence is released and every
+#: subsystem restored without a manual step (the operator actor releases a
+#: releasable fence once the node runs again).
+KUBE = [
+    Scenario("K1-host-fence-reboot-sn1", ("k8s",), reboot("sn1"), host_fencing=True,
+             host_fenced=("sn1",), grant_within_s=2.6, heal_s=300),
+    Scenario("K2-no-host-fence-crash-sn2", ("k8s",), crash("sn2"), aborts_ok=("sn2",),
+             host_fencing=True, host_fenced=(), grant_within_s=2.2),
+    Scenario("K3-no-host-fence-shutdown-sn2", ("k8s",), shutdown_then_restart("sn2"),
+             host_fencing=True, host_fenced=(), grant_within_s=2.2),
+    Scenario("K4-host-fence-partition-winner", ("k8s",), partition(), io_errors_ok=True,
+             stall_limit_s=None, heal_s=300, host_fencing=True, host_fenced=1),
+    Scenario("K5-host-fence-hang-sn2", ("k8s",), hang("sn2"), aborts_ok=("sn2",),
+             host_fencing=True, host_fenced=("sn2",), grant_within_s=2.6),
+    # review on #1527: the loser is listed on an allow-any subsystem; the fence
+    # must not stick in revoking (SPDK refuses a duplicate add), and the
+    # release gives the listed loser back because the volumes authorize it.
+    Scenario("K6-host-fence-stale-host-lists", ("k8s",), reboot("sn1"), host_fencing=True,
+             host_fenced=("sn1",), grant_within_s=2.6, heal_s=300, stale_host_lists=True),
+]
+
 #: finding -> (scenario, bugs that re-introduce it, signature): the scenario
 #: must pass on main and fail with the bugs applied -- with a failure that
 #: contains the signature, so it is caught for that reason and no other.
@@ -403,7 +434,8 @@ EXERCISED = {
 #: crash, freeze of the vol1 primary (abort-on-wake, F5/F13), partition (fence
 #: both, leadership after the heal, F14/F15) -- and the cheapest proofs that
 #: the decision loop never blocks (F16) and port_allow respects the fence (F15).
-FAST = {"01b-crash-sn2", "02b-hang-sn2", "07-partition", "detect:F16", "detect:F3"}
+FAST = {"01b-crash-sn2", "02b-hang-sn2", "07-partition", "detect:F16", "detect:F3",
+        "K1-host-fence-reboot-sn1", "K2-no-host-fence-crash-sn2"}
 
 #: Known failing on main: scenario -> (reason with the fix that flips it, a
 #: text the failure must contain, so it fails for that reason and no other).
@@ -428,6 +460,19 @@ KNOWN_FAILING = {
     "F18-ana-groups-restored": ("F18: the fence restore puts back only the namespaces' ANA "
                                 "groups (fix: restore every group the fence changed)",
                                 "ANA 44"),
+    "F24-frozen-primary-takeover-read": ("F23 on what main deploys: the follower survivor's takeover "
+                                         "metadata read waits on the frozen primary's data devices "
+                                         "until it aborts on wake (bed c9/c10 02c: 9 s; fix: ultra "
+                                         "#219 with F24, isolate by marking the devices unavailable)",
+                                         "F23"),
+    "F25-frozen-primary-takeover-append-lock": ("F23 on what main deploys: the follower survivor's "
+                                                "takeover waits on the frozen primary's data devices "
+                                                "(fix: ultra #219 with F24 and F25)",
+                                                "F23"),
+    "F26-takeover-read-inflight-on-peer-jm": ("F23 on what main deploys: the follower survivor's "
+                                              "takeover waits on the frozen primary's data devices "
+                                              "(fix: ultra #219 with F24, F25 and F26)",
+                                              "F23"),
     "F21-takeover-reader-frozen-peer-jm": ("F21: the survivor's takeover reader picks the frozen "
                                            "peer's JM and waits for the 8 s NVMe IO timeout "
                                            "(fix: a solo LVS skips the peer JM the HA layer knows "
@@ -445,13 +490,40 @@ PENDING_FIX = {
     # and the survivor's writes of its own LVS wait on the frozen peer's data
     # devices (c9 02a, F23)
     "F19-long-freeze-primary": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
-                                          "stoplist_peer_devices_on_grant"}),
+                                          "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable",
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
     "F21-takeover-reader-frozen-peer-jm": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
-                                                     "stoplist_peer_devices_on_grant"}),
+                                                     "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable",
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
     "F18-ana-groups-restored": frozenset({"ana_restore_all_groups"}),
     "F20-frozen-leader-client-kato": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
-                                                "stoplist_peer_devices_on_grant"}),
-    "F23-frozen-secondary-data-io": frozenset({"stoplist_peer_devices_on_grant"}),
+                                                "stoplist_peer_devices_on_grant", "isolate_marks_devices_unavailable",
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
+    # the survivor also takes the frozen primary's other LVS (vol0's LVS_1) over;
+    # its takeover read needs F24's capability (the bed's fio wrote vol1 only)
+    "F23-frozen-secondary-data-io": frozenset({"stoplist_peer_devices_on_grant",
+                                               "isolate_marks_devices_unavailable",
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
+    # c11 02c: the frozen primary's LVS is taken over by the follower survivor;
+    # its metadata read must go degraded around the isolated peer devices
+    # c12 02c: with F24 the takeover read goes degraded, but the new leader's first
+    # write waited for its append lock on the frozen peer's JM (F25); judged on
+    # the client stall the bed measures (default limit, KATO 2)
+    "F25-frozen-primary-takeover-append-lock": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                                          "stoplist_peer_devices_on_grant",
+                                                          "isolate_marks_devices_unavailable",
+                                                          "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
+    # c12b 02c-r1: the survivor's reader had a history read in flight on the frozen
+    # peer's JM; the takeover's reader restart waited for it (F26)
+    "F26-takeover-read-inflight-on-peer-jm": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                                        "stoplist_peer_devices_on_grant",
+                                                        "isolate_marks_devices_unavailable",
+                                                        "appender_lock_skips_peer_jm",
+                                                        "reader_resets_peer_jm_read"}),
+    "F24-frozen-primary-takeover-read": frozenset({"grant_stops_redirect", "reader_skips_dead_peer_jm",
+                                                   "stoplist_peer_devices_on_grant",
+                                                   "isolate_marks_devices_unavailable",
+                                                   "appender_lock_skips_peer_jm", "reader_resets_peer_jm_read"}),
 }
 
 EXTRA = [
@@ -471,11 +543,27 @@ EXTRA = [
     # c9 02a: the secondary sn1 frozen 4 s. vol1's leader sn2 is granted at about
     # +2 s, but its writes (each stripe has a chunk on sn1) wait on sn1's data
     # devices until sn1 aborts on wake and its connections close (+5.1 s).
-    # A frozen primary (c9 02c) is not modelled for F23: on the bed (c9/02b) the
-    # survivor's takeover served IO before the frozen primary aborted, so a
-    # takeover read hanging on the frozen devices is not established.
+    # A frozen primary (02c) is F24-frozen-primary-takeover-read below.
     Scenario("F23-frozen-secondary-data-io", ("F23",), hang("sn1"), aborts_ok=("sn1",),
              grant_within_s=2.6),
+    # c9/c10/c11 02c: the vol1 primary sn2 frozen 8 s; the follower sn1 takes LVS_6
+    # over after its grant. Its lvstore metadata read waits on sn2's data devices
+    # until sn2 aborts on wake and its connections close (F23, c9/c10: 9 s), or,
+    # with #219 as run in c11 (devices closed but still online), fails and aborts
+    # the survivor (F24: 160 IO errors). Judged on the takeover itself; the
+    # client-side detection (F20) is not part of it.
+    Scenario("F24-frozen-primary-takeover-read", ("F23", "F24"), hang("sn2", 8.0), aborts_ok=("sn2",),
+             grant_within_s=2.6, stall_limit_s=None),
+    # c12 02c: the same freeze with F24 fixed. The takeover's first write waits for
+    # the append lock on the frozen sn2's JM until sn2 aborts on wake (F25: 6-8 s
+    # client stall, 0 IO errors). Judged on the client stall, as the bed's 02c.
+    Scenario("F25-frozen-primary-takeover-append-lock", ("F23", "F25"), hang("sn2", 8.0), aborts_ok=("sn2",),
+             grant_within_s=2.6),
+    # c12b 02c-r1 (intermittent): the same freeze while the survivor's JC reader has
+    # a history read in flight on sn2's JM. With F21 and F25 fixed the takeover's
+    # reader restart still waits for that read (F26: 7 s client stall, 0 IO errors).
+    Scenario("F26-takeover-read-inflight-on-peer-jm", ("F23", "F26"), hang("sn2", 8.0), aborts_ok=("sn2",),
+             grant_within_s=2.6, conditions=("reader_read_inflight_on_peer_jm",)),
 ]
 
 #: Findings the simulator cannot express, and why.

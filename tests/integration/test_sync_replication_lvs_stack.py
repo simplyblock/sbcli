@@ -69,6 +69,9 @@ class _Rpcs(dict):
         rpc.jc_compression_get_status.return_value = False
         rpc.bdev_distrib_check_inflight_io.return_value = False
         rpc.get_lvstore.return_value = {"lvs leadership": False}
+        # instance attributes, which the spec does not carry (the restart
+        # evicts the node's pooled RPC sessions by them)
+        rpc.host, rpc.port = f"{node_id}-host", 8080
         self[node_id] = rpc
         return rpc
 

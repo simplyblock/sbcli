@@ -29,6 +29,9 @@ import logging
 from simplyblock_core import constants
 
 from .simnode import (
+    CAP_APPENDER_LOCK_SKIPS_PEER_JM,
+    CAP_ISOLATE_MARKS_UNAVAILABLE,
+    CAP_READER_RESETS_PEER_JM_READ,
     CAP_READER_SKIPS_DEAD_PEER_JM,
     CAP_STOPLIST_PEER_DEVICES,
     FENCED,
@@ -444,6 +447,19 @@ class Client:
             out.append((0 if st == "optimized" else 1, -changed, n.name, n))
         return [x[3] for x in sorted(out, key=lambda x: x[:3])]
 
+    def _peer_devices_release(self, peer: SimNode):
+        """When IO stuck on a frozen peer's data devices completes: when its
+        connections close after its abort on wake (DEVICE_TEARDOWN_S later), or
+        when it wakes without aborting. None if nothing is stuck on them."""
+        if peer.proc == "frozen":
+            release = peer.frozen_until
+            if peer.arbitration and peer.frozen_until - peer.frozen_since > peer.lease_ttl_ms / 1000.0:
+                release += DEVICE_TEARDOWN_S         # it will abort on wake
+            return release
+        if peer.proc == "dead" and peer.died_after_freeze:
+            return peer.died_at + DEVICE_TEARDOWN_S
+        return None
+
     def _stuck_on_peer_devices(self, node: SimNode, peer: SimNode, lvs) -> bool:
         """Campaign c9, F23: the survivor's writes after its solo grant still
         wait on the frozen peer's data devices (each stripe has a chunk there).
@@ -463,15 +479,8 @@ class Client:
         if not peer.frozen_since or lvs.leader_since > peer.frozen_since:
             return False
         now = self.world.vt.time()
-        if peer.proc == "frozen":
-            release = peer.frozen_until
-            if peer.arbitration and peer.frozen_until - peer.frozen_since > peer.lease_ttl_ms / 1000.0:
-                release += DEVICE_TEARDOWN_S         # it will abort on wake
-        elif peer.proc == "dead" and peer.died_after_freeze:
-            release = peer.died_at + DEVICE_TEARDOWN_S
-        else:
-            return False
-        if now >= release:
+        release = self._peer_devices_release(peer)
+        if release is None or now >= release:
             return False
         key = ("F23", node.uuid, lvs.name, peer.frozen_since)
         if key not in self.reported:
@@ -544,6 +553,54 @@ class Client:
                       % (node.name, lvs_name, delay))
         else:
             delay = w.takeover_s
+        # The takeover's lvstore update reads the metadata (super block) through
+        # distrib, and every stripe has a chunk on the peer's data devices.
+        # Only while the peer is still frozen: after its abort the hublvol redirect
+        # itself fails only once the connections close (DEVICE_TEARDOWN_S), so a
+        # takeover then finds the devices torn down (bed 02b: 3 s).
+        release = self._peer_devices_release(peer) if peer.proc == "frozen" else None
+        now = w.vt.time()
+        if release is not None and now < release:
+            if CAP_STOPLIST_PEER_DEVICES not in node.caps:
+                # campaign c9/c10 02c, F23: the read waits on the frozen peer's
+                # devices until its connections close after its abort on wake
+                delay = max(delay, release - now)
+                w.violate("F23: %s's takeover metadata read of %s waits on %s's data devices "
+                          "(until +%.1f s)" % (node.name, lvs_name, peer.name, release - w.t0))
+            elif CAP_ISOLATE_MARKS_UNAVAILABLE not in node.caps and lv.state == SOLO:
+                # campaign c11 02c, F24: #219 only closed the isolated devices; the
+                # device status still read online, the follower's takeover read took
+                # the normal-read path to a closed device, failed, and the lvstore
+                # update on failover aborted the survivor
+                w.violate("F24: %s's takeover read of %s failed on %s's isolated (closed) "
+                          "device; the survivor aborted" % (node.name, lvs_name, peer.name))
+                node.abort("F24 takeover read on a closed peer device")
+                return "error"
+            elif CAP_APPENDER_LOCK_SKIPS_PEER_JM not in node.caps and lv.state == SOLO:
+                # campaign c12 02c, F25: the new leader re-locks the appender on
+                # every JM and waits for all lock requests; the one on the frozen
+                # peer's JM neither completes nor fails until the peer aborts on
+                # wake (the process exit fails it at once: bed "Update lvolstore
+                # done" at the abort's millisecond). The takeover's first write,
+                # and with it the LVS's client IO, waits until then.
+                if peer.frozen_until > now:
+                    delay = max(delay, peer.frozen_until - now)
+                    w.violate("F25: %s's takeover of %s waits for its append lock on %s's JM "
+                              "(until +%.1f s)" % (node.name, lvs_name, peer.name, peer.frozen_until - w.t0))
+        if (peer.proc == "frozen" and lv.state == SOLO and CAP_READER_SKIPS_DEAD_PEER_JM in node.caps
+                and "reader_read_inflight_on_peer_jm" in w.conditions
+                and CAP_READER_RESETS_PEER_JM_READ not in node.caps):
+            # campaign c12b 02c-r1, F26: the survivor's JC reader had a history read
+            # in flight on the peer's JM when the peer froze. F21 only keeps that JM
+            # from being chosen again; the read itself neither completes nor fails
+            # until the NVMe IO timeout or the peer's abort on wake, and the
+            # takeover's reader restart waits for it.
+            now = w.vt.time()
+            done = min(peer.frozen_since + NVME_TIMEOUT_S, peer.frozen_until)
+            if done > now:
+                delay = max(delay, done - now)
+                w.violate("F26: %s's takeover of %s waits for a history read in flight on %s's JM "
+                          "(until +%.1f s)" % (node.name, lvs_name, peer.name, done - w.t0))
         lvs.takeover_until = w.vt.time() + delay
         w.log("%s: takes over %s on new IO (%.0f ms)" % (node.name, lvs_name, delay * 1000))
         return "wait"
