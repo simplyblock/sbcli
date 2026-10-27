@@ -134,6 +134,8 @@ def publish_ports(node: "StorageNode", at_most_every: float = 0) -> None:
     _published_at[node.get_id()] = time.monotonic()
     ports = published_ports(node)
     try:
-        node.client(timeout=30, retry=1).spdk_service_publish(node.rpc_port, node.cluster_id, ports)
+        _, err = node.client(timeout=30, retry=1).spdk_service_publish(node.rpc_port, node.cluster_id, ports)
     except SNodeClientException as e:
-        logger.warning("Node %s: the Service does not forward %s yet: %s", node.get_id(), ports, e)
+        err = str(e)
+    if err:
+        logger.warning("Node %s: the Service does not forward %s yet: %s", node.get_id(), ports, err)
