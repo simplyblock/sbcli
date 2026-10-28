@@ -194,3 +194,24 @@ class TestTheWorkersAddressOfANodeOnAttachedNetworks:
         from simplyblock_core import utils
 
         assert utils.get_mgmt_ip({"network_interface": {}}, "", NETWORKS) is None
+
+
+DEVICE_NETWORKS = [{"name": "vf", "namespace": "infra", "interface": "data0", "ips": ["10.10.10.101/24"],
+                    "resource": "intel.com/sriov_storage"}]
+
+
+def test_the_v2_node_add_keeps_the_device_resource_of_a_network():
+    """The device resource travels with its network into the task, so the node record
+    keeps it and a restart requests the device again."""
+    from simplyblock_web.api.v2.cluster import storage_node as v2
+    from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
+
+    cluster = MagicMock()
+    cluster.get_id.return_value = "00000000-0000-0000-0000-0000000000c1"
+    parameters = StorageNodeParams(node_address="10.0.0.1:5000", interface_name="eth0", networks=DEVICE_NETWORKS)
+
+    with patch.object(v2.tasks_controller, "add_node_add_task", return_value="00000000-0000-0000-0000-000000000001") as add, \
+            patch.object(v2.util, "creation_response"):
+        v2.add(MagicMock(), cluster, parameters)
+
+    assert add.call_args.args[1]["networks"] == DEVICE_NETWORKS
