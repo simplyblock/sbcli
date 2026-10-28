@@ -51,6 +51,13 @@ class NetworkAttachment(BaseModel):
                                     max_length=253)] = ""
     interface: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,14}$")
     ips: list[Annotated[str, AfterValidator(_address)]] = Field(default_factory=list)
+    #: The extended resource a device plugin hands the interface's device out under (an
+    #: SR-IOV VF pool), from the definition's ``k8s.v1.cni.cncf.io/resourceName``. The
+    #: SPDK container requests one of it per attachment; it is not part of the Multus
+    #: network selection element.
+    resource: Annotated[str, Field(
+        pattern=r"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$",
+        max_length=316)] = ""
 
 
 def from_report(report: dict, known: Sequence[IFace] = ()) -> tuple[str, list[IFace]]:

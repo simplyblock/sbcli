@@ -116,7 +116,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "failure_domain": parameters.failure_domain,
             "expansion": parameters.expand,
             "force_format": parameters.force_format,
-            **({"networks": [network.model_dump() for network in parameters.networks]} if parameters.networks else {}),
+            **({"networks": [network.model_dump(exclude_defaults=True) for network in parameters.networks]} if parameters.networks else {}),
             **({"pod_network": True} if parameters.pod_network else {}),
         }
     )

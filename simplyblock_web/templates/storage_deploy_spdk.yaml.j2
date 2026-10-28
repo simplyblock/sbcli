@@ -150,12 +150,18 @@ spec:
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          {% for name, count in (DEVICE_RESOURCES or {}).items() %}
+          {{ name }}: {{ count }}
+          {% endfor %}
         requests:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
           {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          {% for name, count in (DEVICE_RESOURCES or {}).items() %}
+          {{ name }}: {{ count }}
+          {% endfor %}
 
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}

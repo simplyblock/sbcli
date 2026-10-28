@@ -510,6 +510,7 @@ def spdk_process_start(body: SPDKParams):
             'NETWORKS': network_attachments.annotation(body.networks),
             'POD_NETWORK': body.pod_network,
             'FULL_CLUSTER_ID': body.cluster_id,
+            'DEVICE_RESOURCES': network_attachments.device_resources(body.networks),
         }
 
         if ubuntu_host:

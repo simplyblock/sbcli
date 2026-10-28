@@ -23,10 +23,22 @@ POLL_INTERVAL_SEC = 2
 
 
 def annotation(attachments: list[NetworkAttachment]) -> str:
-    """The value of the networks annotation, or "" when there are no attachments."""
+    """The value of the networks annotation, or "" when there are no attachments. The
+    device resource is the pod's request, not part of a network selection element."""
     if not attachments:
         return ""
-    return json.dumps([a.model_dump() for a in attachments])
+    return json.dumps([a.model_dump(exclude={"resource"}) for a in attachments])
+
+
+def device_resources(attachments: list[NetworkAttachment]) -> dict[str, int]:
+    """The device-plugin resources the SPDK container requests, one per attachment
+    whose device a plugin hands out. Without the request the plugin allocates no
+    device and Multus has none to attach."""
+    resources: dict[str, int] = {}
+    for a in attachments:
+        if a.resource:
+            resources[a.resource] = resources.get(a.resource, 0) + 1
+    return dict(sorted(resources.items()))
 
 
 def server_ip(attachments: list[NetworkAttachment], pod_network: bool = False) -> str:
