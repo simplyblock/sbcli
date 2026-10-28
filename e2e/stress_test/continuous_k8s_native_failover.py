@@ -2196,6 +2196,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                 except Exception:
                     pass
 
+                # The Job is gone, the volume is not. Creating the
+                # replacement now races the detach, and the scheduler is
+                # free to put it on another node.
+                self._wait_volume_released(pvc_name)
+
                 fio_config, warmup_config = self._build_fio_config(pvc_name)
                 nid = pvc_info.get("node_id")
                 avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
@@ -2226,6 +2231,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.k8s_utils.delete_configmap(old_cm)
                 except Exception:
                     pass
+
+                # The Job is gone, the volume is not. Creating the
+                # replacement now races the detach, and the scheduler is
+                # free to put it on another node.
+                self._wait_volume_released(clone_name)
 
                 fio_config, warmup_config = self._build_fio_config(clone_name)
                 clone_nid = self._get_pvc_node_id(clone_name)
@@ -2400,6 +2410,10 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.k8s_utils.delete_configmap(old_cm)
             except Exception:                             # noqa: BLE001
                 pass
+            # Same race as the checkpoint relaunch: the Pod goes, the
+            # VolumeAttachment stays, and the replacement may be scheduled
+            # somewhere else.
+            self._wait_volume_released(name)
             try:
                 fio_config, warmup_config = self._build_fio_config(name)
                 nid = (info.get("node_id") if label == "pvc"
@@ -2430,6 +2444,36 @@ class K8sNativeFailoverTest(TestClusterBase):
             info["job_name"] = new_job
             info["configmap_name"] = new_cm
             self.logger.info(f"[quiesce] {name}: FIO restarted as {new_job}")
+
+    def _wait_volume_released(self, pvc_name, timeout=240):
+        """Block until *pvc_name*'s PV has no VolumeAttachment left.
+
+        Call between deleting a FIO Job and creating its replacement. The
+        Pod disappears immediately; the VolumeAttachment does not, and a
+        replacement scheduled onto a different node in that window gets
+        "Multi-Attach error ... already exclusively attached to one node".
+
+        A timeout is reported, not raised. The caller goes on to create the
+        Job anyway: a volume left with no IO for the rest of the window is a
+        silent loss of coverage, where a Multi-Attach is at least loud, and
+        assert_no_volume_attach_errors will now name a cause the log explains.
+        """
+        try:
+            pv = self.k8s_utils.get_pvc_volume_handle(pvc_name)
+        except Exception as exc:                          # noqa: BLE001
+            self.logger.warning(
+                f"[detach] could not resolve the PV for {pvc_name}: "
+                f"{str(exc)[:140]}")
+            return
+        if not pv:
+            return
+        if not self.k8s_utils.wait_volume_detached(pv, timeout=timeout):
+            held = self.k8s_utils.get_volume_attachments(pv)
+            self.logger.warning(
+                f"[detach] {pvc_name} ({pv}) is still attached after "
+                f"{timeout}s: {held}. Recreating its FIO Job anyway -- if the "
+                f"replacement lands on another node it will report "
+                f"Multi-Attach, and this line is the reason.")
 
     def _build_reverse_secondary_map(self):
         rev = defaultdict(set)
