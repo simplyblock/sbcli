@@ -80,6 +80,8 @@ def leg(monkeypatch):
     db = _FakeDB(snaps, [src, other])
     monkeypatch.setattr(rsr.replication_recovery_points, "group_recovery_point_ids",
                         lambda gids, db=None: set())
+    db.minis_synced = []
+    monkeypatch.setattr(rsr, "_sync_mini", lambda db, snap: db.minis_synced.append(snap.uuid))
     return db, src
 
 
@@ -94,6 +96,8 @@ def test_retire_marks_lineage_but_never_user_or_foreign_snapshots(leg):
     assert set(rsr.retire_source_lineage(db, src)) == {"C1", "C2", "S1", "S2"}
     assert not db.snaps["U"].deleted
     assert not db.snaps["X"].deleted
+    # The reaper scans the mini table; a flag only on the full record is invisible.
+    assert set(db.minis_synced) == {"C1", "C2", "S1", "S2"}
 
 
 def test_group_recovery_point_is_not_retired(leg, monkeypatch):
