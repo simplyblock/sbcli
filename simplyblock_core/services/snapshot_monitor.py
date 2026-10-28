@@ -6,6 +6,7 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, migration_turn, utils
 from simplyblock_core.controllers import (
     replication_delta,
+    replication_snapshot_retire,
     snapshot_controller,
     snapshot_events,
 )
@@ -796,6 +797,13 @@ def main():
                 take_due_internal_snapshots(cluster.get_id(), int(time.time()))
             except Exception as e:
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
+
+            try:
+                deletions_in_flight += replication_snapshot_retire.reap_retired(
+                    db, cluster.get_id())
+            except Exception as e:
+                logger.error(f"Retired replication snapshot cleanup failed for cluster "
+                             f"{cluster.get_id()}: {e}")
 
             # Only in-deletion snapshots need any processing. Find them via
             # the mini table (cheap; no embedded LVol dict) and fetch the few
