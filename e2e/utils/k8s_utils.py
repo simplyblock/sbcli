@@ -331,6 +331,15 @@ class K8sUtils:
             f"|| true",
             timeout=timeout_min * 60 + 120)
         text = (out or "") + (err or "")
+        # Outcome first, then symptoms. `oc adm drain` retries an eviction
+        # that a PodDisruptionBudget refuses and says so each time --
+        # "error when evicting pods/... Cannot evict pod as it would violate
+        # the pod's disruption budget" -- and then succeeds. Matching the
+        # word "error" anywhere in the output called that a failed drain,
+        # which it was not: the last line said "node/<n> drained".
+        if f"node/{node_name} drained" in text:
+            self.logger.info("[K8sUtils] drained %s", node_name)
+            return True
         if "error" in text.lower() or "timed out" in text.lower():
             self.logger.warning(
                 "[K8sUtils] drain of %s did not complete cleanly: %s",
@@ -338,6 +347,50 @@ class K8sUtils:
             return False
         self.logger.info("[K8sUtils] drained %s", node_name)
         return True
+
+    def wait_node_volumes_detached(self, node_ip: str,
+                                   timeout: int = 300) -> bool:
+        """Block until no VolumeAttachment is still bound to this node.
+
+        A drain returns when the pods are deleted. The volumes have not moved
+        at that point: kubelet on THIS node still has to run
+        NodeUnstageVolume, the attach/detach controller then calls
+        ControllerUnpublishVolume, and only then does the VolumeAttachment go
+        and the claim become attachable somewhere else.
+
+        Rebooting in between kills the kubelet that owes step one, so nothing
+        in the cluster can finish the detach until the node returns, and the
+        pod the drain relocated reports "Multi-Attach error" for as long as
+        that takes. Waiting here costs seconds in the normal case and saves
+        the cycle in the bad one.
+
+        Returns False on timeout; the caller decides. Deliberately does not
+        force-delete the attachments or taint the node --
+        `node.kubernetes.io/out-of-service` is the sanctioned way to force a
+        detach, but applying it would change what the cycle asserts about the
+        product's own recovery.
+        """
+        node_name = self._get_k8s_node_name(node_ip)
+        if not node_name:
+            return True
+        deadline = time.time() + timeout
+        held = []
+        while time.time() < deadline:
+            held = [a for a in self.get_volume_attachments()
+                    if a.get("node") == node_name and a.get("attached")]
+            if not held:
+                self.logger.info(
+                    "[K8sUtils] %s holds no VolumeAttachment; safe to reboot",
+                    node_name)
+                return True
+            time.sleep(5)
+        self.logger.warning(
+            "[K8sUtils] %s still holds %d VolumeAttachment(s) after %ds: %s. "
+            "Rebooting anyway -- the cycle needs the outage -- but a pod the "
+            "drain moved elsewhere will report Multi-Attach until this node "
+            "is back, and this line is the reason.",
+            node_name, len(held), timeout, [a.get("pv") for a in held[:5]])
+        return False
 
     def reboot_node(self, node_ip: str, drain: bool = True) -> bool:
         """Actually reboot the worker. Returns True if a real reboot was issued.
@@ -402,6 +455,10 @@ class K8sUtils:
             # its own eviction rules rather than being cut off.
             self.cordon_node(node_ip, cordon=True)
             self.drain_node(node_ip)
+            # The drain moved the pods. It did not move their volumes, and
+            # the kubelet that has to unstage them is on the node we are
+            # about to reboot.
+            self.wait_node_volumes_detached(node_ip)
 
         self.logger.info("[K8sUtils] rebooting node %s (%s)",
                          node_name, node_ip)
@@ -4908,7 +4965,7 @@ class K8sUtils:
     _FIO_SIGNAL_RE = re.compile(
         r"fio: terminating on signal \d+"
         r"|fio: job .*(?:aborted|interrupted)",
-        re.I)
+        re.IGNORECASE)
 
     #: A real failure of the workload, signal or no signal.
     FIO_IO_ERROR_MARKERS = (
