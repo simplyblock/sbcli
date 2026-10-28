@@ -2843,6 +2843,19 @@ def _delete_base_unless_recovery_point(db_controller, snapshot_id):
     snapshot_controller.delete(snapshot_id)
 
 
+def _delete_held_sources(lvol):
+    """A clone of a replicated copy being deleted releases the source
+    snapshots that copy's live clone held back (a failed-over volume going
+    after the fail-back; snapshot_controller.delete_held_sources)."""
+    if not lvol.cloned_from_snap:
+        return
+    try:
+        snapshot_controller.delete_held_sources(lvol.cloned_from_snap)
+    except Exception:
+        logger.exception("Could not finish the held-back deletes of the sources of %s",
+                         lvol.cloned_from_snap)
+
+
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
     db_controller = DBController()
     ops_gate.assert_object_ops_allowed("volume delete", pool_uuid=lvol.pool_uuid)
@@ -2953,6 +2966,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
                         _delete_base_unless_recovery_point(db_controller, snap.get_id())
             except KeyError:
                 pass # already removed
+        _delete_held_sources(lvol)
 
         logger.info("Done")
         return
@@ -3033,6 +3047,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
                 _delete_base_unless_recovery_point(db_controller, snap.get_id())
         except KeyError:
             pass # already deleted
+    _delete_held_sources(lvol)
 
     cl = db_controller.get_cluster_by_id(snode.cluster_id)
 
