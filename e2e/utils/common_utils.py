@@ -148,8 +148,7 @@ class CommonUtils:
         caught.
         """
         base = os.path.basename(log_file)
-        if base.endswith(".log"):
-            base = base[:-len(".log")]
+        base = base.removesuffix(".log")
         if not base:
             return False
         try:
