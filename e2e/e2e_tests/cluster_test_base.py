@@ -462,12 +462,25 @@ class TestClusterBase:
         if not doc:
             return {}
         from utils.run_state import adopt_by_prefix, reconcile
+        # list_lvols returns {lvol_name: id}, so iterating it yields the
+        # NAMES already. The previous `lv.get("lvol_name")` treated each
+        # key as a dict and raised AttributeError on every resume; the
+        # except below swallowed it, adoption returned {}, and the run
+        # went on to create a second full set of volumes on top of the
+        # ones it was supposed to adopt. On 2026-10-28 that took the
+        # docker cluster from 84% to 139% provisioned.
         try:
-            live = [lv.get("lvol_name") for lv in
-                    (self.sbcli_utils.list_lvols() or [])]
+            live = list(self.sbcli_utils.list_lvols() or {})
         except Exception as exc:                      # noqa: BLE001
-            self.logger.warning("[resume] could not list lvols: %s", exc)
-            return {}
+            # Not a warning. Resume was asked for, and a resume that
+            # cannot see the cluster's lvols does not degrade to a
+            # fresh run -- it duplicates every volume.
+            raise RuntimeError(
+                f"[resume] cannot list the cluster's lvols, so the "
+                f"checkpoint's objects cannot be adopted: {exc}. "
+                f"Refusing to continue: resuming without adoption "
+                f"creates a second set of volumes on top of the "
+                f"existing ones.") from exc
 
         prefix = doc.get("lvol_base") or doc.get("lvol_name") or ""
         adopted = adopt_by_prefix(live, prefix)
