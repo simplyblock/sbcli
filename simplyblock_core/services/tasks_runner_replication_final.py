@@ -215,6 +215,17 @@ def _delete_source_if_requested(task):
         # loudly but does not un-succeed the task.
         logger.error(f"Source volume {src_lvol_id} could not be "
                      f"deleted after the cutover: {e}")
+        return
+
+    # The volume is going; the replication snapshots its data sat on are not
+    # deleted with it and retention never runs for it again. Hand them to the
+    # snapshot monitor, which deletes each one once nothing depends on it.
+    try:
+        from simplyblock_core.controllers import replication_snapshot_retire
+        replication_snapshot_retire.retire_source_lineage(db, src_lvol)
+    except Exception as e:
+        logger.error(f"Replication snapshots of source volume {src_lvol_id} "
+                     f"could not be retired after the cutover: {e}")
 
 
 def _reconstitute_group(rep):
