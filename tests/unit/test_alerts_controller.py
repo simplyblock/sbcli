@@ -599,3 +599,94 @@ class TestFeedOrder(unittest.TestCase):
         crit = dict(_raised("node_offline:node-1"), status=ac.STATUS_FIRING)
         ordered = sorted([warn, crit], key=ac._feed_sort_key)
         self.assertEqual(ordered[0]["severity"], ac.SEVERITY_CRITICAL)
+
+
+# ==========================================================================
+# device health (assessed by the operator, reported through
+# PUT .../devices/{id}/health-assessment)
+# ==========================================================================
+
+def _assessed(perf=None, smart=None, reported_ago=60, valid=900, **dev):
+    d = _device(**dev)
+    d.health_assessment = {
+        "reporter": "simplyblock-operator",
+        "reported_at": (NOW - timedelta(seconds=reported_ago)).isoformat(),
+        "valid_seconds": valid,
+        "performance": {"verdict": perf, "reason": "13x the fleet median"} if perf else None,
+        "smart": {"verdict": smart, "reason": "reliability degraded"} if smart else None,
+    }
+    return d
+
+
+def _health_alerts(device, node_status=StorageNode.STATUS_ONLINE):
+    alerts = _run(nodes=[_node(status=node_status, devices=[device])])
+    return [a for a in alerts if a["kind"] in (ac.DEVICE_SLOW, ac.DEVICE_UNHEALTHY)]
+
+
+class TestDeviceHealthAlerts(unittest.TestCase):
+    def test_a_slow_device_is_a_warning(self):
+        alerts = _health_alerts(_assessed(perf="slow"))
+        self.assertEqual([(a["kind"], a["severity"]) for a in alerts],
+                         [(ac.DEVICE_SLOW, ac.SEVERITY_WARNING)])
+        self.assertEqual(alerts[0]["id"], "device_slow:dev-1")
+        self.assertEqual(alerts[0]["details"]["performance"]["verdict"], "slow")
+        self.assertEqual(alerts[0]["details"]["serial_number"], "SN1")
+
+    def test_a_failing_health_log_is_critical(self):
+        alerts = _health_alerts(_assessed(smart="failing"))
+        self.assertEqual([(a["kind"], a["severity"]) for a in alerts],
+                         [(ac.DEVICE_UNHEALTHY, ac.SEVERITY_CRITICAL)])
+
+    def test_a_health_log_warning_is_a_warning(self):
+        alerts = _health_alerts(_assessed(smart="warning"))
+        self.assertEqual([(a["kind"], a["severity"]) for a in alerts],
+                         [(ac.DEVICE_UNHEALTHY, ac.SEVERITY_WARNING)])
+
+    def test_both_halves_are_two_alerts(self):
+        self.assertEqual({a["kind"] for a in _health_alerts(_assessed(perf="slow", smart="failing"))},
+                         {ac.DEVICE_SLOW, ac.DEVICE_UNHEALTHY})
+
+    def test_good_and_inconclusive_verdicts_are_quiet(self):
+        for perf, smart in (("ok", "ok"), ("unknown", "unknown"), (None, "unsupported")):
+            with self.subTest(perf=perf, smart=smart):
+                self.assertEqual(_health_alerts(_assessed(perf=perf, smart=smart)), [])
+
+    def test_a_device_never_assessed_is_quiet(self):
+        self.assertEqual(_health_alerts(_device()), [])
+
+    # Suppressions -------------------------------------------------------
+
+    def test_a_stale_report_ages_out(self):
+        # The assessor stopped reporting: its last word must not fire forever.
+        self.assertEqual(_health_alerts(_assessed(perf="slow", reported_ago=901, valid=900)), [])
+
+    def test_a_missing_validity_defaults_to_fifteen_minutes(self):
+        d = _assessed(perf="slow", reported_ago=800)
+        del d.health_assessment["valid_seconds"]
+        self.assertEqual(len(_health_alerts(d)), 1)
+        d = _assessed(perf="slow", reported_ago=1000)
+        del d.health_assessment["valid_seconds"]
+        self.assertEqual(_health_alerts(d), [])
+
+    def test_an_unparseable_report_time_is_quiet(self):
+        d = _assessed(perf="slow")
+        d.health_assessment["reported_at"] = "yesterday"
+        self.assertEqual(_health_alerts(d), [])
+
+    def test_a_node_that_is_not_online_is_quiet(self):
+        # The node is the alert then; one node condition is not N device ones.
+        for status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_RESTARTING,
+                       StorageNode.STATUS_DOWN):
+            with self.subTest(status=status):
+                self.assertEqual(_health_alerts(_assessed(perf="slow", smart="failing"), status), [])
+
+    def test_an_unavailable_device_is_device_unavailable_only(self):
+        alerts = _run(nodes=[_node(devices=[
+            _assessed(perf="slow", smart="failing", status=NVMeDevice.STATUS_UNAVAILABLE)])])
+        self.assertEqual(_kinds(alerts), {ac.DEVICE_UNAVAILABLE})
+
+    def test_an_operator_removed_device_is_quiet(self):
+        self.assertEqual(_health_alerts(_assessed(perf="slow", admin_removed=True)), [])
+
+    def test_a_read_only_device_still_alerts(self):
+        self.assertEqual(len(_health_alerts(_assessed(smart="failing", status=NVMeDevice.STATUS_READONLY))), 1)
