@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import traceback
+from typing import Annotated
 
 import yaml
 from flask_openapi3 import APIBlueprint
@@ -13,8 +14,10 @@ from pydantic import BaseModel, Field
 from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
 from simplyblock_core.settings import Settings
+from simplyblock_core.storage_network import NetworkAttachment
 from simplyblock_core.utils import shell as shell_utils
 from simplyblock_web import node_utils, node_utils_k8s, utils
+from simplyblock_web.api.internal.storage_node import network_attachments
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from .._node_info import get_static_node_info
@@ -103,6 +106,17 @@ def get_nodes_config():
         return {}
 
 
+def reported_hostname(command_hostname: str) -> str:
+    """The name the control plane knows this worker by.
+
+    With the agent in the pod network, `hostname -s` answers the pod's name. The
+    DaemonSet hands the worker's name over as HOSTNAME and the worker's address as
+    HOST_IP, and the latter is what says the agent is off the host network."""
+    if os.environ.get("HOST_IP") and os.environ.get("HOSTNAME"):
+        return os.environ["HOSTNAME"].split(".")[0]
+    return command_hostname
+
+
 @api.get('/info', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'object',
@@ -114,7 +128,7 @@ def get_info():
     return utils.get_response({
         "cluster_id": get_cluster_id(),
 
-        "hostname": node_info["hostname"],
+        "hostname": reported_hostname(node_info["hostname"]),
         "system_id": node_info["system_id"],
 
         "cpu_count": node_info["cpu_info"]['count'],
@@ -136,6 +150,8 @@ def get_info():
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
         "network_interface": core_utils.get_nics_data(),
+        # Set by the DaemonSet: the agent's own interfaces may not be the host's.
+        "host_ip": os.environ.get("HOST_IP", ""),
 
         "cloud_instance": node_info["cloud_info"],
         "nodes_config": get_nodes_config(),
@@ -292,6 +308,11 @@ class SPDKParams(BaseModel):
     socket: int | None = Field(None, ge=0)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)
+    # The Secret the SPDK proxy serves and connects with: the cluster's
+    # recorded one, or the constant name from a control plane that sends none.
+    spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
+    # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
+    networks: Annotated[list[NetworkAttachment], Field(default_factory=list)]
 
 
 @api.post('/spdk_process_start', responses={
@@ -386,7 +407,7 @@ def spdk_process_start(body: SPDKParams):
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
             'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
-            'SERVER_IP': body.server_ip,
+            'SERVER_IP': network_attachments.server_ip(body.networks) or body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
             'RPC_PASSWORD': body.rpc_password,
@@ -412,6 +433,9 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CONNECT': settings.tls_connect,
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
+            'SPDK_PROXY_TLS_SECRET': body.spdk_proxy_tls_secret,
+            'AGENT_IP': os.environ.get("POD_IP", "") if body.networks else "",
+            'NETWORKS': network_attachments.annotation(body.networks),
         }
 
         if ubuntu_host:
@@ -503,7 +527,13 @@ def spdk_process_start(body: SPDKParams):
             core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
             msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
             logger.info(msg)
-            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
+            # The OpenShift CPU-topology Job's first-time path waits up to 5 min
+            # for the pool to render, sleeps 15 min for the MCO reboot, and after
+            # the reboot waits up to 6 min for the NUMA plugin, plus stale-pool
+            # retries and pod scheduling: ~35 min at 3 s per poll, above the
+            # default 24 min, which would time out a Job about to succeed and
+            # delete it.
+            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace, timeout=700)
             logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
             batch_v1.delete_namespaced_job(
                 name=core_resp.metadata.name,
@@ -586,9 +616,13 @@ def spdk_process_start(body: SPDKParams):
         docs = yaml.safe_load_all(template.render(values))
         for dep in docs:
             logger.debug(dep)
-            resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
-            msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}'"
+            pod_name = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace).metadata.name
+            msg = f"Pod created: '{pod_name}' in namespace '{namespace}'"
             logger.info(msg)
+        if body.networks:
+            report = network_attachments.wait_for_report(
+                lambda: k8s_core_v1.read_namespaced_pod(pod_name, namespace), body.networks)
+            return utils.get_response({"message": msg, **report})
     except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 

@@ -12,6 +12,7 @@ from simplyblock_core.controllers import device_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lock import DbLock, DbLockBusyError
+from simplyblock_core.models.lvol_model import LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -1282,6 +1283,51 @@ def add_backup_task(backup):
     )
 
 
+def add_group_backup_delete_task(group_backup):
+    """Create the task that retires a deleting group backup's members, unless
+    one is already open for it.
+
+    Like the commit task it does no data-plane RPC of its own (a member's merge
+    is its own FN_BACKUP_MERGE task), so it carries no node. Returns the task
+    id, or False when one is already open.
+    """
+    for task in db.get_job_tasks_by_function(group_backup.cluster_id,
+                                            JobSchedule.FN_GROUP_BACKUP_DELETE):
+        if ((task.function_params or {}).get("group_backup_id") == group_backup.uuid
+                and not task.canceled and task.status != JobSchedule.STATUS_DONE):
+            logger.info(f"Task found, skip adding new task: {task.uuid}")
+            return False
+    return _add_task(
+        JobSchedule.FN_GROUP_BACKUP_DELETE,
+        group_backup.cluster_id,
+        "",
+        "",
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        function_params={
+            "group_backup_id": group_backup.uuid,
+        },
+    )
+
+
+def add_group_backup_commit_task(group_backup):
+    """Create the task that commits a consistency-group backup.
+
+    The task does no data-plane RPC: it watches the member backups (which the
+    FN_BACKUP runner drives) and publishes the group manifest once every member
+    has completed, so it carries no node and only the group backup id.
+    """
+    return _add_task(
+        JobSchedule.FN_GROUP_BACKUP_COMMIT,
+        group_backup.cluster_id,
+        "",
+        "",
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        function_params={
+            "group_backup_id": group_backup.uuid,
+        },
+    )
+
+
 def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids,
                             lvol_id="", s3_config=None):
     """Create the task that restores an S3 backup chain into a new lvol.
@@ -1372,6 +1418,42 @@ def get_active_replication_final_task(cluster_id, lvol_id):
             if task.status != JobSchedule.STATUS_DONE and task.function_params.get("lvol_id") == lvol_id:
                 return task.uuid
     return False
+
+
+def get_replication_final_task(cluster_id, lvol_id):
+    """Return the UUID of the replication cutover task a new commit of *lvol_id*
+    would repeat, or False: one queued or running, or one that finished the
+    cutover while the relationship it cut over still stands. A finished
+    cutover leaves the source in place until delete_source retires it, and a
+    commit then would build a second clone. A fail-back back to the source
+    removes that relationship, and a later commit of the same volume is a new
+    cutover. A task that ended without the cutover is not returned either.
+
+    One indexed read of the cluster's cutover tasks serves both checks."""
+    finished = []
+    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_REPLICATION_FINAL):
+        if task.canceled is not False or task.function_params.get("lvol_id") != lvol_id:
+            continue
+        if task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
+        if task.function_result == "cutover done":
+            finished.append(task)
+    for task in finished:
+        if _cutover_stands(task.function_params.get("replication_id")):
+            return task.uuid
+    return False
+
+
+def _cutover_stands(replication_id):
+    """Whether the relationship a cutover cut over is still recorded as cut
+    over. A fail-back removes the prior relationship when it completes."""
+    if not replication_id:
+        return False
+    try:
+        rep = db.get_lvol_replication_by_id(replication_id)
+    except KeyError:
+        return False
+    return rep.state == LVolReplication.STATE_CUTOVER_DONE
 
 
 def add_replication_final_task(cluster_id, src_node_id, function_params):

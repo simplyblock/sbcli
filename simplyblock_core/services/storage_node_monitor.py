@@ -2180,12 +2180,12 @@ def check_node(snode):
 
     # 4- check node rpc interface
     node_rpc_check, node_rpc_check_1 = health_controller.check_node_rpc(snode, timeout=20, retry=1)
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+    logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}")
 
     #if RPC times out, we dont know if its due to node becoming unavailable or spdk hanging
     #so we try it twice. If all other checks pass again, but only this one fails: it's the spdk process
     if not node_rpc_check:
-        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
+        logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
         # A hung RPC channel on a live SPDK recovers by nothing else: the
         # process is up, SNodeAPI answers, ping passes, so every other check
         # says healthy. Abort it once the hang outlives RPC_HANG_ABORT_SEC.
@@ -2208,7 +2208,7 @@ def check_node(snode):
 
     decrement()
     if not node_rpc_check or not node_rpc_check_1:
-        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:FAILED")
+        logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}:FAILED")
         set_node_schedulable(snode)
         return False
 

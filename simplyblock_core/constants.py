@@ -523,6 +523,17 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # seconds. Before that the cutover waits and takes NO snapshots of its own --
 # the iterative snapshots ARE the endgame.
 REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# Migration-plan forecast fallbacks, used until the plan's own transfers and
+# cutovers have been measured (simplyblock_core/migration_forecast.py).
+REPL_FORECAST_DEFAULT_BYTES_PER_SEC = 200 * 1024 * 1024
+REPL_FORECAST_DEFAULT_CUTOVER_SEC = 60
+# An lvstore whose volumes are written at this fraction of its replication
+# throughput or more is reported as not converging: the remaining margin is
+# eaten by snapshot and convert overhead, and the lag never closes.
+REPL_CONVERGENCE_MARGIN = 0.9
+# Cadence a migration plan gives a volume that has none: the initial copy and
+# the catch-up ride the cadence snapshots, so without one nothing ever ships.
+REPL_MIGRATION_DEFAULT_INTERVAL_MIN = 1
 # Rounds must follow each other within MILLISECONDS. Returning to the task
 # scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
 # each time, which puts a floor under the delta no number of rounds can beat.
@@ -572,8 +583,33 @@ REPL_MAX_NODE_SWITCHES = 6
 REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # How long the submitting pass may wait inline for the transfer. The runner is
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
-# just falls back to being noticed on a later pass.
-REPL_XFER_INLINE_WAIT_SEC = 5.0
+# just falls back to being noticed on a later pass, REPL_ACTIVE_PASS_SEC later.
+REPL_XFER_INLINE_WAIT_SEC = 1.0
+# A delta's landing volume is merged with its base on the target as a job
+# (bdev_lvol_merge_base): how long the finish waits for it inline, and how
+# often it polls, before leaving it to the next pass. No inline wait: merges
+# take minutes, and every second spent here blocks the single-threaded runner
+# for every other task -- with three volumes merging, a pass took ~50 s and a
+# finished merge was acted on that much later (bed run 4, 2026-10-24). The
+# pass interval (REPL_ACTIVE_PASS_SEC) notices a finished merge instead.
+REPL_MERGE_INLINE_WAIT_SEC = 0.0
+REPL_MERGE_POLL_SEC = 1.0
+# Pass interval of the snapshot replication runner while any transfer or
+# merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
+# pass reads the task table (see test_transfer_completion_latency).
+REPL_ACTIVE_PASS_SEC = 1.0
+# Requests a replication transfer keeps in flight. A full transfer sends one
+# whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
+# (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
+# for the same in-flight bytes (256 x 64 KiB = 16 MiB). Powers of two (SPDK
+# rings).
+REPL_XFER_BATCH = 16
+REPL_XFER_PARTIAL_BATCH = 256
+# The next snapshot of a volume may transfer while the target still merges the
+# previous copy: the cycle then takes the longer of transfer and merge, not
+# their sum. Its landing volume is chained onto that copy once the copy exists
+# (snapshot_replication._finishing_predecessor).
+REPL_OVERLAP_MERGE = True
 # A volume in its final cutover already owns its lvstore and every other
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
@@ -849,6 +885,13 @@ OS_K8S_ENDPOINT = "http://opensearch-cluster-master:9200"
 WEBAPI_K8S_ENDPOINT = "http://simplyblock-webappapi:5000/api/v2"
 
 K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
+# The names a cluster's workload is reached by when its record names none: a
+# cluster created before the record existed, and the first cluster in a
+# namespace. A storage node's hostname is <node>.<service>.<namespace>.svc, so
+# these are part of every such node's identity.
+K8S_SNODE_API_SERVICE = "simplyblock-storage-node-api"
+K8S_SPDK_PROXY_SERVICE = "simplyblock-spdk-proxy"
+K8S_SPDK_PROXY_TLS_SECRET = "simplyblock-spdk-proxy-tls"
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
@@ -906,6 +949,16 @@ prometheus_patch = {
 }
 
 qos_class_meta_and_migration_weight_percent = 25
+
+# Service (QoS) classes travel in the top NBITS_PRIORITY_CLASS=3 bits of every
+# lvol IO's LBA, so distrib schedules 8 wire classes: 0 = Default, 1 = internal
+# metadata/migration, 2..7 = lvol_priority_class 1..6 (wire = class id + 1).
+# Class id 6 (wire 7) is reserved for cross-cluster snapshot replication
+# traffic, which leaves users Default plus class ids 1..QOS_MAX_USER_CLASS_ID.
+QOS_MAX_USER_CLASS_ID = 5
+QOS_REPLICATION_CLASS_ID = 6
+QOS_REPLICATION_WIRE_CLASS = QOS_REPLICATION_CLASS_ID + 1
+qos_class_replication_weight_percent = 10
 
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
@@ -1021,12 +1074,16 @@ BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---
-# Cooldown between hub-attach retry attempts when the target node is down or
-# recovering (covers control-plane lag before the DB reflects the down state).
+# Cooldown between cutover attempts while the target is unreachable: down or
+# recovering, before the DB reflects the down state.
 REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
-# Max consecutive hub-attach failures with the node still appearing online
-# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
-REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# How long, from the first unreachable attempt, an unreachable target is
+# waited out without burning a task.retry. One window per task: a burned retry
+# does not open another, so the window and max_retry do not multiply.
+REPL_CUTOVER_TRANSIENT_WINDOW_SEC = 600
+# How long a commit waits for another commit of the same volume to finish
+# queuing its cutover: a couple of database round trips.
+REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC = 10
 # Delete the superseded original volume BEFORE building the fail-back clone
 # (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
 # original's blob id while its parent snapshot's clone registry is already
@@ -1138,6 +1195,19 @@ TWO_NODE_LEADERSHIP_RETRY_MS = 3000
 #: Campaign c5: a port-allow task open longer than this no longer holds back
 #: the arbiter's leadership restoration (it targets the same primary).
 TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
+#: Who decides which node of a two-node cluster continues alone
+#: (docs/design/two-node-kubernetes-fencing.md): the arbiter on the control
+#: plane, or Pacemaker on the nodes (the arbiter then stays out entirely).
+TWO_NODE_AUTHORITY_WITNESS = "witness"
+TWO_NODE_AUTHORITY_PACEMAKER = "pacemaker"
+TWO_NODE_AUTHORITIES = (TWO_NODE_AUTHORITY_WITNESS, TWO_NODE_AUTHORITY_PACEMAKER)
+#: Host fencing (kubernetes-fencing contract, section 3.2): a revocation is
+#: applied again this often, covering subsystems recreated with allow_any_host.
+TWO_NODE_HOST_FENCE_REASSERT_S = 10
+#: Timeout of each subsystem RPC of a host-fence revocation or release.
+TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S = 5
+#: Node condition the operator sets on a host-fenced node's Kubernetes Node.
+TWO_NODE_STORAGE_FENCED_CONDITION = "StorageFenced"
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60

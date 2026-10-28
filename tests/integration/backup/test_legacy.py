@@ -806,6 +806,28 @@ class TestListBackups(unittest.TestCase):
         self.assertEqual([row["ID"] for row in data], ["newer", "older"])
         self.assertEqual(data[0]["Created"], time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(1710000005)))
 
+    @patch("simplyblock_core.controllers.backup.controller.db_controller")
+    def test_merged_hidden_by_default(self, mock_db):
+        merged = _backup(uuid="merged-1", status=Backup.STATUS_MERGED)
+        completed = _backup(uuid="completed-1")
+        mock_db.get_backups.return_value = [merged, completed]
+
+        from simplyblock_core.controllers.backup.controller import list_backups
+        data = list_backups()
+
+        self.assertEqual([row["ID"] for row in data], ["completed-1"])
+
+    @patch("simplyblock_core.controllers.backup.controller.db_controller")
+    def test_merged_shown_with_show_all(self, mock_db):
+        merged = _backup(uuid="merged-1", status=Backup.STATUS_MERGED)
+        completed = _backup(uuid="completed-1")
+        mock_db.get_backups.return_value = [merged, completed]
+
+        from simplyblock_core.controllers.backup.controller import list_backups
+        data = list_backups(show_all=True)
+
+        self.assertEqual({row["ID"] for row in data}, {"merged-1", "completed-1"})
+
 
 # ===========================================================================
 # 11. Policy management
@@ -947,7 +969,7 @@ class TestPolicyDetach(unittest.TestCase):
 
 class TestEvaluatePolicy(unittest.TestCase):
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_no_policy(self, mock_db, mock_tasks):
         mock_db.get_policy_for_lvol.return_value = None
@@ -959,7 +981,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_not_called()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_version_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
         policy = _policy(max_versions=2, max_age_seconds=0)
@@ -977,7 +999,7 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_under_version_limit(self, mock_db, mock_tasks):
         policy = _policy(max_versions=5, max_age_seconds=0)
@@ -995,7 +1017,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_not_called()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_age_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
         policy = _policy(max_versions=0)
@@ -1014,7 +1036,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_called_once()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_both_conditions_required(self, mock_db, mock_tasks, _mock_write):
         """When both versions and age are set, either limit can trigger a merge."""
@@ -1034,7 +1056,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_called_once()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_both_conditions_met(self, mock_db, mock_tasks, _mock_write):
         """When both limits set and both exceeded, merge triggers."""
@@ -1054,7 +1076,7 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_fewer_than_two_backups(self, mock_db, mock_tasks):
         """Never merge with fewer than 2 completed backups."""
@@ -1261,31 +1283,31 @@ class TestBackupLocationAccessor(unittest.TestCase):
 
 
 # ===========================================================================
-# 20. _trigger_merge
+# 20. trigger_merge
 # ===========================================================================
 
 class TestTriggerMerge(unittest.TestCase):
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     def test_trigger_merge_marks_old_as_merging(self, mock_tasks):
-        from simplyblock_core.controllers.backup.policy import _trigger_merge
+        from simplyblock_core.controllers.backup.controller import trigger_merge
         keep = _backup(uuid="keep")
         old = _backup(uuid="old")
         old.write_to_db = MagicMock()
 
-        _trigger_merge(keep, old)
+        trigger_merge(keep, old)
 
         self.assertEqual(old.status, Backup.STATUS_MERGING)
         old.write_to_db.assert_called_once()
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     def test_skip_if_not_completed(self, mock_tasks):
-        from simplyblock_core.controllers.backup.policy import _trigger_merge
+        from simplyblock_core.controllers.backup.controller import trigger_merge
         keep = _backup(uuid="keep")
         old = _backup(uuid="old", status=Backup.STATUS_PENDING)
 
-        _trigger_merge(keep, old)
+        trigger_merge(keep, old)
 
         mock_tasks.add_backup_merge_task.assert_not_called()
 

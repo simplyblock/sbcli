@@ -1,6 +1,7 @@
+import hashlib
 import time
 from datetime import UTC, datetime, timedelta
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from uuid import uuid4
 
 from pydantic import SecretStr
@@ -26,7 +27,15 @@ from simplyblock_core.settings import Settings
 from simplyblock_core.snode_client import SNodeClient
 from simplyblock_core.utils import rpc_budget
 
+if TYPE_CHECKING:
+    from simplyblock_core.models.cluster import Cluster
+
 logger = utils.get_logger(__name__)
+
+# One DNS label, which a hostname in a headless Service is, and the digest a
+# label cut to fit it carries.
+_MAX_DNS_LABEL = 63
+_HOSTNAME_DIGEST = 8
 
 
 class StorageNode(BaseNodeObject):
@@ -86,6 +95,8 @@ class StorageNode(BaseNodeObject):
     cpu_hz: int = 0
     ctrl_secret: SecretStr = SecretStr("")
     data_nics: list[IFace] = default_factory(list)
+    # Dumped storage_network.NetworkAttachment entries; empty on the host network.
+    networks: list[dict] = default_factory(list)
     distrib_cpu_cores: list[int] = default_factory(list)
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
@@ -126,6 +137,8 @@ class StorageNode(BaseNodeObject):
     max_snap: int = 0
     memory: int = 0
     mgmt_ip: str = ""
+    # SPDK RPC address of a pod on attached networks; mgmt_ip stays the worker's address.
+    spdk_ip: str = ""
     namespace: str = ""
     node_lvs: str = "lvs"
     num_partitions_per_dev: int = 1
@@ -174,6 +187,11 @@ class StorageNode(BaseNodeObject):
     # Lets the arbiter grant the peer solo operation even when THIS node is the
     # preferred one (docs/design/two-node-arbitration.md, invariant 3).
     remediation_fenced: bool = False
+    # Kernel NVMe host NQNs of the Kubernetes node this storage node runs on
+    # (the kernel default and the simplyblock form), reported by the operator;
+    # revoked on the peer by a host fence
+    # (docs/design/two-node-kubernetes-fencing.md, section 3.2).
+    client_host_nqns: list[str] = default_factory(list)
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: list[str] = default_factory(list)
@@ -190,6 +208,13 @@ class StorageNode(BaseNodeObject):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
+    # The cluster's workload names (Cluster.snode_api_service and its
+    # siblings), copied onto the node when it is added so that building a
+    # client needs no cluster read.
+    snode_api_service: str = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: str = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: str = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: str = ""
     # Per-LVS restart phase tracking: {lvs_name: phase_string}
     # Phases: "pre_block", "blocked", "post_unblock", "" (not in restart)
     # Used by other services to gate sync deletes and create/clone/resize registrations.
@@ -231,6 +256,25 @@ class StorageNode(BaseNodeObject):
             return self.hublvol.nvmf_port
         return 0
 
+    def lvstore_cluster_size(self, lvs_name: str) -> int | None:
+        """The ``cluster_sz`` this node's lvstore ``lvs_name`` was created with,
+        in bytes, or None when the persisted stack has no such lvstore.
+
+        ``lvstore_stack`` is written once by create_lvstore with the exact
+        parameters sent to SPDK and replayed verbatim on every restart, so this
+        is the running lvstore's real cluster size whatever release created it.
+        Anything that turns ``num_allocated_clusters`` into bytes must use this
+        rather than recompute the size from the current cluster settings: the
+        formula has changed between releases (page size x1 before 26.3.2, x ndcs
+        since) and an lvstore keeps the size it was born with.
+        """
+        for entry in self.lvstore_stack:
+            if entry.get("type") == "bdev_lvstore" and entry.get("name") == lvs_name:
+                cluster_sz = (entry.get("params") or {}).get("cluster_sz")
+                if cluster_sz:
+                    return int(cluster_sz)
+        return None
+
     def watch_scope(self):
         return (self.cluster_id,)
 
@@ -240,7 +284,7 @@ class StorageNode(BaseNodeObject):
         host = self.api_endpoint
         if Settings().tls_connect != "disabled":
             port = self.api_endpoint.rsplit(":", 1)[1]
-            host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
+            host = f"{self._k8s_service_host(self.snode_api_service)}:{port}"
         return SNodeClient(host, **kwargs)
 
     def from_dict(self, data):
@@ -271,6 +315,16 @@ class StorageNode(BaseNodeObject):
                     break
         return super().from_dict(data)
 
+    @property
+    def on_pod_network(self) -> bool:
+        """Whether the SPDK pod is attached to extra networks rather than on the host's."""
+        return bool(self.networks)
+
+    @property
+    def rpc_host(self) -> str:
+        """Where SPDK RPC is served: the pod's address when attached, else the worker's."""
+        return self.spdk_ip or self.mgmt_ip
+
     def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
 
@@ -289,15 +343,39 @@ class StorageNode(BaseNodeObject):
             timeout, retry = budget
             kwargs.setdefault("timeout", timeout)
             kwargs.setdefault("retry", retry)
-        host = self.mgmt_ip
+        host = self.rpc_host
         if Settings().tls_connect != "disabled":
-            host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
+            host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(
             host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
     def _k8s_node_label(self) -> str:
         return self.hostname.removesuffix(f"_{self.rpc_port}")
+
+    def _k8s_service_host(self, service: str) -> str:
+        """The node's hostname in one of its cluster's headless Services.
+
+        A label too long to take the suffix within the 63 characters of one
+        DNS label is cut and carries an eight-character digest of the whole
+        label, which is the rule the operator publishes the hostname under
+        (atlas-lib kube.WorkloadNames.Hostname): both sides have to build the
+        same name.
+        """
+        label = self._k8s_node_label()
+        suffix = self.node_label_suffix
+        if len(label) + len(suffix) > _MAX_DNS_LABEL:
+            keep = _MAX_DNS_LABEL - len(suffix) - _HOSTNAME_DIGEST - 1
+            digest = hashlib.sha256(label.encode()).hexdigest()[:_HOSTNAME_DIGEST]
+            label = f"{label[:keep].rstrip('-')}-{digest}"
+        return f"{label}{suffix}.{service}.{self.cr_namespace}.svc"
+
+    def record_workload_names(self, cluster: "Cluster") -> None:
+        """Copy the cluster's workload names onto this node."""
+        self.snode_api_service = cluster.snode_api_service
+        self.spdk_proxy_service = cluster.spdk_proxy_service
+        self.spdk_proxy_tls_secret = cluster.spdk_proxy_tls_secret
+        self.node_label_suffix = cluster.node_label_suffix
 
     def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port,
                     ana_state=None, min_cntlid=1):
@@ -395,6 +473,25 @@ class StorageNode(BaseNodeObject):
         nodes can use NVMe multipath (ANA) to failover between them.
         """
         return f"{cluster_nqn}:hublvol:{lvstore_name}"
+
+    @staticmethod
+    def lvs_hublvol_nqn(lvs_node, cluster_nqn):
+        """The NQN the hublvol of ``lvs_node.lvstore`` is served under, on
+        every node that exposes it (primary, sec_1, a takeover leader).
+
+        Peers attach every hublvol path with the NQN the LVS's primary
+        recorded (``HublvolReconnectCoordinator.reconcile``), so a node that
+        exposes the same hublvol under any other name serves a subsystem
+        nobody connects to. The record wins over the shared scheme: a primary
+        whose hublvol was created on R25 holds the per-node
+        ``{host_nqn}:lvol:{uuid}`` NQN, and re-deriving the scheme for sec_1
+        left every tertiary of an upgraded cluster with a single hublvol path
+        (its failover attach rejected with -5). The scheme is only the
+        fallback for a record that carries no NQN.
+        """
+        if lvs_node.hublvol and lvs_node.hublvol.nqn:
+            return lvs_node.hublvol.nqn
+        return StorageNode.hublvol_nqn_for_lvstore(cluster_nqn, lvs_node.lvstore)
 
     def prestage_hublvol_subsystem(self, nqn, model_number, port,
                                    ana_state=None, min_cntlid=1):
@@ -570,7 +667,7 @@ class StorageNode(BaseNodeObject):
     def create_secondary_hublvol(self, primary_node, cluster_nqn):
         """Create and expose a hublvol on this node for a LVStore where this node is sec_1.
 
-        Uses the same shared NQN as the primary's hublvol so that downstream
+        Uses the primary's hublvol NQN (:meth:`lvs_hublvol_nqn`) so that downstream
         nodes (tertiary) can use NVMe multipath to failover from primary to sec_1.
         The listener ANA state is non_optimized.
         """
@@ -592,7 +689,7 @@ class StorageNode(BaseNodeObject):
                 logger.error(f'Failed to create secondary hublvol for {lvstore_name}')
                 return None
 
-        nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
+        nqn = self.lvs_hublvol_nqn(primary_node, cluster_nqn)
         hublvol_port = primary_node.hublvol.nvmf_port
 
         # The secondary's hublvol subsystem MUST use a cntlid range
@@ -645,7 +742,7 @@ class StorageNode(BaseNodeObject):
         else:
             logger.info('Adopted hublvol already exists: %s', bdev_name)
 
-        nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
+        nqn = self.lvs_hublvol_nqn(lvs_node, cluster_nqn)
         self.expose_bdev(
             nqn=nqn,
             bdev_name=bdev_name,

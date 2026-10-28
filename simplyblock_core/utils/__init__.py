@@ -46,6 +46,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
 from ..models.mgmt_node import MgmtNode
+from . import host_network
 from . import pci as pci_utils
 from . import shell as shell_utils
 from .helpers import parse_thread_siblings_list
@@ -84,6 +85,12 @@ EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
 #: caller has to remember; ``NQN_PATTERN`` stays for the paths that validate
 #: imperatively.
 NQN = Annotated[str, Field(pattern=NQN_PATTERN)]
+
+#: A Kubernetes object name that is also a DNS label, as a Service's is.
+K8S_DNS_LABEL = Annotated[str, Field(pattern=r'^[a-z]([-a-z0-9]*[a-z0-9])?$', max_length=63)]
+#: A Kubernetes object name that is a DNS subdomain, as a Secret's is.
+K8S_DNS_SUBDOMAIN = Annotated[str, Field(
+    pattern=r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$', max_length=253)]
 
 
 def get_env_var(name, default=None, is_required=False):
@@ -128,7 +135,7 @@ def get_nvme_info(dev_name):
 
 def get_nics_data():
     logger.debug("function:get_nics_data start")
-    out, err, rc = shell_utils.run_command("ip -j address show")
+    out, err, rc = shell_utils.run_command(host_network.host_command("ip -j address show"))
     if rc != 0:
         logger.error(err)
         return []
@@ -218,6 +225,12 @@ def get_docker_client(cluster_id=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes(cluster_id)
+    if not nodes and cluster_id:
+        # Management nodes belong to the deployment, not to one cluster: only
+        # the first cluster's bootstrap records one, so a cluster attached
+        # later with `cluster add` has none of its own. Any of them reaches
+        # the same swarm.
+        nodes = db_controller.get_mgmt_nodes()
     if not nodes:
         raise RuntimeError("No mgmt nodes was found in the cluster!")
 
@@ -1500,6 +1513,25 @@ def aio_bdev_name_for_serial(serial: str) -> str:
     return f"aio_{sanitized}"
 
 
+def _unsafe_live_device_reason(dev):
+    """Safety checks that must hold for ANY live device before SPDK is told
+    to open it as storage — whether it was selected at add-node time
+    (`filter_eligible_block_devices`) or re-resolved at restart
+    (`resolve_lblk_entries`). A name/partuuid fallback match can land on a
+    device that merely shares a slot with the configured one on a
+    different host (e.g. a restart onto new hardware); without this check
+    it would be handed straight to `bdev_aio_create` with no re-validation,
+    including the possibility of landing on the host's own mounted root
+    disk."""
+    if dev.get("mounted_in_subtree"):
+        return "mounted (busy)"
+    if dev.get("holders"):
+        return f"held by {dev['holders']} (busy)"
+    if dev.get("is_root_disk"):
+        return "backs the root filesystem"
+    return None
+
+
 def resolve_lblk_entries(configured_entries, host_devices):
     """Match the node's configured lblk devices against the live host
     inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
@@ -1507,31 +1539,69 @@ def resolve_lblk_entries(configured_entries, host_devices):
     entries additionally resolve by PARTUUID — it survives a parent-disk
     serial change (e.g. a hypervisor re-exposing the volume) while the
     derived partition serial would not. Returns ``(resolved, missing)``
-    where resolved entries carry the CURRENT name/path/by-id."""
+    where resolved entries carry the CURRENT name/path/by-id/serial — the
+    live serial wins whenever one is reported, even when the match itself
+    was made by name/partuuid, so a device that only *looks* like the
+    configured one (same slot, genuinely different hardware — e.g. this
+    node restarted on a brand-new host) is truthfully reported as having a
+    new identity instead of silently inheriting the old serial. Callers
+    rely on that to tell "same device, renamed" from "different device,
+    coincidentally in the same slot": only the former is safe to treat as
+    already-initialized storage.
+
+    A match that resolves to a live device failing `_unsafe_live_device_reason`
+    (mounted, held, or backing the root filesystem) is demoted to `missing`
+    rather than returned as resolved — a fallback match by name/partuuid
+    must clear the same safety bar `filter_eligible_block_devices` enforces
+    at add-node time, not just "something is attached at that name now"."""
+    by_path = _index_by_selector(host_devices)
     by_serial = {d["serial"]: d for d in host_devices}
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
                    if d.get("partuuid")}
     resolved, missing = [], []
     for entry in configured_entries:
-        live = by_serial.get(entry.get("serial"))
-        if live is None and entry.get("partuuid"):
-            live = by_partuuid.get(entry["partuuid"].lower())
+        path = entry.get("path")
+        if path:
+            # A caller-selected path is the device's whole identity: a path
+            # that no longer answers is a missing device, not an invitation
+            # to fall back to serial/partuuid/name and guess at a different
+            # one that happens to still be there.
+            live = by_path.get(path)
+            matched_by = "path"
+        else:
+            live = by_serial.get(entry.get("serial"))
+            matched_by = "serial"
+            if live is None and entry.get("partuuid"):
+                live = by_partuuid.get(entry["partuuid"].lower())
+                matched_by = "partuuid"
+            if live is None:
+                live = by_name.get(entry.get("name"))
+                matched_by = "name"
         if live is None:
-            live = by_name.get(entry.get("name"))
-        if live is None:
+            missing.append(entry)
+            continue
+        unsafe_reason = _unsafe_live_device_reason(live)
+        if unsafe_reason:
+            logger.warning(
+                f"Configured block device {entry.get('name')} (serial "
+                f"{entry.get('serial')}) matched live device {live.get('name')} "
+                f"by {matched_by}, but it is {unsafe_reason}; refusing to "
+                f"reuse it as storage")
             missing.append(entry)
             continue
         resolved_entry = {
             "name": live["name"],
             "current_path": live["device_path"],
-            "serial": entry.get("serial") or live["serial"],
-            "by_id": live.get("by_id_path") or entry.get("by_id", ""),
+            "serial": live.get("serial") or entry.get("serial"),
+            "by_id": path or live.get("by_id_path") or entry.get("by_id", ""),
             "size": int(live.get("size") or entry.get("size") or 0),
             "numa": int(live.get("numa_node", entry.get("numa", -1))),
             "model": live.get("model", ""),
             "has_partitions": bool(live.get("has_partitions")),
         }
+        if path:
+            resolved_entry["path"] = path
         if entry.get("type") == "part" or live.get("type") == "part":
             resolved_entry["type"] = "part"
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
@@ -1553,9 +1623,10 @@ def addAioDevices(rpc_client, snode, blk_entries):
         bdev_name = aio_bdev_name_for_serial(entry["serial"])
         ret = rpc_client.bdev_get(bdev_name)
         if not ret:
-            # Prefer the by-id path as the filename so a udev rename between
-            # resolution and create cannot swap devices under us.
-            filename = entry.get("by_id") or entry["current_path"]
+            # A path the caller selected the device by is opened as given.
+            # Otherwise prefer the by-id path as the filename so a udev rename
+            # between resolution and create cannot swap devices under us.
+            filename = entry.get("path") or entry.get("by_id") or entry["current_path"]
             ret = rpc_client.bdev_aio_create(bdev_name, filename)
             if not ret:
                 raise Exception(
@@ -1593,7 +1664,7 @@ def addAioDevices(rpc_client, snode, blk_entries):
                 'nvme_controller': "",
                 'bdev_type': "aio",
                 'device_path': entry["current_path"],
-                'by_id_path': entry.get("by_id", ""),
+                'by_id_path': entry.get("path") or entry.get("by_id", ""),
                 'node_id': snode.get_id(),
                 'cluster_id': snode.cluster_id,
                 'status': NVMeDevice.STATUS_ONLINE
@@ -1895,12 +1966,9 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
             return "not a disk or partition"
         if dev["name"].startswith(constants.LBLK_EXCLUDED_NAME_PREFIXES):
             return "special device type"
-        if dev.get("mounted_in_subtree"):
-            return "mounted (busy)"
-        if dev.get("holders"):
-            return f"held by {dev['holders']} (busy)"
-        if dev.get("is_root_disk"):
-            return "backs the root filesystem"
+        unsafe_reason = _unsafe_live_device_reason(dev)
+        if unsafe_reason:
+            return unsafe_reason
         if dev.get("ro"):
             return "read-only"
         if not dev.get("size"):
@@ -1977,6 +2045,7 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
         include_serials=include_serials, force_format=force_format)
     for dev, reason in rejected:
         logger.debug(f"block device {dev['name']} skipped: {reason}")
+    requested = set(include_names or [])
     result = {}
     for dev in selected:
         if dev.get("serial_synthetic"):
@@ -1991,6 +2060,12 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
             "size": int(dev["size"]),
             "numa": int(dev.get("numa_node", -1)),
         }
+        # The stable path the caller selected the device by is its identity
+        # from here on: add-node and every restart look it up by that path
+        # alone, and the AIO bdev is opened on it (resolve_lblk_entries).
+        given = sorted(requested & device_selectors(dev))
+        if given:
+            entry["path"] = given[0]
         if dev.get("type") == "part":
             entry["type"] = "part"
             entry["partuuid"] = dev.get("partuuid", "")
@@ -3744,12 +3819,19 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
-def get_mgmt_ip(node_info: Any, iface_names: str | list[str]) -> tuple[str, str] | None:
+def get_mgmt_ip(node_info: Any, iface_names: str | list[str], networks=None) -> tuple[str, str] | None:
+    """The worker's address and the interface it is on. With attached ``networks`` the
+    agent runs in the pod network and cannot see the host's interfaces, so it reports
+    the host's address itself (``host_ip``, set by the DaemonSet) and no interface."""
     if isinstance(node_info, (bytes, bytearray)):
         try:
             node_info = json.loads(node_info.decode("utf-8"))
         except Exception:
             return None
+
+    if networks:
+        host_ip = node_info.get("host_ip")
+        return (host_ip, "") if host_ip else None
 
     if isinstance(iface_names, str):
         iface_names = [iface_names]

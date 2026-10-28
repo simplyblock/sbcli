@@ -2,12 +2,10 @@ import json
 import math
 import os
 import socket
-import subprocess
 import time
 from pathlib import Path
 from typing import Annotated, Any
 
-import psutil
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
@@ -17,6 +15,7 @@ import simplyblock_core.utils as init_utils
 import simplyblock_core.utils.pci as pci_utils
 from simplyblock_core import constants, scripts
 from simplyblock_core import utils as core_utils
+from simplyblock_core.utils import host_network
 from simplyblock_core.utils import shell as shell_utils
 from simplyblock_web import node_utils, utils
 
@@ -1030,60 +1029,6 @@ class NicQuery(BaseModel):
     nic: str
 
 
-def resolve_underlying_ifaces(nic):
-    base_path = f"/sys/class/net/{nic}"
-    if not os.path.exists(base_path):
-        return []
-
-    # Handle bridge devices (collect all lower interfaces)
-    bridge_path = os.path.join(base_path, "brif")
-    if os.path.exists(bridge_path):
-        lower_ifaces = os.listdir(bridge_path)
-        resolved = []
-        for lower in lower_ifaces:
-            resolved.extend(resolve_underlying_ifaces(lower))
-        return resolved
-
-    # Handle bonded interfaces (collect all slaves)
-    bond_slaves = os.path.join(base_path, "bonding/slaves")
-    if os.path.exists(bond_slaves):
-        try:
-            with open(bond_slaves, "r") as f:
-                slaves = f.read().strip().split()
-            resolved = []
-            for s in slaves:
-                resolved.extend(resolve_underlying_ifaces(s))
-            return resolved
-        except Exception as e:
-            logger.warning(f"Failed to read bond slaves for {nic}: {e}")
-
-    # Handle VLANs (detect lower_* symlinks like lower_bond0)
-    lowers = [f for f in os.listdir(base_path) if f.startswith("lower_")]
-    if lowers:
-        resolved = []
-        for lower in lowers:
-            try:
-                target = os.path.basename(os.path.realpath(os.path.join(base_path, lower)))
-                resolved.extend(resolve_underlying_ifaces(target))
-            except Exception as e:
-                logger.warning(f"Failed to resolve {lower} for {nic}: {e}")
-        return resolved
-
-    # Fallback: device symlink (for VLANs on physical ifaces)
-    vlan_dev_path = os.path.join(base_path, "device")
-    if os.path.islink(vlan_dev_path):
-        try:
-            real_path = os.path.realpath(vlan_dev_path)
-            parent = real_path.split("/")[-1]
-            if parent != nic and os.path.exists(f"/sys/class/net/{parent}"):
-                return resolve_underlying_ifaces(parent)
-        except Exception as e:
-            logger.warning(f"Failed to resolve VLAN parent for {nic}: {e}")
-
-    # Default: treat as physical
-    return [nic]
-
-
 @api.get('/ifc_is_roce', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean',
@@ -1096,20 +1041,10 @@ def ifc_is_roce(query: NicQuery):
     """
     try:
         nic = query.nic if hasattr(query, "nic") else str(query)
-        rdma_path = "/sys/class/infiniband/"
-        if not os.path.exists(rdma_path):
-            return utils.get_response(False)
-
-        underlying = resolve_underlying_ifaces(nic)
+        underlying = host_network.underlying_interfaces(nic)
         logger.debug(f"Resolved {nic} → underlying ifaces: {underlying}")
-
-        for rdma_dev in os.listdir(rdma_path):
-            net_path = os.path.join(rdma_path, rdma_dev, "device/net")
-            if os.path.exists(net_path):
-                roce_ifaces = os.listdir(net_path)
-                for iface in underlying:
-                    if iface in roce_ifaces:
-                        return utils.get_response(True)
+        roce_ifaces = host_network.rdma_netdevs()
+        return utils.get_response(any(iface in roce_ifaces for iface in underlying))
     except Exception as e:
         logger.error(f"ifc_is_roce failed: {e}")
 
@@ -1124,10 +1059,8 @@ def ifc_is_roce(query: NicQuery):
 def ifc_is_tcp(query: NicQuery):
     try:
         nic = query.nic if hasattr(query, "nic") else str(query)
-        addrs = psutil.net_if_addrs().get(nic, [])
-        for addr in addrs:
-            if addr.family == socket.AF_INET:
-                return utils.get_response(True)
+        if core_utils.get_iface_ip(nic):
+            return utils.get_response(True)
     except Exception as e:
         logger.error(e)
     return utils.get_response(False)
@@ -1153,7 +1086,8 @@ def is_alive():
 def connect_to_nvme(body: utils.NVMEConnectParams):
     """Connect to the indicated NVMe-oF target.
     """
-    st = f"nvme connect --transport=tcp --traddr={body.ip} --trsvcid={body.port} --nqn={body.nqn}"
+    st = host_network.host_command(
+        f"nvme connect --transport=tcp --traddr={body.ip} --trsvcid={body.port} --nqn={body.nqn}")
     logger.debug(st)
     out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
@@ -1175,7 +1109,7 @@ def connect_to_nvme(body: utils.NVMEConnectParams):
 def disconnect_nqn(body: utils.DisconnectParams):
     """Disconnect from indicated NVMe-oF target
     """
-    st = f"nvme disconnect --nqn={body.nqn}"
+    st = host_network.host_command(f"nvme disconnect --nqn={body.nqn}")
     out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
@@ -1194,12 +1128,14 @@ class PingQuery(BaseModel):
 })
 def ping_ip(query: PingQuery):
     try:
-        subprocess.check_call(
-            ["ping", "-c", "3", "-W", "1", query.ip],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return utils.get_response(Path(f"/sys/class/net/{query.ifname}/carrier").read_text().strip() == "1")
+        _, err, rc = shell_utils.run_command(host_network.host_command(f"ping -c 3 -W 1 {query.ip}"))
+        if rc != 0:
+            # run_command returns a process's stderr as bytes, and a failure to
+            # start the process as a str.
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", errors="replace")
+            return utils.get_response(False, err or f"{query.ip} does not answer")
+        return utils.get_response(host_network.has_carrier(query.ifname))
     except Exception as e:
         logger.error(e)
         return utils.get_response(False, str(e))

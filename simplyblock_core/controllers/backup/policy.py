@@ -9,11 +9,17 @@ import re
 import time
 import uuid
 
-from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import group_backup
+from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
+from simplyblock_core.models.backup import (
+    Backup,
+    BackupPolicy,
+    BackupPolicyAttachment,
+    GroupBackup,
+)
 from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger()
@@ -129,13 +135,16 @@ def attach_policy(policy_id, target_type, target_id):
     except KeyError as e:
         return None, str(e)
 
-    if target_type not in ("pool", "lvol"):
-        return None, f"Invalid target_type: {target_type}. Use 'pool' or 'lvol'"
+    if target_type not in ("pool", "lvol", "consistency_group"):
+        return None, (f"Invalid target_type: {target_type}. "
+                      f"Use 'pool', 'lvol', or 'consistency_group'")
 
     # Validate target exists
     try:
         if target_type == "pool":
             db_controller.get_pool_by_id(target_id)
+        elif target_type == "consistency_group":
+            db_controller.get_consistency_group_by_id(target_id)
         else:
             db_controller.get_lvol_by_id(target_id)
     except KeyError as e:
@@ -214,7 +223,7 @@ def evaluate_policy(lvol):
     if versions_exceeded or age_exceeded:
         oldest = completed[0]
         second = completed[1]
-        _trigger_merge(second, oldest)
+        backup_controller.trigger_merge(second, oldest)
 
 
 def evaluate_schedule(lvol):
@@ -288,8 +297,79 @@ def evaluate_schedule(lvol):
             tier_backups.sort(key=lambda b: b.created_at)
             oldest = tier_backups[0]
             second = tier_backups[1]
-            _trigger_merge(second, oldest)
+            backup_controller.trigger_merge(second, oldest)
             return  # One merge per cycle to avoid conflicts
+
+
+def evaluate_group_backups(group):
+    """Back up and prune a consistency group per its backup policy.
+
+    One pass, three steps. Member copies orphaned by a delete from before group
+    backups retired their own members are swept. A generation is taken when the
+    schedule's smallest interval has elapsed since the last one, and the pass
+    ends there so the take commits before anything is pruned. Otherwise the
+    generations either retention rule selects are deleted: the count/age rule
+    (``max_versions``, ``max_age``) and the schedule's tiers (``keep_count`` per
+    age band). A group backup is the retention unit, so the rules count
+    generations, and the delete retires each one's member backups.
+    """
+    policy = db_controller.get_policy_for_group(group)
+    if not policy:
+        return
+
+    try:
+        tiers = _parse_schedule(policy.backup_schedule) if policy.backup_schedule else []
+    except ValueError:
+        tiers = []
+    now = int(time.time())
+    group_backups = db_controller.get_group_backups_by_consistency_group(group.get_id())
+    completed = [g for g in group_backups if g.status == GroupBackup.STATUS_COMPLETED]
+    in_flight = [g for g in group_backups
+                 if g.status in (GroupBackup.STATUS_PENDING, GroupBackup.STATUS_IN_PROGRESS)]
+
+    group_backup.retire_orphaned_member_backups(
+        [lid for lid, m in (group.members or {}).items() if m.get("removed_seq", 0) == 0])
+
+    # One group backup at a time: none while one is still committing, the same
+    # gate the single-volume schedule keeps.
+    if tiers and not in_flight:
+        latest = max((g.created_at for g in completed), default=None)
+        if latest is None or now - latest >= tiers[0][0]:
+            _, err = group_backup.create_group_backup(group.get_id())
+            if err:
+                logger.warning("Scheduled group backup skipped for group %s: %s",
+                               group.uuid, err)
+            return
+
+    for gb in _group_backups_to_prune(completed, policy, tiers, now):
+        try:
+            group_backup.delete_group_backup(gb.get_id())
+        except (KeyError, PreconditionError, ManifestError) as e:
+            logger.warning("Group retention could not delete group backup %s: %s", gb.uuid, e)
+
+
+def _group_backups_to_prune(completed, policy, tiers, now):
+    """The completed group backups either retention rule deletes, oldest first.
+
+    The count/age rule selects every generation beyond ``max_versions`` and every
+    one older than ``max_age``. The tiers select one generation per pass: the
+    oldest of the first age band holding more than its ``keep_count``.
+    """
+    completed = sorted(completed, key=lambda g: g.created_at)
+    doomed = []
+    if policy.max_versions > 0 and len(completed) > policy.max_versions:
+        doomed.extend(completed[:len(completed) - policy.max_versions])
+    if policy.max_age_seconds > 0:
+        doomed.extend(gb for gb in completed if (now - gb.created_at) > policy.max_age_seconds)
+    for tier_idx, (_interval, keep_count) in enumerate(tiers):
+        lower_age = 0 if tier_idx == 0 else tiers[tier_idx - 1][0]
+        upper_age = tiers[tier_idx + 1][0] if tier_idx + 1 < len(tiers) else float('inf')
+        band = [g for g in completed if lower_age <= (now - g.created_at) < upper_age]
+        if len(band) > keep_count:
+            doomed.append(band[0])
+            break
+    unique = {gb.uuid: gb for gb in doomed}
+    return sorted(unique.values(), key=lambda g: g.created_at)
 
 
 def _auto_backup_lvol(lvol):
@@ -309,18 +389,3 @@ def _auto_backup_lvol(lvol):
         logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
 
 
-def _trigger_merge(keep_backup, old_backup):
-    """Trigger a merge of old_backup into keep_backup."""
-    if old_backup.status != Backup.STATUS_COMPLETED:
-        return
-    if keep_backup.status != Backup.STATUS_COMPLETED:
-        return
-
-    old_backup.status = Backup.STATUS_MERGING
-    old_backup.write_to_db()
-
-    tasks_controller.add_backup_merge_task(
-        keep_backup.cluster_id,
-        keep_backup.node_id,
-        keep_backup.uuid,
-        old_backup.uuid)

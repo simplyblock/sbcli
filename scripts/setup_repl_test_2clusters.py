@@ -439,10 +439,16 @@ def main():
 
     # --- Phase 1: install sbcli everywhere ---
     install_cmds = [
-        "sudo dnf install git python3-pip nvme-cli -y",
-        "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
-        "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
+        # sbcli requires Python >= 3.11 (pyproject.toml); the image's python3
+        # is 3.9, so install 3.11 next to it and install sbcli into that.
+        "sudo dnf install git python3.11 python3.11-pip nvme-cli -y",
+        # sbctl loads libfdb_c on import, so the client library must be there
+        # before the first sbctl call (install_deps.sh runs too late for that)
+        "rpm -q foundationdb-clients || sudo dnf install -y https://github.com/apple/foundationdb/"
+        "releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm",
+        "sudo python3.11 -m pip install --upgrade pip setuptools wheel",
+        "sudo python3.11 -m pip install ruamel.yaml",
+        f"sudo python3.11 -m pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
         " --upgrade --force --ignore-installed requests",
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
     ]

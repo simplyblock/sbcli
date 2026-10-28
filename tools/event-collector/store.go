@@ -12,6 +12,15 @@ import "fmt"
 type Cluster struct {
 	UUID               string `json:"uuid"`
 	TwoNodeArbitration bool   `json:"two_node_arbitration"`
+	// FencingAuthority is "witness" (default, also when empty) or "pacemaker". In mode
+	// pacemaker the node agent owns the single jc_wait_events waiter and no arbiter consumes
+	// events (docs/design/two-node-kubernetes-fencing.md, section 4.2).
+	FencingAuthority string `json:"two_node_fencing_authority"`
+}
+
+// Arbitrated reports whether the collector serves the cluster's nodes.
+func (c Cluster) Arbitrated() bool {
+	return c.TwoNodeArbitration && c.FencingAuthority != "pacemaker"
 }
 
 // Node is the part of a StorageNode record the collector needs.
