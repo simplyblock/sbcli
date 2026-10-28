@@ -19,7 +19,7 @@ User snapshots are never marked.
 """
 from simplyblock_core import utils
 from simplyblock_core.controllers import replication_recovery_points
-from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
@@ -70,12 +70,25 @@ def retire_source_lineage(db, src_lvol):
     for snap in lineage:
         if snap.get_id() in keep or snap.deleted:
             continue
-        db.atomic_update(snap, lambda s: setattr(s, "deleted", True))
+        fresh = db.atomic_update(snap, lambda s: setattr(s, "deleted", True))
+        if fresh is None:
+            continue
+        _sync_mini(db, fresh)
         retired.append(snap.get_id())
     if retired:
         logger.info("Retiring %d replication snapshot(s) of migrated-away volume %s: %s",
                     len(retired), src_lvol.get_id(), ", ".join(retired))
     return retired
+
+
+def _sync_mini(db, snap):
+    """Carry the flag onto the snapshot's mini record, which the reaper scans.
+
+    atomic_update writes only the full record; SnapShot.write_to_db is what
+    keeps the mini index in step, so a flag set atomically stays invisible to
+    every mini-table reader until some later plain write happens to refresh
+    it (bf5 2026-10-28: 2 of 13 retired snapshots reaped in 20 minutes)."""
+    SnapShotMini().from_snapshot(snap).write_to_db(db.kv_store)
 
 
 def _spdk_clones(db, snap):
