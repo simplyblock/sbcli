@@ -129,6 +129,44 @@ class CommonUtils:
     # overlapping IO, so lblk callers can demote it -- see md5_severity.
     FIO_PAYLOAD_MARKERS = ("verify failed", "checksum", "data mismatch")
 
+    def fio_job_still_running(self, node, log_file):
+        """True if a fio job is still writing *log_file* on *node*.
+
+        The launcher's convention ties the three names together: a job called
+        ``<base>_fio`` runs in tmux session ``fio_<base>_fio`` and its stdout
+        is redirected to ``<base>.log``. So the session can be derived from
+        the log path, which is all validate_fio_test is given.
+
+        ``[f]io_`` rather than ``fio_``: the shell running this check carries
+        the pattern in its own command line, so an unbracketed match finds
+        itself and every job looks alive forever. That exact bug cost a run in
+        September -- see _docker_fio_running in the lblk matrix.
+
+        Unknown counts as running. A failed ssh must not be the reason a
+        20-hour run is thrown away, and the incremental scanners read these
+        same logs after every outage, so a real failure has other ways to be
+        caught.
+        """
+        base = os.path.basename(log_file)
+        if base.endswith(".log"):
+            base = base[:-len(".log")]
+        if not base:
+            return False
+        try:
+            out, _err = self.ssh_utils.exec_command(
+                node=node,
+                command=(f"sudo tmux list-sessions -F '#S' 2>/dev/null "
+                         f"| grep -qx '[f]io_{base}_fio' && echo ALIVE "
+                         f"|| echo GONE"),
+                timeout=60, max_retries=1)
+            return "ALIVE" in (out or "")
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[fio-validate] could not tell whether %s is still running on "
+                "%s (%s); assuming it is, rather than failing the run on an "
+                "ssh error", base, node, str(exc)[:120])
+            return True
+
     def validate_fio_test(self, node, log_file, md5_severity="error"):
         """Validate an FIO log for corruption and for interruptions.
 
@@ -159,17 +197,36 @@ class CommonUtils:
         file_data = self.ssh_utils.read_file(node, log_file)
         lines = file_data.splitlines()
 
-        # An FIO log always carries at least the job header, so nothing to read
-        # means the job never started -- a mistyped path, a session name the
-        # shell split on a space, a client that lost the mount. Every marker
-        # scan below would then match nothing and the caller would be told the
-        # volume is clean. Refusing to judge an empty log is the difference
-        # between "verified" and "never ran".
+        # Nothing to read means one of two opposite things, and they need
+        # opposite verdicts.
+        #
+        # fio's stdout is redirected into this file with a shell `>`, so libc
+        # block-buffers it: the output does not exist until the process exits.
+        # A job with a long --runtime therefore has a zero-byte log for its
+        # whole life, and an empty log read mid-run means only that the job is
+        # still going. (The older comment here asserted that "an FIO log
+        # always carries at least the job header" -- true on a tty, false for
+        # every job in these lanes, and that assumption discarded 20h 43m of
+        # clean soak in run 40506675448, 1h 41m before the job finished with
+        # err= 0.)
+        #
+        # Once the job is gone, an empty log is the original failure this rule
+        # was written for -- a mistyped path, a session name the shell split
+        # on a space, a client that lost the mount. Every marker scan below
+        # would match nothing and the caller would be told the volume is
+        # clean, so that case still raises.
         if not file_data.strip():
+            if self.fio_job_still_running(node, log_file):
+                self.logger.warning(
+                    "[fio-validate] %s on %s is empty because the job is still "
+                    "running -- fio only flushes at exit. Nothing to verify "
+                    "yet; not treating this as a failure.", log_file, node)
+                return
             raise RuntimeError(
-                f"FIO log {log_file} on {node} is missing or empty, so nothing "
-                f"was verified. Treating as a failure rather than a pass: the "
-                f"job most likely never started.")
+                f"FIO log {log_file} on {node} is missing or empty and no fio "
+                f"job is running for it, so nothing was verified. Treating as "
+                f"a failure rather than a pass: the job most likely never "
+                f"started.")
 
         def _hits(markers, skip=()):
             out = []
