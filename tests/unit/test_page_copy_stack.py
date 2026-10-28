@@ -90,7 +90,10 @@ class TestKeepPlacedBalancing(unittest.TestCase):
     def test_only_restart_balancing_passes_keep_placed(self):
         import inspect
 
-        from simplyblock_core.services import tasks_runner_migration, tasks_runner_new_dev_migration
+        from simplyblock_core.services import (
+            tasks_runner_migration,
+            tasks_runner_new_dev_migration,
+        )
         self.assertIn('keep_placed=bool(getattr(db.get_cluster_by_id(snode.cluster_id), "page_copy", False))',
                       inspect.getsource(tasks_runner_migration))
         # expansion onto new devices keeps moving data to the primary location
