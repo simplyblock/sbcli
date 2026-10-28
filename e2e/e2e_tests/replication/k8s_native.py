@@ -182,7 +182,7 @@ class K8sReplication:
         native path has nothing to annotate -- so this says that plainly
         rather than failing later inside kubectl.
         """
-        for name, rec in (getattr(self, "_volume_registry", {}) or {}).items():
+        for rec in (getattr(self, "_volume_registry", {}) or {}).values():
             if rec.get("lvol_id") == volume_id and rec.get("pvc_name"):
                 return rec["pvc_name"]
         raise AssertionError(

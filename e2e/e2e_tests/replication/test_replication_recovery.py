@@ -411,7 +411,11 @@ class ReplicationMigration(_RecoveryBase):
                          timeout=self.REPL_OP_SEC,
                          what="cut-over with --delete-source")
         sleep_n_sec(60)
-        still_there = [l for l in self.sbcli_utils.list_lvols().get("results", [])
+        # list_lvols returns {lvol_name: id} and carries no cluster_id, so
+        # it cannot answer this question; `.get("results", [])` was always []
+        # and still_there was always empty. Ask the API for the records.
+        _lvols = (self.sbcli_utils.get_request(api_url="/lvol") or {})
+        still_there = [l for l in (_lvols.get("results") or [])
                        if l.get("lvol_name") == second
                        and l.get("cluster_id") == self.cluster_a]
         if still_there:

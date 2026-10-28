@@ -240,12 +240,17 @@ class ReplicationNegativeOperations(ReplicationTestBase):
             combined = str(exc)
         sleep_n_sec(45)
         still_related = self.relationship_for(v2)
-        exists = any(l.get("lvol_name") == vol2
-                     for l in self.sbcli_utils.list_lvols().get("results", []))
+        # list_lvols returns {lvol_name: id}. The old `.get("results", [])`
+        # read it as an API envelope, so this was always [] and `exists` was
+        # always False -- the branch below has never run.
+        exists = vol2 in (self.sbcli_utils.list_lvols() or {})
 
         if exists:
+            # The delete's own output, which the try/except above captured.
+            # `(out, err)` were never defined in this scope: reaching here
+            # raised NameError rather than asserting anything.
             self.expect_refused(
-                "AR-N-006", (out, err),
+                "AR-N-006", ("", combined),
                 "deleting a volume that is under replication",
                 allow=("replicat", "in use", "policy"))
         elif still_related:
