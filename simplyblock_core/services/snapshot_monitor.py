@@ -61,6 +61,20 @@ def sync_delete_peer_ids(lvol_ha_type, snode, primary_node_id):
     return peer_ids
 
 
+def _instance_has_live_clone(instance):
+    """True when a volume that is not being deleted is cloned from *instance*
+    (a SnapShot or its dict form from ``SnapShot.instances``)."""
+    uuid = instance.get("uuid") if isinstance(instance, dict) else instance.uuid
+    if not uuid:
+        return False
+    for lvol in db.get_mini_lvols():
+        if lvol.cloned_from_snap == uuid and lvol.status != LVol.STATUS_IN_DELETION:
+            logger.info("Keeping snapshot copy %s: volume %s is cloned from it",
+                        uuid, lvol.get_id())
+            return True
+    return False
+
+
 def process_snap_delete_finish(snap, completed_node):
     """Phase-2 of the delete protocol (sync deletes + DB finalize).
 
@@ -136,6 +150,15 @@ def process_snap_delete_finish(snap, completed_node):
     # and keeps the gate only while some remain.
     primary_node.lvol_del_sync_lock_reset()
 
+    # A replicated snapshot lists its copy on the other cluster among its
+    # instances, and a migrated or failed-over volume is a clone of that copy.
+    # Handing the delete on to it would mark the live volume's base in_deletion:
+    # the finalisation below refuses to delete it (live clone), but the record
+    # stays in_deletion and every replication of that volume stops on "chain
+    # ancestor ... is mid-deletion" (bf5 2026-10-28 round 2: three of six
+    # volumes never started). delete_replicated keeps such a copy for the same
+    # reason; this path has to honour it too.
+    snap.instances = [i for i in snap.instances if not _instance_has_live_clone(i)]
     if snap.instances:
         # Hand the delete on to the next copy. The instance is a DIFFERENT
         # record (its own uuid, node and bdev) and it inherits the rest of the

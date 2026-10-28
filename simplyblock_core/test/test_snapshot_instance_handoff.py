@@ -75,7 +75,7 @@ class _Node:
 @pytest.fixture
 def harness(monkeypatch):
     """Stub everything phase-2 does to the cluster; keep the record bookkeeping."""
-    state: dict[str, Any] = {"handed_off": [], "events": []}
+    state: dict[str, Any] = {"handed_off": [], "events": [], "lvols": []}
 
     successor = _Snap("SUCCESSOR", node_id="NODE_B")
 
@@ -87,6 +87,9 @@ def harness(monkeypatch):
 
         def get_snapshot_by_id(self, uuid):
             return successor
+
+        def get_mini_lvols(self):
+            return state["lvols"]
 
     class _SnapShotFactory:
         """Callable stand-in that still carries the STATUS_* constants."""
@@ -152,3 +155,45 @@ def test_remaining_chain_is_carried_to_the_successor(harness):
 
     assert harness["successor"].instances == [{"uuid": "THIRD"}]
     assert snap.removed is True
+
+
+class _Clone:
+    def __init__(self, uuid, cloned_from_snap, status="online"):
+        self.uuid = uuid
+        self.cloned_from_snap = cloned_from_snap
+        self.status = status
+
+    def get_id(self):
+        return self.uuid
+
+
+def test_copy_a_live_volume_is_cloned_from_is_not_handed_the_delete(harness):
+    """bf5 2026-10-28: deleting a migrated-away volume's source snapshot handed
+    the delete to its replicated copy on the other cluster -- the base the
+    migrated volume is cloned from. The record went in_deletion and every
+    replication of that volume stopped on "chain ancestor ... is mid-deletion"."""
+    harness["lvols"].append(_Clone("MIGRATED", cloned_from_snap="SUCCESSOR"))
+    snap = _Snap("ORIGINAL", instances=[{"uuid": "SUCCESSOR"}])
+    sm.process_snap_delete_finish(snap, _Node("NODE_A"))
+
+    assert harness["handed_off"] == []
+    assert snap.removed is True
+    assert harness["events"] == ["ORIGINAL"]
+
+
+def test_a_clone_being_deleted_does_not_keep_the_copy(harness):
+    harness["lvols"].append(_Clone("GOING", cloned_from_snap="SUCCESSOR",
+                                   status="in_deletion"))
+    snap = _Snap("ORIGINAL", instances=[{"uuid": "SUCCESSOR"}])
+    sm.process_snap_delete_finish(snap, _Node("NODE_A"))
+    assert harness["handed_off"] == ["SUCCESSOR"]
+
+
+def test_only_the_cloned_copy_is_skipped(harness):
+    harness["lvols"].append(_Clone("MIGRATED", cloned_from_snap="SUCCESSOR"))
+    snap = _Snap("ORIGINAL", instances=[{"uuid": "SUCCESSOR"}, {"uuid": "THIRD"}])
+    sm.process_snap_delete_finish(snap, _Node("NODE_A"))
+    # THIRD takes over (the stub factory returns the same successor record for
+    # any payload), so nothing is left behind it: the cloned copy left the chain.
+    assert harness["handed_off"] == ["SUCCESSOR"]
+    assert harness["successor"].instances == []
