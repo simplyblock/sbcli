@@ -836,6 +836,13 @@ commands:
             help: "The device node id."
             dest: device_id
             type: str
+      - name: get-device-smart-log
+        help: "Returns the device SMART log page from SPDK."
+        arguments:
+          - name: "device_id"
+            help: "The device node id."
+            dest: device_id
+            type: str
   - name: "cluster"
     help: "Cluster Commands"
     weight: 200

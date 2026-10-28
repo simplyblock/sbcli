@@ -1704,3 +1704,26 @@ def get_device_health_info(device_id):
     rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)
     return json.dumps(ret, indent=2)
+
+
+def get_device_smart_log(device_id):
+    db_controller = DBController()
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    if device.bdev_type == "aio":
+        # SMART is not reachable through SPDK for AIO bdevs; host-side
+        # smartctl via the node agent is a possible follow-up.
+        return {
+            "bdev_type": "aio",
+            "device_path": device.device_path,
+            "smart": None,
+            "message": "SMART data is not available through SPDK for AIO devices",
+        }
+
+    rpc_client = snode.rpc_client()
+    return rpc_client.get_nvme_log_pages(device.nvme_controller)

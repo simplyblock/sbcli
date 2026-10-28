@@ -1,7 +1,9 @@
+import base64
 import errno
 import hashlib
 import http.client
 import json
+import struct
 import threading
 from collections import OrderedDict
 from enum import IntEnum
@@ -2554,3 +2556,34 @@ class RPCClient:
 
     def bdev_nvme_get_controller_health_info(self, name):
         return self._request("bdev_nvme_get_controller_health_info", name=name)
+
+    def build_get_log_page_cmd(self, nsid=0xFFFFFFFF, log_id=0x02, data_len=512):
+        numd = (data_len // 4) - 1  # zero-based dword count
+        numdl = numd & 0xFFFF
+        numdu = (numd >> 16) & 0xFFFF
+
+        cdw0 = 0x02          # opcode: Get Log Page
+        cdw10 = (numdl << 16) | log_id
+        cdw11 = numdu
+
+        # 16 x uint32 little-endian = 64 bytes
+        cmd = struct.pack(
+          "<16I",
+          cdw0, nsid,      # CDW0, CDW1 (NSID)
+          0, 0,            # CDW2, CDW3 (reserved)
+          0, 0,            # CDW4-5 (MPTR, filled by SPDK)
+          0, 0,            # CDW6-7 (DPTR/PRP1, filled by SPDK)
+          0, 0,            # CDW8-9 (PRP2, filled by SPDK)
+          cdw10, cdw11,
+          0, 0, 0, 0,      # CDW12-15
+        )
+        return base64.urlsafe_b64encode(cmd).decode()
+
+    def get_nvme_log_pages(self, controller_name):
+        return self._request(
+            "bdev_nvme_send_cmd",
+            name=controller_name,
+            cmd_type="admin",
+            data_direction="c2h",
+            cmdbuf=self.build_get_log_page_cmd(),
+            data_len=512)

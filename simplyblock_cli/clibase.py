@@ -542,6 +542,9 @@ class CLIWrapperBase:
     def storage_node__get_device_health_info(self, sub_command, args):
         return device_controller.get_device_health_info(args.device_id)
 
+    def storage_node__get_device_smart_log(self, sub_command, args):
+        return _format_json(device_controller.get_device_smart_log(args.device_id))
+
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)
 

@@ -91,6 +91,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_storage_node__lvs_dump_tree(subparser)
         self.init_storage_node__get_device_health_info(subparser)
+        self.init_storage_node__get_device_smart_log(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -361,6 +362,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__get_device_health_info(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-device-health-info', 'Returns the device health information from SPDK.')
+        subcommand.add_argument('device_id', help='The device node id.', type=str)
+
+    def init_storage_node__get_device_smart_log(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-device-smart-log', 'Returns the device SMART log page from SPDK.')
         subcommand.add_argument('device_id', help='The device node id.', type=str)
 
 
@@ -1625,6 +1630,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.storage_node__lvs_dump_tree(sub_command, args)
                 elif sub_command in ['get-device-health-info']:
                     ret = self.storage_node__get_device_health_info(sub_command, args)
+                elif sub_command in ['get-device-smart-log']:
+                    ret = self.storage_node__get_device_smart_log(sub_command, args)
                 else:
                     self.parser.print_help()
 

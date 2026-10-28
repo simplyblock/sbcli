@@ -96,6 +96,21 @@ class TestHealthInfoAio(unittest.TestCase):
         snode.rpc_client.assert_not_called()
 
 
+class TestSmartLogAio(unittest.TestCase):
+
+    def test_aio_returns_stub_without_nvme_rpc(self):
+        device = _aio_dev()
+        snode = MagicMock()
+        db = MagicMock()
+        db.get_storage_device_by_id.return_value = device
+        db.get_storage_node_by_id.return_value = snode
+        with patch.object(device_controller, "DBController", return_value=db):
+            data = device_controller.get_device_smart_log("dev-1")
+        self.assertEqual(data["bdev_type"], "aio")
+        self.assertIsNone(data["smart"])
+        snode.rpc_client.assert_not_called()
+
+
 class TestNewDeviceFromFailedAio(unittest.TestCase):
 
     def _run(self, bdev_present_initially, inventory=None, create_ok=True):
