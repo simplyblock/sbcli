@@ -1563,7 +1563,7 @@ class RPCClient:
         return self._request("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                        relaxed_mode=False):
+                                        relaxed_mode=False, keep_placed=False):
         params = {
             "name": name,
         }
@@ -1575,6 +1575,10 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        # Page copy distribs only (older data planes reject the parameter): a balancing migration keeps
+        # columns that page copies placed on another online device with anti-affinity kept.
+        if keep_placed:
+            params["keep_placed"] = True
         return self._request("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):

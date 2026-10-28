@@ -4,6 +4,8 @@ setting fixed at creation: create_lvstore persists it on every distrib stack
 entry, and bdev_distrib_create sends it to the data plane.
 """
 
+import unittest
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,3 +69,29 @@ def test_bdev_distrib_create_sends_page_copy(page_copy):
 
 def test_cluster_page_copy_defaults_off():
     assert Cluster().page_copy is False
+
+
+class TestKeepPlacedBalancing(unittest.TestCase):
+    """Page copy clusters: restart balancing keeps columns that page copies placed acceptably."""
+
+    def _client(self):
+        from simplyblock_core import rpc_client as rpc_mod
+        client = rpc_mod.RPCClient.__new__(rpc_mod.RPCClient)
+        client._request = mock.Mock(return_value=True)
+        return client
+
+    def test_expansion_start_sends_keep_placed_only_when_set(self):
+        c = self._client()
+        c.distr_migration_expansion_start("d", keep_placed=True)
+        self.assertIs(c._request.call_args.kwargs["keep_placed"], True)
+        c.distr_migration_expansion_start("d")
+        self.assertNotIn("keep_placed", c._request.call_args.kwargs)
+
+    def test_only_restart_balancing_passes_keep_placed(self):
+        import inspect
+
+        from simplyblock_core.services import tasks_runner_migration, tasks_runner_new_dev_migration
+        self.assertIn('keep_placed=bool(getattr(db.get_cluster_by_id(snode.cluster_id), "page_copy", False))',
+                      inspect.getsource(tasks_runner_migration))
+        # expansion onto new devices keeps moving data to the primary location
+        self.assertNotIn("keep_placed", inspect.getsource(tasks_runner_new_dev_migration))
