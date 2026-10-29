@@ -561,6 +561,18 @@ commands:
             dest: force
             type: bool
             action: store_true
+      - name: resize-device
+        help: "Grows a Linux block device (lblk) online to the size of its block device."
+        usage: >
+          Re-reads the size of the device's block device on the storage node's host, for example, after its LUN was
+          grown on the storage array, and grows the storage device online without interrupting I/O. Shrinking is
+          refused. The placement weight of the device keeps its original size, so the added capacity is only fully
+          usable once all data devices of the cluster have grown by the same factor (see cluster grow-devices).
+        arguments:
+          - name: "device_id"
+            help: "The storage device id."
+            dest: device_id
+            type: str
       - name: add-device
         help: "Adds a new storage device."
         usage: >
@@ -1405,6 +1417,18 @@ commands:
             completer: _completer_get_cluster_list
       - name: complete-expand
         help: "Create lvstore on newly added nodes to the cluster."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: grow-devices
+        help: "Grows every Linux block device (lblk) of the cluster online to the size of its block device."
+        usage: >
+          Re-reads the size of every online data device of an lblk cluster and grows the devices whose block device
+          has grown, one at a time. Used after all LUNs of the cluster were grown by the same factor on the storage
+          array.
         arguments:
           - name: "cluster_id"
             help: "The cluster id."

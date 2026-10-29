@@ -73,6 +73,13 @@ class NVMeDevice(BaseModel):
     admin_removed: bool = False
     serial_number: str = ""
     size: int = -1
+    # Size in bytes the device had when it entered the cluster map. The
+    # distrib placement weight of the device is derived from it, and distrib
+    # requires a weight never to change once set (a change re-places 50% or
+    # more of the data). ``size`` follows an online growth of an lblk device
+    # (device_controller.resize_device); this field keeps the weight frozen.
+    # 0 means the device was never resized, so ``size`` is still the weight.
+    placement_size: int = 0
     # NVMe per-block metadata size in bytes, as reported by the bound SPDK bdev.
     # >=8 means alceml can run in cv_md_method (no read/write amplification).
     # 0 means alceml must use cv_fallback_method (extra md page per 2 MiB extent).
@@ -105,6 +112,11 @@ class NVMeDevice(BaseModel):
     # does not compute it; alerts_controller turns it into device_slow /
     # device_unhealthy while it is fresh. Empty until first reported.
     health_assessment: dict = default_factory(dict)
+
+    def weight_size(self) -> int:
+        """Bytes the cluster-map weight of this device is derived from: the
+        size it had when it was placed, unchanged by later growth."""
+        return self.placement_size if self.placement_size > 0 else self.size
 
     def __change_dev_connection_to(self, connecting_from_node):
         # Targeted single-record write. The previous implementation scanned

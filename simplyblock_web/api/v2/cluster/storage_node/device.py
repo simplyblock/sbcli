@@ -4,6 +4,7 @@ from typing import Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core.controllers import device_controller
@@ -131,6 +132,35 @@ def replace(
         get_full=lambda id: _make_device_dto(storage_node.get_id())(
             db.get_storage_device_by_id(str(id))),
     )
+
+
+class DeviceResizeDTO(BaseModel):
+    device_id: str
+    old_size: int
+    new_size: int
+    placement_size: int
+    resized: bool
+    uniform: bool
+    warning: str = ""
+
+
+@instance_api.post('/resize', name='clusters:storage_nodes:devices:resize',
+                   response_model=DeviceResizeDTO,
+                   responses={409: {"description": "The device cannot be grown"}})
+def resize(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceResizeDTO:
+    """Grow an lblk device online to the size its block device now has.
+
+    The storage node's host re-reads the size of the block device (for
+    example, a LUN grown on its storage array) and the device takes it over
+    without interrupting I/O. Shrinking is refused. The placement weight of
+    the device stays at its original size, so the added capacity is only
+    fully usable once all data devices of the cluster have grown by the same
+    factor; `uniform` and `warning` report it.
+    """
+    try:
+        return DeviceResizeDTO(**device_controller.resize_device(device.get_id()))
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
 
 
 @instance_api.post('/restart', name='clusters:storage_nodes:devices:restart', status_code=204, responses={204: {"content": None}})

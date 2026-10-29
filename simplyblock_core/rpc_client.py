@@ -1471,6 +1471,22 @@ class RPCClient:
         """Re-read the backing device's size (device grow pickup)."""
         return self._request("bdev_aio_rescan", name=name)
 
+    def alceml_bdev_backend_resize_begin(self, name, request_timeout=None):
+        """Put an alceml bdev into its resize state: new I/O is held, pending
+        I/O drains, and the backing bdev is closed. Answers once the backing
+        bdev is closed, so the timeout covers the drain."""
+        return self._request("alceml_bdev_backend_resize_begin",
+                             request_timeout=request_timeout, name=name)
+
+    def alceml_bdev_backend_resize_end(self, name, b_fail=False, cntr_path="", request_timeout=None):
+        """Leave the resize state. With ``b_fail`` False, alceml reopens its
+        backing bdev (``cntr_path``, or its own when empty), takes its new
+        size, and releases the held I/O. With ``b_fail`` True, alceml fails
+        all held and future I/O until it is destroyed."""
+        return self._request("alceml_bdev_backend_resize_end",
+                             request_timeout=request_timeout,
+                             name=name, b_fail=b_fail, cntr_path=cntr_path)
+
     def bdev_set_qd_sampling_period(self, name, period_us):
         """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
         queue_depth/io_time — the hung-IO watchdog's signal for AIO base

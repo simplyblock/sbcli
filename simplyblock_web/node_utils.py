@@ -551,6 +551,62 @@ def wipe_block_device_signatures(device_name: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _write_sysfs(path: str, value: str) -> None:
+    with open(path, "w") as f:
+        f.write(value)
+
+
+def rescan_block_device(device_path: str) -> dict:
+    """Make the kernel re-read the size of a whole-disk block device that
+    grew underneath it (a LUN resized on the storage array), and return the
+    size the kernel reports afterwards.
+
+    SCSI disks (FC, iSCSI, SAS) are rescanned through
+    ``/sys/block/<dev>/device/rescan``; NVMe namespaces through
+    ``rescan_controller`` of every controller that reaches them, which also
+    covers the head device of native NVMe multipathing. Other devices, such
+    as virtio-blk, pick up a resize on their own, so their size is just
+    read. Partitions are refused: growing one is a partition-table change,
+    not a rescan.
+
+    Returns ``{"device", "size", "rescanned"}`` with ``size`` in bytes.
+    Raises ValueError for unusable input."""
+    import glob as _glob
+    import re as _re
+    real = os.path.realpath(device_path)
+    if not real.startswith("/dev/"):
+        raise ValueError(f"{device_path} is not a device path")
+    name = real[len("/dev/"):]
+    if not _re.match(r"^[a-zA-Z0-9_\-]+$", name):
+        raise ValueError(f"invalid device name {name!r}")
+    sys_dev = f"/sys/class/block/{name}"
+    if not os.path.exists(sys_dev):
+        raise ValueError(f"block device {name} not found")
+    if os.path.exists(f"{sys_dev}/partition"):
+        raise ValueError(f"{name} is a partition, which cannot be resized online")
+
+    rescanned: list[str] = []
+    if _re.match(r"^nvme\d+n\d+$", name):
+        # A plain namespace links device -> its controller; the head device
+        # of native multipathing links device -> the subsystem, whose
+        # controllers are its nvme* children.
+        candidates = [f"{sys_dev}/device/rescan_controller"]
+        candidates += sorted(_glob.glob(f"{sys_dev}/device/nvme*/rescan_controller"))
+        for path in candidates:
+            if os.path.exists(path):
+                _write_sysfs(path, "1")
+                rescanned.append(path)
+    elif os.path.exists(f"{sys_dev}/device/rescan"):
+        _write_sysfs(f"{sys_dev}/device/rescan", "1")
+        rescanned.append(f"{sys_dev}/device/rescan")
+
+    sectors = _read_sysfs(f"{sys_dev}/size")
+    if not sectors:
+        raise ValueError(f"could not read the size of {name}")
+    # /sys/block/<dev>/size counts 512-byte sectors, whatever the block size.
+    return {"device": name, "size": int(sectors) * 512, "rescanned": rescanned}
+
+
 def _get_mem_info():
     logger.debug("function:_get_mem_info start")
     out, err, rc = shell_utils.run_command("cat /proc/meminfo")

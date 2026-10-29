@@ -1681,6 +1681,8 @@ def new_device_from_failed(device_id):
     new_device.uuid = str(uuid.uuid4())
     new_device.status = NVMeDevice.STATUS_NEW
     new_device.cluster_device_order = -1
+    # A new device enters the cluster map with a weight of its own.
+    new_device.placement_size = 0
     new_device.deleted = False
     new_device.io_error = False
     new_device.retries_exhausted = False
@@ -1901,3 +1903,208 @@ def set_device_health_assessment(node_id, device_id, assessment: dict):
     if fresh is None or not found:
         raise KeyError(f"device {device_id} not found on node {node_id}")
     return fresh
+
+
+# ---------------------------------------------------------------------------
+# Online growth of lblk devices (a LUN grown on its storage array).
+#
+# The base bdev of an lblk device is an SPDK AIO bdev over a kernel block
+# device, and alceml sits directly on it. alceml can swap its backing bdev
+# for a larger one without losing state: resize_begin holds new I/O, drains
+# pending I/O and closes the backing bdev; resize_end reopens it and takes
+# its new size, so the pages beyond the old end become allocatable. Layers
+# above alceml see a fixed virtual size and need no change.
+#
+# The cluster-map weight of the device does NOT change: distrib requires a
+# weight never to change once set, since a change re-places 50% or more of
+# the data. The weight stays derived from NVMeDevice.placement_size, the
+# size the device had when it was placed. Placement therefore keeps filling
+# every device in proportion to its original size, and the added capacity is
+# only fully usable when all data devices of the cluster grow by the same
+# factor. resize_device reports whether the cluster is still uniform, and
+# grow_cluster_devices grows every device in one call.
+# ---------------------------------------------------------------------------
+
+#: Timeout for alceml_bdev_backend_resize_begin, which answers only after
+#: the pending I/O of the device has drained.
+RESIZE_RPC_TIMEOUT_SEC = 120
+#: Attempts to reopen the backing bdev before the device is given up.
+RESIZE_END_ATTEMPTS = 3
+#: Relative spread of size/placement_size across the data devices of a
+#: cluster that still counts as uniform growth.
+RESIZE_UNIFORM_TOLERANCE = 0.01
+
+
+def _growth_ratio(dev):
+    base = dev.weight_size()
+    return (dev.size / base) if base and base > 0 else 1.0
+
+
+def cluster_growth_uniformity(cluster_id):
+    """Whether all data devices of a cluster have grown by the same factor
+    relative to their placement size. Returns ``(uniform, min_ratio,
+    max_ratio)``; journal, new, and failed devices are ignored."""
+    db_controller = DBController()
+    ratios = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW,
+                              NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+                continue
+            ratios.append(_growth_ratio(dev))
+    if not ratios:
+        return True, 1.0, 1.0
+    lo, hi = min(ratios), max(ratios)
+    return (hi - lo) <= RESIZE_UNIFORM_TOLERANCE * lo, lo, hi
+
+
+def _check_resizable(db_controller, dev, snode):
+    """Raise ValueError when ``dev`` cannot be grown online right now."""
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.device_mode != constants.DEVICE_MODE_LBLK or dev.bdev_type != "aio":
+        raise ValueError("Online resizing is only supported for Linux block devices (lblk device mode)")
+    if dev.status != NVMeDevice.STATUS_ONLINE:
+        raise ValueError(f"Device must be online, current status: {dev.status}")
+    if snode.status != StorageNode.STATUS_ONLINE:
+        raise ValueError(f"Storage node must be online, current status: {snode.status}")
+    if dev.is_partition:
+        raise ValueError("Partitions cannot be resized online")
+    if dev.testing_bdev or dev.hang_bdev:
+        raise ValueError("Device runs with a testing or hang bdev under alceml, remove it first")
+    if not dev.alceml_bdev or not dev.nvme_bdev:
+        raise ValueError("Device has no alceml or AIO bdev recorded")
+    if tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev.get_id()):
+        raise ValueError("A restart task is active for the device")
+
+
+def _reopen_after_resize(rpc_client, dev):
+    """Leave alceml's resize state with the backing bdev reopened. Returns
+    True on success. On persistent failure alceml is told to fail its I/O,
+    which hands the device to the regular failure handling."""
+    for attempt in range(1, RESIZE_END_ATTEMPTS + 1):
+        try:
+            rpc_client.alceml_bdev_backend_resize_end(
+                dev.alceml_bdev, b_fail=False, cntr_path="",
+                request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+            return True
+        except RPCException as e:
+            logger.error(f"alceml resize_end for {dev.alceml_bdev}, attempt {attempt}: {e}")
+            time.sleep(1)
+    try:
+        rpc_client.alceml_bdev_backend_resize_end(
+            dev.alceml_bdev, b_fail=True, cntr_path="",
+            request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+    except RPCException as e:
+        logger.error(f"alceml resize_end(b_fail) for {dev.alceml_bdev}: {e}")
+    return False
+
+
+def _resize_failed(device_id, dev, msg, set_unavailable):
+    if set_unavailable:
+        device_set_unavailable(device_id, cause=CAUSE_LOCAL_FAILURE)
+        msg += "; the backing bdev could not be reopened, the device was set unavailable"
+    else:
+        msg += "; the device is unchanged"
+    device_events.device_resize_failed(dev, f"Device growth failed: {msg}")
+    return ValueError(msg)
+
+
+def resize_device(device_id):
+    """Grow an lblk device online to the size its block device now has.
+
+    The kernel is made to re-read the size first (SCSI or NVMe rescan on the
+    storage node's host). A smaller size is refused. Returns a dict with
+    ``device_id``, ``old_size``, ``new_size``, ``placement_size``,
+    ``resized``, and the cluster's ``uniform`` growth flag with a
+    ``warning`` when it is not uniform. Raises ValueError on refusal or
+    failure; the message says whether the device is unchanged."""
+    db_controller = DBController()
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        raise ValueError(f"Device not found: {device_id}") from e
+    _check_resizable(db_controller, dev, snode)
+
+    path = dev.by_id_path or dev.device_path
+    if not path:
+        raise ValueError("No block device path known for the device")
+    result, err = snode.client(timeout=60, retry=1).rescan_block_device(path)
+    if err or not result:
+        raise ValueError(f"Rescan of {path} failed: {err}")
+    new_size = int(result["size"])
+    old_size = dev.size
+
+    if new_size < old_size:
+        raise ValueError(
+            f"The block device shrank from {old_size} to {new_size} bytes. Shrinking is not "
+            f"supported and destroys data: restore the LUN to at least {old_size} bytes")
+    if new_size == old_size:
+        uniform, _, _ = cluster_growth_uniformity(snode.cluster_id)
+        return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
+                "placement_size": dev.weight_size(), "resized": False, "uniform": uniform,
+                "warning": ""}
+
+    logger.info(f"Growing device {device_id} from {old_size} to {new_size} bytes")
+    rpc_client = snode.rpc_client()
+    try:
+        rpc_client.alceml_bdev_backend_resize_begin(
+            dev.alceml_bdev, request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+    except RPCException as e:
+        # A timeout may leave alceml in its resize state anyway: reopen.
+        reopened = _reopen_after_resize(rpc_client, dev)
+        raise _resize_failed(device_id, dev, f"alceml resize_begin failed: {e}", not reopened) from e
+
+    rescan_error = None
+    try:
+        rpc_client.bdev_aio_rescan(dev.nvme_bdev)
+    except RPCException as e:
+        rescan_error = e
+
+    if not _reopen_after_resize(rpc_client, dev):
+        raise _resize_failed(device_id, dev, "alceml resize_end failed", True)
+    if rescan_error is not None:
+        raise _resize_failed(device_id, dev, f"AIO rescan failed: {rescan_error}", False)
+
+    def _apply(d, n=new_size):
+        if d.placement_size <= 0:
+            d.placement_size = d.size
+        d.size = n
+    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
+    fresh = db_controller.get_storage_device_by_id(device_id)
+    device_events.device_resized(fresh, old_size, new_size)
+
+    uniform, lo, hi = cluster_growth_uniformity(snode.cluster_id)
+    warning = ""
+    if not uniform:
+        warning = (
+            f"The data devices of the cluster have grown unevenly (growth factors {lo:.2f} to {hi:.2f}). "
+            "Placement keeps filling every device in proportion to its original size, so the added "
+            "capacity is only fully usable once all data devices have grown by the same factor.")
+        logger.warning(warning)
+    return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
+            "placement_size": fresh.weight_size(), "resized": True, "uniform": uniform,
+            "warning": warning}
+
+
+def grow_cluster_devices(cluster_id):
+    """Grow every online lblk data device of a cluster to the size of its
+    block device, one device at a time. Devices whose size did not change
+    are left alone. Returns ``{"devices": [...], "errors": {...},
+    "uniform": bool}``; a device that fails does not stop the others."""
+    db_controller = DBController()
+    results, errors = [], {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status != NVMeDevice.STATUS_ONLINE or dev.bdev_type != "aio":
+                continue
+            try:
+                results.append(resize_device(dev.get_id()))
+            except ValueError as e:
+                errors[dev.get_id()] = str(e)
+    uniform, _, _ = cluster_growth_uniformity(cluster_id)
+    return {"devices": results, "errors": errors, "uniform": uniform}

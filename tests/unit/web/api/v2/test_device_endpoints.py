@@ -372,3 +372,56 @@ class TestWatchDevices:
         assert DEVICE_ID in response.text
         device_controller.watch_device.assert_called_once_with(
             CLUSTER_ID, STORAGE_NODE_ID, DEVICE_ID)
+
+
+RESIZE_RESULT = {
+    'device_id': DEVICE_ID, 'old_size': 100, 'new_size': 200, 'placement_size': 100,
+    'resized': True, 'uniform': False, 'warning': 'grown unevenly',
+}
+
+
+class TestResizeDevice:
+
+    def test_returns_resize_result(self, client, db, device, device_controller):
+        device_controller.resize_device.return_value = RESIZE_RESULT
+
+        response = client.post(f'{BASE}/{DEVICE_ID}/resize')
+
+        assert response.status_code == 200
+        assert response.json() == RESIZE_RESULT
+        device_controller.resize_device.assert_called_once_with(DEVICE_ID)
+
+    def test_refusal_returns_409(self, client, db, device, device_controller):
+        device_controller.resize_device.side_effect = ValueError('shrank')
+
+        response = client.post(f'{BASE}/{DEVICE_ID}/resize')
+
+        assert response.status_code == 409
+        assert 'shrank' in response.json()['detail']
+
+
+class TestGrowClusterDevices:
+
+    URL = f'/api/v2/clusters/{CLUSTER_ID}/grow-devices'
+
+    def test_grows_devices_of_lblk_cluster(self, client, db, cluster, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import simplyblock_web.api.v2.cluster as cluster_module
+        mock = MagicMock()
+        mock.grow_cluster_devices.return_value = {'devices': [RESIZE_RESULT], 'errors': {}, 'uniform': True}
+        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+        cluster.device_mode = 'lblk'
+
+        response = client.post(self.URL)
+
+        assert response.status_code == 200
+        assert response.json()['uniform'] is True
+        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID)
+
+    def test_nvme_cluster_returns_409(self, client, db, cluster):
+        cluster.device_mode = 'nvme'
+
+        response = client.post(self.URL)
+
+        assert response.status_code == 409
