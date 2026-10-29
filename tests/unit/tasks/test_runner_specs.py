@@ -569,12 +569,22 @@ def mig_all_online(mig, monkeypatch):
     monkeypatch.setattr(mig, "cluster_unavailable_state", lambda cid: [])
     cluster = Cluster()
     mig.db.get_cluster_by_id.return_value = cluster
+    mig.db.get_storage_nodes_by_cluster_id.return_value = [_online_node("2026-10-29T17:00:00+00:00")]
 
     def _atomic(obj, fn):
         fn(cluster)
         return cluster
     mig.db.atomic_update.side_effect = _atomic
     return mig, cluster
+
+
+def _online_node(online_since):
+    n = MagicMock()
+    n.online_since = online_since
+    return n
+
+
+_STARTED = "2026-10-29T17:30:00+00:00"   # after the node's online_since above
 
 
 def _ft_status(error, ft_pages="absent"):
@@ -588,7 +598,7 @@ def test_migration_error_all_online_fault_tolerant_is_not_retried(mig_all_online
     """All online and every unplaced page fault tolerant: an imperfect balance
     only, the migration is done and the cluster may be ACTIVE."""
     mig, cluster = mig_all_online
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
     assert mig.report_migration_status(task, _ft_status(9, 0)) is None
     assert "not retried" in task.function_result
     assert cluster.migration_ft_impact == {}
@@ -599,18 +609,40 @@ def test_migration_error_all_online_ft_impacted_degrades(mig_all_online, ft_page
     """All online, pages left without full fault tolerance (or a data plane
     that does not tell): no retry, the cluster is held DEGRADED with the reason."""
     mig, cluster = mig_all_online
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
     assert mig.report_migration_status(task, _ft_status(10, ft_pages)) is None
     entry = cluster.migration_ft_impact["node-1/distr-1"]
     assert entry["error"] == 10
     assert entry["ft_impacted_pages"] == (None if ft_pages == "absent" else ft_pages)
 
 
+@pytest.mark.parametrize("started", [None, "2026-10-29T17:46:00+00:00"])
+def test_migration_error_retries_when_a_node_came_back_during_it(mig_all_online, started):
+    """All online when the migration ends, but a node came back during it (or the
+    start is unknown): its errors may be the outage's, so it is retried."""
+    mig, cluster = mig_all_online
+    mig.db.get_storage_nodes_by_cluster_id.return_value = [_online_node("2026-10-29 17:46:53.277000+00:00")]
+    params = dict(distr_name="distr-1", migration={"name": "distr-1"})
+    if started:
+        params["migration_started"] = started
+    task = _task(**params)
+    with pytest.raises(trb.TaskRetry):
+        mig.report_migration_status(task, _ft_status(10, 608))
+    assert cluster.migration_ft_impact == {}
+
+
+def test_start_migration_records_its_start(mig):
+    task = _task(distr_name="distr-1")
+    mig.start_migration(task, lambda: True)
+    assert task.function_params["migration"] == {"name": "distr-1"}
+    assert task.function_params["migration_started"]
+
+
 def test_clean_migration_clears_ft_impact(mig_all_online):
     mig, cluster = mig_all_online
     cluster.migration_ft_impact = {"node-1/distr-1": {"error": 10, "ft_impacted_pages": 3, "time": ""},
                                    "node-1/distr-2": {"error": 9, "ft_impacted_pages": 1, "time": ""}}
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
     mig.report_migration_status(task, _status("completed"))
     assert list(cluster.migration_ft_impact) == ["node-1/distr-2"]
 
@@ -672,7 +704,7 @@ def test_sibling_gate_releases_a_task_already_migrating(mig):
     """Once its own migration is running the task IS the sibling others wait
     on — gating it here would stall it forever."""
     mig.tasks_controller.get_active_node_mig_task.return_value = "other-task"
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
     assert mig.no_sibling_migration(task) is True
 
 
@@ -713,7 +745,7 @@ def failed_migration(monkeypatch):
 
 def test_failed_migration_tags_the_device_once_finished(failed_migration):
     failed_migration.tasks_controller.get_failed_device_mig_task.return_value = False
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
     task.device_id = "dev-1"
 
     failed_migration.SPEC.on_finish(task)
@@ -733,7 +765,7 @@ def test_failed_migration_leaves_the_device_alone_if_never_started(failed_migrat
 
 def test_failed_migration_waits_for_the_last_task_on_the_device(failed_migration):
     failed_migration.tasks_controller.get_failed_device_mig_task.return_value = "other-task"
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
     task.device_id = "dev-1"
 
     failed_migration.SPEC.on_finish(task)
