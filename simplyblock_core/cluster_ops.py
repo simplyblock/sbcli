@@ -512,6 +512,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    # Page copy is always on for new clusters; it is a property of the distribs, so clusters created
+    # before it keep it off (model default).
+    cluster.page_copy = True
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -827,6 +830,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    # Page copy is always on for new clusters; it is a property of the distribs, so clusters created
+    # before it keep it off (model default).
+    cluster.page_copy = True
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port

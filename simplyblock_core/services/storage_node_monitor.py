@@ -475,6 +475,12 @@ def _status_verdict(cluster, snodes, affected_physical_nodes, online_nodes,
     elif (affected_nodes > k or online_devices < (n + k) or (
             online_nodes < (n + k) and cluster.strict_node_anti_affinity)):
         return Cluster.STATUS_SUSPENDED
+    elif cluster.migration_ft_impact:
+        # Migrations that ended with errors with every node online left pages
+        # without full fault tolerance (see Cluster.migration_ft_impact).
+        logger.warning("Cluster %s degraded: migrations left pages without full fault tolerance: %s",
+                       cluster.get_id(), cluster.migration_ft_impact)
+        return Cluster.STATUS_DEGRADED
     else:
         return Cluster.STATUS_ACTIVE
 

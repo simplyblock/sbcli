@@ -10037,6 +10037,45 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
     return True, ""
 
 
+def _broadcast_devices_unavailable(snode):
+    """Shutdown Loop 1: mark the node's JM and NVMe devices unavailable.
+
+    The underlying device_set_unavailable() / set_jm_device_state()
+    helpers call distr_controller.send_dev_status_event() which already
+    fans out to all peers and skips offline/removed, so the peers update
+    their cluster maps and DISTRIB stops routing IO toward these devices.
+    Best effort: a failure is logged and the shutdown continues.
+    """
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        logger.info("Loop 1: setting JM unavailable on peers")
+        try:
+            device_controller.set_jm_device_state(
+                snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        except Exception as e:
+            logger.warning(
+                "Loop 1: set_jm_device_state failed (continuing): %s", e)
+
+    logger.info(
+        "Loop 1: marking %d nvme device(s) unavailable on peers",
+        len(snode.nvme_devices))
+    for dev in snode.nvme_devices:
+        if dev.status not in [
+            NVMeDevice.STATUS_UNAVAILABLE,
+            NVMeDevice.STATUS_ONLINE,
+            NVMeDevice.STATUS_CANNOT_ALLOCATE,
+            NVMeDevice.STATUS_READONLY,
+        ]:
+            continue
+        try:
+            # Default cause (CAUSE_OTHER): a node-driven shutdown
+            # must not count against the per-device flap budget.
+            device_controller.device_set_unavailable(dev.get_id())
+        except Exception as e:
+            logger.warning(
+                "Loop 1: device_set_unavailable(%s) failed (continuing): %s",
+                dev.get_id(), e)
+
+
 def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
                           current_restart_task_id=None):
     """Gracefully terminate a storage node.
@@ -10079,9 +10118,10 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     down their remote_alceml / remote_jm controllers — is now provided
     by Loop 2.
 
-    Forced (force=True) still skips Loops 1+2 and goes straight to
-    kill (matches the existing --force semantics: terminate immediately
-    and accept that peers discover the loss through TCP errors).
+    Forced (force=True) skips Loop 2 and goes straight to kill
+    (terminate immediately), then runs Loop 1 right after the kill, so
+    the peers stop routing IO to the dead devices at once instead of
+    waiting for the node's restart to bring them back.
     """
     db_controller = DBController()
     try:
@@ -10200,38 +10240,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     ])
 
     if not force:
-        # Step 3 (Loop 1): broadcast device-unavailable events. The
-        # underlying device_set_unavailable() / set_jm_device_state()
-        # helpers call distr_controller.send_dev_status_event() which
-        # already fans out to all peers and skips offline/removed.
-        if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-            logger.info("Loop 1: setting JM unavailable on peers")
-            try:
-                device_controller.set_jm_device_state(
-                    snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-            except Exception as e:
-                logger.warning(
-                    "Loop 1: set_jm_device_state failed (continuing): %s", e)
-
-        logger.info(
-            "Loop 1: marking %d nvme device(s) unavailable on peers",
-            len(snode.nvme_devices))
-        for dev in snode.nvme_devices:
-            if dev.status not in [
-                NVMeDevice.STATUS_UNAVAILABLE,
-                NVMeDevice.STATUS_ONLINE,
-                NVMeDevice.STATUS_CANNOT_ALLOCATE,
-                NVMeDevice.STATUS_READONLY,
-            ]:
-                continue
-            try:
-                # Default cause (CAUSE_OTHER): a node-driven shutdown
-                # must not count against the per-device flap budget.
-                device_controller.device_set_unavailable(dev.get_id())
-            except Exception as e:
-                logger.warning(
-                    "Loop 1: device_set_unavailable(%s) failed (continuing): %s",
-                    dev.get_id(), e)
+        # Step 3 (Loop 1): broadcast device-unavailable events.
+        _broadcast_devices_unavailable(snode)
 
         # Step 4 (Loop 2): detach remote_alceml / remote_jm controllers
         # on every peer still capable of receiving an RPC. Detach (vs.
@@ -10290,6 +10300,16 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
+    if force:
+        # Loop 1 after the kill: the devices are gone now. Without it the
+        # peers keep routing writes to them until the node's restart brings
+        # them back -- device errors the peers report meanwhile are skipped
+        # while the node is in_restart -- and a leader whose writes fail for
+        # longer than the lvol layer waits (6s) drops leadership and returns
+        # the queued IO as EIO: 2026-10-29 page copy soak, iteration 21,
+        # forced shutdown + restart, LVS_1 leader on a peer failed client
+        # writes after 10s of writes to the dead node's devices.
+        _broadcast_devices_unavailable(snode)
     pci_address = []
     for dev in snode.nvme_devices:
         if dev.bdev_type == "aio":
@@ -15917,6 +15937,10 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # same flag without having to re-fetch the cluster setting.
         if cluster.shared_placement:
             distrib_params["shared_placement"] = True
+        # Page copy (snapshot copy-on-write in the distrib): fixed at cluster
+        # creation, persisted per stack entry for the same reason.
+        if cluster.page_copy:
+            distrib_params["page_copy"] = True
         # Failure-domain placement is activated implicitly via the per-node
         # failure_domain id (>= 0) in the distrib cluster map sent by
         # distr_send_cluster_map / distr_add_nodes (see get_distr_cluster_map);
