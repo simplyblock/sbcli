@@ -1101,9 +1101,10 @@ commands:
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >
-              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
-              limit and larger values are rejected. Set here rather than per node so every node
-              in the cluster is sized alike; a node adopts a change on its next restart.
+              Cluster-wide ceiling on nvmf subsystems per storage node. 500 is a hard product
+              limit and larger values are rejected; 0 sizes each node for the default of 75.
+              Set here rather than per node so every node in the cluster is sized alike; a
+              node adopts a change on its next restart.
             dest: max_subsys
             type: int
             default: 0
@@ -1324,9 +1325,10 @@ commands:
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >
-              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
-              limit and larger values are rejected. Set here rather than per node so every node
-              in the cluster is sized alike; a node adopts a change on its next restart.
+              Cluster-wide ceiling on nvmf subsystems per storage node. 500 is a hard product
+              limit and larger values are rejected; 0 sizes each node for the default of 75.
+              Set here rather than per node so every node in the cluster is sized alike; a
+              node adopts a change on its next restart.
             dest: max_subsys
             type: int
             default: 0

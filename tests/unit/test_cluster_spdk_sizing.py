@@ -308,7 +308,7 @@ class TestApplyClusterHugepages(unittest.TestCase):
         snode_api.persist_node_config.return_value = (True, None)
         # sn configure priced this for the product ceiling and its own
         # default (larger) core count.
-        node_config = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE,
+        node_config = self._node_config(max_lvol=constants.DEFAULT_SUBSYSTEMS_PER_NODE,
                                         isolated_len=28)
         configured_hp_memory = node_config["huge_page_memory"]
         node_config["max_lvol"] = 10  # the cluster's real max_subsys, already applied above
@@ -349,7 +349,7 @@ class TestApplyClusterHugepages(unittest.TestCase):
     def test_failed_persist_returns_none(self):
         snode_api = MagicMock()
         snode_api.persist_node_config.return_value = (False, "disk full")
-        node_config = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE,
+        node_config = self._node_config(max_lvol=constants.DEFAULT_SUBSYSTEMS_PER_NODE,
                                         isolated_len=28)
         node_config["max_lvol"] = 10
 
@@ -417,7 +417,7 @@ class TestReserveClusterHugepages(unittest.TestCase):
     def test_reserves_after_recomputing_to_the_cluster_max_subsys(self):
         snode_api = MagicMock()
         snode_api.persist_node_config.return_value = (True, None)
-        node = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE)
+        node = self._node_config(max_lvol=constants.DEFAULT_SUBSYSTEMS_PER_NODE)
         configured = node["huge_page_memory"]
 
         ok = storage_node_ops.reserve_cluster_hugepages(
@@ -435,14 +435,44 @@ class TestReserveClusterHugepages(unittest.TestCase):
                         call_names.index("set_hugepages"),
                         "must recompute+persist before reserving, not after")
 
+    def test_a_cluster_above_the_default_grows_the_configured_host(self):
+        """sn configure prices a host for the default; a cluster that asks for
+        more, up to the cap, must get the pages for it before they are
+        reserved."""
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node = self._node_config(max_lvol=constants.DEFAULT_SUBSYSTEMS_PER_NODE)
+        configured = node["huge_page_memory"]
+
+        ok = storage_node_ops.reserve_cluster_hugepages(
+            snode_api, [node], self._cluster(max_subsys=constants.MAX_SUBSYSTEMS_PER_NODE))
+
+        self.assertTrue(ok)
+        self.assertEqual(node["max_lvol"], constants.MAX_SUBSYSTEMS_PER_NODE)
+        self.assertGreater(node["huge_page_memory"], configured)
+        self.assertEqual(snode_api.mock_calls[-1][0], "set_hugepages")
+
+    def test_the_product_default_keeps_the_configured_size(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node = self._node_config(max_lvol=constants.DEFAULT_SUBSYSTEMS_PER_NODE)
+        configured = node["huge_page_memory"]
+
+        ok = storage_node_ops.reserve_cluster_hugepages(
+            snode_api, [node], self._cluster(max_subsys=0))
+
+        self.assertTrue(ok)
+        self.assertEqual(node["max_lvol"], constants.DEFAULT_SUBSYSTEMS_PER_NODE)
+        self.assertEqual(node["huge_page_memory"], configured)
+
     def test_reserve_is_called_once_after_all_entries(self):
         """Two instances on one socket: both entries are recomputed before the
         single set_hugepages(), so it sums the real total, not a mix that
         includes an un-shrunk worst-case entry."""
         snode_api = MagicMock()
         snode_api.persist_node_config.return_value = (True, None)
-        nodes = [self._node_config(constants.MAX_SUBSYSTEMS_PER_NODE, ssd="0000:00:01.0"),
-                 self._node_config(constants.MAX_SUBSYSTEMS_PER_NODE, ssd="0000:00:02.0")]
+        nodes = [self._node_config(constants.DEFAULT_SUBSYSTEMS_PER_NODE, ssd="0000:00:01.0"),
+                 self._node_config(constants.DEFAULT_SUBSYSTEMS_PER_NODE, ssd="0000:00:02.0")]
 
         ok = storage_node_ops.reserve_cluster_hugepages(
             snode_api, nodes, self._cluster(max_subsys=10))
@@ -457,7 +487,7 @@ class TestReserveClusterHugepages(unittest.TestCase):
     def test_a_failed_persist_aborts_before_reserving(self):
         snode_api = MagicMock()
         snode_api.persist_node_config.return_value = (False, "disk full")
-        node = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE)
+        node = self._node_config(max_lvol=constants.DEFAULT_SUBSYSTEMS_PER_NODE)
 
         ok = storage_node_ops.reserve_cluster_hugepages(
             snode_api, [node], self._cluster(max_subsys=10))
