@@ -1851,7 +1851,6 @@ class CLIWrapperBase:
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
-            page_copy=getattr(args, 'page_copy', False),
         )
 
     def cluster_create(self, args):
@@ -1925,7 +1924,6 @@ class CLIWrapperBase:
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
             cluster_vip=cluster_vip,
-            page_copy=getattr(args, 'page_copy', False),
         )
 
     def query_yes_no(self, question, default="yes"):
