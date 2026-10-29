@@ -40,8 +40,14 @@ def _install(monkeypatch, lvols):
     def remove(self, kv_store):
         db.lvols.pop(self.uuid, None)
 
+    def write_replacing(self, old, kv_store):
+        # One transaction on FDB; here the same effect on the fake store.
+        remove(old, kv_store)
+        write(self, kv_store)
+
     monkeypatch.setattr(LVol, "write_to_db", write)
     monkeypatch.setattr(LVol, "remove", remove)
+    monkeypatch.setattr(LVol, "write_replacing", write_replacing)
     monkeypatch.setattr(LVolReplication, "write_to_db", lambda self, kv_store=None: None)
     monkeypatch.setattr(runner, "db", db)
     return db
