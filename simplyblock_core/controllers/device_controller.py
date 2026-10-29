@@ -481,6 +481,18 @@ def device_repair(device_id, force=False):
     logger.info("Device %s repair probe: present=%s missing=%s",
                 device_id, present, missing)
 
+    if not missing and device_obj.status == NVMeDevice.STATUS_REMOVED:
+        # REMOVED is local: SPDK unregistered the bdev (e.g. an alceml stuck-IO
+        # shutdown). An intact stack means an earlier attempt already rebuilt
+        # it, so the only step left is the one that attempt never reached.
+        # Without this the device stayed removed with a whole stack (bf5
+        # 2026-10-29, device b09c1063).
+        logger.info("Device %s is removed but its local stack is intact; "
+                    "setting online", device_id)
+        device_set_io_error(device_id, False)
+        device_set_online(device_id, cause=CAUSE_DEVICE_RESTART, connect_peers=True)
+        return True
+
     if not missing:
         # Intact locally. The unavailability is remote (consensus) and a
         # rebuild would be a no-op, so do not spend an attempt on it.
