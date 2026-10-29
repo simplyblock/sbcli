@@ -164,6 +164,7 @@ def _record_cutover_done(task):
 
     _stop_source_replication(task)
     _delete_source_if_requested(task)
+    _prune_endgame_snapshots(task)
     _reconstitute_group(rep)
     _release_lvs_claim(task)
 
@@ -190,6 +191,28 @@ def _stop_source_replication(task):
         pass          # source already gone (e.g. deleted out of band)
     except Exception as e:
         logger.error(f"Could not stop replication on the source after "
+                     f"cutover: {e}")
+
+
+def _prune_endgame_snapshots(task):
+    """Release the snapshots the endgame held: all but the newest pair go.
+
+    Retention is held for the whole endgame (snapshot_replication.
+    _cutover_holds_retention), so the shrink rounds' snapshots are still there.
+    With --delete-source the source's lineage is retired instead and the
+    reaper's deletes take the target copies with them, keeping the one the new
+    volume is cloned from; this covers a source that is kept.
+    """
+    if task.function_params.get("delete_source"):
+        return
+    try:
+        from simplyblock_core.services import snapshot_replication
+        src_lvol = db.get_lvol_by_id(task.function_params.get("lvol_id"))
+        snapshot_replication.prune_after_cutover(src_lvol)
+    except KeyError:
+        pass          # source already gone
+    except Exception as e:
+        logger.error(f"Could not prune the endgame snapshots after the "
                      f"cutover: {e}")
 
 
