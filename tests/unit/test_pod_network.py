@@ -217,6 +217,25 @@ class TestTheV2NodeAddRefusesBothWaysOffTheHostNetwork:
                               networks=[{"name": "fabric", "interface": "data0"}])
 
 
+@pytest.mark.parametrize("extra", [{"pod_network": True}, {"networks": [{"name": "fabric", "interface": "data0"}]}])
+class TestDataNicsNeedTheHostNetwork:
+    def test_the_api_rejects_data_nics(self, extra):
+        from pydantic import ValidationError
+
+        from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
+
+        with pytest.raises(ValidationError, match="host network"):
+            StorageNodeParams(node_address="a:1", interface_name="", data_nics=["eth1"], **extra)
+
+    def test_the_core_add_refuses_data_nics_before_it_calls_the_node(self, extra):
+        from simplyblock_core import storage_node_ops
+
+        with patch.object(storage_node_ops, "SNodeClient") as client:
+            assert storage_node_ops.add_node("c1", "a:1", "", ["eth1"], 500, **extra) is False
+
+        client.assert_not_called()
+
+
 class TestTheWorkersAddressOfANodeOnThePodNetwork:
     def test_the_agent_reports_its_hosts_address(self):
         from simplyblock_core import utils

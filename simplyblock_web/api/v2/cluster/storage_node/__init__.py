@@ -80,6 +80,9 @@ class StorageNodeParams(BaseModel):
     def _one_way_off_the_host_network(self):
         if self.networks and self.pod_network:
             raise ValueError("a node is added with networks or on the pod network, not both")
+        # data_nics are host NIC names, which a pod off the host network does not see.
+        if self.data_nics and (self.networks or self.pod_network):
+            raise ValueError("data_nics are allowed only when the node is on the host network")
         return self
 
 

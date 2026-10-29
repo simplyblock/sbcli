@@ -3679,6 +3679,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
     if networks and pod_network:
         logger.error("A node is added with networks or on the pod network, not both")
         return False
+    if data_nics_list and (networks or pod_network):
+        logger.error("data_nics are allowed only when the node is on the host network")
+        return False
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
