@@ -550,13 +550,69 @@ def test_migration_failure_is_terminal(mig):
         mig.report_migration_status(_task(), _status("failed"))
 
 
-def test_migration_error_restarts_from_scratch(mig):
+def test_migration_error_restarts_from_scratch(mig, monkeypatch):
     """A disallowed error code drops the marker so the next attempt issues a
-    fresh migration instead of polling the one that errored."""
+    fresh migration instead of polling the one that errored -- while a node or
+    device is down, which may be causing the errors."""
+    monkeypatch.setattr(mig, "cluster_unavailable_state", lambda cid: ["node:n2"])
     task = _task(migration={"name": "distr-1"})
     with pytest.raises(trb.TaskRetry):
         mig.report_migration_status(task, _status("completed", error=7))
     assert "migration" not in task.function_params
+
+
+@pytest.fixture
+def mig_all_online(mig, monkeypatch):
+    """Every node and device online; the cluster record keeps its real
+    migration_ft_impact dict across atomic updates."""
+    from simplyblock_core.models.cluster import Cluster
+    monkeypatch.setattr(mig, "cluster_unavailable_state", lambda cid: [])
+    cluster = Cluster()
+    mig.db.get_cluster_by_id.return_value = cluster
+
+    def _atomic(obj, fn):
+        fn(cluster)
+        return cluster
+    mig.db.atomic_update.side_effect = _atomic
+    return mig, cluster
+
+
+def _ft_status(error, ft_pages="absent"):
+    res = _status("completed", error=error)
+    if ft_pages != "absent":
+        res[0]["ft_impacted_pages"] = ft_pages
+    return res
+
+
+def test_migration_error_all_online_fault_tolerant_is_not_retried(mig_all_online):
+    """All online and every unplaced page fault tolerant: an imperfect balance
+    only, the migration is done and the cluster may be ACTIVE."""
+    mig, cluster = mig_all_online
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    assert mig.report_migration_status(task, _ft_status(9, 0)) is None
+    assert "not retried" in task.function_result
+    assert cluster.migration_ft_impact == {}
+
+
+@pytest.mark.parametrize("ft_pages", [3, None, "absent"])
+def test_migration_error_all_online_ft_impacted_degrades(mig_all_online, ft_pages):
+    """All online, pages left without full fault tolerance (or a data plane
+    that does not tell): no retry, the cluster is held DEGRADED with the reason."""
+    mig, cluster = mig_all_online
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    assert mig.report_migration_status(task, _ft_status(10, ft_pages)) is None
+    entry = cluster.migration_ft_impact["node-1/distr-1"]
+    assert entry["error"] == 10
+    assert entry["ft_impacted_pages"] == (None if ft_pages == "absent" else ft_pages)
+
+
+def test_clean_migration_clears_ft_impact(mig_all_online):
+    mig, cluster = mig_all_online
+    cluster.migration_ft_impact = {"node-1/distr-1": {"error": 10, "ft_impacted_pages": 3, "time": ""},
+                                   "node-1/distr-2": {"error": 9, "ft_impacted_pages": 1, "time": ""}}
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    mig.report_migration_status(task, _status("completed"))
+    assert list(cluster.migration_ft_impact) == ["node-1/distr-2"]
 
 
 def test_migration_error_tolerated_when_devices_are_degraded(mig):
