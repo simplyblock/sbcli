@@ -29,7 +29,9 @@ PHASE_INTERMEDIATE (orchestrator: wait + batch-final)
 
 PHASE_CLEANUP_SOURCE (orchestrator: wait + source teardown)
     Wait for all workers to signal cleanup_source_done.
-    Delete the source NVMe-oF subsystem (workers delete individual source bdevs).
+    Delete the source snapshots workers deferred (only group siblings still
+    cloned from them) and the source NVMe-oF subsystem (workers delete their
+    own individual source bdevs).
     Advance to PHASE_COMPLETED → mark task DONE.
 
 PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
@@ -38,6 +40,7 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
     NVMe-oF subsystem and marks group FAILED/CANCELLED.
 """
 
+import errno
 import time
 
 from simplyblock_core import constants, utils
@@ -48,6 +51,7 @@ from simplyblock_core.controllers import (
     tasks_controller,
     tasks_events,
 )
+from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -56,6 +60,8 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCRemoteError
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
+    _bdev_is_immutable_snapshot,
+    _bdev_is_linked_under,
     _build_paths,
     _ensure_and_prune_target_paths,
     _get_source_tertiary_node,
@@ -466,21 +472,25 @@ def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_
             # Same known SPDK behavior _reconstruct_snap_tree already guards
             # against: converting an already-immutable bdev is rejected, so a
             # retry that reaches an earlier round already committed here would
-            # otherwise fail every time. bdev_lvol_get_bdevs reports
-            # is_snapshot on the primary; treat that as "already done" and
-            # just advance the predecessor pointer.
-            _existing = tgt_rpc.bdev_get(tgt_composite)
-            if _existing and _existing.get('driver_specific', {}).get('lvol', {}).get('is_snapshot'):
+            # otherwise fail every time (re-linking it answers EEXIST). Treat
+            # an already-immutable bdev as "already done" and just advance the
+            # predecessor pointer. Read it through the shared helper: SPDK's
+            # snapshot flag stays false until something is cloned from the
+            # bdev, which for these is the cutover that just failed.
+            if _bdev_is_immutable_snapshot(tgt_rpc.bdev_get(tgt_composite)):
                 pred_composite = tgt_composite
                 continue
 
             if pred_composite:
-                if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone failed for intermediate snap {snap_uuid}"
-                if sec_rpc and not sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone on secondary failed for intermediate snap {snap_uuid}"
-                if ter_rpc and not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone on tertiary failed for intermediate snap {snap_uuid}"
+                # A retry can also land between add_clone and convert: the
+                # link exists but the bdev is still writable. Link only where
+                # it is missing -- repeating add_clone answers EEXIST.
+                pred_short = pred_composite.split("/", 1)[1]
+                for rpc, where in ((tgt_rpc, ""), (sec_rpc, " on secondary"), (ter_rpc, " on tertiary")):
+                    if not rpc or _bdev_is_linked_under(rpc.bdev_get(tgt_composite), pred_short):
+                        continue
+                    if not rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                        return f"bdev_lvol_add_clone{where} failed for intermediate snap {snap_uuid}"
 
             if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
                 return f"target node not LVS leader for convert of intermediate snap {snap_uuid}, retrying"
@@ -991,6 +1001,55 @@ def _handle_cleanup_source_barrier(group):
     return expected.issubset(done_set)
 
 
+def _delete_deferred_source_snaps(group, src_node, src_rpc, primary_src_node=None):
+    """
+    Delete the source snapshots workers deferred to the group
+    (``group.source_snaps_deferred``): ones only group siblings still cloned
+    from when their owner cleaned up. Runs after the cleanup_source barrier,
+    when every sibling's source bdev is gone and its record is on the target.
+
+    Each one is re-checked first: a sibling that failed instead of signalling
+    is still on the source and still needs its parent. Best-effort, like the
+    rest of source cleanup -- returns a list of notes for anything kept.
+    """
+    primary_src_node = primary_src_node or src_node
+    notes: list = []
+    replicas = []
+    if primary_src_node.secondary_node_id and primary_src_node.secondary_node_id != src_node.get_id():
+        try:
+            replicas.append(db.get_storage_node_by_id(primary_src_node.secondary_node_id))
+        except KeyError as e:
+            logger.warning(f"Group {group.uuid[:8]}: secondary src node lookup (non-fatal): {e}")
+    tert_node = _get_source_tertiary_node(primary_src_node)
+    if tert_node and tert_node.get_id() != src_node.get_id():
+        replicas.append(tert_node)
+    replica_rpcs = [_make_rpc(n) for n in replicas]
+
+    for snap_uuid, bdev_name in group.source_snaps_deferred.items():
+        holders = migration_controller.source_lvols_cloning_from(snap_uuid, group.source_node_id)
+        if holders:
+            logger.warning(
+                f"Group {group.uuid[:8]}: keeping source snapshot {bdev_name}: "
+                f"still cloned by {holders}")
+            notes.append(f"source snap {bdev_name} kept, still cloned by {holders}")
+            continue
+        try:
+            if not src_rpc.bdev_get(bdev_name):
+                logger.info(f"Group {group.uuid[:8]}: source snapshot {bdev_name} already gone")
+                continue
+            delete_bdev_blocking(
+                bdev_name, src_rpc,
+                secondary_rpc=replica_rpcs[0] if replica_rpcs else None,
+                tertiary_rpc=replica_rpcs[1] if len(replica_rpcs) > 1 else None,
+                all_nodes=[src_node, *replicas],
+                lvs_name=primary_src_node.lvstore)
+            logger.info(f"Group {group.uuid[:8]}: deleted deferred source snapshot {bdev_name}")
+        except (RuntimeError, RPCException) as e:
+            logger.warning(f"Group {group.uuid[:8]}: delete deferred source snapshot {bdev_name}: {e}")
+            notes.append(f"source snap {bdev_name} delete failed: {e}")
+    return notes
+
+
 def _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc, primary_src_node=None):
     """
     Delete the source NVMe-oF subsystem on all SRC replicas (active source,
@@ -1086,6 +1145,31 @@ def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc, primar
 # Retry-budget helper
 # ---------------------------------------------------------------------------
 
+# SPDK error codes that are a definite answer about state a retry replays
+# unchanged: the orchestrator re-runs the same step against the same bdevs,
+# so it gets the same answer every time. Spending the retry budget on them
+# only delays cleanup and buries the first error under the ceiling message.
+_PERMANENT_RPC_ERRNOS = frozenset({errno.EEXIST, errno.EOPNOTSUPP, errno.ENOTSUP})
+
+
+def _batch_enter_cleanup_target(task, group, group_id, msg):
+    """Give up on the cutover: send the group to cleanup_target and suspend."""
+    logger.error(msg)
+    group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+    group.error_message = msg
+    task.function_result = msg
+    group.write_to_db(db.kv_store)
+    for rec in group.members:
+        try:
+            mig = db.get_migration_by_id(rec['migration_id'])
+            migration_events.migration_phase_changed(mig)
+        except Exception:
+            pass
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.write_to_db(db.kv_store)
+    return False
+
+
 def _batch_budget_suspend(task, group, group_id, error_msg):
     """Charge retry budget and suspend; redirect to cleanup_target when exhausted.
 
@@ -1095,21 +1179,9 @@ def _batch_budget_suspend(task, group, group_id, error_msg):
     task.retry += 1
     task.function_result = error_msg
     if task.retry >= constants.LVOL_MIG_MAX_RETRIES:
-        ceiling_msg = (
+        return _batch_enter_cleanup_target(task, group, group_id, (
             f"Group {group_id[:8]}: max retry ({constants.LVOL_MIG_MAX_RETRIES}) "
-            f"reached; entering cleanup_target: {error_msg}"
-        )
-        logger.error(ceiling_msg)
-        group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
-        group.error_message = ceiling_msg
-        task.function_result = ceiling_msg
-        group.write_to_db(db.kv_store)
-        for rec in group.members:
-            try:
-                mig = db.get_migration_by_id(rec['migration_id'])
-                migration_events.migration_phase_changed(mig)
-            except Exception:
-                pass
+            f"reached; entering cleanup_target: {error_msg}"))
     task.status = JobSchedule.STATUS_SUSPENDED
     task.write_to_db(db.kv_store)
     return False
@@ -1378,6 +1450,10 @@ def task_runner(task):
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return False
+        if isinstance(exc, RPCRemoteError) and exc.posix_errno in _PERMANENT_RPC_ERRNOS:
+            return _batch_enter_cleanup_target(task, group, group_id, (
+                f"Group {group_id[:8]}: permanent RPC error in phase {phase} "
+                f"(code {exc.code}); entering cleanup_target without retrying: {exc}"))
         return _batch_budget_suspend(task, group, group_id, f"RPC error in phase {phase}: {exc}")
 
     # ── PHASE_CLEANUP_SOURCE: wait for workers, then delete source subsystem ───
@@ -1390,6 +1466,10 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
+        _cleanup_notes = _delete_deferred_source_snaps(
+            group, src_node, src_rpc, primary_src_node=primary_src_node)
+        if _cleanup_notes:
+            group.error_message = "source cleanup partial: " + "; ".join(_cleanup_notes)
         _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc,
                                   primary_src_node=primary_src_node)
 

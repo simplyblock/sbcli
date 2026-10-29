@@ -709,7 +709,7 @@ def _get_snap_ancestry(snap_uuid):
 # Cleanup safety helpers
 # ---------------------------------------------------------------------------
 
-def get_snaps_safe_to_delete_on_source(migration):
+def get_snaps_safe_to_delete_on_source(migration, moving_lvol_ids=frozenset()):
     """
     Return the set of snapshot UUIDs (from the migration plan) that are safe
     to delete from the *source* node after a successful migration.
@@ -728,12 +728,19 @@ def get_snaps_safe_to_delete_on_source(migration):
 
     Intermediate snapshots created during migration always belong to the
     migrating volume, so they are always included as initial candidates.
+
+    *moving_lvol_ids* are lvols treated as already gone from the source even
+    though their records still say otherwise -- a batch group's siblings,
+    which are leaving with this migration. A snapshot the result only
+    contains because of them must not be deleted yet: the siblings' source
+    bdevs still clone from it. See _handle_cleanup_source's deferral.
     """
     candidates = set(migration.intermediate_snaps)  # always owned by migrating lvol
 
     # Build the set of lvol UUIDs still on the source node so we can distinguish
     # "owner still on SRC" (must protect) from "owner already migrated" (safe to clean up).
-    source_lvols = db.get_lvols_by_node_id(migration.source_node_id)
+    source_lvols = [lv for lv in db.get_lvols_by_node_id(migration.source_node_id)
+                    if lv.uuid not in moving_lvol_ids]
     source_lvol_ids = {lv.uuid for lv in source_lvols}
 
     for snap_uuid in migration.snap_migration_plan:
@@ -761,6 +768,17 @@ def get_snaps_safe_to_delete_on_source(migration):
             candidates -= _collect_snap_ancestry(lvol.cloned_from_snap)
 
     return candidates
+
+
+def source_lvols_cloning_from(snap_uuid, source_node_id):
+    """uuids of lvols on *source_node_id* whose clone ancestry includes *snap_uuid*.
+
+    The same reference test get_snaps_safe_to_delete_on_source's Rule 2
+    applies, for a single snapshot: non-empty means its source copy is still
+    some volume's backing data and must stay.
+    """
+    return [lv.uuid for lv in db.get_lvols_by_node_id(source_node_id)
+            if lv.cloned_from_snap and snap_uuid in _collect_snap_ancestry(lv.cloned_from_snap)]
 
 
 def get_snaps_to_delete_on_target(migration):
