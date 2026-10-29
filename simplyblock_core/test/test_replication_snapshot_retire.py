@@ -209,3 +209,29 @@ def test_a_snapshot_that_is_not_retired_keeps_its_copy_and_the_hold(leg, monkeyp
     rsr.retire_source_lineage(db, src)
     assert db.snaps["X"].target_replicated_snap_uuid == "TX"
     assert snapshot_controller._replicated_copy_with_live_clone(db.snaps["X"]) == "TX"
+
+
+def test_retiring_a_landing_copy_unlinks_its_source_on_the_other_cluster(leg):
+    """The source of a retired landing copy lives on in the other cluster's
+    chain; still pointing at the deleted copy, it made the next return trip
+    refuse to finalize (bf6 round 4: 56 tasks gave up)."""
+    db, src = leg
+    origin = _snap("B2", _lvol("BACK"), "repl_commit_back")
+    origin.cluster_id = "CL_b"
+    origin.target_replicated_snap_uuid = "C2"
+    origin.instances = [{"uuid": "C2", "cluster_id": CLUSTER},
+                        {"uuid": "B2_mirror", "cluster_id": "CL_b"}]
+    db.snaps["B2"] = origin
+    rsr.retire_source_lineage(db, src)
+    assert origin.target_replicated_snap_uuid == ""
+    assert origin.instances == [{"uuid": "B2_mirror", "cluster_id": "CL_b"}]
+    assert not origin.deleted
+
+
+def test_a_source_that_points_elsewhere_is_left_alone(leg):
+    db, src = leg
+    origin = _snap("B2", _lvol("BACK"), "repl_commit_back")
+    origin.target_replicated_snap_uuid = "SOMETHING_ELSE"
+    db.snaps["B2"] = origin
+    rsr.retire_source_lineage(db, src)
+    assert origin.target_replicated_snap_uuid == "SOMETHING_ELSE"

@@ -74,6 +74,7 @@ def retire_source_lineage(db, src_lvol):
         if fresh is None:
             continue
         _sync_mini(db, fresh)
+        _unlink_from_source(db, fresh)
         retired.append(snap.get_id())
     if retired:
         logger.info("Retiring %d replication snapshot(s) of migrated-away volume %s: %s",
@@ -97,6 +98,41 @@ def _retire(snap):
     snap.target_replicated_snap_uuid = ""
     snap.instances = [i for i in (snap.instances or [])
                       if _instance_cluster(i) in ("", snap.cluster_id)]
+
+
+def _unlink_from_source(db, copy):
+    """Drop the links that the snapshot *copy* was replicated from keeps to it.
+
+    A retired landing copy is deleted, but its source on the other cluster
+    lives on in the chain of the volume that migrated back there. Still
+    pointing at the deleted copy, that source is the next return trip's chain
+    predecessor, and the transfer refuses to finalize onto a copy it cannot
+    resolve: bf6 2026-10-29 round 4, 56 replication tasks gave up after 8
+    retries each ("Predecessor snapshot ... has remote copy ... but it cannot
+    be resolved"). Unlinked, the source has no remote copy, and the next
+    transfer starts the chain."""
+    src_id = copy.source_replicated_snap_uuid
+    if not src_id:
+        return
+    try:
+        src = db.get_snapshot_by_id(src_id)
+    except KeyError:
+        return
+    copy_id = copy.get_id()
+
+    def unlink(s):
+        if s.target_replicated_snap_uuid == copy_id:
+            s.target_replicated_snap_uuid = ""
+        s.instances = [i for i in (s.instances or []) if _instance_uuid(i) != copy_id]
+
+    fresh = db.atomic_update(src, unlink)
+    if fresh is not None:
+        _sync_mini(db, fresh)
+
+
+def _instance_uuid(inst):
+    return (inst.get("uuid") if isinstance(inst, dict)
+            else getattr(inst, "uuid", "")) or ""
 
 
 def _instance_cluster(inst):
