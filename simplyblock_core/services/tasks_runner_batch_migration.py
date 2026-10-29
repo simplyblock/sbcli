@@ -61,6 +61,7 @@ from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCRemoteErr
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
     _bdev_is_immutable_snapshot,
+    _bdev_is_linked_under,
     _build_paths,
     _ensure_and_prune_target_paths,
     _get_source_tertiary_node,
@@ -473,20 +474,23 @@ def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_
             # retry that reaches an earlier round already committed here would
             # otherwise fail every time (re-linking it answers EEXIST). Treat
             # an already-immutable bdev as "already done" and just advance the
-            # predecessor pointer. bdev_get_bdevs reports the flag as
-            # driver_specific.lvol.snapshot, not is_snapshot -- read it through
-            # the shared helper, which knows both spellings.
+            # predecessor pointer. Read it through the shared helper: SPDK's
+            # snapshot flag stays false until something is cloned from the
+            # bdev, which for these is the cutover that just failed.
             if _bdev_is_immutable_snapshot(tgt_rpc.bdev_get(tgt_composite)):
                 pred_composite = tgt_composite
                 continue
 
             if pred_composite:
-                if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone failed for intermediate snap {snap_uuid}"
-                if sec_rpc and not sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone on secondary failed for intermediate snap {snap_uuid}"
-                if ter_rpc and not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone on tertiary failed for intermediate snap {snap_uuid}"
+                # A retry can also land between add_clone and convert: the
+                # link exists but the bdev is still writable. Link only where
+                # it is missing -- repeating add_clone answers EEXIST.
+                pred_short = pred_composite.split("/", 1)[1]
+                for rpc, where in ((tgt_rpc, ""), (sec_rpc, " on secondary"), (ter_rpc, " on tertiary")):
+                    if not rpc or _bdev_is_linked_under(rpc.bdev_get(tgt_composite), pred_short):
+                        continue
+                    if not rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                        return f"bdev_lvol_add_clone{where} failed for intermediate snap {snap_uuid}"
 
             if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
                 return f"target node not LVS leader for convert of intermediate snap {snap_uuid}, retrying"
@@ -1145,7 +1149,7 @@ def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc, primar
 # unchanged: the orchestrator re-runs the same step against the same bdevs,
 # so it gets the same answer every time. Spending the retry budget on them
 # only delays cleanup and buries the first error under the ceiling message.
-_PERMANENT_RPC_ERRNOS = frozenset({-errno.EEXIST, -errno.EOPNOTSUPP, -errno.ENOTSUP})
+_PERMANENT_RPC_ERRNOS = frozenset({errno.EEXIST, errno.EOPNOTSUPP, errno.ENOTSUP})
 
 
 def _batch_enter_cleanup_target(task, group, group_id, msg):
@@ -1446,7 +1450,7 @@ def task_runner(task):
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return False
-        if isinstance(exc, RPCRemoteError) and exc.code in _PERMANENT_RPC_ERRNOS:
+        if isinstance(exc, RPCRemoteError) and exc.posix_errno in _PERMANENT_RPC_ERRNOS:
             return _batch_enter_cleanup_target(task, group, group_id, (
                 f"Group {group_id[:8]}: permanent RPC error in phase {phase} "
                 f"(code {exc.code}); entering cleanup_target without retrying: {exc}"))

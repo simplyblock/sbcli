@@ -1221,6 +1221,14 @@ def _bdev_is_immutable_snapshot(bdev_info) -> bool:
     quietly answer False for every bdev -- "never converted" -- and send a retry
     straight back into the transfer SPDK fences a node for. A list is still
     read, by its first entry, for any caller that has one.
+
+    SPDK's ``snapshot`` flag means "a snapshot that has clones", not
+    "converted": a just-converted lvol nothing has been linked under yet
+    reports ``snapshot: false``, ``clone: false`` -- exactly the state a retry
+    finds an intermediate snapshot in when the cutover that would have
+    attached the live lvol to it failed (61 cluster, 2026-10-29). What
+    convert does change unconditionally is the bdev turning read-only, so
+    ``supported_io_types.write == false`` is read as converted too.
     """
     if isinstance(bdev_info, list):
         bdev_info = bdev_info[0] if bdev_info else None
@@ -1228,7 +1236,19 @@ def _bdev_is_immutable_snapshot(bdev_info) -> bool:
         lvol = bdev_info["driver_specific"]["lvol"]
     except (KeyError, TypeError):
         return False
-    return bool(lvol.get("is_snapshot") or lvol.get("snapshot"))
+    if lvol.get("is_snapshot") or lvol.get("snapshot"):
+        return True
+    return (bdev_info.get("supported_io_types") or {}).get("write") is False
+
+
+def _bdev_is_linked_under(bdev_info, parent_short) -> bool:
+    """True if a ``bdev_get`` answer shows the lvol already cloned from
+    *parent_short* (bare lvol name, no lvstore prefix) -- add_clone ran.
+    Repeating add_clone for that pair answers EEXIST."""
+    try:
+        return bdev_info["driver_specific"]["lvol"].get("base_snapshot") == parent_short
+    except (KeyError, TypeError):
+        return False
 
 
 def _replica_bdev_state(rpc, composite):
