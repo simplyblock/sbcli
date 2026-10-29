@@ -1,6 +1,5 @@
 """The networks an SPDK pod attaches to, and what the pod reports once it holds them,
-turned into the records the control plane keeps for the node: the address its RPC is
-served on and its data NICs.
+turned into the data NICs the control plane keeps for the node.
 
 The pod's interfaces exist only in its own network namespace, so nothing the node agent
 reads from the host describes them. The agent's start call returns what the pod holds.
@@ -30,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = utils.get_logger(__name__)
 
-#: The attachment that carries SPDK RPC; the pod's own address is used when none is named so.
+#: The attachment the operator names for management traffic. It carries data only when no other does.
 MANAGEMENT_INTERFACE = "mgmt0"
 ATTACHED_NET_TYPE = "attached"
 #: The NIC of a pod serving on the pod network: the CNI's interface, fronted by a Service.
@@ -60,18 +59,18 @@ class NetworkAttachment(BaseModel):
         max_length=316)] = ""
 
 
-def from_report(report: dict, known: Sequence[IFace] = ()) -> tuple[str, list[IFace]]:
-    """The SPDK RPC address and the data NICs of the node, from the pod's report.
+def from_report(report: dict, known: Sequence[IFace] = ()) -> list[IFace]:
+    """The data NICs of the node, from the pod's report.
 
-    With attachments, the RPC address is the management interface's, and the pod's own
-    when no management network was declared. The data NICs are the other interfaces, and
-    the management interface carries the data when there are none. An attached
-    interface is TCP: it is a kernel interface in the pod's namespace and nothing here
-    probes it for RoCE.
+    With attachments, the data NICs are the interfaces other than the management one, and
+    the management interface carries the data when there are none. An attached interface
+    is TCP: it is a kernel interface in the pod's namespace and nothing here probes it for
+    RoCE. SPDK RPC is not here: the control plane reaches the proxy by name
+    (``StorageNode.rpc_host``).
 
-    On the pod network (a report with a ``service_ip`` and no interfaces), the RPC and
-    the data are both served at the Service's address, and the one data NIC binds the
-    pod's own address, which the next restart replaces.
+    On the pod network (a report with a ``service_ip`` and no interfaces), the one data
+    NIC is held at the Service's address and binds the pod's own address, which the next
+    restart replaces.
 
     A NIC in ``known`` keeps its uuid, because the records that point at it are keyed
     by it."""
@@ -82,7 +81,7 @@ def from_report(report: dict, known: Sequence[IFace] = ()) -> tuple[str, list[IF
         service_ip = report.get("service_ip")
         if not service_ip:
             raise ValueError("the SPDK pod reported no interfaces")
-        return service_ip, [IFace({
+        return [IFace({
             "uuid": identity.get(POD_INTERFACE) or str(uuid.uuid4()),
             "if_name": POD_INTERFACE,
             "ip4_address": service_ip,
@@ -94,7 +93,7 @@ def from_report(report: dict, known: Sequence[IFace] = ()) -> tuple[str, list[IF
 
     management = next((i for i in interfaces if i["name"] == MANAGEMENT_INTERFACE), None)
     data = [i for i in interfaces if i["name"] != MANAGEMENT_INTERFACE] or [management]
-    return (management["ips"][0] if management else report["pod_ip"]), [IFace({
+    return [IFace({
         "uuid": identity.get(i["name"]) or str(uuid.uuid4()),
         "if_name": i["name"],
         "ip4_address": i["ips"][0],

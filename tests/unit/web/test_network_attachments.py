@@ -193,12 +193,12 @@ def test_the_wait_ends_before_the_node_client_gives_up_and_retries():
     assert network_attachments.REPORT_TIMEOUT_SEC < SNodeClient.__init__.__defaults__[0]
 
 
-def test_a_pod_with_networks_binds_its_proxy_to_the_management_address():
+def test_a_pod_with_a_management_network_binds_its_proxy_to_its_own_address():
     pod = _render(NETWORKS=network_attachments.annotation([MGMT, DATA]),
                   SERVER_IP=network_attachments.server_ip([MGMT, DATA]))
 
     env = {e["name"]: e for c in pod["spec"]["containers"] if c["name"] == "spdk-proxy-container" for e in c["env"]}
-    assert env["SERVER_IP"]["value"] == "10.0.0.5"
+    assert env["SERVER_IP"]["value"] == network_attachments.POD_IP_REFERENCE
 
 
 def test_a_pod_without_a_management_network_binds_its_proxy_to_its_own_address():

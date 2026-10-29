@@ -4286,7 +4286,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
 
         data_nics: list[IFace] = []
-        spdk_ip = ""
 
         active_tcp = False
         active_rdma = False
@@ -4296,7 +4295,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if networks or pod_network:
             # The host's NICs say nothing about the pod's interfaces; use the pod's report.
             try:
-                spdk_ip, data_nics = storage_network.from_report(results)
+                data_nics = storage_network.from_report(results)
             except (ValueError, KeyError, TypeError) as e:
                 _abort_started_spdk(snode_api, rpc_port, cluster_id,
                                     f"The SPDK pod reported no usable interfaces: {e}",
@@ -4360,11 +4359,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # so restart can re-resolve devices without the host config file.
         snode.lblk_devices = lblk_configured if lblk_mode else []
         snode.hostname = hostname
+        snode.k8s_node_name = node_info['hostname']
         snode.host_nqn = subsystem_nqn
         snode.subsystem = subsystem_nqn
         snode.data_nics = data_nics
         snode.networks = list(networks or [])
-        snode.spdk_ip = spdk_ip
         snode.mgmt_ip = mgmt_ip
         snode.primary_ip = mgmt_ip
         snode.rpc_port = rpc_port
@@ -8616,6 +8615,7 @@ def _restart_storage_node_impl(
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
         snode.hostname = node_info['hostname']
+        snode.k8s_node_name = node_info['hostname']
         evict_cached_session(old_rpc_host, old_rpc_port)
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
@@ -8868,7 +8868,7 @@ def _restart_storage_node_impl(
             pod_network=snode.pod_network, published_ports=storage_network.published_ports(snode))
         if snode.on_pod_network:
             # A recreated pod can hold other addresses.
-            snode.spdk_ip, snode.data_nics = storage_network.from_report(results, snode.data_nics)
+            snode.data_nics = storage_network.from_report(results, snode.data_nics)
 
     except Exception as e:
         logger.error(e)

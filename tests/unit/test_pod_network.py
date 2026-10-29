@@ -19,10 +19,8 @@ POD_REPORT = {"pod_ip": "10.244.5.31", "service_ip": "10.103.252.64", "interface
 
 class TestTheReportOfAPodOnThePodNetwork:
     def test_the_service_address_is_held_and_the_pod_address_is_bound(self):
-        spdk_ip, nics = storage_network.from_report(POD_REPORT)
+        [nic] = storage_network.from_report(POD_REPORT)
 
-        assert spdk_ip == "10.103.252.64"
-        [nic] = nics
         assert (nic.if_name, nic.ip4_address, nic.listen_address) == ("eth0", "10.103.252.64", "10.244.5.31")
         assert nic.net_type == storage_network.POD_NET_TYPE and nic.trtype == "TCP" and nic.uuid
 
@@ -30,7 +28,7 @@ class TestTheReportOfAPodOnThePodNetwork:
         known = [IFace({"uuid": "keep-me", "if_name": "eth0", "ip4_address": "10.103.252.64",
                         "listen_ip4": "10.244.5.9", "net_type": "pod", "trtype": "TCP"})]
 
-        _, [nic] = storage_network.from_report(POD_REPORT, known)
+        [nic] = storage_network.from_report(POD_REPORT, known)
 
         assert nic.uuid == "keep-me" and nic.ip4_address == "10.103.252.64" and nic.listen_address == "10.244.5.31"
 
