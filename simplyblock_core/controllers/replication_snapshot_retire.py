@@ -70,7 +70,7 @@ def retire_source_lineage(db, src_lvol):
     for snap in lineage:
         if snap.get_id() in keep or snap.deleted:
             continue
-        fresh = db.atomic_update(snap, lambda s: setattr(s, "deleted", True))
+        fresh = db.atomic_update(snap, _retire)
         if fresh is None:
             continue
         _sync_mini(db, fresh)
@@ -79,6 +79,29 @@ def retire_source_lineage(db, src_lvol):
         logger.info("Retiring %d replication snapshot(s) of migrated-away volume %s: %s",
                     len(retired), src_lvol.get_id(), ", ".join(retired))
     return retired
+
+
+def _retire(snap):
+    """Mark *snap* deleted and detach it from its replicated copies.
+
+    After a migration each copy on the target cluster is the base the migrated
+    volume is cloned from, so it has a live clone for as long as that volume
+    lives. The delete path holds back a snapshot whose copy has a live clone
+    (snapshot_controller._delete_locked: deleting it would hand its delete on to
+    the copy); left paired, the retired lineage was held on the vacated cluster
+    for good (bf6 2026-10-29: 112 retired snapshots, 0 volumes). The copy keeps
+    its data and its own record; only this side's links to it go, so the
+    delete stays local. A fail-over's sources are not retired here, and keep
+    the hold."""
+    snap.deleted = True
+    snap.target_replicated_snap_uuid = ""
+    snap.instances = [i for i in (snap.instances or [])
+                      if _instance_cluster(i) in ("", snap.cluster_id)]
+
+
+def _instance_cluster(inst):
+    return (inst.get("cluster_id") if isinstance(inst, dict)
+            else getattr(inst, "cluster_id", "")) or ""
 
 
 def _sync_mini(db, snap):
