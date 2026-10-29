@@ -1,5 +1,6 @@
 import base64
 import builtins
+import contextlib
 import copy
 import json
 import os
@@ -3607,6 +3608,49 @@ def cluster_restart(cl_id) -> None:
         "them in parallel and reactivate the cluster", cl_id)
 
 
+# The lock name a forced delete holds on its cluster. The lock is the per-lvstore
+# mutation lock, which is keyed by cluster and name, with a name no lvstore has.
+CLUSTER_DELETE_LOCK = "__cluster_delete__"
+
+
+@contextlib.contextmanager
+def _one_forced_delete_at_a_time(cl_id):
+    """Hold the cluster's delete lock for the whole of a forced teardown.
+
+    The caller's request outlives its own timeout while the agents answer
+    slowly, so the caller sends the request again, and every repeat used to
+    start a teardown of its own. Those ran together, each killing SPDK on the same
+    nodes through the same agents, which loaded the agents further and slowed
+    them again. A repeat that finds the lock held is refused with a ValueError,
+    which the API answers with a conflict the caller retries, and the running
+    teardown carries on alone.
+
+    The lock is refreshed while the teardown runs, so a teardown that takes
+    longer than the lock's TTL does not lapse into one a repeat can take over;
+    it lapses only when the holder died, which is when taking it over is right."""
+    owner = f"cluster-delete:{uuid.uuid4()}"
+    acquired, holder = db_controller.acquire_lvstore_lock(cl_id, CLUSTER_DELETE_LOCK, owner)
+    if not acquired:
+        raise ValueError(f"Deleting cluster {cl_id} is already in progress ({holder})")
+
+    done = threading.Event()
+
+    def refresh():
+        while not done.wait(constants.LVSTORE_MUTATION_LOCK_HEARTBEAT_SEC):
+            if not db_controller.refresh_lvstore_lock(cl_id, CLUSTER_DELETE_LOCK, owner):
+                logger.warning(f"The delete lock of cluster {cl_id} was taken over; this teardown goes on")
+                return
+
+    heartbeat = threading.Thread(target=refresh, name=f"cluster-delete-lock-{cl_id}", daemon=True)
+    heartbeat.start()
+    try:
+        yield
+    finally:
+        done.set()
+        heartbeat.join()
+        db_controller.release_lvstore_lock(cl_id, CLUSTER_DELETE_LOCK, owner)
+
+
 def delete_cluster(cl_id, force=False) -> None:
     """Delete a cluster record, which an empty cluster only allows.
 
@@ -3615,12 +3659,22 @@ def delete_cluster(cl_id, force=False) -> None:
     pool is deleted with the volumes and snapshots in it. Nothing survives a
     forced delete; it is what deleting a cluster that will not come back
     means, and the node removal it skips is an online removal that drains a
-    node onto the others, which the last node of a cluster has none of."""
+    node onto the others, which the last node of a cluster has none of.
+
+    A forced delete runs one at a time per cluster; a second request while one
+    runs is refused with a ValueError."""
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if force:
-        _bring_down(cl_id)
+        with _one_forced_delete_at_a_time(cl_id):
+            _bring_down(cl_id)
+            _delete_empty_cluster(cluster, cl_id)
+        return
 
+    _delete_empty_cluster(cluster, cl_id)
+
+
+def _delete_empty_cluster(cluster, cl_id) -> None:
     nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if nodes:
         raise ValueError("Can only remove Empty cluster, Storage nodes found")
