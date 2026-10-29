@@ -517,6 +517,127 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
     return inventory[jm_name], inventory[data_name]
 
 
+def _partition_entry_fields(part_name: str) -> dict:
+    """GPT entry name and type of one partition, probed from the device
+    (``blkid -p``): lsblk reads PARTLABEL/PARTTYPE from the udev database,
+    which the storage-node container does not mount."""
+    out, _, rc = shell_utils.run_command(f"blkid -p -o export /dev/{part_name}")
+    if rc != 0:
+        return {}
+    fields = {}
+    for line in (out or "").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip()
+    return {"name": fields.get("PART_ENTRY_NAME", ""),
+            "type": fields.get("PART_ENTRY_TYPE", "").lower()}
+
+
+def journal_split_partitions(disk_name: str, devices: list[dict]) -> tuple[dict, dict] | None:
+    """The ``(journal, data)`` partitions of a whole disk that
+    partition_disk_for_journal laid out, or None.
+
+    A disk qualifies only when it carries exactly two partitions, both of the
+    simplyblock GPT type, labelled ``sb_jm`` and ``sb_data``. A disk with any
+    other partition belongs, at least in part, to someone else, and is never
+    taken for a previous journal split. ``devices`` is a
+    get_block_devices_info() inventory of the host."""
+    parts = [d for d in devices if d.get("type") == "part" and d.get("parent_name") == disk_name]
+    if len(parts) != 2:
+        return None
+    jm = data = None
+    for part in parts:
+        entry = _partition_entry_fields(part["name"])
+        if entry.get("type") != SB_GPT_PARTITION_TYPECODE:
+            return None
+        if entry.get("name") == "sb_jm":
+            jm = part
+        elif entry.get("name") == "sb_data":
+            data = part
+    if jm is None or data is None:
+        return None
+    return jm, data
+
+
+def partition_disk_for_journal(disk_name: str, jm_bytes: int) -> tuple[dict, dict]:
+    """Lay out an unpartitioned whole disk as a journal partition of
+    ``jm_bytes`` followed by a data partition covering the rest.
+
+    Used by lblk nodes that run on a single disk per journal, typically a
+    RAID-protected LUN of a storage array, where a separate journal device is
+    neither needed nor wanted. The disk must be idle (unmounted, no holders,
+    not backing root) and carry no partition table. Sizes are given to sgdisk
+    in MiB, so the layout is correct on 512-byte and on 4K-native disks, and
+    both partitions start on a 1 MiB boundary. Returns ``(jm_device,
+    data_device)`` in the get_block_devices_info() shape. Raises ValueError
+    on any precondition or tool failure.
+    """
+    import math
+
+    inventory = {d["name"]: d for d in get_block_devices_info()}
+    disk = inventory.get(disk_name)
+    if disk is None or disk.get("type") != "disk":
+        raise ValueError(f"disk {disk_name} not found")
+    if disk.get("mounted_in_subtree"):
+        raise ValueError(f"disk {disk_name} is mounted (busy)")
+    if disk.get("holders"):
+        raise ValueError(f"disk {disk_name} is held by {disk['holders']} (busy)")
+    if disk.get("is_root_disk"):
+        raise ValueError(f"disk {disk_name} backs the root filesystem")
+    if disk.get("has_partitions"):
+        raise ValueError(f"disk {disk_name} already carries partitions")
+
+    jm_mib = math.ceil(jm_bytes / (1024 * 1024))
+    # 1 MiB at the start for the GPT, 1 MiB at the end for its backup, and at
+    # least 1 MiB of data.
+    if (jm_mib + 3) * 1024 * 1024 > int(disk.get("size") or 0):
+        raise ValueError(
+            f"disk {disk_name} ({disk.get('size')} bytes) is too small to hold a "
+            f"{jm_bytes}-byte journal plus a data partition")
+
+    dev = f"/dev/{disk_name}"
+    cmds = [
+        f"sgdisk -o {dev}",
+        f"sgdisk -n 1:0:+{jm_mib}M -t 1:{SB_GPT_PARTITION_TYPECODE} -c 1:sb_jm {dev}",
+        f"sgdisk -n 2:0:0 -t 2:{SB_GPT_PARTITION_TYPECODE} -c 2:sb_data {dev}",
+    ]
+    for cmd in cmds:
+        out, err, rc = shell_utils.run_command(cmd)
+        if rc != 0:
+            raise ValueError(f"{cmd} failed (rc={rc}): {err or out}")
+
+    _, _, rc = shell_utils.run_command(f"partprobe {dev}")
+    if rc != 0:
+        _, err, rc = shell_utils.run_command(f"partx -u {dev}")
+        if rc != 0:
+            raise ValueError(f"failed to re-read partition table of {disk_name}: {err}")
+    shell_utils.run_command("udevadm settle -t 5")
+
+    # Identify the two partitions by their numbers: nvme1n1p1 and sdb1 alike.
+    by_number = {}
+    try:
+        for entry in os.listdir(f"/sys/block/{disk_name}"):
+            if not entry.startswith(disk_name):
+                continue
+            number = _read_sysfs(f"/sys/block/{disk_name}/{entry}/partition")
+            if number:
+                by_number[int(number)] = entry
+    except (OSError, ValueError):
+        pass
+    jm_name, data_name = by_number.get(1, ""), by_number.get(2, "")
+    if not jm_name or not data_name:
+        raise ValueError(
+            f"partitioning of {disk_name} completed but the journal and data "
+            f"partitions were not found")
+
+    inventory = {d["name"]: d for d in get_block_devices_info()}
+    if jm_name not in inventory or data_name not in inventory:
+        raise ValueError(
+            f"new partitions {jm_name}/{data_name} missing from inventory "
+            f"after partitioning {disk_name}")
+    return inventory[jm_name], inventory[data_name]
+
+
 def wipe_block_device_signatures(device_name: str) -> tuple[bool, str]:
     """Wipe partition-table / filesystem signatures from a whole disk
     (`--force-format` on lblk add-node). Re-validates that the device is not

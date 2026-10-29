@@ -85,7 +85,7 @@ commands:
             type: str
             default: ""
           - name: "--lblk"
-            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition."
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node, or a single whole disk. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition. A single whole disk, or the smallest disk with --lblk-journal-split, is partitioned the same way."
             dest: lblk
             type: bool
             action: store_true
@@ -107,8 +107,13 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk-journal-split"
+            help: "With --lblk and whole disks: partition the smallest selected disk into a journal partition (--jm-percent of total capacity) and a data partition, instead of dedicating the smallest disk to the journal. Meant for disks protected below simplyblock, such as RAID-protected storage-array LUNs. A selection of a single whole disk is always split this way. Requires one storage node per host. The journal stays on that disk; disks added later do not receive a share of it."
+            dest: lblk_journal_split
+            type: bool
+            action: store_true
           - name: "--jm-percent"
-            help: "Journal size in percent of the node's total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`."
+            help: "Journal size in percent of the node's total selected capacity when the journal is carved from a selected partition or disk (requires --lblk with partitions, a single disk, or --lblk-journal-split). Default: `3`."
             dest: jm_percent
             required: false
             type: int

@@ -2034,19 +2034,92 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     return selected, rejected
 
 
+def _journal_split_disks(devices):
+    """``{disk_name: (disk, (jm_part, data_part))}`` for every whole disk of
+    the inventory that a previous configure laid out with
+    node_utils.partition_disk_for_journal."""
+    found = {}
+    for dev in devices:
+        if dev.get("type") == "disk" and dev.get("has_partitions"):
+            pair = node_utils.journal_split_partitions(dev["name"], devices)
+            if pair:
+                found[dev["name"]] = (dev, pair)
+    return found
+
+
+def _reuse_journal_split_disks(devices, include_names, exclude_names, include_serials):
+    """Map a selection onto disks a previous configure already split.
+
+    A configure runs again on every start of a storage node pod, and after the
+    first one the selected whole disk carries the journal and data partitions
+    the first one created. The disk is then no longer eligible as a whole
+    disk, but it is exactly what the selection asked for, so its two
+    partitions are taken instead, with the journal flagged as before.
+
+    Returns ``(reused, names, serials)``: the reused ``(disk, jm, data)``
+    triples and the part of the selection that is left for the eligibility
+    filter."""
+    names = set(include_names or [])
+    serials = set(include_serials or [])
+    excluded = set(exclude_names or [])
+    reused = []
+    for disk, pair in _journal_split_disks(devices).values():
+        selectors = device_selectors(disk)
+        if names & selectors:
+            names -= selectors
+        elif disk.get("serial") and disk["serial"] in serials:
+            serials.discard(disk["serial"])
+        elif include_names or include_serials or (selectors & excluded):
+            continue
+        reused.append((disk, pair[0], pair[1]))
+    return reused, names, serials
+
+
 def detect_lblk_devices(include_names=None, exclude_names=None,
-                        include_serials=None, force_format=False):
+                        include_serials=None, force_format=False,
+                        min_units=constants.LBLK_MIN_DEVICES_PER_NODE):
     """Local-host block-device detection for `sn configure --lblk`.
     Returns ``{name: config_entry}`` where config_entry is the shape stored
-    in the node config file's ``lblk_devices`` list."""
+    in the node config file's ``lblk_devices`` list.
+
+    ``min_units`` is the number of selected units below which the selection
+    is refused. A caller that splits a whole disk into journal and data
+    partitions afterwards passes 1 and checks the result itself."""
     devices = node_utils.get_block_devices_info()
-    selected, rejected = filter_eligible_block_devices(
-        devices, include_names=include_names, exclude_names=exclude_names,
-        include_serials=include_serials, force_format=force_format)
+    reused, names, serials = _reuse_journal_split_disks(
+        devices, include_names, exclude_names, include_serials)
+    if (include_names and not names) or (include_serials and not serials):
+        # Everything requested was a previously split disk. Calling the
+        # filter with an empty selection would select every eligible disk.
+        selected, rejected = [], []
+    else:
+        # A reused disk and its partitions are not offered again, neither as
+        # a whole disk (which --force would make eligible, and the wipe at
+        # add-node would destroy the journal) nor as single partitions.
+        taken = {disk["name"] for disk, _, _ in reused}
+        offered = [d for d in devices
+                   if d.get("name") not in taken and d.get("parent_name") not in taken]
+        selected, rejected = filter_eligible_block_devices(
+            offered, include_names=sorted(names) or None, exclude_names=exclude_names,
+            include_serials=sorted(serials) or None, force_format=force_format)
     for dev, reason in rejected:
         logger.debug(f"block device {dev['name']} skipped: {reason}")
     requested = set(include_names or [])
     result = {}
+    for disk, jm_part, data_part in reused:
+        for part in (jm_part, data_part):
+            unsafe = _unsafe_live_device_reason(part)
+            if unsafe:
+                raise ValueError(
+                    f"partition {part['name']} of the journal-split disk {disk['name']} "
+                    f"is {unsafe}")
+        logger.info(f"block device {disk['name']} already carries a journal and a data "
+                    f"partition; using {jm_part['name']} and {data_part['name']}")
+        jm_entry = _lblk_entry_from_inventory(jm_part)
+        jm_entry["journal"] = True
+        result[jm_entry["name"]] = jm_entry
+        data_entry = _lblk_entry_from_inventory(data_part)
+        result[data_entry["name"]] = data_entry
     for dev in selected:
         if dev.get("serial_synthetic"):
             logger.warning(
@@ -2071,9 +2144,9 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
             entry["partuuid"] = dev.get("partuuid", "")
             entry["parent_serial"] = dev.get("parent_serial", "")
         result[dev["name"]] = entry
-    if len(result) < constants.LBLK_MIN_DEVICES_PER_NODE:
+    if len(result) < min_units:
         raise ValueError(
-            f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
+            f"lblk mode requires at least {min_units} "
             f"partitions or SSDs per node; only {len(result)} eligible unit(s) "
             f"selected: {sorted(result)}")
     return result
@@ -2135,6 +2208,65 @@ def split_lblk_journal_partition(lblk_entries, jm_percent=3):
     logger.info(f"Splitting partition {target_name} into a {jm_bytes}-byte "
                 f"journal partition and a data partition")
     jm_dev, data_dev = node_utils.split_partition_for_journal(target_name, jm_bytes)
+
+    result = {n: e for n, e in lblk_entries.items() if n != target_name}
+    jm_entry = _lblk_entry_from_inventory(jm_dev)
+    jm_entry["journal"] = True
+    result[jm_entry["name"]] = jm_entry
+    data_entry = _lblk_entry_from_inventory(data_dev)
+    result[data_entry["name"]] = data_entry
+    return result
+
+
+def lblk_needs_journal_split(lblk_entries, journal_split=False) -> bool:
+    """Whether a whole disk of the selection has to be split into a journal
+    and a data partition.
+
+    That is the case when the selection carries no journal yet (neither a
+    journal-flagged entry nor partitions, whose own split provides one), and
+    either the split was asked for or the selection is a single whole disk,
+    which leaves no other device for a dedicated journal."""
+    if not lblk_entries:
+        return False
+    if any(e.get("journal") for e in lblk_entries.values()):
+        return False
+    if any(e.get("type") == "part" for e in lblk_entries.values()):
+        return False
+    return bool(journal_split) or len(lblk_entries) == 1
+
+
+def split_lblk_journal_disk(lblk_entries, jm_percent=3):
+    """Carve the journal from a whole disk of the selection.
+
+    The smallest selected disk, or the only one, is partitioned into a
+    journal partition and a data partition covering the remainder. This is
+    the layout for disks that are protected below simplyblock, such as the
+    RAID-protected LUNs of a storage array, where a separate journal device
+    adds nothing. The journal is sized at ``jm_percent`` of the node's total
+    selected capacity, floored at LBLK_JM_MIN_SIZE and capped at
+    LBLK_JM_SPLIT_MAX_FRACTION of the disk.
+
+    The journal stays on that disk for the life of the node: disks selected
+    later do not receive a share of it.
+
+    Runs on the storage node during `sn configure`. Returns the updated
+    ``{name: entry}`` dict with the journal entry flagged ``journal: True``.
+    """
+    target_name = min(lblk_entries, key=lambda n: lblk_entries[n]["size"])
+    target = lblk_entries[target_name]
+    total_size = sum(e["size"] for e in lblk_entries.values())
+    jm_bytes = max(total_size * int(jm_percent) // 100, constants.LBLK_JM_MIN_SIZE)
+    max_jm = int(target["size"] * constants.LBLK_JM_SPLIT_MAX_FRACTION)
+    if jm_bytes > max_jm:
+        raise ValueError(
+            f"journal needs {jm_bytes} bytes ({jm_percent}% of {total_size}, "
+            f"min {constants.LBLK_JM_MIN_SIZE}) but the smallest selected "
+            f"disk {target_name} ({target['size']} bytes) may contribute "
+            f"at most {max_jm}; provide a larger disk")
+
+    logger.info(f"Partitioning disk {target_name} into a {jm_bytes}-byte "
+                f"journal partition and a data partition")
+    jm_dev, data_dev = node_utils.partition_disk_for_journal(target_name, jm_bytes)
 
     result = {n: e for n, e in lblk_entries.items() if n != target_name}
     jm_entry = _lblk_entry_from_inventory(jm_dev)
@@ -2559,14 +2691,29 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         # add-node). Reuse the NVMe NUMA-distribution scaffolding by
         # presenting the same {name: {"numa_node": ...}} shape.
         try:
+            journal_split = bool(lblk_selection.get("journal_split"))
             lblk_entries = detect_lblk_devices(
                 include_names=lblk_selection.get("names"),
                 exclude_names=lblk_selection.get("names_exclude"),
                 include_serials=lblk_selection.get("serials"),
-                force_format=force)
+                force_format=force, min_units=1)
             # Partition-backed nodes: carve the journal by splitting the
             # smallest selected partition in two (journal + data remainder).
             lblk_entries = split_lblk_journal_partition(lblk_entries, jm_percent=jm_percent)
+            # Whole disks without a dedicated journal device (asked for, or
+            # a single disk): carve the journal from the smallest disk.
+            if lblk_needs_journal_split(lblk_entries, journal_split):
+                if nodes_per_socket * len(sockets_to_use) > 1:
+                    raise ValueError(
+                        "splitting a disk into journal and data partitions requires "
+                        "one storage node per host; the journal partition and the data "
+                        "partitions would otherwise be dealt to different nodes")
+                lblk_entries = split_lblk_journal_disk(lblk_entries, jm_percent=jm_percent)
+            if len(lblk_entries) < constants.LBLK_MIN_DEVICES_PER_NODE:
+                raise ValueError(
+                    f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
+                    f"partitions or SSDs per node; only {len(lblk_entries)} eligible "
+                    f"unit(s) selected: {sorted(lblk_entries)}")
         except ValueError as e:
             logger.error(str(e))
             return False, False
