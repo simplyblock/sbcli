@@ -1429,6 +1429,10 @@ def _cluster_two_node_arbitrated(cluster_id, cluster=None, db=None) -> bool:
     return _remember_cluster_arbitration(cluster)
 
 
+# Restart: poll interval while the LVS leader reports an active journal compression (see recover lvstore).
+RESTART_JC_COMPRESSION_POLL_S = 5
+
+
 def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
                                       interval_s=2.0, sleep=None, clock=None, arbitrated=None):
     """``jc_compression get_status`` on the LVS leader, retried while it fails.
@@ -13786,15 +13790,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         if current_leader:
             try:
                 jc_compression_is_active = _jc_compression_status_with_retry(current_leader, lvs_jm_vuid)
-                retries = 10
+                # Polled every RESTART_JC_COMPRESSION_POLL_S, for at most 10 minutes as before. A compression
+                # interrupted by this node's outage finishes on the survivors once their JMs drop this node's
+                # dead reader (ultra page copy PR), seconds after the kill; polling once a minute added up to a
+                # minute to every such restart. (Before that ultra fix it could not finish until this node was
+                # back: the restart waited the full 10 minutes, 2026-10-29 page copy soak.)
+                poll_s = RESTART_JC_COMPRESSION_POLL_S
+                retries = int(600 // poll_s)
                 while jc_compression_is_active:
                     if retries <= 0:
                         logger.warning("Timeout waiting for JC compression task to finish on leader %s",
                                        current_leader.get_id())
                         break
                     retries -= 1
-                    logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in 60 seconds")
-                    time.sleep(60)
+                    logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in {poll_s} seconds")
+                    time.sleep(poll_s)
                     # Poll the SAME jm_vuid as the first read above — the LVS
                     # being recovered (lvs_jm_vuid). Was previously
                     # current_leader.jm_vuid, which is the leader-node's own
