@@ -1434,7 +1434,7 @@ RESTART_JC_COMPRESSION_POLL_S = 5
 
 
 def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
-                                      interval_s=2.0, sleep=None, clock=None, arbitrated=None):
+                                      interval_s=2.0, sleep=None, clock=None):
     """``jc_compression get_status`` on the LVS leader, retried while it fails.
 
     Campaign c2, F1: right after the returning node's SPDK is up, the leader
@@ -1444,10 +1444,11 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
     failure that outlasts that aborts the restart (the caller raises).
 
-    Two-node arbitration only: on every other cluster this is exactly the
-    previous single call, and a failure is re-raised at once (the restart
-    aborts immediately, as before). The arbitration flag is read only after a
-    failed first call, so the success path does no extra work.
+    All clusters. It was two-node arbitration only, and a regular cluster
+    aborted the restart on the first such answer -- seen there too once the
+    survivors' JMs finish a compression without the absent node (ultra page
+    copy PR), so the returning journal needs a longer re-level: 2026-10-29
+    page copy soak, 1+1, a graceful restart aborted twice before it got through.
 
     Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
     number of rounds (timeout / interval), so a patched-out ``time.sleep``
@@ -1455,11 +1456,7 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     """
     try:
         return leader.rpc_client().jc_compression_get_status(jm_vuid)
-    except Exception as e:                      # noqa: BLE001 - re-raised unless arbitrated
-        if arbitrated is None:
-            arbitrated = _cluster_two_node_arbitrated(leader.cluster_id)
-        if not arbitrated:
-            raise
+    except Exception as e:                      # noqa: BLE001 - retried, then re-raised
         logger.warning("jc_compression status on leader %s failed (%s); retrying "
                        "(journal re-level in progress?)", leader.get_id(), e)
     if timeout_s is None:
