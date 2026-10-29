@@ -540,7 +540,9 @@ class CLIWrapperBase:
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
     def storage_node__get_device_health_info(self, sub_command, args):
-        return device_controller.get_device_health_info(args.device_id)
+        # The controller returns a dict (the v2 API serializes it through a
+        # DTO); rendering it for the terminal is the CLI's job.
+        return _format_json(device_controller.get_device_health_info(args.device_id))
 
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)

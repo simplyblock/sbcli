@@ -93,7 +93,16 @@ class StatsObject(BaseModel):
 
 
 class DeviceStatObject(StatsObject):
-    pass
+    # SPDK tick rate (Hz) of the node that measured this record -- the
+    # top-level ``tick_rate`` of ``bdev_get_iostat``. The ``*_latency_ticks``
+    # counters are in these ticks, and the rate is per CPU (TSC), so latency
+    # can only be compared across nodes after dividing by it. 0 on records
+    # written before it was collected; the exporter omits it then.
+    #
+    # Declared here rather than on StatsObject: node and cluster records are
+    # built by summing device records field by field (utils.sum_records), and
+    # a sum of tick rates is not a rate of anything.
+    tick_rate: int = 0
 
 
 # `total=False` throughout: these records are read back from FoundationDB and

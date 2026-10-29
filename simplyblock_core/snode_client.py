@@ -252,6 +252,15 @@ class SNodeClient:
         return self._request("POST", "wipe_block_device",
                              {"device_name": device_name})
 
+    def device_smart(self, device_path):
+        """Raw health log of a kernel block device on the node (lblk/AIO).
+
+        Returns ``(result, error)``; ``result`` is
+        ``{"supported", "source", "device_path", "data", "reason"}`` with
+        ``source`` one of ``"nvme-cli"``, ``"smartctl"`` or ``""``.
+        """
+        return self._request("GET", "device_smart", {"device_path": device_path})
+
     def spdk_process_is_up(self, rpc_port, cluster_id):
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)

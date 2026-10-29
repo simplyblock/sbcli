@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 
 import boto3
 import requests
@@ -701,3 +702,83 @@ def get_available_device_name(instance_id):
     except Exception as e:
         logger.error(f"Failed to get available device name: {e!s}")
         return None
+
+
+# Device paths the SMART reader accepts: an absolute /dev path of plain name
+# characters. The value comes from a request, and although run_command does
+# not go through a shell, it is still split on whitespace and handed to a
+# privileged tool -- so it is validated, not trusted.
+_DEVICE_PATH_RE = re.compile(r"^/dev/[A-Za-z0-9._:/+-]+$")
+# A partition carries no health log of its own; the disk it lives on does.
+_NVME_PARTITION_RE = re.compile(r"^(nvme\d+n\d+)p\d+$")
+_SD_PARTITION_RE = re.compile(r"^((?:sd|vd|xvd)[a-z]+)\d+$")
+
+#: smartctl exit-status bits 0 and 1: the command line did not parse, or the
+#: device could not be opened / its type not detected. Every higher bit
+#: reports a finding ABOUT the disk (failing, prefail attributes, logged
+#: errors) and comes with a complete JSON document, so only these two mean
+#: "no health log was read".
+_SMARTCTL_FATAL_BITS = 0x03
+
+
+def _smart_target(device_path: str) -> str:
+    """The whole-disk node whose health log describes ``device_path``."""
+    real = os.path.realpath(device_path)
+    name = os.path.basename(real)
+    for pattern in (_NVME_PARTITION_RE, _SD_PARTITION_RE):
+        m = pattern.match(name)
+        if m:
+            return os.path.join(os.path.dirname(real), m.group(1))
+    return real
+
+
+def _smart_unsupported(path: str, reason: str) -> dict:
+    return {"supported": False, "source": "", "device_path": path,
+            "data": None, "reason": reason}
+
+
+def read_device_smart(device_path: str) -> dict:
+    """Read a kernel block device's health log, raw, for the control plane.
+
+    Kernel NVMe namespaces (``/dev/nvme*``) are read with ``nvme smart-log``
+    (nvme-cli ships in the agent image); anything else with ``smartctl -a``
+    when it is installed. A device that exposes no health log at all -- a
+    virtio disk in a VM, or no smartctl -- is ``supported: False`` with the
+    reason, not an error: it is a property of the device, and the caller
+    reports it as such. The raw tool output is returned in ``data`` and
+    mapped to the SPDK field names on the control-plane side, so one mapping
+    serves both agent flavours.
+    """
+    if not _DEVICE_PATH_RE.match(device_path or "") or ".." in device_path:
+        raise ValueError(f"invalid device path {device_path!r}")
+
+    target = _smart_target(device_path)
+    if os.path.basename(target).startswith("nvme"):
+        out, err, rc = shell_utils.run_command(f"nvme smart-log -o json {target}")
+        if rc == 0:
+            try:
+                return {"supported": True, "source": "nvme-cli", "device_path": target,
+                        "data": json.loads(out), "reason": ""}
+            except json.JSONDecodeError as e:
+                logger.error("nvme smart-log %s: unparseable output: %s", target, e)
+        else:
+            logger.warning("nvme smart-log %s failed (rc=%s): %s", target, rc, err)
+        # Fall through: smartctl reads NVMe too, and is the only other way in.
+
+    if shutil.which("smartctl") is None:
+        return _smart_unsupported(target, "smartctl is not installed on the storage node")
+
+    out, err, rc = shell_utils.run_command(f"smartctl -j -a {target}")
+    try:
+        data = json.loads(out) if out else None
+    except json.JSONDecodeError:
+        data = None
+    if data is None or rc & _SMARTCTL_FATAL_BITS:
+        messages = [m.get("string", "") for m in
+                    ((data or {}).get("smartctl", {}).get("messages") or [])]
+        return _smart_unsupported(
+            target, "; ".join(m for m in messages if m) or f"smartctl failed (rc={rc})")
+    if (data.get("smart_support") or {}).get("available") is False:
+        return _smart_unsupported(target, "device does not support SMART")
+    return {"supported": True, "source": "smartctl", "device_path": target,
+            "data": data, "reason": ""}

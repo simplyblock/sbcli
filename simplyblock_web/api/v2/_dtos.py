@@ -1,10 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import Request
-from pydantic import BaseModel, SecretStr, field_serializer
+from pydantic import AwareDatetime, BaseModel, Field, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.controllers.backup.manifest import (
@@ -304,6 +304,9 @@ class DeviceDTO(BaseModel):
     nvmf_nqn: str = ""
     nvmf_port: int = 0
     capacity: CapacityStatDTO
+    # The last DeviceHealthAssessmentDTO recorded for the device, verbatim;
+    # None until one has been reported.
+    health_assessment: dict | None = None
 
     @staticmethod
     def from_model(model: NVMeDevice, storage_node_id: str, stat_obj: StatsObject | None = None):
@@ -331,6 +334,7 @@ class DeviceDTO(BaseModel):
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
+            health_assessment=getattr(model, 'health_assessment', None) or None,
         )
 
 
@@ -1244,56 +1248,91 @@ class BatchMigrationDTO(BaseModel):
 
 
 class DeviceHealthInfoDTO(BaseModel):
-    id: UUID
-    model_number: str
-    serial_number: str
-    firmware_revision: str
-    traddr: str
-    critical_warning: int
-    temperature_celsius: int
-    available_spare_percentage: int
-    available_spare_threshold_percentage: int
-    percentage_used: int
-    data_units_read: int
-    data_units_written: int
-    host_read_commands: int
-    host_write_commands: int
-    controller_busy_time: int
-    power_cycles: int
-    power_on_hours: int
-    unsafe_shutdowns: int
-    media_errors: int
-    num_err_log_entries: int
-    warning_temperature_time_minutes: int
-    critical_composite_temperature_time_minutes: int
+    """A device's health log, in SPDK's field names whatever it was read with.
 
+    Every metric is optional: an AIO device read through smartctl reports a
+    different subset than an NVMe controller does, and a device with no
+    health log at all (a virtio disk, a host without smartctl) is
+    ``supported=false`` with every metric null -- a 200, not an error.
+    """
+    id: UUID
+    supported: bool = True
+    # "spdk" | "nvme-cli" | "smartctl" | "" (unsupported)
+    source: str = ""
+    model_number: str | None = None
+    serial_number: str | None = None
+    firmware_revision: str | None = None
+    traddr: str | None = None
+    critical_warning: int | None = None
+    temperature_celsius: int | None = None
+    available_spare_percentage: int | None = None
+    available_spare_threshold_percentage: int | None = None
+    percentage_used: int | None = None
+    data_units_read: int | None = None
+    data_units_written: int | None = None
+    host_read_commands: int | None = None
+    host_write_commands: int | None = None
+    controller_busy_time: int | None = None
+    power_cycles: int | None = None
+    power_on_hours: int | None = None
+    unsafe_shutdowns: int | None = None
+    media_errors: int | None = None
+    num_err_log_entries: int | None = None
+    warning_temperature_time_minutes: int | None = None
+    critical_composite_temperature_time_minutes: int | None = None
+    # smartctl's overall smart_status.passed (ATA/SCSI). None for NVMe, whose
+    # verdict is critical_warning.
+    smart_passed: bool | None = None
+    # ATA attributes 5 (Reallocated_Sector_Ct) and 197 (Current_Pending_Sector)
+    reallocated_sectors: int | None = None
+    pending_sectors: int | None = None
 
     @staticmethod
     def from_model(model: NVMeDevice, health_info: dict):
+        fields = DeviceHealthInfoDTO.model_fields.keys() - {'id'}
         return DeviceHealthInfoDTO(
             id=UUID(model.get_id()),
-            model_number=health_info["model_number"],
-            serial_number=health_info["serial_number"],
-            firmware_revision=health_info["firmware_revision"],
-            traddr=health_info["traddr"],
-            critical_warning=health_info["critical_warning"],
-            temperature_celsius=health_info["temperature_celsius"],
-            available_spare_percentage=health_info["available_spare_percentage"],
-            available_spare_threshold_percentage=health_info["available_spare_threshold_percentage"],
-            percentage_used=health_info["percentage_used"],
-            data_units_read=health_info["data_units_read"],
-            data_units_written=health_info["data_units_written"],
-            host_read_commands=health_info["host_read_commands"],
-            host_write_commands=health_info["host_write_commands"],
-            controller_busy_time=health_info["controller_busy_time"],
-            power_cycles=health_info["power_cycles"],
-            power_on_hours=health_info["power_on_hours"],
-            unsafe_shutdowns=health_info["unsafe_shutdowns"],
-            media_errors=health_info["media_errors"],
-            num_err_log_entries=health_info["num_err_log_entries"],
-            warning_temperature_time_minutes=health_info["warning_temperature_time_minutes"],
-            critical_composite_temperature_time_minutes=health_info["critical_composite_temperature_time_minutes"],
+            **{name: health_info[name] for name in fields if health_info.get(name) is not None},
         )
+
+
+PerformanceVerdict = Literal["ok", "slow", "unknown"]
+SmartVerdict = Literal["ok", "warning", "failing", "unsupported", "unknown"]
+_NonNegative = Annotated[float | None, Field(ge=0)]
+
+
+class DevicePerformanceAssessmentDTO(BaseModel):
+    verdict: PerformanceVerdict
+    reason: str = ""
+    since: AwareDatetime | None = None
+    latency_us: _NonNegative = None
+    fleet_latency_us: _NonNegative = None
+    latency_ratio: _NonNegative = None
+    iops_per_tib: _NonNegative = None
+    fleet_iops_per_tib: _NonNegative = None
+    iops_ratio: _NonNegative = None
+
+
+class DeviceSmartAssessmentDTO(BaseModel):
+    verdict: SmartVerdict
+    reason: str = ""
+    checked_at: AwareDatetime | None = None
+
+
+class DeviceHealthAssessmentDTO(BaseModel):
+    """A device health verdict computed outside the control plane.
+
+    The Kubernetes operator judges each device's performance against the
+    fleet and its SMART log, and records the result here; the control plane
+    stores it on the device and raises ``device_slow`` / ``device_unhealthy``
+    from it while it is fresh (``reported_at`` + ``valid_seconds``). ``None``
+    for ``performance`` or ``smart`` means that half was not assessed.
+    """
+    reporter: str = ""
+    reported_at: AwareDatetime
+    valid_seconds: Annotated[int, Field(gt=0)] = 900
+    performance: DevicePerformanceAssessmentDTO | None = None
+    smart: DeviceSmartAssessmentDTO | None = None
 
 
 class AlertDTO(BaseModel):

@@ -12,7 +12,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 
 from ... import util
 from ..._dependencies import Cluster, Device, StorageNode
-from ..._dtos import DeviceDTO, DeviceHealthInfoDTO
+from ..._dtos import DeviceDTO, DeviceHealthAssessmentDTO, DeviceHealthInfoDTO
 from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 
 api = APIRouter()
@@ -173,10 +173,36 @@ def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Respon
 
 @instance_api.get('/health-info', name='clusters:storage_nodes:devices:get-device-health-info')
 def health_info(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceHealthInfoDTO:
+    """The device's health log (NVMe SMART / ATA SMART).
+
+    A device that exposes no health log answers 200 with `supported=false`;
+    a storage node that cannot be reached is an error.
+    """
     ret = device_controller.get_device_health_info(device.get_id())
     if not ret:
         raise ValueError('Failed to get device health info')
     return DeviceHealthInfoDTO.from_model(device, ret)
+
+
+@instance_api.put('/health-assessment', name='clusters:storage_nodes:devices:set-health-assessment',
+                  status_code=204, responses={204: {"content": None}})
+def set_health_assessment(
+        cluster: Cluster, storage_node: StorageNode, device: Device,
+        body: DeviceHealthAssessmentDTO,
+) -> Response:
+    """Record an externally computed health assessment (performance + SMART).
+
+    Stored on the device as sent; it raises the `device_slow` /
+    `device_unhealthy` alerts while `reported_at + valid_seconds` has not
+    passed.
+    """
+    try:
+        device_controller.set_device_health_assessment(
+            storage_node.get_id(), device.get_id(), body.model_dump(mode='json'))
+    except KeyError as e:
+        # Removed between the lookup and the write.
+        raise HTTPException(404, f'Device {device.get_id()} not found') from e
+    return Response(status_code=204)
 
 
 api.include_router(instance_api)

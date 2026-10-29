@@ -188,6 +188,32 @@ def wipe_block_device(body: _WipeBlockDeviceParams):
     return utils.get_response(True)
 
 
+class _DeviceSmartQuery(BaseModel):
+    device_path: str
+
+
+@api.get('/device_smart', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'required': ['supported', 'source', 'device_path', 'data', 'reason'],
+        'properties': {
+            'supported': {'type': 'boolean'},
+            'source': {'type': 'string', 'enum': ['nvme-cli', 'smartctl', '']},
+            'device_path': {'type': 'string'},
+            'data': {'type': 'object', 'nullable': True, 'additionalProperties': True},
+            'reason': {'type': 'string'},
+        },
+    })}}},
+})
+def device_smart(query: _DeviceSmartQuery):
+    """Raw health log of a kernel block device (lblk / AIO devices), read
+    with nvme-cli or smartctl; `supported: false` when it has none."""
+    try:
+        return utils.get_response(node_utils.read_device_smart(query.device_path))
+    except ValueError as e:
+        return utils.get_response(None, str(e))
+
+
 @api.post('/join_swarm', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
