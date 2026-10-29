@@ -130,13 +130,22 @@ def test_after_the_cutover_all_but_the_newest_pair_go(harness):
     assert "S5" not in harness.deleted and "TS5" not in harness.deleted
 
 
-@pytest.mark.parametrize("delete_source, pruned", [(False, True), (True, False)])
-def test_the_cutover_prunes_a_kept_source_only(monkeypatch, delete_source, pruned):
-    """With --delete-source the source's lineage is retired and reaped instead."""
+@pytest.mark.parametrize("delete_source", [False, True])
+def test_the_cutover_prunes_with_or_without_delete_source(monkeypatch, delete_source):
+    """The endgame's landing copies are layers under the target volume either
+    way; with --delete-source they were left (bf6: 13-15 layers per volume)."""
     calls = []
     lvol = _lvol()
     monkeypatch.setattr(runner, "db", SimpleNamespace(get_lvol_by_id=lambda i: lvol))
     monkeypatch.setattr(sr, "prune_after_cutover", lambda lv: calls.append(lv.get_id()))
     task = SimpleNamespace(function_params={"lvol_id": SRC, "delete_source": delete_source})
     runner._prune_endgame_snapshots(task)
-    assert calls == ([SRC] if pruned else [])
+    assert calls == [SRC]
+
+
+def test_the_prune_runs_before_the_source_is_deleted():
+    """Pruning deletes source and copy as a pair, so the source must still be
+    there; delete-source then retires what is left of its lineage."""
+    import inspect
+    body = inspect.getsource(runner._record_cutover_done)
+    assert body.index("_prune_endgame_snapshots(task)") < body.index("_delete_source_if_requested(task)")
