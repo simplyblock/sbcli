@@ -40,6 +40,7 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
     NVMe-oF subsystem and marks group FAILED/CANCELLED.
 """
 
+import errno
 import time
 
 from simplyblock_core import constants, utils
@@ -59,6 +60,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCRemoteError
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
+    _bdev_is_immutable_snapshot,
     _build_paths,
     _ensure_and_prune_target_paths,
     _get_source_tertiary_node,
@@ -469,11 +471,12 @@ def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_
             # Same known SPDK behavior _reconstruct_snap_tree already guards
             # against: converting an already-immutable bdev is rejected, so a
             # retry that reaches an earlier round already committed here would
-            # otherwise fail every time. bdev_lvol_get_bdevs reports
-            # is_snapshot on the primary; treat that as "already done" and
-            # just advance the predecessor pointer.
-            _existing = tgt_rpc.bdev_get(tgt_composite)
-            if _existing and _existing.get('driver_specific', {}).get('lvol', {}).get('is_snapshot'):
+            # otherwise fail every time (re-linking it answers EEXIST). Treat
+            # an already-immutable bdev as "already done" and just advance the
+            # predecessor pointer. bdev_get_bdevs reports the flag as
+            # driver_specific.lvol.snapshot, not is_snapshot -- read it through
+            # the shared helper, which knows both spellings.
+            if _bdev_is_immutable_snapshot(tgt_rpc.bdev_get(tgt_composite)):
                 pred_composite = tgt_composite
                 continue
 
@@ -1138,6 +1141,31 @@ def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc, primar
 # Retry-budget helper
 # ---------------------------------------------------------------------------
 
+# SPDK error codes that are a definite answer about state a retry replays
+# unchanged: the orchestrator re-runs the same step against the same bdevs,
+# so it gets the same answer every time. Spending the retry budget on them
+# only delays cleanup and buries the first error under the ceiling message.
+_PERMANENT_RPC_ERRNOS = frozenset({-errno.EEXIST, -errno.EOPNOTSUPP, -errno.ENOTSUP})
+
+
+def _batch_enter_cleanup_target(task, group, group_id, msg):
+    """Give up on the cutover: send the group to cleanup_target and suspend."""
+    logger.error(msg)
+    group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+    group.error_message = msg
+    task.function_result = msg
+    group.write_to_db(db.kv_store)
+    for rec in group.members:
+        try:
+            mig = db.get_migration_by_id(rec['migration_id'])
+            migration_events.migration_phase_changed(mig)
+        except Exception:
+            pass
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.write_to_db(db.kv_store)
+    return False
+
+
 def _batch_budget_suspend(task, group, group_id, error_msg):
     """Charge retry budget and suspend; redirect to cleanup_target when exhausted.
 
@@ -1147,21 +1175,9 @@ def _batch_budget_suspend(task, group, group_id, error_msg):
     task.retry += 1
     task.function_result = error_msg
     if task.retry >= constants.LVOL_MIG_MAX_RETRIES:
-        ceiling_msg = (
+        return _batch_enter_cleanup_target(task, group, group_id, (
             f"Group {group_id[:8]}: max retry ({constants.LVOL_MIG_MAX_RETRIES}) "
-            f"reached; entering cleanup_target: {error_msg}"
-        )
-        logger.error(ceiling_msg)
-        group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
-        group.error_message = ceiling_msg
-        task.function_result = ceiling_msg
-        group.write_to_db(db.kv_store)
-        for rec in group.members:
-            try:
-                mig = db.get_migration_by_id(rec['migration_id'])
-                migration_events.migration_phase_changed(mig)
-            except Exception:
-                pass
+            f"reached; entering cleanup_target: {error_msg}"))
     task.status = JobSchedule.STATUS_SUSPENDED
     task.write_to_db(db.kv_store)
     return False
@@ -1430,6 +1446,10 @@ def task_runner(task):
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return False
+        if isinstance(exc, RPCRemoteError) and exc.code in _PERMANENT_RPC_ERRNOS:
+            return _batch_enter_cleanup_target(task, group, group_id, (
+                f"Group {group_id[:8]}: permanent RPC error in phase {phase} "
+                f"(code {exc.code}); entering cleanup_target without retrying: {exc}"))
         return _batch_budget_suspend(task, group, group_id, f"RPC error in phase {phase}: {exc}")
 
     # ── PHASE_CLEANUP_SOURCE: wait for workers, then delete source subsystem ───
