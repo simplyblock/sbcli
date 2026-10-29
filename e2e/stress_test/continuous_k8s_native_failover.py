@@ -3897,6 +3897,15 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         self.logger.info("[cleanup] Deleting all test K8s resources...")
 
+        # Before anything else, and whatever else fails below: a cordon left
+        # behind makes the NEXT run's bring-up fail, with a message about
+        # stripe width rather than about a cordon.
+        try:
+            self.k8s_utils.uncordon_all_workers()
+        except Exception as exc:                          # noqa: BLE001
+            self.logger.warning(
+                f"[cleanup] could not uncordon: {str(exc)[:140]}")
+
         if self.use_client_fio:
             # ── Client cleanup: stop fio, unmount, disconnect NVMe ──
             for clone_name, clone_info in list(self.clone_details.items()):

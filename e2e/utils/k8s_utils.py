@@ -304,6 +304,37 @@ class K8sUtils:
                          (out or err or "").strip()[:160])
         return True
 
+    def uncordon_all_workers(self) -> list:
+        """Uncordon every worker left SchedulingDisabled. Returns their names.
+
+        A cordon is state on shared infrastructure that outlives the process
+        that set it. reboot_node cordons before draining and only uncordons
+        on the recovery path, so a run that fails in between leaves the node
+        unschedulable -- and the operator then declines it outright
+        ("is not used: it is cordoned"), which is a bring-up failure for the
+        NEXT run, with a message about stripe width rather than about a
+        cordon.
+
+        Masters are left alone: they are cordoned on purpose on some
+        clusters, and no storage node lives there.
+        """
+        out, _ = self._exec_kubectl(
+            "kubectl get nodes -o "
+            "jsonpath='{range .items[?(@.spec.unschedulable==true)]}"
+            "{.metadata.name}{\"\\n\"}{end}' 2>/dev/null || true",
+            supress_logs=True)
+        names = [n.strip() for n in (out or "").splitlines()
+                 if n.strip() and "master" not in n]
+        if not names:
+            return []
+        cli = "oc adm" if self.detect_openshift() else "kubectl"
+        for name in names:
+            self.logger.warning(
+                "[K8sUtils] %s was left cordoned; uncordoning it", name)
+            self._exec_kubectl(f"{cli} uncordon {name} 2>&1 || true",
+                               timeout=120)
+        return names
+
     def drain_node(self, node_ip: str, timeout_min: int = 10) -> bool:
         """Evacuate the node's pods before it goes down.
 

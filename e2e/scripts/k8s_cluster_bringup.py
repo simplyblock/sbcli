@@ -414,7 +414,32 @@ def build_discovery(name: str) -> dict:
     }
 
 
+def uncordon_leftovers() -> None:
+    """Uncordon workers a previous run left SchedulingDisabled.
+
+    The operator declines a cordoned worker outright -- "is not used: it is
+    cordoned" -- so one left over from a run that died between its cordon
+    and its uncordon removes a node from discovery. The bring-up then fails
+    on stripe width ("produces 5 storage node(s) and the 2+2 stripe needs
+    6"), which says nothing about the real cause.
+
+    This is bring-up for a cluster that is about to be built from scratch,
+    so no earlier run's cordon is worth honouring. Masters are left alone.
+    """
+    out, _ = kubectl_out(
+        "get", "nodes", "-o",
+        "jsonpath={range .items[?(@.spec.unschedulable==true)]}"
+        "{.metadata.name}{\"\n\"}{end}")
+    names = [n.strip() for n in (out or "").splitlines()
+             if n.strip() and "master" not in n]
+    for name in names:
+        log(f"uncordoning {name}: a previous run left it cordoned, and "
+            f"discovery declines a cordoned worker")
+        kubectl("uncordon", name, check=False)
+
+
 def run_discovery(config_name: str, timeout: int) -> str:
+    uncordon_leftovers()
     op = build_discovery(config_name)
     op_name = op["metadata"]["name"]
 
