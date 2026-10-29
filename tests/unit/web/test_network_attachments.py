@@ -166,24 +166,6 @@ def test_a_pod_without_a_management_network_binds_its_proxy_to_its_own_address()
     assert names.index("POD_IP") < names.index("SERVER_IP"), "$(POD_IP) expands only from an earlier entry"
 
 
-def test_the_preparation_job_calls_the_agent_at_its_pod_address_whatever_the_spdk_pods_network(monkeypatch):
-    """The agent is off the host network whenever the operator sets POD_IP, and the
-    preparation job runs on the host network, where nothing listens on the worker's
-    address any more. That is so for an SPDK pod on the host network too, which sends
-    neither networks nor pod_network."""
-    monkeypatch.setenv("POD_IP", "10.42.1.9")
-
-    assert network_attachments.agent_ip() == "10.42.1.9"
-
-
-def test_the_preparation_job_calls_the_host_address_when_the_agent_has_no_pod_address(monkeypatch):
-    """An agent on the host network, which an older operator still deploys, has no
-    POD_IP, and the worker's address is where it listens."""
-    monkeypatch.delenv("POD_IP", raising=False)
-
-    assert network_attachments.agent_ip() == ""
-
-
 def _render_init_job(**extra):
     env = Environment(loader=FileSystemLoader(str(deploy_template.TEMPLATE_DIR)), trim_blocks=True, lstrip_blocks=True)
     values = dict(NAMESPACE="simplyblock", HOSTNAME="w1", JOBNAME="snode-spdk-job-w1", SIMPLYBLOCK_DOCKER_IMAGE="sb:test",

@@ -3,7 +3,6 @@ the pod spec needs for them: the annotation Multus reads. A pod with none stays 
 the host network, unless it serves on the pod network itself (``pod_network``)."""
 
 import json
-import os
 
 from tenacity import (
     RetryError,
@@ -28,15 +27,6 @@ def annotation(attachments: list[NetworkAttachment]) -> str:
     if not attachments:
         return ""
     return json.dumps([a.model_dump() for a in attachments])
-
-
-def agent_ip() -> str:
-    """The address the preparation job calls the agent at: the agent's own pod
-    address when it is off the host network, which is when the operator sets POD_IP,
-    and "" when it is on the host network, where the job calls the worker's address.
-    It does not depend on the SPDK pod's network: the agent is off the host network
-    for a host-network SPDK pod too."""
-    return os.environ.get("POD_IP", "")
 
 
 def server_ip(attachments: list[NetworkAttachment], pod_network: bool = False) -> str:

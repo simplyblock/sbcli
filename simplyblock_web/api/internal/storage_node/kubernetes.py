@@ -504,7 +504,9 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
             'SPDK_PROXY_TLS_SECRET': body.spdk_proxy_tls_secret,
-            'AGENT_IP': network_attachments.agent_ip(),
+            # The operator sets POD_IP when the agent is off the host network, whatever the
+            # SPDK pod's network; the preparation job (host network) then calls it there.
+            'AGENT_IP': os.environ.get("POD_IP", ""),
             'NETWORKS': network_attachments.annotation(body.networks),
             'POD_NETWORK': body.pod_network,
             'FULL_CLUSTER_ID': body.cluster_id,

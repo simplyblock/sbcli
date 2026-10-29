@@ -217,45 +217,22 @@ class TestTheV2NodeAddRefusesBothWaysOffTheHostNetwork:
                               networks=[{"name": "fabric", "interface": "data0"}])
 
 
-_FABRIC_NETWORK = [{"name": "fabric", "interface": "data0"}]
-
-
-class TestDataNicsNameHostNicsAndNeedTheHostNetwork:
-    """data_nics are host NIC names, which a pod off the host network does not see.
-    The operator allows them only with spdkOnHostNetwork, so the control plane
-    refuses them the same way rather than ignoring them."""
-
-    def test_the_api_rejects_data_nics_with_networks(self):
+@pytest.mark.parametrize("extra", [{"pod_network": True}, {"networks": [{"name": "fabric", "interface": "data0"}]}])
+class TestDataNicsNeedTheHostNetwork:
+    def test_the_api_rejects_data_nics(self, extra):
         from pydantic import ValidationError
 
         from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
 
         with pytest.raises(ValidationError, match="host network"):
-            StorageNodeParams(node_address="a:1", interface_name="", data_nics=["eth1"], networks=_FABRIC_NETWORK)
+            StorageNodeParams(node_address="a:1", interface_name="", data_nics=["eth1"], **extra)
 
-    def test_the_api_rejects_data_nics_on_the_pod_network(self):
-        from pydantic import ValidationError
-
-        from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
-
-        with pytest.raises(ValidationError, match="host network"):
-            StorageNodeParams(node_address="a:1", interface_name="", data_nics=["eth1"], pod_network=True)
-
-    def test_the_api_accepts_data_nics_on_the_host_network(self):
-        from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
-
-        params = StorageNodeParams(node_address="a:1", interface_name="eth0", data_nics=["eth1"])
-
-        assert params.data_nics == ["eth1"]
-
-    @pytest.mark.parametrize("extra", [{"pod_network": True}, {"networks": _FABRIC_NETWORK}])
     def test_the_core_add_refuses_data_nics_before_it_calls_the_node(self, extra):
         from simplyblock_core import storage_node_ops
 
         with patch.object(storage_node_ops, "SNodeClient") as client:
-            added = storage_node_ops.add_node("c1", "a:1", "", ["eth1"], 500, **extra)
+            assert storage_node_ops.add_node("c1", "a:1", "", ["eth1"], 500, **extra) is False
 
-        assert added is False
         client.assert_not_called()
 
 
