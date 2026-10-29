@@ -163,3 +163,49 @@ def test_snapshots_of_other_clusters_are_left_to_their_own_pass(reaper):
     db, deleted = reaper
     db.lvols.pop("SRC")
     assert rsr.reap_retired(db, "CL_b") == 0
+
+
+# --- the retired lineage lets go of its copies on the target cluster --------
+#
+# After a migration each copy on the target cluster is the base the migrated
+# volume is cloned from, so it has a live clone as long as that volume lives.
+# The delete path holds back a snapshot whose copy has a live clone (it would
+# hand its delete on to that copy), and left paired the whole retired lineage
+# stayed on the vacated cluster (bf6 2026-10-29: 112 retired snapshots, 0
+# volumes, half of the cluster's allocation).
+
+def _paired(snap, copy_id, other_cluster="CL_b"):
+    snap.target_replicated_snap_uuid = copy_id
+    snap.instances = [{"uuid": copy_id, "cluster_id": other_cluster},
+                      {"uuid": snap.uuid + "_local", "cluster_id": CLUSTER}]
+
+
+def test_retire_detaches_the_copies_on_the_other_cluster(leg):
+    db, src = leg
+    _paired(db.snaps["S2"], "T2")
+    rsr.retire_source_lineage(db, src)
+    s2 = db.snaps["S2"]
+    assert s2.deleted
+    assert s2.target_replicated_snap_uuid == ""
+    assert s2.instances == [{"uuid": "S2_local", "cluster_id": CLUSTER}]
+
+
+def test_a_retired_snapshot_is_no_longer_held_by_its_copys_clone(leg, monkeypatch):
+    from simplyblock_core.controllers import snapshot_controller
+    db, src = leg
+    _paired(db.snaps["S2"], "T2")
+    monkeypatch.setattr(snapshot_controller, "_has_live_clone", lambda sid: sid == "T2")
+    assert snapshot_controller._replicated_copy_with_live_clone(db.snaps["S2"]) == "T2"
+    rsr.retire_source_lineage(db, src)
+    assert snapshot_controller._replicated_copy_with_live_clone(db.snaps["S2"]) == ""
+
+
+def test_a_snapshot_that_is_not_retired_keeps_its_copy_and_the_hold(leg, monkeypatch):
+    """A fail-over's source is not retired: it stays paired and held (KI-12)."""
+    from simplyblock_core.controllers import snapshot_controller
+    db, src = leg
+    _paired(db.snaps["X"], "TX")
+    monkeypatch.setattr(snapshot_controller, "_has_live_clone", lambda sid: sid == "TX")
+    rsr.retire_source_lineage(db, src)
+    assert db.snaps["X"].target_replicated_snap_uuid == "TX"
+    assert snapshot_controller._replicated_copy_with_live_clone(db.snaps["X"]) == "TX"
