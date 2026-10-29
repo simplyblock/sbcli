@@ -41,6 +41,7 @@ class _FakeDB:
     def __init__(self, snaps, lvols):
         self.snaps = {s.uuid: s for s in snaps}
         self.lvols = {lv.uuid: lv for lv in lvols}
+        self.minis_synced: list = []
 
     def get_snapshots_by_node_id(self, node_id):
         return list(self.snaps.values())
@@ -80,7 +81,6 @@ def leg(monkeypatch):
     db = _FakeDB(snaps, [src, other])
     monkeypatch.setattr(rsr.replication_recovery_points, "group_recovery_point_ids",
                         lambda gids, db=None: set())
-    db.minis_synced = []
     monkeypatch.setattr(rsr, "_sync_mini", lambda db, snap: db.minis_synced.append(snap.uuid))
     return db, src
 
