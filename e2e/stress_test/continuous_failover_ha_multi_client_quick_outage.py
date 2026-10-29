@@ -17,6 +17,7 @@ from datetime import datetime
 from exceptions.custom_exception import LvolNotConnectException
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from stress_test.rapid_fio_lifecycle import RapidFioLifecycle
+from utils import ssh_utils
 from utils.common_utils import sleep_n_sec
 
 
@@ -332,19 +333,25 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
             # two hosts on one subsystem corrupts data.
             clone_nqn = self._nqn_from_connect_cmds(connect_ls)
             if clone_nqn:
-                for _lname, _ldet in self.lvol_mount_details.items():
-                    _cmds = _ldet.get("Command") or []
-                    if any(clone_nqn in str(c) for c in _cmds):
-                        _owner = _ldet.get("Client")
-                        if _owner and _owner != client:
-                            self.logger.info(
-                                f"[clone_connect] {clone_nqn[-24:]} already held on "
-                                f"{_owner} (via {_lname}); moving clone {clone_name} "
-                                f"from {client} to {_owner}"
-                            )
-                            client = _owner
-                            self.clone_mount_details[clone_name]["Client"] = client
-                        break
+                # Ask the registry, not the bookkeeping. The old version
+                # scanned each volume's stored connect command for this NQN,
+                # which can never match a namespaced child: a child is
+                # adopted by rescanning a subsystem, so it has no connect
+                # command and _register_and_mount_device stores
+                # "Command": None. The subsystem this clone inherits was
+                # held by exactly such a child in run 20261029-031030, the
+                # scan found nothing, and the clone was connected on the
+                # other client -- two hosts on nsid 1 for 4h 33m.
+                _owner = ssh_utils.nqn_owner(clone_nqn)
+                if _owner and _owner != client:
+                    self.logger.info(
+                        f"[clone_connect] {clone_nqn[-24:]} already held on "
+                        f"{_owner}; moving clone {clone_name} from {client} "
+                        f"to {_owner} -- two clients on one subsystem is two "
+                        f"clients on every namespace in it"
+                    )
+                    client = _owner
+                    self.clone_mount_details[clone_name]["Client"] = client
 
             initial = self.ssh_obj.get_devices(node=client)
             clone_already_connected = False
@@ -1544,9 +1551,24 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                     )
                     continue
 
+                # Register the subsystem against this client before anything
+                # else can want it. A child found by rescan never ran an
+                # `nvme connect`, so ssh_utils' own hook never saw it and the
+                # registry would not know the subsystem is in use -- which is
+                # how a clone inheriting the same NQN came to be connected on
+                # the other client.
+                _prev = ssh_utils.claim_nqn(child_nqn, client_node)
+                if _prev:
+                    self.logger.warning(
+                        f"[namespace] child {child} resolved on {client_node} "
+                        f"but its subsystem {child_nqn[-28:]} is held by "
+                        f"{_prev}; leaving the holder as {_prev} so later "
+                        f"volumes follow it there")
+
                 self.logger.info(
                     f"[namespace] child {child} nsid={child_ns} -> {device} "
-                    f"(sharing {parent}'s subsystem)")
+                    f"(subsystem {child_nqn[-28:]}, requested against "
+                    f"{parent})")
                 self._register_and_mount_device(child, child_id, client_node, fs_type, device)
                 self._namespaced_lvols.add(child)
                 owner = self._nqn_to_parent.get(child_nqn, parent)

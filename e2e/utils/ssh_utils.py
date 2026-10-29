@@ -93,6 +93,140 @@ def get_parent_device(device: str) -> str:
 
     return dev
 
+#: Which client holds each NVMe subsystem, keyed by NQN.
+#:
+#: Two hosts on one subsystem is two hosts on every namespace in it, which
+#: corrupts data and presents as a verify failure rather than as an error.
+#: The control plane decides which subsystem a namespaced child or a clone
+#: lands in -- "namespace=True asks for a shared subsystem, not for THIS
+#: parent's" -- so a lane cannot predict it and must look it up.
+#:
+#: Process-wide rather than per-SshUtils: a run has one SshUtils but the
+#: invariant is about the cluster, and a second instance must not be able to
+#: hand the same subsystem to a second client.
+_NQN_OWNER: dict[str, str] = {}
+_NQN_LOCK = threading.Lock()
+
+#: Set E2E_ALLOW_SHARED_NQN=1 to downgrade the refusal to a warning. For a
+#: test that deliberately multi-attaches, nothing else.
+_ALLOW_SHARED = os.getenv("E2E_ALLOW_SHARED_NQN") == "1"
+
+#: `--nqn=X`, `--nqn X` and `-n X` all appear: the control plane supplies its
+#: own connect string and get_lvol_connect_str builds the fallback.
+_NQN_RE = re.compile(r"(?:--nqn[= ]|(?<!\w)-n\s+)(\S+)")
+
+
+def nqn_in_command(command: str) -> str | None:
+    """The subsystem NQN an `nvme connect` names, or None if it is not one."""
+    if not command or "nvme connect" not in command:
+        return None
+    m = _NQN_RE.search(command)
+    if not m:
+        return None
+    return m.group(1).strip().strip("'\"")
+
+
+def nqn_owner(nqn: str) -> str | None:
+    """The client currently holding *nqn*, or None if nobody does."""
+    with _NQN_LOCK:
+        return _NQN_OWNER.get(nqn)
+
+
+def client_for_nqn(nqn: str, preferred: str) -> str:
+    """The client a connect for *nqn* must run on.
+
+    *preferred* when nobody holds the subsystem yet, otherwise the holder.
+    Call this instead of assuming: a namespaced child or a clone joins
+    whatever subsystem the control plane chose, which may already be open on
+    another client, and connecting it a second time elsewhere is the bug this
+    module exists to make impossible.
+    """
+    return nqn_owner(nqn) or preferred
+
+
+def claim_nqn(nqn: str, node: str) -> str | None:
+    """Record *node* as the holder of *nqn* without running a connect.
+
+    Needed because a namespaced child is often reached by RESCANNING a
+    subsystem the client already has open -- no `nvme connect` runs for it, so
+    exec_command never sees it and the registry would not know the subsystem
+    is in use. That blind spot is what let a clone open the same subsystem on
+    a second client in run 20261029-031030.
+
+    Returns the previous holder when it was somebody else, so the caller can
+    report it; the binding is left with the original holder.
+    """
+    if not nqn:
+        return None
+    with _NQN_LOCK:
+        owner = _NQN_OWNER.get(nqn)
+        if owner is None:
+            _NQN_OWNER[nqn] = node
+            return None
+        return None if owner == node else owner
+
+
+def release_nqn(nqn: str, node: str | None = None) -> None:
+    """Forget the holder of *nqn*, after a real disconnect.
+
+    Not called on a volume delete. While any namespace of the subsystem is
+    still connected the binding holds -- a deleted parent does not move the
+    subsystem, and dropping the binding early is how the second client gets
+    let back in.
+    """
+    with _NQN_LOCK:
+        if node is None or _NQN_OWNER.get(nqn) == node:
+            _NQN_OWNER.pop(nqn, None)
+
+
+def release_all_nqns_on(node: str) -> None:
+    """Forget every subsystem held by *node* -- for `nvme disconnect-all`."""
+    with _NQN_LOCK:
+        for nqn in [n for n, owner in _NQN_OWNER.items() if owner == node]:
+            del _NQN_OWNER[nqn]
+
+
+def _claim_or_refuse(node: str, command: str, logger=None) -> None:
+    """Record *node* as the holder, or refuse a second client outright.
+
+    Raises RuntimeError rather than warning. A warning here produces a verify
+    failure hours later that reads as storage corruption, and three of those
+    have been investigated as product defects in this archive.
+    """
+    if "disconnect-all" in (command or ""):
+        release_all_nqns_on(node)
+        return
+    if "nvme disconnect" in (command or ""):
+        m = _NQN_RE.search(command or "")
+        if m:
+            release_nqn(m.group(1).strip().strip("'\""), node)
+        return
+
+    nqn = nqn_in_command(command)
+    if not nqn:
+        return
+    with _NQN_LOCK:
+        owner = _NQN_OWNER.get(nqn)
+        if owner is None:
+            _NQN_OWNER[nqn] = node
+            return
+        if owner == node:
+            return
+    msg = (
+        f"[subsystem] refusing to connect {nqn} on {node}: it is already "
+        f"connected on {owner}. Two clients on one subsystem means two "
+        f"clients on every namespace in it, which corrupts data and surfaces "
+        f"as an fio verify failure that looks like storage. Use "
+        f"ssh_utils.client_for_nqn(nqn, preferred) to place this volume on "
+        f"the client that already holds its subsystem, and rescan there."
+    )
+    if _ALLOW_SHARED:
+        if logger:
+            logger.warning("%s (allowed by E2E_ALLOW_SHARED_NQN)", msg)
+        return
+    raise RuntimeError(msg)
+
+
 class SshUtils:
     """Class to perform all ssh level operationa
     """
@@ -911,6 +1045,12 @@ class SshUtils:
         and proper exit-status capture to reduce “ran but no output” confusion.
         If raise_on_error=True, raises RuntimeError when exit_status != 0.
         '''
+        # One subsystem, one client. Checked here because every lane runs its
+        # connect strings through this method, so no test can miss it by not
+        # calling a helper -- which is exactly how the previous guard was
+        # bypassed for namespaced children.
+        _claim_or_refuse(node, command, self.logger)
+
         retry = 0
         while retry < max_retries:
             with self.ssh_semaphore:
