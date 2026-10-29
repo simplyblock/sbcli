@@ -25,6 +25,9 @@ def _lvstore_stack(monkeypatch, page_copy, shared_placement=True):
     db.get_cluster_by_id.return_value = cluster
     monkeypatch.setattr(storage_node_ops, "DBController", lambda: db)
     monkeypatch.setattr(storage_node_ops.utils, "get_next_lvstore_ports", lambda cluster_id: (4430, 4431))
+    # Publishing the node's ports (pod network) is outside this test; main's
+    # create_lvstore does it before the stack is built.
+    monkeypatch.setattr(storage_node_ops, "storage_network", MagicMock(), raising=False)
     vuids = iter(range(100, 200))
     monkeypatch.setattr(storage_node_ops.utils, "get_random_vuid", lambda: next(vuids))
     captured = {}
