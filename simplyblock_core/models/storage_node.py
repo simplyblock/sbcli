@@ -109,6 +109,9 @@ class StorageNode(BaseNodeObject):
     host_nqn: str = ""
     host_secret: SecretStr = SecretStr("")
     hostname: str = ""
+    # The Kubernetes node the pod runs on; "" on a record that predates it, which the
+    # hostname (<node>_<rpc_port>) then stands in for.
+    k8s_node_name: str = ""
     hugepages: int = 0
     ib_devices: list[IFace] = default_factory(list)
     id_device_by_nqn: bool = False
@@ -138,7 +141,6 @@ class StorageNode(BaseNodeObject):
     memory: int = 0
     mgmt_ip: str = ""
     # SPDK RPC address of a pod on attached networks; mgmt_ip stays the worker's address.
-    spdk_ip: str = ""
     namespace: str = ""
     node_lvs: str = "lvs"
     num_partitions_per_dev: int = 1
@@ -343,8 +345,18 @@ class StorageNode(BaseNodeObject):
 
     @property
     def rpc_host(self) -> str:
-        """Where SPDK RPC is served: the pod's address when attached, else the worker's."""
-        return self.spdk_ip or self.mgmt_ip
+        """Where the control plane dials the SPDK proxy: a name for a pod, whose address
+        changes on every restart, and the worker's address for a pod on the host network.
+
+        Under TLS or on attached networks it is the node's name in the proxy's headless
+        Service, which resolves to the pod's primary address. On the pod network it is
+        the node's own Service, the one peers and clients hold the address of."""
+        if Settings().tls_connect != "disabled" or self.networks:
+            return self._k8s_service_host(self.spdk_proxy_service)
+        if self.pod_network:
+            from simplyblock_core.storage_network import service_name
+            return f"{service_name(self.rpc_port, self.cluster_id)}.{self.namespace}.svc"
+        return self.mgmt_ip
 
     def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
@@ -364,15 +376,12 @@ class StorageNode(BaseNodeObject):
             timeout, retry = budget
             kwargs.setdefault("timeout", timeout)
             kwargs.setdefault("retry", retry)
-        host = self.rpc_host
-        if Settings().tls_connect != "disabled":
-            host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(
-            host, self.rpc_port,
+            self.rpc_host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
     def _k8s_node_label(self) -> str:
-        return self.hostname.removesuffix(f"_{self.rpc_port}")
+        return self.k8s_node_name or self.hostname.removesuffix(f"_{self.rpc_port}")
 
     def _k8s_service_host(self, service: str) -> str:
         """The node's hostname in one of its cluster's headless Services.
