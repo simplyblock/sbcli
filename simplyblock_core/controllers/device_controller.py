@@ -412,8 +412,16 @@ def probe_device_stack(device_obj, snode, rpc_client=None):
         subsys: list = []
 
         def _get_subsys():
-            subsys.extend(rpc_client.subsystem_get(device_obj.nvmf_nqn) or [])
-            return subsys
+            # subsystem_get returns the one subsystem as a dict (None when
+            # absent). Extending a list with that dict appended its KEYS, so
+            # the entry read below was a string, listener and namespace always
+            # looked missing, and no repair could ever complete (bf5
+            # 2026-10-29: device b09c1063 looped "still missing after repair:
+            # listener, namespace" with both in place).
+            entry = rpc_client.subsystem_get(device_obj.nvmf_nqn)
+            if entry:
+                subsys.append(entry)
+            return entry
 
         _safe("subsystem", _get_subsys)
         if subsys:
