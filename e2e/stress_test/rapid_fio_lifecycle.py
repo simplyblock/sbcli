@@ -195,6 +195,22 @@ class RapidFioLifecycle(_RapidFioHooks):
                        or self._rapid_base_runtime or 1800)
         self._rapid_launched[name] = (time.time(), int(runtime))
 
+    def rapid_job_was_evicted(self, name, record):
+        """Did the harness itself remove this job's worker process?
+
+        Default no, which keeps the cautious path: a job that vanished
+        without writing anything is not relaunched, because relaunching
+        would hide whatever stopped it.
+
+        A platform overrides this for the cases it can PROVE were our doing
+        -- on k8s a drain for storage_node_reboot evicts the FIO pod, and a
+        Job with restartPolicy: Never gets no replacement. There is nothing
+        to preserve then: the pod is gone and its log went with it, so
+        refusing to relaunch only costs the volume its IO for the rest of
+        the run.
+        """
+        return False
+
     def rapid_grace_seconds(self):
         """How long past its runtime a job may still be running.
 
@@ -355,13 +371,20 @@ class RapidFioLifecycle(_RapidFioHooks):
             if self.fio_job_alive(name, rec):
                 continue
             if not self.rapid_job_finished_cleanly(name, rec):
-                # Gone, no summary, no error line. Say so rather than guess:
-                # relaunching would paper over a job that died silently.
-                self.logger.warning(
-                    "[rapid-fio] %s is not running %s and wrote neither an "
-                    "error nor a run summary. Not relaunching it -- that "
-                    "would hide whatever stopped it.", name, context)
-                continue
+                # Gone, no summary, no error line. Two different situations
+                # wear the same face, so ask the platform which one it is.
+                if self.rapid_job_was_evicted(name, rec):
+                    self.logger.info(
+                        "[rapid-fio] %s is not running %s because WE evicted "
+                        "its pod; relaunching. Its log went with the pod, so "
+                        "there is nothing to preserve by leaving the volume "
+                        "idle for the rest of the run.", name, context)
+                else:
+                    self.logger.warning(
+                        "[rapid-fio] %s is not running %s and wrote neither "
+                        "an error nor a run summary. Not relaunching it -- "
+                        "that would hide whatever stopped it.", name, context)
+                    continue
             rt = self.rapid_runtime_for(name)
             try:
                 self.fio_relaunch(name, rec, rt)

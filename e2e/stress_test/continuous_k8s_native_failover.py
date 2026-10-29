@@ -6453,6 +6453,43 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
         except Exception:                             # noqa: BLE001
             return True
 
+    def rapid_job_was_evicted(self, name, record):
+        """True when this Job has no pod left, or its pod was Evicted.
+
+        storage_node_reboot cordons and drains the worker, which evicts the
+        FIO pod; with restartPolicy: Never and backoffLimit: 0 the Job never
+        gets another one. The Job object survives with zero pods, which is
+        indistinguishable from a silent death by log alone -- and is in fact
+        our own doing.
+
+        Zero pods counts as evicted: whether the drain evicted it or the pod
+        was collected afterwards, the log is gone either way and there is no
+        evidence left for the cautious path to protect.
+        """
+        if getattr(self, "use_client_fio", False):
+            return False
+        job = (record or {}).get("job_name")
+        if not job:
+            return False
+        try:
+            self._ensure_k8s_utils()
+            pods = self.k8s_utils.get_job_pod_names(job) or []
+            if not pods:
+                return True
+            for pod in pods:
+                detail = self.k8s_utils.get_pod_status_detail(pod) or {}
+                reason = f"{detail.get('reason', '')} {detail.get('message', '')}"
+                if "evict" in reason.lower():
+                    return True
+        except Exception as exc:                      # noqa: BLE001
+            # Unknown is not "we did it": fall back to the cautious path
+            # rather than relaunch over something we cannot account for.
+            self.logger.warning(
+                "[rapid-fio] could not tell whether %s was evicted (%s); "
+                "treating it as a silent death", name, str(exc)[:120])
+            return False
+        return False
+
     def fio_relaunch(self, name, record, runtime):
         """Start this one job again.
 
