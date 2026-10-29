@@ -3002,7 +3002,12 @@ class K8sUtils:
                 f"-o jsonpath='{{.status.active}}' 2>/dev/null || true",
                 supress_logs=True,
             )
-        except Exception:                                 # noqa: BLE001
+        except Exception as exc:                           # noqa: BLE001
+            self.logger.warning(
+                "[K8sUtils] job_active(%s) could not read .status.active "
+                "(%s); reporting it ALIVE, which blocks a relaunch. If this "
+                "repeats, that is the bug, not the workload.",
+                job_name, str(exc)[:120])
             return True
         raw = (out or "").strip().strip("'")
         if not raw:
@@ -3012,6 +3017,14 @@ class K8sUtils:
         try:
             return int(raw) >= 1
         except ValueError:
+            # The value that produced run 40809136442's "22 jobs still
+            # running" on 22 jobs that had finished. Named here so the next
+            # occurrence does not need to be inferred from the symptom.
+            self.logger.warning(
+                "[K8sUtils] job_active(%s): .status.active is %r, which is "
+                "not a count. Reporting ALIVE; a finished job read this way "
+                "is never relaunched and its volume goes idle.",
+                job_name, raw[:120])
             return True
 
     def get_job_pod_names(self, job_name: str, namespace: str | None = None) -> list:

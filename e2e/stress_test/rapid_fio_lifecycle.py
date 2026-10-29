@@ -202,7 +202,19 @@ class RapidFioLifecycle(_RapidFioHooks):
                 continue            # never launched through the lifecycle
             started, runtime = when
             overdue_by = now - started - runtime - grace
-            if overdue_by > 0 and self.fio_job_alive(name, rec):
+            if overdue_by <= 0:
+                continue
+
+            # fio's own summary outvotes any liveness check. A log carrying
+            # `run=N` means the job finished and wrote its results, whatever
+            # the platform reports about the pod or the session. Run
+            # 40809136442 called 22 finished jobs "still running" 1h 48m
+            # after they exited, because k8s job_active answers "alive" when
+            # it cannot parse `.status.active`.
+            if self.rapid_job_finished_cleanly(name, rec):
+                continue
+
+            if self.fio_job_alive(name, rec):
                 late.append((name, int(overdue_by), runtime))
         return late
 
