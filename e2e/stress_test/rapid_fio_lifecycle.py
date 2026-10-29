@@ -173,6 +173,28 @@ class RapidFioLifecycle(_RapidFioHooks):
         self._rapid_launched[name] = (time.time(), runtime)
         return runtime
 
+    def rapid_note_launched(self, name, runtime=None):
+        """Restart this job's clock. Call it wherever a job is (re)created.
+
+        rapid_overdue measures from _rapid_launched, and rapid_runtime_for is
+        the only other writer -- so a lane that creates jobs by any other
+        route leaves the old timestamp in place and its fresh job is judged
+        against a clock that started hours ago. That produced run
+        40855141396's "1335s past a 4000s runtime" on jobs that had just been
+        relaunched, and the giveaway is that every reported job shows the
+        SAME overdue figure.
+
+        *runtime* defaults to the lane's own FIO_RUNTIME, then to the
+        lifecycle base: a relaunch outside rapid_fio_lifecycle uses the
+        lane's runtime rather than a jittered one.
+        """
+        if self._rapid_launched is None:
+            self._rapid_launched = {}
+        if runtime is None:
+            runtime = (getattr(self, "FIO_RUNTIME", None)
+                       or self._rapid_base_runtime or 1800)
+        self._rapid_launched[name] = (time.time(), int(runtime))
+
     def rapid_grace_seconds(self):
         """How long past its runtime a job may still be running.
 

@@ -2218,6 +2218,9 @@ class K8sNativeFailoverTest(TestClusterBase):
 
                 pvc_info["job_name"] = new_job
                 pvc_info["configmap_name"] = new_cm
+                # A new job needs a new clock, or rapid_overdue judges it
+                # against the one the lifecycle was armed with.
+                self.rapid_note_launched(pvc_name)
                 sleep_n_sec(5)
 
             for clone_name, clone_info in self.clone_details.items():
@@ -2254,6 +2257,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
                 clone_info["job_name"] = new_job
                 clone_info["configmap_name"] = new_cm
+                self.rapid_note_launched(clone_name)
                 sleep_n_sec(5)
 
     # ── Outage methods ───────────────────────────────────────────────────────
@@ -2443,6 +2447,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                 continue
             info["job_name"] = new_job
             info["configmap_name"] = new_cm
+            # Same reason as the checkpoint relaunch: this is a fresh job.
+            self.rapid_note_launched(name)
             self.logger.info(f"[quiesce] {name}: FIO restarted as {new_job}")
 
     def _wait_volume_released(self, pvc_name, timeout=240):
