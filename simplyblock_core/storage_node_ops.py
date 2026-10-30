@@ -1430,8 +1430,12 @@ def _cluster_two_node_arbitrated(cluster_id, cluster=None, db=None) -> bool:
     return _remember_cluster_arbitration(cluster)
 
 
+# Restart: poll interval while the LVS leader reports an active journal compression (see recover lvstore).
+RESTART_JC_COMPRESSION_POLL_S = 5
+
+
 def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
-                                      interval_s=2.0, sleep=None, clock=None, arbitrated=None):
+                                      interval_s=2.0, sleep=None, clock=None):
     """``jc_compression get_status`` on the LVS leader, retried while it fails.
 
     Campaign c2, F1: right after the returning node's SPDK is up, the leader
@@ -1441,10 +1445,11 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
     failure that outlasts that aborts the restart (the caller raises).
 
-    Two-node arbitration only: on every other cluster this is exactly the
-    previous single call, and a failure is re-raised at once (the restart
-    aborts immediately, as before). The arbitration flag is read only after a
-    failed first call, so the success path does no extra work.
+    All clusters. It was two-node arbitration only, and a regular cluster
+    aborted the restart on the first such answer -- seen there too once the
+    survivors' JMs finish a compression without the absent node (ultra page
+    copy PR), so the returning journal needs a longer re-level: 2026-10-29
+    page copy soak, 1+1, a graceful restart aborted twice before it got through.
 
     Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
     number of rounds (timeout / interval), so a patched-out ``time.sleep``
@@ -1452,11 +1457,7 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     """
     try:
         return leader.rpc_client().jc_compression_get_status(jm_vuid)
-    except Exception as e:                      # noqa: BLE001 - re-raised unless arbitrated
-        if arbitrated is None:
-            arbitrated = _cluster_two_node_arbitrated(leader.cluster_id)
-        if not arbitrated:
-            raise
+    except Exception as e:                      # noqa: BLE001 - retried, then re-raised
         logger.warning("jc_compression status on leader %s failed (%s); retrying "
                        "(journal re-level in progress?)", leader.get_id(), e)
     if timeout_s is None:
@@ -13899,15 +13900,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         if current_leader:
             try:
                 jc_compression_is_active = _jc_compression_status_with_retry(current_leader, lvs_jm_vuid)
-                retries = 10
+                # Polled every RESTART_JC_COMPRESSION_POLL_S, for at most 10 minutes as before. A compression
+                # interrupted by this node's outage finishes on the survivors once their JMs drop this node's
+                # dead reader (ultra page copy PR), seconds after the kill; polling once a minute added up to a
+                # minute to every such restart. (Before that ultra fix it could not finish until this node was
+                # back: the restart waited the full 10 minutes, 2026-10-29 page copy soak.)
+                poll_s = RESTART_JC_COMPRESSION_POLL_S
+                retries = int(600 // poll_s)
                 while jc_compression_is_active:
                     if retries <= 0:
                         logger.warning("Timeout waiting for JC compression task to finish on leader %s",
                                        current_leader.get_id())
                         break
                     retries -= 1
-                    logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in 60 seconds")
-                    time.sleep(60)
+                    logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in {poll_s} seconds")
+                    time.sleep(poll_s)
                     # Poll the SAME jm_vuid as the first read above — the LVS
                     # being recovered (lvs_jm_vuid). Was previously
                     # current_leader.jm_vuid, which is the leader-node's own
@@ -15940,6 +15947,10 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # same flag without having to re-fetch the cluster setting.
         if cluster.shared_placement:
             distrib_params["shared_placement"] = True
+        # Page copy (snapshot copy-on-write in the distrib): fixed at cluster
+        # creation, persisted per stack entry for the same reason.
+        if cluster.page_copy:
+            distrib_params["page_copy"] = True
         # Failure-domain placement is activated implicitly via the per-node
         # failure_domain id (>= 0) in the distrib cluster map sent by
         # distr_send_cluster_map / distr_add_nodes (see get_distr_cluster_map);

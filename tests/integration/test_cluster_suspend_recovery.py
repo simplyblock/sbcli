@@ -113,6 +113,9 @@ def _cluster(status=Cluster.STATUS_ACTIVE, distr_ndcs=1, distr_npcs=2,
     # logic, so keep the feature off (FD-aware cases live in the unit suite's
     # test_failure_domain.py).
     c.enable_failure_domain = False
+    # A migration that left pages without full fault tolerance degrades the
+    # cluster; these clusters have none (the model default is an empty dict).
+    c.migration_ft_impact = {}
     c.get_id = MagicMock(return_value="cluster-1")
     return c
 

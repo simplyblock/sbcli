@@ -996,7 +996,7 @@ class RPCClient:
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
-                            write_protection_v2=False):
+                            write_protection_v2=False, page_copy=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -1046,6 +1046,8 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
+        if page_copy:
+            params["page_copy"] = True
         return self._request("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):
@@ -1565,7 +1567,7 @@ class RPCClient:
         return self._request("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                        relaxed_mode=False):
+                                        relaxed_mode=False, keep_placed=False):
         params = {
             "name": name,
         }
@@ -1577,6 +1579,10 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        # Page copy distribs only (older data planes reject the parameter): a balancing migration keeps
+        # columns that page copies placed on another online device with anti-affinity kept.
+        if keep_placed:
+            params["keep_placed"] = True
         return self._request("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):

@@ -1045,6 +1045,13 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
+          - name: "--enable-page-copy"
+            help: >
+              Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the
+              cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.
+            dest: page_copy
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1289,6 +1296,13 @@ commands:
               4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster
               creation.
             dest: atomic_4k
+            type: bool
+            action: store_true
+          - name: "--enable-page-copy"
+            help: >
+              Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the
+              cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.
+            dest: page_copy
             type: bool
             action: store_true
           - name: "--name"

@@ -86,16 +86,30 @@ def no_db(monkeypatch):
 
 # ---- restart flow: jc_compression precheck (c2, F1) ----------------------------
 
-def test_regular_restart_compression_check_is_one_call_and_aborts_at_once(no_db):
-    """Before F1: one call, a failure aborts the restart. Unchanged for regular clusters."""
+def test_regular_restart_compression_check_retries_the_transient_failure(no_db):
+    """F1 on a regular cluster too (2026-10-29 page copy soak: a graceful restart
+    aborted twice on "Compression request failed" while the leader re-levelled the
+    returning journal). Retried like on an arbitrated cluster, without a DB read."""
     storage_node_ops._remember_cluster_arbitration(_Cluster(arbitrated=False))
     leader = _Node("leader")
     leader.rpc.answers = [RuntimeError("Compression request failed"), False]
-    slept = []
+    t = [0.0]
+    got = storage_node_ops._jc_compression_status_with_retry(
+        leader, 1, timeout_s=60, interval_s=2, sleep=lambda s: t.__setitem__(0, t[0] + s),
+        clock=lambda: t[0])
+    assert got is False and len(leader.rpc.calls) == 2 and t[0] == 2
+    assert no_db.calls == []
+
+
+def test_regular_restart_compression_check_gives_up_after_the_budget(no_db):
+    leader = _Node("leader")
+    leader.rpc.answers = [RuntimeError("Compression request failed")] * 100
+    t = [0.0]
     with pytest.raises(RuntimeError):
-        storage_node_ops._jc_compression_status_with_retry(leader, 1, sleep=slept.append)
-    assert [c[0] for c in leader.rpc.calls] == ["jc_compression_get_status"]
-    assert slept == [] and no_db.calls == []
+        storage_node_ops._jc_compression_status_with_retry(
+            leader, 1, timeout_s=10, interval_s=2, sleep=lambda s: t.__setitem__(0, t[0] + s),
+            clock=lambda: t[0])
+    assert t[0] <= 10 and len(leader.rpc.calls) <= 6
 
 
 def test_regular_restart_compression_check_success_reads_nothing(no_db):
@@ -111,7 +125,7 @@ def test_arbitrated_restart_compression_check_retries():
     t = [0.0]
     got = storage_node_ops._jc_compression_status_with_retry(
         leader, 1, timeout_s=60, interval_s=2, sleep=lambda s: t.__setitem__(0, t[0] + s),
-        clock=lambda: t[0], arbitrated=True)
+        clock=lambda: t[0])
     assert got is False and len(leader.rpc.calls) == 3 and t[0] == 4
 
 

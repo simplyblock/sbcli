@@ -204,7 +204,51 @@ def start_migration(task, start, **params):
         raise TaskRetry("Failed to start device migration task, retry later")
 
     return checkpoint(task, migration={"name": task.function_params["distr_name"]},
-                      **params)
+                      migration_started=datetime.now(UTC).isoformat(), **params)
+
+
+def _ft_impact_key(task):
+    return f"{task.node_id}/{task.function_params.get('distr_name', '')}"
+
+
+def record_migration_ft_impact(task, entry):
+    """Set (``entry``) or clear (None) the distrib's ``Cluster.migration_ft_impact``."""
+    key = _ft_impact_key(task)
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    if entry is None and key not in (cluster.migration_ft_impact or {}):
+        return
+
+    def _mutate(c):
+        impact = dict(c.migration_ft_impact or {})
+        if entry is None:
+            if key not in impact:
+                return False
+            impact.pop(key)
+        else:
+            impact[key] = entry
+        c.migration_ft_impact = impact
+
+    db.atomic_update(cluster, _mutate)
+
+
+def _node_back_since(cluster_id, started):
+    """Whether a node of the cluster came (back) online after ``started``
+    (the migration's start, ``migration_started``): an outage that ended during
+    the migration, whose errors (source or target not available) and fault
+    tolerance verdict (pages on the then offline devices) are not final.
+    Unknown (no start recorded, e.g. a migration started before an upgrade, or
+    an unparsable stamp) counts as yes: the caller then retries, as before."""
+    if not started:
+        return True
+    try:
+        t0 = datetime.fromisoformat(started)
+        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.online_since and datetime.fromisoformat(node.online_since) >= t0:
+                return True
+    except Exception as e:
+        logger.warning("Migration start / node online stamps not comparable (%s); retrying", e)
+        return True
+    return False
 
 
 def report_migration_status(task, res, allow_all_errors=False, allowed_error_codes=None):
@@ -220,6 +264,7 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
 
     if migration_status == "completed":
         if error_code == 0:
+            record_migration_ft_impact(task, None)
             set_result(task, "Done")
             return
         if error_code in allowed_error_codes or allow_all_errors:
@@ -228,7 +273,34 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
         # Drop the marker so the next attempt starts a fresh migration rather
         # than polling the one that just errored.
         drop_params(task, 'migration')
-        raise TaskRetry(f"mig error: {error_code}, retrying")
+        if cluster_unavailable_state(task.cluster_id):
+            # Something is down: the errors may be its doing, retry once it is back.
+            raise TaskRetry(f"mig error: {error_code}, retrying")
+        if _node_back_since(task.cluster_id, task.function_params.get("migration_started")):
+            # Everything is online now, but a node came back during this migration (2026-10-29 soak: a
+            # network outage ended 3 s before the migration did; its errors and the pages it counted
+            # without full fault tolerance were the outage's). The retry runs with everything online.
+            raise TaskRetry(f"mig error: {error_code}, a node came back during the migration, retrying")
+        # Every node and device is online, so a retry would hit the same errors.
+        # The migration is done; whether the cluster may be ACTIVE depends on
+        # whether the pages it could not place are fault tolerant as they are.
+        ft_pages = res_data.get("ft_impacted_pages")
+        if ft_pages == 0:
+            record_migration_ft_impact(task, None)
+            logger.warning("Migration %s ended with error %s, all nodes online, "
+                           "not retried: the pages it could not place are fault tolerant",
+                           task.uuid, error_code)
+        else:
+            record_migration_ft_impact(task, {
+                "error": error_code, "ft_impacted_pages": ft_pages,
+                "time": datetime.now(UTC).isoformat()})
+            logger.error("Migration %s ended with error %s, all nodes online, not retried: "
+                         "%s pages without full fault tolerance, cluster stays degraded",
+                         task.uuid, error_code,
+                         "unknown number of" if ft_pages is None else ft_pages)
+        set_result(task, f"mig completed with error {error_code}, all nodes online, not retried; "
+                         f"ft_impacted_pages: {ft_pages}")
+        return
 
     if migration_status == "failed":
         raise TaskAbort(migration_status)
