@@ -332,29 +332,38 @@ def rebalance_cluster( cluster: Cluster) -> Response:
     return Response(status_code=204)
 
 
-class DeviceRebalanceDTO(BaseModel):
-    weights_updated: bool
-    started: bool
-    reason: str
+class DeviceGrowthEntryDTO(BaseModel):
+    device_id: str
+    old_size: int
+    new_size: int
+    backend_size: int
+    unused_size: int
+    placement_size: int
 
 
 class DeviceGrowthDTO(BaseModel):
-    devices: builtins.list[dict]
+    grown: bool
+    factor: float
+    devices: builtins.list[DeviceGrowthEntryDTO]
     errors: dict[str, str]
-    uniform: bool
-    rebalance: DeviceRebalanceDTO | None = None
+    reason: str
 
 
 @instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
-def grow_devices(cluster: Cluster, rebalance: bool = True) -> DeviceGrowthDTO:
-    """Grow every online lblk data device of the cluster to the size of its
-    block device, one device at a time. Used after the LUNs of the cluster
-    were grown on the storage array. If they have grown unevenly, the device
-    weights are set to the new sizes and the cluster is rebalanced, unless
-    ``rebalance`` is false."""
+def grow_devices(cluster: Cluster) -> DeviceGrowthDTO:
+    """Grow all lblk data devices of the cluster online by the same factor.
+
+    Every block device is rescanned (for example, after its LUN was grown on
+    the storage array), and every device grows by the smallest growth factor
+    of all of them; the rest of a larger block device stays unused
+    (`unused_size`). If one block device did not grow, nothing grows
+    (`grown` false, `reason`). Device weights and data placement never change.
+    A block device smaller than its device is refused, reported in `errors`,
+    and raises the device_shrunk alert.
+    """
     if cluster.device_mode != constants.DEVICE_MODE_LBLK:
         raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
-    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id(), rebalance=rebalance))
+    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id()))
 
 
 instance_api.include_router(alert_api, prefix='/alerts')

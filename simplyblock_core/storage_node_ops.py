@@ -1262,7 +1262,8 @@ def cluster_growth_ratios(db_controller, cluster_id):
     """Growth of the data devices relative to their placement weight, as
     ``(uniform, min_ratio, max_ratio)``. Journal, new, and failed devices are
     ignored. A ratio above 1 means the device grew after it was placed (see
-    device_controller.resize_device)."""
+    device_controller.grow_cluster_devices, which grows all of them by the
+    same factor)."""
     ratios = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.is_secondary_node:
@@ -1288,8 +1289,8 @@ def scaled_placement_size(db_controller, cluster_id, size):
     a common factor f, their weights still stand for their original sizes, so
     a new device is weighted as size / f; weighting it by its full size would
     give it f times its share of the data. Returns 0 (weight = size) when the
-    cluster has not grown, or has grown unevenly (then the next
-    grow-devices run sets every weight to its size anyway)."""
+    cluster has not grown. Growth is uniform by construction; should the
+    ratios ever disagree, the device keeps its full size as weight."""
     uniform, lo, hi = cluster_growth_ratios(db_controller, cluster_id)
     factor = (lo + hi) / 2
     if not uniform or factor <= 1.0 + GROWTH_UNIFORM_TOLERANCE or not size:

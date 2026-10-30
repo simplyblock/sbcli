@@ -3,19 +3,20 @@ FoundationDB (testcontainer via tests/integration/conftest.py).
 
 What runs REAL here: the FDB persistence of the grown device (size and the
 frozen placement_size), the cluster-map build from the persisted records,
-and device_controller.resize_device / grow_cluster_devices end to end. What
+and device_controller.grow_cluster_devices end to end. What
 is faked: SPDK RPC, the node agent (rescan_block_device), and the event
 fan-out.
 
 Scenarios:
-  1. A grown device persists its new size and keeps its placement size, and
-     the cluster map built from the stored records carries the old weight.
-  2. A second growth keeps the original placement size.
-  3. grow_cluster_devices grows every data device by the same factor and
-     reports the cluster as uniform; the journal device is left alone.
+  1. A uniform growth persists the new sizes and keeps the placement sizes,
+     and the cluster map built from the stored records carries the old
+     weights; a second growth keeps the original placement size.
+  2. Mixed growth (1.5 / 2.0) grows every data device by 1.5, records the
+     unused rest, and leaves the journal device alone.
+  3. A shrunk block device is persisted and nothing grows.
   4. A failed reopen leaves the stored size unchanged and the device
      unavailable.
-  5. placement_size survives an FDB round-trip and defaults to 0.
+  5. placement_size and backend_size survive an FDB round-trip.
 """
 
 import uuid as uuid_mod
@@ -106,21 +107,22 @@ class TestResizePersistence:
         _seed_node(db, [dev])
         read = db.get_storage_device_by_id(dev.get_id())
         assert read.placement_size == 0
+        assert read.backend_size == 0
         assert read.weight_size() == 100 * _GIB
 
-    def test_grown_device_keeps_cluster_map_weight(self, db):
+    def test_uniform_growth_keeps_cluster_map_weight(self, db):
         _seed_cluster(db)
         a, b = _aio_device("S1", 0), _aio_device("S2", 1)
         node = _seed_node(db, [a, b])
-        agent = _agent({a.by_id_path: 300 * _GIB})
+        agent = _agent({a.by_id_path: 300 * _GIB, b.by_id_path: 300 * _GIB})
 
-        res = _run(agent, MagicMock(), device_controller.resize_device, a.get_id())
+        res = _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
 
-        assert res["resized"] is True
-        assert res["uniform"] is False
+        assert res["grown"] is True
         read = db.get_storage_device_by_id(a.get_id())
         assert read.size == 300 * _GIB
         assert read.placement_size == 100 * _GIB
+        assert read.backend_size == 300 * _GIB
 
         fresh = db.get_storage_node_by_id(node.get_id())
         cl_map = distr_controller.get_distr_cluster_map([fresh], fresh, "distr-1")
@@ -133,9 +135,9 @@ class TestResizePersistence:
         _seed_node(db, [a])
         sizes = {a.by_id_path: 200 * _GIB}
         agent = _agent(sizes)
-        _run(agent, MagicMock(), device_controller.resize_device, a.get_id())
+        _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
         sizes[a.by_id_path] = 400 * _GIB
-        _run(agent, MagicMock(), device_controller.resize_device, a.get_id())
+        _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
 
         read = db.get_storage_device_by_id(a.get_id())
         assert read.size == 400 * _GIB
@@ -144,43 +146,43 @@ class TestResizePersistence:
 
 class TestGrowCluster:
 
-    def test_uniform_growth_of_all_data_devices(self, db):
+    def test_mixed_growth_uses_the_smallest_factor(self, db):
         _seed_cluster(db)
         a, b = _aio_device("S1", 0), _aio_device("S2", 1)
         jm = _aio_device("J1", 2, size_gib=10, status=NVMeDevice.STATUS_JM)
-        _seed_node(db, [a, b, jm])
-        agent = _agent({a.by_id_path: 200 * _GIB, b.by_id_path: 200 * _GIB})
+        node = _seed_node(db, [a, b, jm])
+        agent = _agent({a.by_id_path: 150 * _GIB, b.by_id_path: 200 * _GIB})
 
         res = _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
 
         assert res["errors"] == {}
-        assert res["uniform"] is True
-        assert sorted(r["device_id"] for r in res["devices"]) == sorted([a.get_id(), b.get_id()])
+        assert res["grown"] is True
+        assert res["factor"] == 1.5
+        ra, rb = db.get_storage_device_by_id(a.get_id()), db.get_storage_device_by_id(b.get_id())
+        assert (ra.size, rb.size) == (150 * _GIB, 150 * _GIB)
+        assert (ra.unused_size(), rb.unused_size()) == (0, 50 * _GIB)
+        assert (ra.placement_size, rb.placement_size) == (100 * _GIB, 100 * _GIB)
         assert db.get_storage_device_by_id(jm.get_id()).size == 10 * _GIB
-        assert res["rebalance"] is None
-        assert db.get_storage_device_by_id(a.get_id()).placement_size == 100 * _GIB
-
-    def test_uneven_growth_reweights_and_rebalances(self, db):
-        _seed_cluster(db)
-        a, b = _aio_device("S1", 0), _aio_device("S2", 1)
-        node = _seed_node(db, [a, b])
-        agent = _agent({a.by_id_path: 200 * _GIB, b.by_id_path: 300 * _GIB})
-
-        with patch.object(device_controller.tasks_controller, "add_device_mig_task_for_node",
-                          return_value=True) as queue:
-            res = _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
-
-        assert res["uniform"] is False
-        assert res["rebalance"] == {"weights_updated": True, "started": True, "reason": ""}
-        queue.assert_called_once_with(node.get_id())
-        assert db.get_storage_device_by_id(a.get_id()).placement_size == 200 * _GIB
-        assert db.get_storage_device_by_id(b.get_id()).placement_size == 300 * _GIB
-        assert db.get_cluster_by_id(CLUSTER_ID).reweight_pending is False
 
         fresh = db.get_storage_node_by_id(node.get_id())
         cl_map = distr_controller.get_distr_cluster_map([fresh], fresh, "distr-1")
         weights = [i["weight"] for i in cl_map["map_prob"][0]["items"]]
-        assert weights == [200, 300]
+        assert weights == [100, 100]
+
+    def test_shrunk_device_is_persisted_and_nothing_grows(self, db):
+        _seed_cluster(db)
+        a, b = _aio_device("S1", 0), _aio_device("S2", 1)
+        _seed_node(db, [a, b])
+        agent = _agent({a.by_id_path: 150 * _GIB, b.by_id_path: 80 * _GIB})
+
+        res = _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
+
+        assert res["grown"] is False
+        assert b.get_id() in res["errors"]
+        rb = db.get_storage_device_by_id(b.get_id())
+        assert rb.size == 100 * _GIB
+        assert rb.is_shrunk()
+        assert db.get_storage_device_by_id(a.get_id()).size == 100 * _GIB
 
     def test_device_added_after_uniform_growth_is_weighted_on_the_same_scale(self, db):
         from simplyblock_core import storage_node_ops
@@ -203,9 +205,10 @@ class TestResizeFailure:
         rpc = MagicMock()
         rpc.alceml_bdev_backend_resize_end.side_effect = RPCRemoteError("reopen", -7)
 
-        with pytest.raises(ValueError, match="unavailable"):
-            _run(agent, rpc, device_controller.resize_device, a.get_id())
+        res = _run(agent, rpc, device_controller.grow_cluster_devices, CLUSTER_ID)
 
+        assert res["grown"] is False
+        assert "unavailable" in res["errors"][a.get_id()]
         read = db.get_storage_device_by_id(a.get_id())
         assert read.size == 100 * _GIB
         assert read.placement_size == 0

@@ -7,7 +7,6 @@ from simplyblock_core import constants, distr_controller, storage_node_ops, util
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
@@ -1912,35 +1911,34 @@ def set_device_health_assessment(node_id, device_id, assessment: dict):
 
 
 # ---------------------------------------------------------------------------
-# Online growth of lblk devices (a LUN grown on its storage array).
+# Online growth of lblk devices (LUNs grown on their storage array).
 #
 # The base bdev of an lblk device is an SPDK AIO bdev over a kernel block
 # device, and alceml sits directly on it. alceml can swap its backing bdev
 # for a larger one without losing state: resize_begin holds new I/O, drains
 # pending I/O and closes the backing bdev; resize_end reopens it and takes
-# its new size, so the pages beyond the old end become allocatable. Layers
-# above alceml see a fixed virtual size and need no change.
+# the size of the whole block device (alceml has no size limit of its own),
+# so the pages beyond the old end become allocatable. Layers above alceml see
+# a fixed virtual size and need no change.
 #
-# Growing a device does not change its cluster-map weight. The weight is
-# derived from NVMeDevice.placement_size, the size the device had when it was
-# placed, and distrib's map spec (message_format_rpcs__distrib__v5.txt,
-# weight_int) asks for weights never to change, because a change re-places
-# 50% or more of the data. Weights only matter relative to each other, so when
-# every data device grows by the same factor (the normal case: equal LUNs grown
-# together on the array), nothing has to change and nothing moves.
+# Growth is uniform only. The cluster-map weight of a device is derived from
+# NVMeDevice.placement_size, the size the device had when it was placed, and
+# never changes. Weights only matter relative to each other, so the cluster
+# can grow without any data movement exactly when every data device grows by
+# the same factor. grow_cluster_devices therefore rescans every data device,
+# takes the SMALLEST growth factor across all of them, and grows every device
+# by exactly that factor: with three LUNs grown by 1.5 and three by 2.0,
+# every device grows by 1.5. A device whose block device did not grow keeps
+# the factor at 1.0, and nothing grows. The rest of a larger LUN stays unused:
+# placement fills every device in proportion to its weight, so it is never
+# reached, and the capacity statistics leave it out (NVMeDevice.backend_size).
 #
-# After an uneven growth the frozen weights no longer match the capacities,
-# and the added capacity is not fully usable. grow_cluster_devices then sets
-# every weight to the device's current size, pushes the new map to all nodes,
-# and starts the cluster rebalance (rebalance_after_growth). That re-places a
-# large part of the data, in the background and within the migration share of
-# the QoS budget. Correctness does not depend on the static placement: distrib
-# finds data by its recorded location, including locations that were correct
-# under an earlier map (alg_remapped_ranges.hpp, get_location_latest, "STALE"),
-# which is the same mechanism a device addition relies on.
+# A block device smaller than its storage device is never accepted: the
+# rescan records it, logs an error event, raises the device_shrunk alert, and
+# nothing grows until the LUN is restored and rescanned.
 #
-# A device that enters the cluster later gets a weight on the same scale as the
-# grown devices (storage_node_ops.scaled_placement_size), so a uniform growth
+# A device that enters the cluster later gets a weight on the same scale as
+# the grown devices (storage_node_ops.scaled_placement_size), so a growth
 # followed by an expansion does not overfill the new device.
 # ---------------------------------------------------------------------------
 
@@ -1949,6 +1947,10 @@ def set_device_health_assessment(node_id, device_id, assessment: dict):
 RESIZE_RPC_TIMEOUT_SEC = 120
 #: Attempts to reopen the backing bdev before the device is given up.
 RESIZE_END_ATTEMPTS = 3
+#: A cluster-wide growth factor below this counts as no growth.
+GROWTH_MIN_FACTOR = 1.001
+#: Grown device sizes are rounded down to this alignment.
+GROWTH_SIZE_ALIGN = 1024 * 1024
 
 
 def cluster_growth_uniformity(cluster_id):
@@ -1958,9 +1960,25 @@ def cluster_growth_uniformity(cluster_id):
     return storage_node_ops.cluster_growth_ratios(DBController(), cluster_id)
 
 
-def _check_resizable(db_controller, dev, snode):
+def _growth_devices(db_controller, cluster_id):
+    """``(node, device)`` for every data device of the cluster that counts
+    for the growth factor: the same set as the cluster-map weights."""
+    pairs = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW,
+                              NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+                continue
+            if dev.cluster_device_order < 0:
+                continue
+            pairs.append((node, dev))
+    return pairs
+
+
+def _check_resizable(cluster, dev, snode):
     """Raise ValueError when ``dev`` cannot be grown online right now."""
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if cluster.device_mode != constants.DEVICE_MODE_LBLK or dev.bdev_type != "aio":
         raise ValueError("Online resizing is only supported for Linux block devices (lblk device mode)")
     if dev.status != NVMeDevice.STATUS_ONLINE:
@@ -1975,6 +1993,18 @@ def _check_resizable(db_controller, dev, snode):
         raise ValueError("Device has no alceml or AIO bdev recorded")
     if tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev.get_id()):
         raise ValueError("A restart task is active for the device")
+
+
+def _rescan_size(snode, dev):
+    """Make the storage node's host re-read the size of the device's block
+    device (SCSI or NVMe rescan) and return it in bytes."""
+    path = dev.by_id_path or dev.device_path
+    if not path:
+        raise ValueError("No block device path known for the device")
+    result, err = snode.client(timeout=60, retry=1).rescan_block_device(path)
+    if err or not result:
+        raise ValueError(f"Rescan of {path} failed: {err}")
+    return int(result["size"])
 
 
 def _reopen_after_resize(rpc_client, dev):
@@ -2009,43 +2039,10 @@ def _resize_failed(device_id, dev, msg, set_unavailable):
     return ValueError(msg)
 
 
-def resize_device(device_id):
-    """Grow an lblk device online to the size its block device now has.
-
-    The kernel is made to re-read the size first (SCSI or NVMe rescan on the
-    storage node's host). A smaller size is refused. Returns a dict with
-    ``device_id``, ``old_size``, ``new_size``, ``placement_size``,
-    ``resized``, and the cluster's ``uniform`` growth flag with a
-    ``warning`` when it is not uniform. Raises ValueError on refusal or
-    failure; the message says whether the device is unchanged."""
-    db_controller = DBController()
-    try:
-        dev = db_controller.get_storage_device_by_id(device_id)
-        snode = db_controller.get_storage_node_by_id(dev.node_id)
-    except KeyError as e:
-        raise ValueError(f"Device not found: {device_id}") from e
-    _check_resizable(db_controller, dev, snode)
-
-    path = dev.by_id_path or dev.device_path
-    if not path:
-        raise ValueError("No block device path known for the device")
-    result, err = snode.client(timeout=60, retry=1).rescan_block_device(path)
-    if err or not result:
-        raise ValueError(f"Rescan of {path} failed: {err}")
-    new_size = int(result["size"])
-    old_size = dev.size
-
-    if new_size < old_size:
-        raise ValueError(
-            f"The block device shrank from {old_size} to {new_size} bytes. Shrinking is not "
-            f"supported and destroys data: restore the LUN to at least {old_size} bytes")
-    if new_size == old_size:
-        uniform, _, _ = cluster_growth_uniformity(snode.cluster_id)
-        return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
-                "placement_size": dev.weight_size(), "resized": False, "uniform": uniform,
-                "warning": ""}
-
-    logger.info(f"Growing device {device_id} from {old_size} to {new_size} bytes")
+def _reopen_alceml(snode, dev):
+    """Let alceml reopen its AIO bdev at the size the block device has now:
+    resize_begin -> bdev_aio_rescan -> resize_end. Raises ValueError."""
+    device_id = dev.get_id()
     rpc_client = snode.rpc_client()
     try:
         rpc_client.alceml_bdev_backend_resize_begin(
@@ -2066,151 +2063,112 @@ def resize_device(device_id):
     if rescan_error is not None:
         raise _resize_failed(device_id, dev, f"AIO rescan failed: {rescan_error}", False)
 
-    def _apply(d, n=new_size):
-        if d.placement_size <= 0:
-            d.placement_size = d.size
-        d.size = n
-    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
-    fresh = db_controller.get_storage_device_by_id(device_id)
-    device_events.device_resized(fresh, old_size, new_size)
 
-    uniform, lo, hi = cluster_growth_uniformity(snode.cluster_id)
-    warning = ""
-    if not uniform:
-        warning = (
-            f"The data devices of the cluster have grown unevenly (growth factors {lo:.2f} to {hi:.2f}). "
-            "Placement keeps filling every device in proportion to its original size, so the added "
-            "capacity is only fully usable once all data devices have grown by the same factor, or "
-            "after cluster grow-devices has updated the weights and rebalanced the cluster.")
-        logger.warning(warning)
-    return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
-            "placement_size": fresh.weight_size(), "resized": True, "uniform": uniform,
-            "warning": warning}
+def _growth_result(grown, factor, devices, errors, reason):
+    return {"grown": grown, "factor": round(factor, 6), "devices": devices,
+            "errors": errors, "reason": reason}
 
 
-#: Tasks that move data across the cluster map or change it. New weights are
-#: never pushed while one of them is open.
-_PLACEMENT_TASKS = (
-    JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG,
-    JobSchedule.FN_BALANCING_AFTER_NODE_RESTART, JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
-    JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION, JobSchedule.FN_CLUSTER_EXPAND,
-    JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG,
-)
+def _device_report(dev, old_size):
+    return {"device_id": dev.get_id(), "old_size": old_size, "new_size": dev.size,
+            "backend_size": dev.backend_size, "unused_size": dev.unused_size(),
+            "placement_size": dev.weight_size()}
 
 
-def _reweight_blocker(db_controller, cluster_id):
-    """Why new weights cannot be pushed now, or "" when they can. The new map
-    must reach every node before any data moves: a migration that runs while
-    nodes disagree about placement can lose writes."""
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
-        return f"the cluster is {cluster.status}, not active"
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
-            continue
-        if node.status != StorageNode.STATUS_ONLINE:
-            return f"storage node {node.get_id()} is {node.status}"
-        for dev in node.nvme_devices:
-            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW,
-                              NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
-                continue
-            if dev.status != NVMeDevice.STATUS_ONLINE:
-                return f"device {dev.get_id()} is {dev.status}"
-    for task in db_controller.get_job_tasks(cluster_id):
-        if (task.function_name in _PLACEMENT_TASKS and task.status != JobSchedule.STATUS_DONE
-                and not task.canceled):
-            return f"task {task.uuid} ({task.function_name}) is still open"
-    return ""
+def grow_cluster_devices(cluster_id):
+    """Grow every data device of an lblk cluster by the same factor: the
+    smallest growth of any of their block devices (see the section comment).
 
+    Every data device must be online and growable; otherwise nothing grows.
+    All block devices are rescanned first and their sizes recorded. If one
+    of them is smaller than its device, the shrink is reported (event and
+    device_shrunk alert) and nothing grows. Otherwise every alceml reopens
+    its grown block device, and only when all of them succeeded is every
+    device size set to ``size * factor``; a failure in between leaves all
+    recorded sizes unchanged, so the cluster stays uniform and a re-run
+    finishes the job. Repeated runs without new growth change nothing.
 
-def rebalance_after_growth(cluster_id):
-    """Set the cluster-map weight of every online data device to its current
-    size, push the new map to every node, and start the cluster rebalance.
-
-    Refused (nothing changed) unless the cluster is active, every node and
-    data device is online, and no migration or expansion is open. If a map
-    push fails, the new weights stay recorded with ``reweight_pending`` and
-    the rebalance is not started; the next call pushes again. Returns
-    ``{"weights_updated": bool, "started": bool, "reason": str}``:
-    ``weights_updated`` once every node runs on the new weights, ``started``
-    once the rebalance is queued, ``reason`` when either is missing."""
+    Returns ``{"grown": bool, "factor": float, "devices": [...],
+    "errors": {device_id: message}, "reason": str}``; every device entry has
+    ``device_id``, ``old_size``, ``new_size``, ``backend_size``,
+    ``unused_size`` and ``placement_size``."""
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
-    blocker = _reweight_blocker(db_controller, cluster_id)
-    if blocker:
-        if cluster.reweight_pending:
-            return _rebalance_outcome(False, False,
-                                      f"New weights recorded, cluster map not pushed yet: {blocker}")
-        return _rebalance_outcome(False, False, f"Weights not updated: {blocker}")
+    if cluster.device_mode != constants.DEVICE_MODE_LBLK:
+        raise ValueError("Online resizing is only supported for Linux block devices (lblk device mode)")
+    pairs = _growth_devices(db_controller, cluster_id)
+    if not pairs:
+        return _growth_result(False, 1.0, [], {}, "The cluster has no data devices")
 
-    if not cluster.reweight_pending:
-        db_controller.atomic_update(cluster, lambda c: setattr(c, "reweight_pending", True))
+    errors = {}
+    for node, dev in pairs:
+        try:
+            _check_resizable(cluster, dev, node)
+        except ValueError as e:
+            errors[dev.get_id()] = str(e)
+    if errors:
+        return _growth_result(False, 1.0, [], errors,
+                              "Not every data device can be grown; growth is uniform across all "
+                              "data devices, so nothing was grown")
 
-        def _apply(n):
-            for d in n.nvme_devices:
-                if d.status == NVMeDevice.STATUS_ONLINE:
-                    d.placement_size = d.size
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status != StorageNode.STATUS_REMOVED:
-                db_controller.atomic_update(node, _apply)
-        logger.info(f"Cluster {cluster_id}: device weights set to the current device sizes")
+    backend = {}
+    for node, dev in pairs:
+        try:
+            backend[dev.get_id()] = _rescan_size(node, dev)
+        except ValueError as e:
+            errors[dev.get_id()] = str(e)
+    if errors:
+        return _growth_result(False, 1.0, [], errors,
+                              "Not every block device could be rescanned; nothing was grown")
 
-    nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-             if n.status == StorageNode.STATUS_ONLINE]
-    failed = [n.get_id() for n in nodes if not distr_controller.send_cluster_map_to_node(n)]
-    if failed:
-        return _rebalance_outcome(
-            False, False, f"New weights recorded, but the cluster map push failed on {', '.join(failed)}; "
-                          "run cluster grow-devices again to retry")
+    for node, dev in pairs:
+        size = backend[dev.get_id()]
+        if dev.backend_size != size:
+            _atomic_device_set(db_controller, node.get_id(), dev.get_id(),
+                               lambda d, s=size: setattr(d, "backend_size", s))
+            dev.backend_size = size
+    shrunk = [(node, dev) for node, dev in pairs if dev.is_shrunk()]
+    if shrunk:
+        for _, dev in shrunk:
+            device_events.device_shrink_detected(dev, dev.backend_size)
+            errors[dev.get_id()] = (
+                f"The block device shrank to {dev.backend_size} bytes, below the device size of "
+                f"{dev.size} bytes. Shrinking is not supported: restore the LUN to at least the "
+                f"device size")
+        return _growth_result(False, 1.0, [], errors, "A block device is smaller than its device; nothing was grown")
 
-    db_controller.atomic_update(db_controller.get_cluster_by_id(cluster_id),
-                                lambda c: setattr(c, "reweight_pending", False))
-    # The same rebalance as POST /clusters/{id}/rebalance: one expansion
-    # migration per distrib, under a balancing master task.
-    queued = bool(nodes) and tasks_controller.add_device_mig_task_for_node(nodes[0].get_id())
-    device_events.devices_reweighted(cluster_id, queued)
-    if not queued:
-        return _rebalance_outcome(
-            True, False, "Weights updated, but no rebalance was queued (no volume store holds data, or a "
-                         "node removal is recorded); start it with the cluster rebalance API when needed")
-    return _rebalance_outcome(True, True, "")
+    factor = min(backend[dev.get_id()] / dev.size for _, dev in pairs)
+    if factor < GROWTH_MIN_FACTOR:
+        return _growth_result(False, 1.0, [_device_report(dev, dev.size) for _, dev in pairs], {},
+                              "Not every block device has grown; growth is uniform across all data "
+                              "devices, so nothing was grown")
 
+    targets = {}
+    for _, dev in pairs:
+        target = int(dev.size * factor) // GROWTH_SIZE_ALIGN * GROWTH_SIZE_ALIGN
+        targets[dev.get_id()] = min(max(target, dev.size), backend[dev.get_id()])
 
-def _rebalance_outcome(weights_updated, started, reason):
-    return {"weights_updated": weights_updated, "started": started, "reason": reason}
+    logger.info(f"Growing {len(pairs)} data devices of cluster {cluster_id} by factor {factor:.4f}")
+    for node, dev in pairs:
+        try:
+            _reopen_alceml(node, dev)
+        except ValueError as e:
+            errors[dev.get_id()] = str(e)
+            return _growth_result(False, factor, [], errors,
+                                  "A device failed to grow; all device sizes are unchanged, run "
+                                  "grow-devices again once the device is back")
 
+    reports = []
+    for node, dev in pairs:
+        old_size = dev.size
+        new_size = targets[dev.get_id()]
 
-def grow_cluster_devices(cluster_id, rebalance=True):
-    """Grow every online lblk data device of a cluster to the size of its
-    block device, one device at a time. Devices whose size did not change
-    are left alone; a device that fails does not stop the others.
-
-    When the devices have grown unevenly and ``rebalance`` is set, the
-    weights are updated and the cluster is rebalanced (rebalance_after_growth),
-    unless a device failed to grow. Returns ``{"devices": [...], "errors":
-    {...}, "uniform": bool, "rebalance": {...} | None}`` (see
-    rebalance_after_growth for the rebalance dict);
-    ``uniform`` describes the growth before any weight change."""
-    db_controller = DBController()
-    results, errors = [], {}
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.is_secondary_node:
-            continue
-        for dev in node.nvme_devices:
-            if dev.status != NVMeDevice.STATUS_ONLINE or dev.bdev_type != "aio":
-                continue
-            try:
-                results.append(resize_device(dev.get_id()))
-            except ValueError as e:
-                errors[dev.get_id()] = str(e)
-    uniform, _, _ = cluster_growth_uniformity(cluster_id)
-    outcome = None
-    pending = db_controller.get_cluster_by_id(cluster_id).reweight_pending
-    if rebalance and (not uniform or pending):
-        if errors and not pending:
-            outcome = _rebalance_outcome(
-                False, False, "Weights not updated: some devices failed to grow; fix them and run "
-                              "cluster grow-devices again")
-        else:
-            outcome = rebalance_after_growth(cluster_id)
-    return {"devices": results, "errors": errors, "uniform": uniform, "rebalance": outcome}
+        def _apply(d, n=new_size):
+            if d.placement_size <= 0:
+                d.placement_size = d.size
+            d.size = n
+        _atomic_device_set(db_controller, node.get_id(), dev.get_id(), _apply)
+        fresh = db_controller.get_storage_device_by_id(dev.get_id())
+        device_events.device_resized(fresh, old_size, new_size)
+        reports.append(_device_report(fresh, old_size))
+    return _growth_result(True, factor, reports, {}, "")

@@ -72,6 +72,7 @@ CLUSTER_CAPACITY_CRITICAL = "cluster_capacity_critical"
 CLUSTER_PROV_CAPACITY_CRITICAL = "cluster_provisioned_capacity_critical"
 DEVICE_SLOW = "device_slow"
 DEVICE_UNHEALTHY = "device_unhealthy"
+DEVICE_SHRUNK = "device_shrunk"
 
 SEVERITY_CRITICAL = "critical"
 SEVERITY_WARNING = "warning"
@@ -290,6 +291,19 @@ def _device_alerts(cluster_id, nodes) -> list[dict]:
 
         label = _node_label(node)
         for dev in (node.nvme_devices or []):
+            # A block device (LUN) seen smaller than its storage device by
+            # the last rescan (device_controller.grow_cluster_devices). It is
+            # a state: it resolves when a rescan sees the restored size.
+            backend_size = getattr(dev, "backend_size", 0) or 0
+            if 0 < backend_size < (getattr(dev, "size", 0) or 0):
+                alerts.append(_alert(
+                    DEVICE_SHRUNK, SEVERITY_CRITICAL,
+                    f"block device of device {dev.get_id()} on node {label} shrank to "
+                    f"{utils.humanbytes(backend_size)}, below the device size of "
+                    f"{utils.humanbytes(dev.size)}: restore the LUN size",
+                    cluster_id, node_id=node.get_id(), device_id=dev.get_id(),
+                    device_status=dev.status,
+                    serial_number=getattr(dev, "serial_number", "")))
             # Removed counts: a device that vanished from an otherwise
             # healthy node is a failure or a physical pull, and either way
             # somebody has to look. The one removal that is not is the

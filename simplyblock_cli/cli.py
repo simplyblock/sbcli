@@ -60,7 +60,6 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__device_hang(subparser)
         self.init_storage_node__get_device(subparser)
         self.init_storage_node__restart_device(subparser)
-        self.init_storage_node__resize_device(subparser)
         self.init_storage_node__add_device(subparser)
         self.init_storage_node__remove_device(subparser)
         self.init_storage_node__set_failed_device(subparser)
@@ -253,10 +252,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'restart-device', 'Restarts a storage device.')
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
         subcommand.add_argument('--force', help='Force restart.', dest='force', action='store_true')
-
-    def init_storage_node__resize_device(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'resize-device', 'Grows a Linux block device (lblk) online to the size of its block device.')
-        subcommand.add_argument('device_id', help='The storage device id.', type=str)
 
     def init_storage_node__add_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-device', 'Adds a new storage device.')
@@ -553,9 +548,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__grow_devices(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows every Linux block device (lblk) of the cluster online to the size of its block device.')
+        subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows all Linux block devices (lblk) of the cluster online by the same factor.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
-        subcommand.add_argument('--no-rebalance', help='Keep the device weights after an uneven growth and do not rebalance the cluster.', default=False, dest='no_rebalance', action='store_true')
 
     def init_cluster__show(self, subparser):
         subcommand = self.add_sub_command(subparser, 'show', 'Shows a cluster\'s statistics.')
@@ -1563,8 +1557,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_node__get_device(sub_command, args)
                 elif sub_command in ['restart-device']:
                     ret = self.storage_node__restart_device(sub_command, args)
-                elif sub_command in ['resize-device']:
-                    ret = self.storage_node__resize_device(sub_command, args)
                 elif sub_command in ['add-device']:
                     ret = self.storage_node__add_device(sub_command, args)
                 elif sub_command in ['remove-device']:
