@@ -425,17 +425,55 @@ def uncordon_leftovers() -> None:
 
     This is bring-up for a cluster that is about to be built from scratch,
     so no earlier run's cordon is worth honouring. Masters are left alone.
+
+    custom-columns, not jsonpath. The jsonpath this used to carry embedded a
+    real newline where kubectl wanted the two characters backslash-n, so
+    kubectl answered "unterminated quoted string" and returned nothing on
+    every call -- and the result was never checked, so this helper silently
+    did nothing from the day it was written. It was added to prevent exactly
+    the bring-up failure it then failed to prevent, in run 41037615762.
+    custom-columns needs no quoting and cannot fail that way.
     """
-    out, _ = kubectl_out(
-        "get", "nodes", "-o",
-        "jsonpath={range .items[?(@.spec.unschedulable==true)]}"
-        "{.metadata.name}{\"\n\"}{end}")
-    names = [n.strip() for n in (out or "").splitlines()
-             if n.strip() and "master" not in n]
-    for name in names:
+    def _cordoned_workers():
+        out, err = kubectl_out(
+            "get", "nodes", "--no-headers", "-o",
+            "custom-columns=:metadata.name,:spec.unschedulable")
+        if err and err.strip():
+            return None, err.strip()
+        names = []
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "true"                     and "master" not in parts[0]:
+                names.append(parts[0])
+        return names, ""
+
+    cordoned, err = _cordoned_workers()
+    if cordoned is None:
+        # Loud. A cleanup helper that cannot see is worse than none: it
+        # reports success by saying nothing, and the cost lands on the next
+        # run as an unrelated-looking error.
+        log(f"WARNING: could not list nodes to check for leftover cordons: "
+            f"{err[:200]}")
+        return
+    if not cordoned:
+        log("no leftover cordons")
+        return
+
+    for name in cordoned:
         log(f"uncordoning {name}: a previous run left it cordoned, and "
             f"discovery declines a cordoned worker")
         kubectl("uncordon", name, check=False)
+
+    # Say whether it worked rather than assume. A cordon that survives this
+    # is the difference between a bring-up and a confusing stripe-width
+    # refusal several minutes later.
+    still, _ = _cordoned_workers()
+    if still:
+        log(f"WARNING: still cordoned after uncordon: {', '.join(still)}. "
+            f"Discovery will decline these and the stripe check will then "
+            f"fail on node count.")
+    else:
+        log(f"uncordoned {len(cordoned)} leftover worker(s)")
 
 
 def run_discovery(config_name: str, timeout: int) -> str:

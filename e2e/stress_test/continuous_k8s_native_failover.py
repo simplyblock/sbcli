@@ -6283,8 +6283,35 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
             if test_failed:
                 summary = "; ".join(failure_reasons) if failure_reasons else "unknown error"
                 self.logger.error(f"[cleanup] Test FAILED -- reasons: {summary}")
+                # A cordon is not debug state. Preserving the PVCs, the Jobs
+                # and the cluster for inspection is the point of this branch;
+                # leaving a worker of shared infrastructure unschedulable is
+                # not, and it is not even ours to keep.
+                #
+                # _cleanup_all_k8s_resources uncordons first "whatever else
+                # fails below" -- but this branch skips that method whole, so
+                # the uncordon went with it. Run 41015882185 cordoned
+                # worker-5 at 08:42:15 for a storage_node_reboot, failed at
+                # 08:56:33 before the recovery path uncordoned it, and took
+                # this branch. The next bring-up then saw five workers and
+                # refused the 2+2 stripe, reporting stripe width rather than
+                # a cordon.
+                try:
+                    left = self.k8s_utils.uncordon_all_workers()
+                    if left:
+                        self.logger.warning(
+                            "[cleanup] uncordoned %s on the way out; the run "
+                            "failed between a cordon and its uncordon, and a "
+                            "cordon left behind fails the NEXT bring-up",
+                            ", ".join(left))
+                except Exception as exc:                  # noqa: BLE001
+                    self.logger.error(
+                        "[cleanup] COULD NOT UNCORDON (%s). The next "
+                        "bring-up may refuse on stripe width; uncordon by "
+                        "hand before rerunning.", str(exc)[:140])
                 self.logger.info(
-                    "[cleanup] Skipping resource cleanup to preserve state for debugging"
+                    "[cleanup] Skipping resource cleanup to preserve state "
+                    "for debugging (cordons excepted, see above)"
                 )
                 raise AssertionError(f"Stress test failed: {summary}")
             else:
