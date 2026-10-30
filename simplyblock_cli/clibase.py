@@ -165,11 +165,12 @@ class CLIWrapperBase:
         # max-subsys, the huge-page floor and the vCPU count are cluster-level
         # settings now, and this command runs on the host before it belongs to
         # any cluster, so it cannot read them. It therefore sizes the host for
-        # the product ceiling (MAX_SUBSYSTEMS_PER_NODE): any cluster value then
-        # fits, and add-node/restart push the cluster's actual numbers into the
-        # host config. Sizing for a smaller default instead would leave a node
-        # unable to honour a larger cluster setting.
-        max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+        # the product default (DEFAULT_SUBSYSTEMS_PER_NODE), which is what a
+        # cluster without --max-subsys runs with. A cluster that sets a larger
+        # value, up to MAX_SUBSYSTEMS_PER_NODE, gets it at add-node, which
+        # resizes the host config before it reserves the huge pages
+        # (reserve_cluster_hugepages); restart recomputes it the same way.
+        max_lvol = constants.DEFAULT_SUBSYSTEMS_PER_NODE
         max_size = 0
         number_of_devices = args.number_of_devices or 0
         sockets_to_use = [0]

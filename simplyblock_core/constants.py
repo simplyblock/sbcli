@@ -487,7 +487,16 @@ MAX_NAMESPACES_PER_SUBSYSTEM = 50
 # reserved huge pages for subsystems it could never serve and operators
 # believed a limit that did not hold. Ingress now rejects anything above
 # this; internal readers of an already-stored config clamp with a warning.
-MAX_SUBSYSTEMS_PER_NODE = 75
+# Raised 75 -> 500 on 2026-10-29.
+MAX_SUBSYSTEMS_PER_NODE = 500
+
+# Subsystems per node a host is sized for when nothing asks for more: what
+# `sn configure` prices huge pages for, and so what a cluster created without
+# --max-subsys (max_subsys = 0, the product default) runs with. Kept apart
+# from the ceiling above, which costs ~35 MiB of huge pages per subsystem:
+# sizing every host for the ceiling would reserve ~17 GiB on nodes that never
+# carry more than this.
+DEFAULT_SUBSYSTEMS_PER_NODE = 75
 
 # Hard cap on open-epoch members of one consistency group. The group snapshot
 # freezes I/O across every member with one bdev_lvol_snapshot_group call, so a
