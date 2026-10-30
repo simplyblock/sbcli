@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 
 logger = utils.get_logger(__name__)
 
-#: The attachment the operator names for management traffic. It carries data only when no other does.
+#: The management attachment of a record written before the operator stopped declaring one
+#: (it declares data networks only). It carries the data only when no other interface does.
 MANAGEMENT_INTERFACE = "mgmt0"
 ATTACHED_NET_TYPE = "attached"
 #: The NIC of a pod serving on the pod network: the CNI's interface, fronted by a Service.
