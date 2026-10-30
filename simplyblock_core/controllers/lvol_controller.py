@@ -2886,6 +2886,14 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         if not force_delete:
             return
 
+    # A deleted volume cuts over nowhere: end a cutover still running for it.
+    try:
+        cluster_id = (snode.cluster_id if snode
+                      else db_controller.get_pool_by_id(lvol.pool_uuid).cluster_id)
+        _cancel_replication_cutover(lvol.get_id(), db_controller.get_job_tasks(cluster_id))
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not cancel the cutover task of %s: %s", lvol.get_id(), e)
+
     # Consistency-group detach on delete (design §8.2): close the member's
     # epoch so future generations exclude it, but PRESERVE its snapshots in
     # prior generations. delete_lvol only removes a snapshot the volume was
@@ -5058,7 +5066,24 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
             if snap.lvol.uuid == lvol.uuid:
                 tasks_controller.cancel_task(task.uuid)
 
+    _cancel_replication_cutover(lvol_id, tasks)
     return True
+
+
+def _cancel_replication_cutover(lvol_id, tasks):
+    """Cancel the volume's cutover task that has not finished.
+
+    A cutover cannot finish once the volume stops replicating or is deleted,
+    yet nothing ended its task: the claim of a volume deleted mid-migration
+    left the task suspended for good, holding the volume's turn and naming a
+    volume that no longer exists (bf6 2026-10-29, vol-2 and vol-3)."""
+    for task in tasks:
+        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
+                and task.status != JobSchedule.STATUS_DONE and not task.canceled
+                and task.function_params.get("lvol_id") == lvol_id):
+            logger.info("Cancelling cutover task %s of volume %s: it no longer replicates",
+                        task.uuid, lvol_id)
+            tasks_controller.cancel_task(task.uuid)
 
 
 def _claim_target_nsid(db_controller, new_lvol, target_node):

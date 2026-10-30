@@ -186,13 +186,56 @@ def process_snap_delete_finish(snap, completed_node):
         # between loses nothing: worst case the hand-off is repeated. No delete
         # event here -- the snapshot is not gone until its last copy is, which
         # is the branch below.
+        _unlink_from_chain(snap)
         snap.remove(db.kv_store)
         snode = db.get_storage_node_by_id(new_main_instance.lvol.node_id)
         logger.info(f"Process Snapshot delete on node {snode.get_id()}")
         process_snap_delete(new_main_instance, snode)
     else:
         snapshot_events.snapshot_delete(snap)
+        _unlink_from_chain(snap)
         snap.remove(db.kv_store)
+
+
+def _unlink_from_chain(snap):
+    """Close the gap a deleted snapshot leaves in its volume's chain.
+
+    A snapshot's prev/next links are set when it is taken or lands and were
+    never updated when a neighbour went. After a cutover prunes the endgame's
+    landing copies, the copy the migrated volume is cloned from still named a
+    deleted predecessor, so walking its lineage (retirement after the next
+    migration) stopped there, and every older copy -- including chain
+    ancestors a return trip re-sent -- was never retired (bf6 2026-10-29: 65
+    snapshots, 74 GiB, on a cluster with no volumes). The successor now takes
+    over the deleted snapshot's predecessor, and the predecessor its
+    successor."""
+    from simplyblock_core.controllers import replication_snapshot_retire
+    snap_id = snap.get_id()
+    prev_id = getattr(snap, "prev_snap_uuid", "") or ""
+    next_id = getattr(snap, "next_snap_uuid", "") or ""
+    if not prev_id and not next_id:
+        return
+
+    def relink(neighbour_id, field, expected, replacement):
+        if not neighbour_id:
+            return
+        try:
+            neighbour = db.get_snapshot_by_id(neighbour_id)
+        except KeyError:
+            return
+        if getattr(neighbour, field, "") != expected:
+            return
+
+        def apply(s):
+            if getattr(s, field, "") == expected:
+                setattr(s, field, replacement)
+
+        fresh = db.atomic_update(neighbour, apply)
+        if fresh is not None:
+            replication_snapshot_retire._sync_mini(db, fresh)
+
+    relink(next_id, "prev_snap_uuid", snap_id, prev_id)
+    relink(prev_id, "next_snap_uuid", snap_id, next_id)
 
 
 def process_snap_delete_try_again(snap):
@@ -574,11 +617,28 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
     # convert ANY future terminal failure into a silent halt.
     task = _live_replication_task(full)
     if task is None:
+        # Re-queue the transfer before giving up on it. Resuming the cadence at
+        # once stacked a new snapshot behind every transfer that gave up (bf6
+        # 2026-10-29: 36 resumes in round 4, 14 unreplicated snapshots on one
+        # volume, each a layer and each counted as a full region of backlog),
+        # while the next attempt at the SAME snapshot would have carried the
+        # same data. Only a snapshot that keeps failing releases the cadence.
+        attempts = _replication_attempts(full)
+        if attempts <= _CADENCE_REQUEUE_LIMIT:
+            logger.warning(
+                "Internal snapshot %s of lvol %s has not replicated and its "
+                "replication task ended; queueing it again (attempt %d of %d) "
+                "instead of taking another snapshot",
+                full.get_id(), lvol.get_id(), attempts + 1, _CADENCE_REQUEUE_LIMIT + 1)
+            from simplyblock_core.controllers import tasks_controller
+            tasks_controller.add_snapshot_replication_task(
+                full.cluster_id, full.lvol.node_id, full.get_id())
+            return full
         logger.error(
-            "Internal snapshot %s of lvol %s never replicated and has no live "
-            "replication task; resuming the cadence. Replication for this "
-            "volume is NOT making progress -- investigate the transfer.",
-            full.get_id(), lvol.get_id())
+            "Internal snapshot %s of lvol %s never replicated after %d attempts "
+            "and has no live replication task; resuming the cadence. "
+            "Replication for this volume is NOT making progress -- investigate "
+            "the transfer.", full.get_id(), lvol.get_id(), attempts)
         return None
     # Its transfer is complete and only the merge and convert on the target
     # remain: the next snapshot may transfer meanwhile (constants.
@@ -593,6 +653,22 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
 
 #: _live_replication_task's answer when the tasks cannot be read
 _UNKNOWN_TASK = object()
+
+#: How often the cadence re-queues the transfer of an outstanding snapshot
+#: whose task ended before it gives up on it and takes the next snapshot.
+_CADENCE_REQUEUE_LIMIT = 3
+
+
+def _replication_attempts(snapshot):
+    """How many replication tasks *snapshot* has had (ended or not)."""
+    try:
+        node = db.get_storage_node_by_id(snapshot.lvol.node_id)
+        tasks = db.get_job_tasks(node.cluster_id)
+    except Exception:                                   # noqa: BLE001
+        return _CADENCE_REQUEUE_LIMIT + 1   # unknown: keep the old behaviour
+    return sum(1 for t in tasks
+               if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+               and t.function_params.get("snapshot_id") == snapshot.get_id())
 
 
 def _live_replication_task(snapshot):

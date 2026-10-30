@@ -120,6 +120,44 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
     return None
 
 
+#: Bound of the clone-ancestry walk in _descendant_destination_lvol: a cycle
+#: guard, as in the other chain walks, not a limit on how often a volume moves.
+_ANCESTRY_MAX_HOPS = 256
+
+
+def _descendant_destination_lvol(snapshot):
+    """The live volume with a replication destination whose clone ancestry
+    holds *snapshot*, or None.
+
+    A landing copy belongs to its REP_* receiving volume, which has no
+    destination of its own. When the volume cloned from such copies replicates
+    on (the return trip of a migration), its chain ancestors are sent first,
+    and a task for one of them that carries no dest_lvol_id resolved its
+    destination from the receiving volume and was dropped -- after which the
+    descendant waited on the ancestor until it gave up (bf6 2026-10-29 round
+    5: vol-5 stalled ~15 minutes, snapshots piling up meanwhile)."""
+    target = snapshot.get_id()
+    try:
+        lvols = db.get_lvols(snapshot.cluster_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Cannot list volumes to find the descendant of %s: %s",
+                       target, e)
+        return None
+    for lvol in lvols:
+        if not lvol.replication_node_id or not lvol.cloned_from_snap:
+            continue
+        snap_id, hops = lvol.cloned_from_snap, 0
+        while snap_id and hops < _ANCESTRY_MAX_HOPS:
+            if snap_id == target:
+                return lvol
+            try:
+                snap_id = db.get_snapshot_by_id(snap_id).prev_snap_uuid
+            except KeyError:
+                break
+            hops += 1
+    return None
+
+
 def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
     """The deepest chain ancestor of *snapshot* that must replicate FIRST.
 
@@ -613,8 +651,15 @@ def process_snap_replicate_start(task, snapshot):
         snode, snapshot, replicate_to_source)
     if verdict == "pending":
         from simplyblock_core.controllers import tasks_controller
-        dest_lvol_id = (task.function_params.get("dest_lvol_id")
-                        or snapshot.lvol.get_id())
+        dest_lvol_id = task.function_params.get("dest_lvol_id")
+        if not dest_lvol_id:
+            # A snapshot of a receiving volume has no destination of its own:
+            # its ancestors travel for the live volume cloned from it.
+            if snapshot.lvol.replication_node_id:
+                dest_lvol_id = snapshot.lvol.get_id()
+            else:
+                descendant = _descendant_destination_lvol(snapshot)
+                dest_lvol_id = descendant.get_id() if descendant else snapshot.lvol.get_id()
         tasks_controller.add_snapshot_replication_task(
             snapshot.cluster_id, task.node_id, ancestor.get_id(),
             replicate_to_source=replicate_to_source, dest_lvol_id=dest_lvol_id)
@@ -689,6 +734,13 @@ def process_snap_replicate_start(task, snapshot):
                     dest_lvol = db.get_lvol_by_id(task.function_params["dest_lvol_id"])
                 except KeyError:
                     pass
+            if not dest_lvol.replication_node_id:
+                # Queued without the hint (a task for the same snapshot that
+                # already existed keeps its own params): find the descendant.
+                descendant = _descendant_destination_lvol(snapshot)
+                if descendant is not None:
+                    dest_lvol = descendant
+                    task.function_params["dest_lvol_id"] = descendant.get_id()
             if not dest_lvol.replication_node_id:
                 msg = (f"LVol {snapshot.lvol.get_id()} has no replication destination; "
                        f"dropping replication task for snapshot {snapshot.get_id()}")
