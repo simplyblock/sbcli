@@ -1544,6 +1544,28 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
             logger.error(f"Failed to create raid_jm_{node}")
             return False
 
+    # The raid has no superblock, so creating it with both legs neither resyncs
+    # nor tells a stale leg from a current one: a leg taken out of the raid
+    # while the JM kept writing would be read as current and the JM alceml
+    # fails to load (SFAM-2843). Drop such legs before the alceml reads, and
+    # re-add them (raid1 rebuilds them from the current leg) once it is up.
+    stale_legs: list[str] = []
+    if after_restart and jm_dev and plan["level"] != jm_raid.RAID_NONE:
+        top_legs = leg_bdevs or plan["members"]
+        stale_legs = [leg for leg in jm_dev.stale_jm_legs if leg in top_legs]
+        if len(stale_legs) >= len(top_legs):
+            logger.error("Every JM raid leg of %s is marked stale (%s): mounting them all",
+                         node[:8], stale_legs)
+            stale_legs = []
+        for leg in stale_legs:
+            logger.warning("JM raid leg %s is stale: removing it from %s before the JM alceml loads",
+                           leg, raid_bdev)
+            try:
+                rpc_client.bdev_raid_remove_base_bdev(leg)
+            except RPCRemoteError as e:
+                logger.error("Failed to remove stale JM raid leg %s: %s", leg, e)
+                return False
+
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
@@ -1608,6 +1630,14 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
 
     ret = rpc_client.bdev_get(raid_bdev)
 
+    for leg in stale_legs:
+        # Stays recorded as stale until the health check sees the rebuild done.
+        logger.info("Re-adding stale JM raid leg %s to %s", leg, raid_bdev)
+        try:
+            rpc_client.bdev_raid_add_base_bdev(raid_bdev, leg)
+        except RPCRemoteError as e:
+            logger.warning("Failed to re-add JM raid leg %s (JM runs degraded): %s", leg, e)
+
     return JMDevice({
         'uuid': alceml_id,
         'device_name': jm_bdev,
@@ -1617,6 +1647,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
         'raid_bdev': raid_bdev,
         'jm_leg_bdevs': leg_bdevs,
         'jm_leg_members': leg_members,
+        'stale_jm_legs': stale_legs,
         'alceml_bdev': alceml_name,
         'alceml_name': alceml_name,
         'jm_bdev': jm_bdev,

@@ -159,6 +159,12 @@ class JMDevice(NVMeDevice):
     # the per-leg member partitions. Empty for single-device (no-raid) JMs.
     jm_leg_bdevs: list[str] = default_factory(list)
     jm_leg_members: list = default_factory(list)
+    # Top-raid1 base bdevs (see jm_raid.leg_of) taken out of the raid while the
+    # JM kept writing to the others, so their content is stale. The raid has no
+    # superblock, so this record is the only thing that stops a restart from
+    # mounting such a leg as current; a leg leaves it only once its rebuild is
+    # seen complete (SFAM-2843).
+    stale_jm_legs: list[str] = default_factory(list)
 
 
 class RemoteDevice(BaseModel):
