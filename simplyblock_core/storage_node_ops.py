@@ -10647,10 +10647,11 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
         return True
     else:
-        # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
+        # Minimum 5 vCPUs: the smallest cluster vCPU budget (4) plus one for the
+        # system, as add_node requires. RAM 4GB min. Plus 0.2% of the storage.
         total_cores = os.cpu_count() or 0
-        if total_cores < 6:
-            raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
+        if total_cores < 5:
+            raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 5 cores required.")
 
         if lblk_selection is None:
             # load vfio_pci and uio_pci_generic (nvme mode only — lblk keeps
