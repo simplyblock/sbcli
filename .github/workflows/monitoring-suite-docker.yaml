@@ -244,6 +244,7 @@ jobs:
         with:
           sparse-checkout: |
             .github/actions/lab-reservation
+            .github/actions/runner-disk-guard
           sparse-checkout-cone-mode: false
 
       # Book the machines before touching them. Every group in the lab's
@@ -274,6 +275,21 @@ jobs:
           disabled: ${{ env.LABRES_DISABLE }}
         env:
           LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
+
+      # A shared runner's disk is shared state, and the thing most likely to
+      # have filled it is one of our own earlier runs. A CANCELLED run skips
+      # its `if: always()` cleanup, and `nohup mc admin trace` is already
+      # init's child by then, so it just keeps writing: run 40404230630,
+      # cancelled on 2026-10-27, put 55 GB on vm22's 94 GB root volume over
+      # three days and killed an unrelated 8h28m stress run (40906656766) at
+      # 00:31Z on 2026-10-30. That run failed no assertion -- the Actions
+      # worker could not write its own log and aborted with exit 134, which
+      # ends the job mid-step and loses every hour it had already spent.
+      #
+      # So: reap other runs' debris, then refuse to start on a disk with no
+      # room, rather than find out at hour eight.
+      - name: Guard the runner's disk
+        uses: ./.github/actions/runner-disk-guard
 
       - name: Clear stale artifacts
         shell: bash
@@ -875,7 +891,17 @@ jobs:
           # 3. Start admin trace in background
           MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
           echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
-          nohup "${MC_BIN}" admin trace -v --all "${MC_ALIAS}" > "${MINIO_TRACE_LOG}" 2>&1 &
+          # A hard cap from the kernel, not a promise to clean up.
+          # RLIMIT_FSIZE survives exec and reparenting, so a tracer this job
+          # never gets to stop -- a cancelled job skips its cleanup step --
+          # dies on SIGXFSZ at the cap instead of filling the runner's root
+          # volume. `exec` keeps $! as mc's own pid so the stop step's kill
+          # still reaches it, and `ulimit -c 0` stops SIGXFSZ from leaving an
+          # mc core behind.
+          MINIO_TRACE_CAP_MB="${MINIO_TRACE_CAP_MB:-2048}"
+          nohup bash -c 'ulimit -c 0; ulimit -f "$1"; shift; exec "$@"' _ \
+            "$((MINIO_TRACE_CAP_MB * 1024))" \
+            "${MC_BIN}" admin trace -v --all "${MC_ALIAS}" > "${MINIO_TRACE_LOG}" 2>&1 &
           echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
 
           echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
