@@ -3232,14 +3232,64 @@ class K8sUtils:
         return out or ""
 
     def get_pod_logs(self, pod_name: str, namespace: str | None = None,
-                     tail: int = 200) -> str:
-        """Get pod logs (last *tail* lines)."""
+                     tail: int = 200, container: str | None = None) -> str:
+        """Get pod logs (last *tail* lines), optionally from one container.
+
+        Without *container* this is `kubectl logs <pod>`, which returns the
+        single REGULAR container and nothing else -- see
+        get_pod_logs_all_containers for why that matters here.
+        """
         ns = namespace or self.namespace
+        sel = f"-c {container} " if container else ""
         out, _ = self._exec_kubectl(
-            f"kubectl logs {pod_name} -n {ns} --tail={tail} 2>/dev/null || true",
+            f"kubectl logs {pod_name} -n {ns} {sel}--tail={tail} "
+            f"2>/dev/null || true",
             supress_logs=True,
         )
         return out
+
+    def get_pod_container_names(self, pod_name: str,
+                                namespace: str | None = None) -> list:
+        """Init containers first, then regular ones, in spec order."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pod {pod_name} -n {ns} -o jsonpath="
+            f"'{{.spec.initContainers[*].name}} {{.spec.containers[*].name}}' "
+            f"2>/dev/null || true", supress_logs=True)
+        return (out or "").split()
+
+    def get_pod_logs_all_containers(self, pod_name: str,
+                                    namespace: str | None = None,
+                                    tail: int = 20000) -> str:
+        """Every container's log, init containers included.
+
+        `kubectl logs <pod>` with no -c returns ONLY the regular container,
+        silently -- verified against a pod with five init containers, which
+        printed the main container's log with no warning and no mention of
+        the others. Our FIO Jobs run `fio-warmup` as an init container, for
+        eight minutes under outages in run 41015882185, and nothing ever read
+        it. Every IO error that pass hit was reported as zero errors, because
+        no code path had ever looked at the container that produced them.
+
+        The default tail is large for the same reason: fio writes `io_u
+        error` when it happens, not in its summary, so a short tail drops the
+        evidence at the start of a long run and reports zero again.
+        """
+        ns = namespace or self.namespace
+        names = self.get_pod_container_names(pod_name, namespace=ns)
+        if not names:
+            return self.get_pod_logs(pod_name, namespace=ns, tail=tail)
+        chunks = []
+        for name in names:
+            text = self.get_pod_logs(pod_name, namespace=ns, tail=tail,
+                                     container=name)
+            if not text:
+                continue
+            # Deliberately free of "error"/"fail": validate_fio_job greps the
+            # whole blob for those words and a header must not be a finding.
+            chunks.append(f"===== container {name} on {pod_name} ====="
+                          f"{chr(10)}{text}")
+        return chr(10).join(chunks)
 
     def delete_job(self, job_name: str, namespace: str | None = None):
         """Delete a Job (cascading to its pods)."""
@@ -4124,7 +4174,9 @@ class K8sUtils:
             )
             return True
         for pod_name in pod_names:
-            logs = self.get_pod_logs(pod_name, namespace=ns, tail=500)
+            # Every container, not the default one. A warmup that failed used
+            # to leave this check reporting a clean job.
+            logs = self.get_pod_logs_all_containers(pod_name, namespace=ns)
             if not logs:
                 continue
             logs_lower = logs.lower()

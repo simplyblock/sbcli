@@ -257,6 +257,22 @@ class RapidFioLifecycle(_RapidFioHooks):
         return late
 
     # ── A: read what the logs already say ────────────────────────────────
+    def fio_error_text(self, name, record):
+        """The text to scan FOR ERRORS -- not the same text as fio_log_text.
+
+        These are two different questions and they need two different
+        sources. fio_log_text answers "has this job finished", and must stay
+        the main benchmark's output alone: a warmup pass writes its own
+        `run=<n>msec` summary, and _DONE_RE would read that as the job
+        finishing the moment the warmup ended -- marking every job complete
+        before its benchmark had written a byte.
+
+        Errors are the opposite. They matter wherever they happen, including
+        in a setup pass that runs for minutes against a cluster under outage.
+        A platform that has more than one place to look overrides this.
+        """
+        return self.fio_log_text(name, record)
+
     def rapid_scan_fio_logs(self):
         """Every error line the FIO logs hold right now.
 
@@ -269,7 +285,7 @@ class RapidFioLifecycle(_RapidFioHooks):
         hits = []
         for name, rec in self.fio_jobs():
             try:
-                for line in (self.fio_log_text(name, rec) or "").splitlines():
+                for line in (self.fio_error_text(name, rec) or "").splitlines():
                     low = line.strip().lower()
                     if not low:
                         continue

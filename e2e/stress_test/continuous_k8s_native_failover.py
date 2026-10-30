@@ -6427,6 +6427,32 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
                                 name, str(exc)[:120])
             return ""
 
+    def fio_error_text(self, name, record):
+        """All containers, not just the benchmark.
+
+        The warmup is an init container, and `kubectl logs <pod>` without -c
+        never returns it. It wrote 24 GiB over 8m19s in run 41015882185 while
+        nodes were being shut down and rebooted under it, and not one line of
+        its output was ever read.
+        """
+        if getattr(self, "use_client_fio", False):
+            return super().fio_error_text(name, record)
+        job = (record or {}).get("job_name")
+        if not job:
+            return ""
+        try:
+            self._ensure_k8s_utils()
+            out = []
+            for pod in (self.k8s_utils.get_job_pod_names(job) or []):
+                out.append(
+                    self.k8s_utils.get_pod_logs_all_containers(pod) or "")
+            return chr(10).join(out)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[rapid-fio] could not read every container's log for %s: "
+                "%s", name, str(exc)[:120])
+            return ""
+
     def fio_job_alive(self, name, record):
         """Is this job still doing IO?
 
