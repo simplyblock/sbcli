@@ -414,7 +414,7 @@ def build_discovery(name: str) -> dict:
     }
 
 
-def uncordon_leftovers() -> None:
+def uncordon_leftovers() -> list:
     """Uncordon workers a previous run left SchedulingDisabled.
 
     The operator declines a cordoned worker outright -- "is not used: it is
@@ -454,10 +454,10 @@ def uncordon_leftovers() -> None:
         # run as an unrelated-looking error.
         log(f"WARNING: could not list nodes to check for leftover cordons: "
             f"{err[:200]}")
-        return
+        return []
     if not cordoned:
         log("no leftover cordons")
-        return
+        return []
 
     for name in cordoned:
         log(f"uncordoning {name}: a previous run left it cordoned, and "
@@ -474,17 +474,36 @@ def uncordon_leftovers() -> None:
             f"fail on node count.")
     else:
         log(f"uncordoned {len(cordoned)} leftover worker(s)")
+    return [n for n in cordoned if n not in (still or [])]
 
 
 def run_discovery(config_name: str, timeout: int) -> str:
-    uncordon_leftovers()
+    freed = uncordon_leftovers()
     op = build_discovery(config_name)
     op_name = op["metadata"]["name"]
 
     existing = kubectl("get", "operatorops", op_name, "-o", "json", check=False)
     if existing.strip():
         prior = json.loads(existing).get("status", {}) or {}
-        if prior.get("configRef"):
+        if prior.get("configRef") and freed:
+            # A discovery result is a snapshot of the nodes that were usable
+            # when it ran. We just made more of them usable, so this one
+            # describes a cluster that no longer exists -- and reusing it
+            # reproduces the refusal the uncordon was meant to prevent, with
+            # the same message, which reads as the uncordon not having
+            # worked. Run 41037615762 left a draft naming five workers after
+            # worker-5 was cordoned; a rerun would have been told "produces
+            # 5 storage node(s) and the 2+2 stripe needs 6" all over again.
+            log(f"discovery {op_name} produced {prior['configRef']} while "
+                f"{', '.join(freed)} {'was' if len(freed) == 1 else 'were'} "
+                f"still cordoned; that draft is stale. Deleting it and "
+                f"discovering again over the full node set.")
+            kubectl("delete", "clusterdeploymentconfig", prior["configRef"],
+                    "--ignore-not-found", check=False)
+            kubectl("delete", "operatorops", op_name, "--ignore-not-found",
+                    check=False)
+            kubectl("apply", "-f", "-", stdin=json.dumps(op))
+        elif prior.get("configRef"):
             log(f"discovery {op_name} already produced "
                 f"{prior['configRef']}; reusing it")
         elif prior.get("phase") == "Failed":
