@@ -81,6 +81,18 @@ def test_the_device_resource_is_not_part_of_the_annotation():
     assert body.networks[0].resource == "intel.com/sriov_netdevice"
 
 
+def test_a_field_a_newer_operator_sends_is_ignored():
+    """An operator ahead of this control plane may describe an attachment with a field
+    this release does not know. The attachment is accepted on the fields it does, and
+    the unknown one reaches neither the annotation nor the pod."""
+    body = _params(networks=[{"name": "fabric", "interface": "data0", "ips": ["10.10.10.5/24"],
+                              "offload": "rdma"}])
+
+    assert body.networks[0].name == "fabric"
+    assert "offload" not in network_attachments.annotation(body.networks)
+    assert network_attachments.device_resources(body.networks) == {}
+
+
 def test_each_attachment_with_a_device_resource_requests_one():
     vf = NetworkAttachment(name="vf-a", interface="data0", resource="intel.com/sriov_storage")
     vf2 = NetworkAttachment(name="vf-b", interface="data1", resource="intel.com/sriov_storage")
