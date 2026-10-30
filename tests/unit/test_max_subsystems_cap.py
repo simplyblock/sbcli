@@ -58,9 +58,12 @@ def test_hosts_are_sized_for_the_default_not_the_cap():
 # ceilings and different core budgets.
 
 def test_configure_no_longer_takes_max_subsys():
+    # --max-subsys parses for the huge-page calculator only; configuring a node
+    # with it is refused.
     w = _wrapper()
+    args = w.parser.parse_args(["storage-node", "configure", "--max-subsys", str(CAP)])
     with pytest.raises(SystemExit):
-        w.parser.parse_args(["storage-node", "configure", "--max-subsys", str(CAP)])
+        w.storage_node__configure("configure", args)
 
 
 def test_configure_no_longer_takes_cores_percentage():

@@ -127,13 +127,21 @@ commands:
             type: bool
             action: store_true
           - name: "--calculate-hp-only"
-            help: "Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices. Subsystem count and the vCPU budget are cluster-level settings."
+            help: "Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices, --max-subsys, --vcpu-count."
             dest: calculate_hp_only
             type: bool
             action: store_true
           - name: "--number-of-devices"
             help: "Number of devices that will be used on this host. For calculating huge pages memory only."
             dest: number_of_devices
+            type: int
+          - name: "--max-subsys"
+            help: "The cluster's subsystem count (maxSubsystemCount) to size huge pages for. For calculating huge pages memory only. Default: the product default."
+            dest: max_subsys
+            type: int
+          - name: "--vcpu-count"
+            help: "The cluster's SPDK vCPU count (vcpuCount) to size huge pages for. For calculating huge pages memory only. Default: the host's own core layout."
+            dest: vcpu_count
             type: int
       - name: configure-upgrade
         help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices."
