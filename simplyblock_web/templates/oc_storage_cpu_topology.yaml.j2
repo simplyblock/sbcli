@@ -273,7 +273,8 @@ spec:
                   echo "[INFO] Node already configured. Waiting for NUMA plugin pod to be ready..."
                   RETRIES=0
                   while [ $RETRIES -lt 36 ]; do
-                    PLUGIN_READY=$(kubectl get pod -n kube-system \
+                    # The operator runs the plugin in its own namespace, so look everywhere.
+                    PLUGIN_READY=$(kubectl get pod -A \
                       --field-selector spec.nodeName={{ HOSTNAME }} \
                       -l app=simplyblock-numa-resource-plugin \
                       -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
