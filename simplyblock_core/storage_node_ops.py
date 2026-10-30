@@ -182,6 +182,13 @@ class LVSRestartRequiredError(Exception):
         super().__init__(msg)
 
 
+class RestartAbortError(Exception):
+    """``recreate_lvstore`` aborts the restart because the jc_compression
+    check on the LVS leader failed. The message names the check and the leader.
+
+    Other "Abort restart: ..." errors in the restart flow raise ``Exception``."""
+
+
 def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None, uuid=None):
     """True iff the subsystem has the namespace identified by nsid/bdev_name/uuid.
 
@@ -1430,51 +1437,76 @@ def _cluster_two_node_arbitrated(cluster_id, cluster=None, db=None) -> bool:
     return _remember_cluster_arbitration(cluster)
 
 
+# jc_compression errors that clear as background work finishes
+# (ultra DISTR_v2 alg_journal.cpp):
+# -4: a replication task is active on the appender.
+# -5: the journal replicator, leveling or sync setter is running.
+# -7: another jc_compression request for the same jm_vuid is pending.
+_JC_COMPRESSION_BUSY_CODES = frozenset({-4, -5, -7})
+# -6 means the journal context is stopped on error (JCERR).
+# On two-node clusters with arbitration enabled, a holding or fenced LVS can
+# stay in this state until the arbiter calls jc_grant_solo or jc_unfence.
+# Retry this code only on those clusters.
+_JC_COMPRESSION_JCERR_CODE = -6
+
+
 def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
-                                      interval_s=2.0, sleep=None, clock=None, arbitrated=None):
-    """``jc_compression get_status`` on the LVS leader, retried while it fails.
+                                      interval_s=2.0, sleep=None, clock=None):
+    """Read ``jc_compression get_status`` on the LVS leader, retrying listed errors.
 
-    Campaign c2, F1: right after the returning node's SPDK is up, the leader
-    re-levels the returning journal on its own (the B1 auto-resync). While it
-    does, ``jc_compression`` answers "Compression request failed"; the restart
-    used to abort on that one answer and kill the new SPDK. The failure is
-    transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
-    failure that outlasts that aborts the restart (the caller raises).
+    The leader can still be catching up the returning node's journal copy,
+    and the restart aborts on any error this function raises. Retry
+    ``_JC_COMPRESSION_BUSY_CODES`` on every cluster. Retry
+    ``_JC_COMPRESSION_JCERR_CODE`` only on two-node clusters with arbitration
+    enabled; that setting is read only after this code, and only if another
+    attempt is allowed.
 
-    Two-node arbitration only: on every other cluster this is exactly the
-    previous single call, and a failure is re-raised at once (the restart
-    aborts immediately, as before). The arbitration flag is read only after a
-    failed first call, so the success path does no extra work.
+    Return the first successful answer. Re-raise every other error without
+    another call or wait, and re-raise the last error when the retry limits
+    stop further attempts.
 
-    Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
-    number of rounds (timeout / interval), so a patched-out ``time.sleep``
-    cannot turn the retry into a busy loop.
+    ``timeout_s`` defaults to ``RESTART_JC_COMPRESSION_RETRY_S``; zero or less
+    means one call and no retry. Calls are ``interval_s`` apart, and at most
+    ``int(timeout_s // interval_s)`` calls are made (at least one). The
+    deadline is checked after each failed retry and does not limit how long
+    one RPC takes. The call limit also stops the retries when ``sleep`` does
+    not advance the clock.
     """
-    try:
-        return leader.rpc_client().jc_compression_get_status(jm_vuid)
-    except Exception as e:                      # noqa: BLE001 - re-raised unless arbitrated
-        if arbitrated is None:
-            arbitrated = _cluster_two_node_arbitrated(leader.cluster_id)
-        if not arbitrated:
-            raise
-        logger.warning("jc_compression status on leader %s failed (%s); retrying "
-                       "(journal re-level in progress?)", leader.get_id(), e)
     if timeout_s is None:
         timeout_s = constants.RESTART_JC_COMPRESSION_RETRY_S
     sleep = sleep or time.sleep
     clock = clock or time.monotonic
     deadline = clock() + timeout_s
-    rounds = max(1, int(timeout_s // interval_s)) - 1  # the first call above was one
+    rounds = int(timeout_s // interval_s) - 1  # retries after the first call
+    arbitrated = None
+
+    def transient(e):
+        nonlocal arbitrated
+        if e.code in _JC_COMPRESSION_BUSY_CODES:
+            return True
+        if e.code == _JC_COMPRESSION_JCERR_CODE:
+            if arbitrated is None:
+                arbitrated = _cluster_two_node_arbitrated(leader.cluster_id)
+            return arbitrated
+        return False
+
+    try:
+        return leader.rpc_client().jc_compression_get_status(jm_vuid)
+    except RPCRemoteError as e:
+        if rounds <= 0 or not transient(e):
+            raise
+        logger.warning("jc_compression status on leader %s failed (%s, code %s); retrying "
+                       "(journal re-level in progress?)", leader.get_id(), e, e.code)
     while True:
         sleep(interval_s)
         try:
             return leader.rpc_client().jc_compression_get_status(jm_vuid)
-        except Exception as e:                  # noqa: BLE001 - retried, then re-raised
+        except RPCRemoteError as e:
             rounds -= 1
-            if rounds <= 0 or clock() + interval_s > deadline:
+            if rounds <= 0 or clock() + interval_s > deadline or not transient(e):
                 raise
-            logger.warning("jc_compression status on leader %s failed (%s); retrying "
-                           "(journal re-level in progress?)", leader.get_id(), e)
+            logger.warning("jc_compression status on leader %s failed (%s, code %s); retrying "
+                           "(journal re-level in progress?)", leader.get_id(), e, e.code)
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
@@ -13921,8 +13953,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     jc_compression_is_active = _jc_compression_status_with_retry(
                         current_leader, lvs_jm_vuid)
             except Exception as e:
-                raise Exception(
-                    f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
+                raise RestartAbortError(
+                    f"Abort restart: jc_compression check on leader {current_leader.get_id()} "
+                    f"failed (retried up to {constants.RESTART_JC_COMPRESSION_RETRY_S} s): {e}") from e
 
     # Probe whether the raid already exists BEFORE step 1 (re)builds the stack.
     # On a real restart SPDK has just started and the raid (superblock=False)
