@@ -158,6 +158,13 @@ def add_device_stats(cl, device, capacity_dict, stats_dict, tick_rate=0):
         # size_prov and with the lvol/snapshot figures, which are effective by
         # construction. The raw numbers are kept in the *_raw fields.
         size_total_raw = int(capacity_dict['npages_nmax']*capacity_dict['pba_page_size'])
+        # alceml spans its whole block device (npages_nmax follows the backend
+        # size). After a LUN grew by more than the cluster-wide growth factor,
+        # only ``size`` of it is usable: placement fills every device in
+        # proportion to its frozen weight, so the rest is never reached.
+        backend_size, dev_size = getattr(device, "backend_size", 0), getattr(device, "size", 0)
+        if isinstance(backend_size, int) and isinstance(dev_size, int) and backend_size > dev_size > 0:
+            size_total_raw = size_total_raw * dev_size // backend_size
         size_used_raw = int(capacity_dict['npages_used']*capacity_dict['pba_page_size'])
         size_free_raw = size_total_raw - size_used_raw
 

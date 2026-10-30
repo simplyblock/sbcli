@@ -77,9 +77,17 @@ class NVMeDevice(BaseModel):
     # distrib placement weight of the device is derived from it, and distrib
     # requires a weight never to change once set (a change re-places 50% or
     # more of the data). ``size`` follows an online growth of an lblk device
-    # (device_controller.resize_device); this field keeps the weight frozen.
-    # 0 means the device was never resized, so ``size`` is still the weight.
+    # (device_controller.grow_cluster_devices); this field keeps the weight
+    # frozen. 0 means the device was never grown, so ``size`` is still the
+    # weight.
     placement_size: int = 0
+    # Size in bytes of the device's block device (the LUN) when the cluster
+    # last rescanned it (device_controller.grow_cluster_devices); 0 = never
+    # rescanned. alceml always uses the whole block device, but all devices
+    # grow by the same factor only, so ``size`` may stay below this value; the
+    # rest is unused and left out of the capacity. A value below ``size`` means
+    # the block device shrank, which raises an alert.
+    backend_size: int = 0
     # NVMe per-block metadata size in bytes, as reported by the bound SPDK bdev.
     # >=8 means alceml can run in cv_md_method (no read/write amplification).
     # 0 means alceml must use cv_fallback_method (extra md page per 2 MiB extent).
@@ -117,6 +125,16 @@ class NVMeDevice(BaseModel):
         """Bytes the cluster-map weight of this device is derived from: the
         size it had when it was placed, unchanged by later growth."""
         return self.placement_size if self.placement_size > 0 else self.size
+
+    def unused_size(self) -> int:
+        """Bytes of the block device beyond ``size``: grown on the storage
+        array, but not usable because the other data devices of the cluster
+        grew by a smaller factor."""
+        return max(0, self.backend_size - self.size) if self.size > 0 else 0
+
+    def is_shrunk(self) -> bool:
+        """The block device was last seen smaller than the device."""
+        return 0 < self.backend_size < self.size
 
     def __change_dev_connection_to(self, connecting_from_node):
         # Targeted single-record write. The previous implementation scanned

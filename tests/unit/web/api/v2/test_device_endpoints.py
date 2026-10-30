@@ -374,82 +374,67 @@ class TestWatchDevices:
             CLUSTER_ID, STORAGE_NODE_ID, DEVICE_ID)
 
 
-RESIZE_RESULT = {
-    'device_id': DEVICE_ID, 'old_size': 100, 'new_size': 200, 'placement_size': 100,
-    'resized': True, 'uniform': False, 'warning': 'grown unevenly',
+GROWN_DEVICE = {
+    'device_id': DEVICE_ID, 'old_size': 100, 'new_size': 150, 'backend_size': 200,
+    'unused_size': 50, 'placement_size': 100,
 }
 
 
-class TestResizeDevice:
+class TestResizeDeviceRemoved:
 
-    def test_returns_resize_result(self, client, db, device, device_controller):
-        device_controller.resize_device.return_value = RESIZE_RESULT
-
+    def test_single_device_resize_is_gone(self, client, db, device, device_controller):
         response = client.post(f'{BASE}/{DEVICE_ID}/resize')
 
-        assert response.status_code == 200
-        assert response.json() == RESIZE_RESULT
-        device_controller.resize_device.assert_called_once_with(DEVICE_ID)
-
-    def test_refusal_returns_409(self, client, db, device, device_controller):
-        device_controller.resize_device.side_effect = ValueError('shrank')
-
-        response = client.post(f'{BASE}/{DEVICE_ID}/resize')
-
-        assert response.status_code == 409
-        assert 'shrank' in response.json()['detail']
+        assert response.status_code in (404, 405)
 
 
 class TestGrowClusterDevices:
 
     URL = f'/api/v2/clusters/{CLUSTER_ID}/grow-devices'
 
+    def _mock(self, monkeypatch, result):
+        from unittest.mock import MagicMock
+
+        import simplyblock_web.api.v2.cluster as cluster_module
+        mock = MagicMock()
+        mock.grow_cluster_devices.return_value = result
+        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+        return mock
+
     def test_grows_devices_of_lblk_cluster(self, client, db, cluster, monkeypatch):
-        from unittest.mock import MagicMock
-
-        import simplyblock_web.api.v2.cluster as cluster_module
-        mock = MagicMock()
-        mock.grow_cluster_devices.return_value = {'devices': [RESIZE_RESULT], 'errors': {}, 'uniform': True}
-        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+        mock = self._mock(monkeypatch, {
+            'grown': True, 'factor': 1.5, 'devices': [GROWN_DEVICE], 'errors': {}, 'reason': ''})
         cluster.device_mode = 'lblk'
 
         response = client.post(self.URL)
 
         assert response.status_code == 200
-        assert response.json()['uniform'] is True
-        assert response.json()['rebalance'] is None
-        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID, rebalance=True)
+        body = response.json()
+        assert body['grown'] is True
+        assert body['factor'] == 1.5
+        assert body['devices'] == [GROWN_DEVICE]
+        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID)
 
-    def test_uneven_growth_reports_rebalance(self, client, db, cluster, monkeypatch):
-        from unittest.mock import MagicMock
-
-        import simplyblock_web.api.v2.cluster as cluster_module
-        mock = MagicMock()
-        mock.grow_cluster_devices.return_value = {
-            'devices': [RESIZE_RESULT], 'errors': {}, 'uniform': False,
-            'rebalance': {'weights_updated': True, 'started': True, 'reason': ''}}
-        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+    def test_nothing_grown_reports_reason_and_errors(self, client, db, cluster, monkeypatch):
+        self._mock(monkeypatch, {
+            'grown': False, 'factor': 1.0, 'devices': [], 'errors': {DEVICE_ID: 'shrank'},
+            'reason': 'A block device is smaller than its device; nothing was grown'})
         cluster.device_mode = 'lblk'
 
         response = client.post(self.URL)
 
         assert response.status_code == 200
-        assert response.json()['rebalance'] == {'weights_updated': True, 'started': True, 'reason': ''}
+        assert response.json()['grown'] is False
+        assert response.json()['errors'] == {DEVICE_ID: 'shrank'}
 
-    def test_rebalance_can_be_disabled(self, client, db, cluster, monkeypatch):
-        from unittest.mock import MagicMock
-
-        import simplyblock_web.api.v2.cluster as cluster_module
-        mock = MagicMock()
-        mock.grow_cluster_devices.return_value = {
-            'devices': [], 'errors': {}, 'uniform': False, 'rebalance': None}
-        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+    def test_rebalance_parameter_is_gone(self, client, db, cluster, monkeypatch):
+        mock = self._mock(monkeypatch, {
+            'grown': False, 'factor': 1.0, 'devices': [], 'errors': {}, 'reason': 'x'})
         cluster.device_mode = 'lblk'
 
-        response = client.post(self.URL, params={'rebalance': 'false'})
+        client.post(self.URL, params={'rebalance': 'false'})
 
-        assert response.status_code == 200
-        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID, rebalance=False)
+        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID)
 
     def test_nvme_cluster_returns_409(self, client, db, cluster):
         cluster.device_mode = 'nvme'

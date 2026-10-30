@@ -448,20 +448,6 @@ class CLIWrapperBase:
     def storage_node__restart_device(self, sub_command, args):
         return device_controller.restart_device(args.device_id, args.force)
 
-    def storage_node__resize_device(self, sub_command, args):
-        try:
-            result = device_controller.resize_device(args.device_id)
-        except ValueError as e:
-            print(e)
-            return False
-        if not result["resized"]:
-            return f"Device size unchanged: {utils.humanbytes(result['new_size'])}"
-        out = (f"Device grown from {utils.humanbytes(result['old_size'])} "
-               f"to {utils.humanbytes(result['new_size'])}")
-        if result["warning"]:
-            out += f"\nWarning: {result['warning']}"
-        return out
-
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
 
@@ -767,25 +753,22 @@ class CLIWrapperBase:
         return True
 
     def cluster__grow_devices(self, sub_command, args):
-        result = device_controller.grow_cluster_devices(
-            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
-        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
-                 for r in result["devices"] if r["resized"]]
-        lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
-        rebalance = result.get("rebalance")
-        if rebalance and rebalance["started"]:
-            lines.append("The devices have grown unevenly: device weights set to the new sizes, "
-                         "cluster rebalancing started.")
-        elif rebalance and rebalance["weights_updated"]:
-            lines.append(f"The devices have grown unevenly: device weights set to the new sizes. "
-                         f"{rebalance['reason']}")
-        elif rebalance:
-            lines.append(f"Warning: the devices have grown unevenly. {rebalance['reason']}")
-        elif not result["uniform"]:
-            lines.append("Warning: the data devices of the cluster have grown unevenly; the added capacity is "
-                         "only fully usable once all of them have grown by the same factor, or after "
-                         "grow-devices without --no-rebalance has updated the weights.")
-        return "\n".join(lines) or "No device has grown"
+        try:
+            result = device_controller.grow_cluster_devices(args.cluster_id)
+        except ValueError as e:
+            print(e)
+            return False
+        lines = [f"{dev_id}: {err}" for dev_id, err in result["errors"].items()]
+        if not result["grown"]:
+            lines.append(result["reason"])
+            return "\n".join(lines)
+        lines.append(f"All data devices grown by factor {result['factor']:.4f}:")
+        for r in result["devices"]:
+            line = f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+            if r["unused_size"]:
+                line += f" ({utils.humanbytes(r['unused_size'])} of the block device unused)"
+            lines.append(line)
+        return "\n".join(lines)
 
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
