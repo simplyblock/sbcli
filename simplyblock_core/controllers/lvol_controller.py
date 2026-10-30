@@ -5076,10 +5076,18 @@ def _cancel_replication_cutover(lvol_id, tasks):
     A cutover cannot finish once the volume stops replicating or is deleted,
     yet nothing ended its task: the claim of a volume deleted mid-migration
     left the task suspended for good, holding the volume's turn and naming a
-    volume that no longer exists (bf6 2026-10-29, vol-2 and vol-3)."""
+    volume that no longer exists (bf6 2026-10-29, vol-2 and vol-3).
+
+    A cutover that has committed (``end_time`` recorded) is left alone: its
+    own wrap-up stops the source's replication and, with --delete-source,
+    deletes the source, both of which land here while the task is still
+    running. Cancelling it then marked a completed cutover canceled, the
+    operator reported the volume's migration failed and never pointed its
+    PersistentVolume at the target (bf7 2026-10-30, vol-3/5/6)."""
     for task in tasks:
         if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
                 and task.status != JobSchedule.STATUS_DONE and not task.canceled
+                and not task.function_params.get("end_time")
                 and task.function_params.get("lvol_id") == lvol_id):
             logger.info("Cancelling cutover task %s of volume %s: it no longer replicates",
                         task.uuid, lvol_id)
