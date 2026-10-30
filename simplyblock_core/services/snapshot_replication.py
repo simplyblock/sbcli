@@ -1477,7 +1477,46 @@ def _retention_schedule_for(source_lvol):
         return []
 
 
-def _prune_internal_snapshots(source_lvol):
+def _cutover_holds_retention(source_lvol):
+    """True while *source_lvol*'s cutover endgame is in progress.
+
+    The endgame converges by taking snapshot after snapshot (shrink rounds)
+    until the remaining delta fits the freeze. Pruning between those rounds
+    deletes the predecessor of every new copy, and a delete is a merge that
+    physically moves data on both clusters (copy-on-write: ultra #222 / spdk
+    #86) -- load competing with the convergence and the freeze themselves. So
+    nothing of the volume is pruned from its first shrink snapshot until the
+    cutover task ends; prune_after_cutover then keeps one.
+    """
+    try:
+        cluster_id = db.get_storage_node_by_id(source_lvol.node_id).cluster_id
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception:                                     # noqa: BLE001
+        return False
+    for task in tasks:
+        if task.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        params = task.function_params or {}
+        if params.get("lvol_id") == source_lvol.get_id() and (
+                params.get("shrink_snap_id") or params.get("cutover_lvs")):
+            return True
+    return False
+
+
+def prune_after_cutover(source_lvol):
+    """After a completed cutover: keep only the newest replicated snapshot pair.
+
+    The endgame's snapshots were held while it ran (_cutover_holds_retention);
+    once IO serves from the target none of them is a delta base any more, so
+    all but the newest go, on both sides. The newest target copy is what the
+    cut-over volume is cloned from, and its source counterpart stays with it.
+    """
+    _prune_internal_snapshots(source_lvol, after_cutover=True)
+
+
+def _prune_internal_snapshots(source_lvol, after_cutover=False):
     """Retention for replication-driven internal snapshots.
 
     Internal snapshots are transient checkpoints taken at a fixed interval
@@ -1492,6 +1531,11 @@ def _prune_internal_snapshots(source_lvol):
     snapshot are pruned, so the newest internal snapshot — which serves as the
     base for the next delta transfer — always remains.
     """
+    if not after_cutover and _cutover_holds_retention(source_lvol):
+        logger.info("Holding retention for lvol %s: its cutover endgame is in "
+                    "progress; pruned once the cutover completes",
+                    source_lvol.get_id())
+        return
     replicated_internal = [
         s for s in db.get_snapshots_by_node_id(source_lvol.node_id)
         if s.lvol.get_id() == source_lvol.get_id()
@@ -1499,14 +1543,15 @@ def _prune_internal_snapshots(source_lvol):
         and s.status == SnapShot.STATUS_ONLINE
         and s.target_replicated_snap_uuid
     ]
-    keep = _keep_replicated_for(source_lvol)
+    # After a cutover there is no next delta to chain: one pair is enough.
+    keep = 1 if after_cutover else _keep_replicated_for(source_lvol)
     replicated_internal.sort(key=lambda s: s.created_at)
 
     # A retention SCHEDULE, when the policy defines one, decides which older
     # snapshots survive; without it retention stays the flat "newest N".
     # Either way the newest `keep` are protected, because deleting a snapshot
     # swap-merges its segments into the successor chained to it.
-    schedule = _retention_schedule_for(source_lvol)
+    schedule = [] if after_cutover else _retention_schedule_for(source_lvol)
     # Say which retention is in force, every time it prunes. Soak run
     # 20260827_224741 ended with 2 snapshots at consecutive cadence ticks after
     # 124 minutes under `5m:15m,7m:30m,10m:1h` -- which is exactly what the FLAT

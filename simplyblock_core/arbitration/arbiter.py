@@ -2063,9 +2063,16 @@ def default_link_probe(node: StorageNode, peer: StorageNode):
     None when the probe itself could not be made (inconclusive)."""
     if not node.data_nics or not peer.data_nics:
         return None
+    # The address the peer's own stack answers on: its pod's on the pod network,
+    # where a ping to the Service address is never answered.
+    peer_ip = peer.data_nics[0].listen_address
     try:
+        if node.on_pod_network:
+            # The node's data interface is in its SPDK pod's namespace; the
+            # proxy there sends the ping.
+            return bool(node.rpc_client(timeout=8, retry=1).net_check(node.data_nics[0].if_name, peer_ip))
         ret, _ = node.client(timeout=8, retry=1, connect_retry=0).ping_ip(
-            peer.data_nics[0].ip4_address, node.data_nics[0].if_name)
+            peer_ip, node.data_nics[0].if_name)
         return bool(ret)
     except Exception as e:                          # noqa: BLE001 - inconclusive
         logger.debug("Link probe %s -> %s failed: %s", node.get_id(), peer.get_id(), e)

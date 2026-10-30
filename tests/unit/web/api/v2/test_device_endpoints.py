@@ -265,6 +265,89 @@ class TestDeviceHealthInfo:
             client.get(f'{BASE}/{DEVICE_ID}/health-info')
 
 
+class TestDeviceHealthInfoShapes:
+
+    def test_an_unsupported_device_is_a_200_with_nulls(self, client, device, device_controller):
+        device_controller.get_device_health_info.return_value = {
+            'supported': False, 'source': '', 'model_number': None, 'critical_warning': None}
+
+        response = client.get(f'{BASE}/{DEVICE_ID}/health-info')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['supported'] is False
+        assert body['critical_warning'] is None
+
+    def test_a_smartctl_log_carries_the_ata_fields(self, client, device, device_controller):
+        device_controller.get_device_health_info.return_value = {
+            'supported': True, 'source': 'smartctl', 'smart_passed': False,
+            'reallocated_sectors': 12, 'pending_sectors': 3}
+
+        body = client.get(f'{BASE}/{DEVICE_ID}/health-info').json()
+
+        assert body['source'] == 'smartctl'
+        assert body['smart_passed'] is False
+        assert body['reallocated_sectors'] == 12
+        assert body['pending_sectors'] == 3
+
+
+ASSESSMENT = {
+    'reporter': 'simplyblock-operator',
+    'reported_at': '2026-10-28T12:00:00Z',
+    'valid_seconds': 900,
+    'performance': {'verdict': 'slow', 'reason': 'r', 'latency_us': 1500000.0, 'latency_ratio': 375.0},
+    'smart': {'verdict': 'ok', 'checked_at': '2026-10-28T11:55:00Z'},
+}
+
+
+class TestDeviceHealthAssessment:
+
+    def test_stores_the_assessment(self, client, device, device_controller):
+        response = client.put(f'{BASE}/{DEVICE_ID}/health-assessment', json=ASSESSMENT)
+
+        assert response.status_code == 204
+        (node_id, device_id, stored), _ = device_controller.set_device_health_assessment.call_args
+        assert (node_id, device_id) == (STORAGE_NODE_ID, DEVICE_ID)
+        assert stored['performance']['verdict'] == 'slow'
+        assert stored['smart']['verdict'] == 'ok'
+        assert stored['valid_seconds'] == 900
+
+    def test_an_unknown_verdict_is_rejected(self, client, device, device_controller):
+        body = dict(ASSESSMENT, performance={'verdict': 'sluggish'})
+
+        response = client.put(f'{BASE}/{DEVICE_ID}/health-assessment', json=body)
+
+        assert response.status_code == 422
+        device_controller.set_device_health_assessment.assert_not_called()
+
+    def test_a_naive_timestamp_is_rejected(self, client, device, device_controller):
+        body = dict(ASSESSMENT, reported_at='2026-10-28T12:00:00')
+
+        response = client.put(f'{BASE}/{DEVICE_ID}/health-assessment', json=body)
+
+        assert response.status_code == 422
+
+    def test_unknown_device_returns_404(self, client, db, storage_node, device_controller):
+        response = client.put(f'{BASE}/{DEVICE_ID}/health-assessment', json=ASSESSMENT)
+
+        assert response.status_code == 404
+        device_controller.set_device_health_assessment.assert_not_called()
+
+    def test_a_device_removed_mid_write_returns_404(self, client, device, device_controller):
+        device_controller.set_device_health_assessment.side_effect = KeyError(DEVICE_ID)
+
+        response = client.put(f'{BASE}/{DEVICE_ID}/health-assessment', json=ASSESSMENT)
+
+        assert response.status_code == 404
+
+    def test_the_device_reads_back_its_assessment(self, client, db, device):
+        device.health_assessment = dict(ASSESSMENT)
+
+        body = client.get(f'{BASE}/{DEVICE_ID}/').json()
+
+        assert body['health_assessment']['performance']['verdict'] == 'slow'
+
+
 class TestWatchDevices:
 
     def test_list_dispatches_watch_devices(self, client, device, device_controller, watch_stream):

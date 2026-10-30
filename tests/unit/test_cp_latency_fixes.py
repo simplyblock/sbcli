@@ -208,7 +208,7 @@ class TestPrestageHublvolSubsystem:
     def _node(self, rpc):
         n = StorageNode()
         n.uuid = "n1"
-        n.data_nics = [types.SimpleNamespace(ip4_address="10.0.0.1",
+        n.data_nics = [types.SimpleNamespace(ip4_address="10.0.0.1", listen_address="10.0.0.1",
                                              trtype="TCP", if_name="eth0")]
         n.active_rdma = False
         n.rpc_client = lambda *a, **k: rpc

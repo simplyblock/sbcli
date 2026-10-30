@@ -1,4 +1,3 @@
-import json
 import logging
 import threading
 import time
@@ -412,8 +411,16 @@ def probe_device_stack(device_obj, snode, rpc_client=None):
         subsys: list = []
 
         def _get_subsys():
-            subsys.extend(rpc_client.subsystem_get(device_obj.nvmf_nqn) or [])
-            return subsys
+            # subsystem_get returns the one subsystem as a dict (None when
+            # absent). Extending a list with that dict appended its KEYS, so
+            # the entry read below was a string, listener and namespace always
+            # looked missing, and no repair could ever complete (bf5
+            # 2026-10-29: device b09c1063 looped "still missing after repair:
+            # listener, namespace" with both in place).
+            entry = rpc_client.subsystem_get(device_obj.nvmf_nqn)
+            if entry:
+                subsys.append(entry)
+            return entry
 
         _safe("subsystem", _get_subsys)
         if subsys:
@@ -472,6 +479,18 @@ def device_repair(device_id, force=False):
     present, missing = probe_device_stack(device_obj, snode, rpc_client)
     logger.info("Device %s repair probe: present=%s missing=%s",
                 device_id, present, missing)
+
+    if not missing and device_obj.status == NVMeDevice.STATUS_REMOVED:
+        # REMOVED is local: SPDK unregistered the bdev (e.g. an alceml stuck-IO
+        # shutdown). An intact stack means an earlier attempt already rebuilt
+        # it, so the only step left is the one that attempt never reached.
+        # Without this the device stayed removed with a whole stack (bf5
+        # 2026-10-29, device b09c1063).
+        logger.info("Device %s is removed but its local stack is intact; "
+                    "setting online", device_id)
+        device_set_io_error(device_id, False)
+        device_set_online(device_id, cause=CAUSE_DEVICE_RESTART, connect_peers=True)
+        return True
 
     if not missing:
         # Intact locally. The unavailability is remote (consensus) and a
@@ -676,7 +695,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
                 device_obj.nvmf_ip = iface.ip4_address
                 break
     else:
@@ -1577,7 +1596,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     if iface.ip4_address:
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                         try:
-                            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
                         except RPCException as e:
                             logger.warning("Failed to create listener for %s on IP %s: %s",
                                            subsystem_nqn, iface.ip4_address, e)
@@ -1682,25 +1701,203 @@ def new_device_from_failed(device_id):
     return new_device.get_id()
 
 
-def get_device_health_info(device_id):
+#: Health-log fields, under the names SPDK's
+#: ``bdev_nvme_get_controller_health_info`` uses. The host-side readers (nvme-cli,
+#: smartctl) are mapped onto these where they report the same quantity, so a
+#: consumer reads one shape whatever the device is attached through.
+HEALTH_INFO_FIELDS = (
+    "model_number", "serial_number", "firmware_revision", "traddr",
+    "critical_warning", "temperature_celsius", "available_spare_percentage",
+    "available_spare_threshold_percentage", "percentage_used",
+    "data_units_read", "data_units_written", "host_read_commands",
+    "host_write_commands", "controller_busy_time", "power_cycles",
+    "power_on_hours", "unsafe_shutdowns", "media_errors", "num_err_log_entries",
+    "warning_temperature_time_minutes",
+    "critical_composite_temperature_time_minutes",
+)
+
+HEALTH_SOURCE_SPDK = "spdk"
+HEALTH_SOURCE_NVME_CLI = "nvme-cli"
+HEALTH_SOURCE_SMARTCTL = "smartctl"
+
+# NVMe health-log field (SPDK name) -> the name nvme-cli's `smart-log -o json`
+# gives it. Temperature is handled separately: NVMe reports it in Kelvin.
+_NVME_CLI_KEYS = {
+    "critical_warning": "critical_warning",
+    "available_spare_percentage": "avail_spare",
+    "available_spare_threshold_percentage": "spare_thresh",
+    "percentage_used": "percent_used",
+    "data_units_read": "data_units_read",
+    "data_units_written": "data_units_written",
+    "host_read_commands": "host_read_commands",
+    "host_write_commands": "host_write_commands",
+    "controller_busy_time": "controller_busy_time",
+    "power_cycles": "power_cycles",
+    "power_on_hours": "power_on_hours",
+    "unsafe_shutdowns": "unsafe_shutdowns",
+    "media_errors": "media_errors",
+    "num_err_log_entries": "num_err_log_entries",
+    "warning_temperature_time_minutes": "warning_temp_time",
+    "critical_composite_temperature_time_minutes": "critical_comp_time",
+}
+# The same log as smartctl's `nvme_smart_health_information_log` names it.
+_SMARTCTL_NVME_KEYS = dict(
+    _NVME_CLI_KEYS,
+    available_spare_percentage="available_spare",
+    available_spare_threshold_percentage="available_spare_threshold",
+    percentage_used="percentage_used",
+    host_read_commands="host_reads",
+    host_write_commands="host_writes",
+)
+
+#: ATA SMART attribute ids: Reallocated_Sector_Ct and Current_Pending_Sector.
+_ATA_REALLOCATED_SECTORS = 5
+_ATA_PENDING_SECTORS = 197
+
+#: Kelvin offset of the NVMe composite temperature.
+_KELVIN_OFFSET = 273
+
+
+def _as_int(value):
+    """An integer health-log value, or None when the tool did not give one.
+
+    Newer nvme-cli releases wrap some fields as ``{"value": n, ...}`` and print
+    128-bit counters as decimal strings; both are accepted.
+    """
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        digits = value.replace(",", "").strip()
+        if digits.isdigit():
+            return int(digits)
+    return None
+
+
+def _empty_health_info(device, supported, source):
+    info: dict = {field: None for field in HEALTH_INFO_FIELDS}
+    # Identity is known from the device record whatever the source says.
+    info["model_number"] = device.model_id or None
+    info["serial_number"] = device.serial_number or None
+    info.update({
+        "supported": supported,
+        "source": source,
+        "smart_passed": None,
+        "reallocated_sectors": None,
+        "pending_sectors": None,
+    })
+    return info
+
+
+def _map_nvme_log(info, log, keys):
+    for field, key in keys.items():
+        info[field] = _as_int(log.get(key))
+    kelvin = _as_int(log.get("temperature"))
+    if kelvin is not None:
+        info["temperature_celsius"] = kelvin - _KELVIN_OFFSET
+
+
+def _map_smartctl(info, data):
+    info["model_number"] = data.get("model_name") or info["model_number"]
+    info["serial_number"] = data.get("serial_number") or info["serial_number"]
+    info["firmware_revision"] = data.get("firmware_version") or None
+
+    nvme_log = data.get("nvme_smart_health_information_log")
+    if isinstance(nvme_log, dict):
+        # An NVMe device read through smartctl: its verdict is
+        # critical_warning, as for every other NVMe source, so smart_passed
+        # stays None.
+        _map_nvme_log(info, nvme_log, _SMARTCTL_NVME_KEYS)
+        return
+
+    passed = (data.get("smart_status") or {}).get("passed")
+    info["smart_passed"] = passed if isinstance(passed, bool) else None
+    info["temperature_celsius"] = _as_int((data.get("temperature") or {}).get("current"))
+    info["power_on_hours"] = _as_int((data.get("power_on_time") or {}).get("hours"))
+    info["power_cycles"] = _as_int(data.get("power_cycle_count"))
+    for attr in (data.get("ata_smart_attributes") or {}).get("table") or []:
+        raw = _as_int((attr.get("raw") or {}).get("value"))
+        if attr.get("id") == _ATA_REALLOCATED_SECTORS:
+            info["reallocated_sectors"] = raw
+        elif attr.get("id") == _ATA_PENDING_SECTORS:
+            info["pending_sectors"] = raw
+
+
+def map_host_smart(device, result):
+    """Map the storage node agent's ``device_smart`` result onto the SPDK
+    health-info shape (see ``HEALTH_INFO_FIELDS``)."""
+    if not result or not result.get("supported"):
+        return _empty_health_info(device, False, "")
+    source = result.get("source") or ""
+    data = result.get("data") or {}
+    info = _empty_health_info(device, True, source)
+    if source == HEALTH_SOURCE_NVME_CLI:
+        _map_nvme_log(info, data, _NVME_CLI_KEYS)
+    elif source == HEALTH_SOURCE_SMARTCTL:
+        _map_smartctl(info, data)
+    else:
+        raise ValueError(f"unknown health-log source {source!r} from storage node")
+    return info
+
+
+def get_device_health_info(device_id) -> dict:
+    """The device's health log, in one shape for every attachment type.
+
+    SPDK-attached NVMe devices are read with
+    ``bdev_nvme_get_controller_health_info``. AIO (lblk) devices are invisible
+    to that RPC, so the storage node agent reads them from the host instead
+    (nvme-cli for kernel NVMe namespaces, smartctl otherwise). A device that
+    has no health log at all is ``supported: False`` -- a property of the
+    device, not an error. An unreachable node or agent raises.
+
+    Raises KeyError for an unknown device or node.
+    """
     db_controller = DBController()
-    try:
-        device = db_controller.get_storage_device_by_id(device_id)
-        snode = db_controller.get_storage_node_by_id(device.node_id)
-    except KeyError as e:
-        logger.error(e)
-        return False
+    device = db_controller.get_storage_device_by_id(device_id)
+    snode = db_controller.get_storage_node_by_id(device.node_id)
 
     if device.bdev_type == "aio":
-        # SMART is not reachable through SPDK for AIO bdevs; host-side
-        # smartctl via the node agent is a possible follow-up.
-        return json.dumps({
-            "bdev_type": "aio",
-            "device_path": device.device_path,
-            "smart": None,
-            "message": "SMART data is not available through SPDK for AIO devices",
-        }, indent=2)
+        path = device.device_path or device.by_id_path
+        if not path:
+            return _empty_health_info(device, False, "")
+        result, error = snode.client(timeout=30, retry=1).device_smart(path)
+        if error:
+            raise ValueError(f"storage node failed to read the health log of {path}: {error}")
+        return map_host_smart(device, result)
 
     rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)
-    return json.dumps(ret, indent=2)
+    if not isinstance(ret, dict):
+        raise ValueError(
+            f"no health info for controller {device.nvme_controller}: {ret!r}")
+    info = _empty_health_info(device, True, HEALTH_SOURCE_SPDK)
+    info.update(ret)
+    return info
+
+
+def set_device_health_assessment(node_id, device_id, assessment: dict):
+    """Store an externally computed health assessment on the device, verbatim.
+
+    Devices live inside their node's record, so the write goes through
+    ``atomic_update`` on the node (``_atomic_device_set``) and touches only
+    this device's ``health_assessment``: an assessment arriving every few
+    minutes must never clobber a concurrent status change.
+
+    Raises KeyError when the node or the device on it does not exist.
+    """
+    db_controller = DBController()
+    found = []
+
+    def _apply(dev):
+        # Replayed on write conflict: record the find, mutate, nothing else.
+        found.append(True)
+        dev.health_assessment = dict(assessment)
+        return True
+
+    fresh = _atomic_device_set(db_controller, node_id, device_id, _apply)
+    if fresh is None or not found:
+        raise KeyError(f"device {device_id} not found on node {node_id}")
+    return fresh

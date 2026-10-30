@@ -98,6 +98,13 @@ class NVMeDevice(BaseModel):
     # Stable /dev/disk/by-id/... symlink when the device has one; preferred
     # as the AIO bdev filename so udev renames cannot bite mid-flight.
     by_id_path: str = ""
+    # The latest disk-health assessment an external assessor (the Kubernetes
+    # operator) recorded through PUT .../devices/{id}/health-assessment,
+    # stored verbatim: {"reporter", "reported_at", "valid_seconds",
+    # "performance": {...} | None, "smart": {...} | None}. The control plane
+    # does not compute it; alerts_controller turns it into device_slow /
+    # device_unhealthy while it is fresh. Empty until first reported.
+    health_assessment: dict = default_factory(dict)
 
     def __change_dev_connection_to(self, connecting_from_node):
         # Targeted single-record write. The previous implementation scanned

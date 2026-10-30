@@ -335,7 +335,7 @@ def _cleanup_created(migration):
                     if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
                         try:
                             sec_rpc.listeners_del(nqn, nic.trtype.lower(),
-                                                  nic.ip4_address, sec_port)
+                                                  nic.listen_address, sec_port)
                         except Exception:
                             pass
                 logger.info(
@@ -355,7 +355,7 @@ def _cleanup_created(migration):
             if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
                 try:
                     tgt_rpc.listeners_del(nqn, nic.trtype.lower(),
-                                          nic.ip4_address, tgt_port)
+                                          nic.listen_address, tgt_port)
                 except Exception:
                     pass
         logger.info(
@@ -1577,7 +1577,7 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
                 if not nic.ip4_address or nic.trtype.lower() != lvol.fabric:
                     continue
                 try:
-                    _rpc.listeners_create(nqn, nic.trtype.lower(), nic.ip4_address,
+                    _rpc.listeners_create(nqn, nic.trtype.lower(), nic.listen_address,
                                           _port, ana_state="inaccessible")
                     logger.info(
                         f"create_migration: inaccessible listener on overlap node "
@@ -1618,12 +1618,12 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
             for nic in _node.data_nics:
                 if not nic.ip4_address or nic.trtype.lower() != lvol.fabric:
                     continue
-                _listener_key = (nic.trtype.lower(), nic.ip4_address, str(_port))
+                _listener_key = (nic.trtype.lower(), nic.listen_address, str(_port))
                 if _listener_key in _existing_listeners:
                     continue
                 try:
                     _ret_listener = _rpc.listeners_create(
-                        nqn, nic.trtype.lower(), nic.ip4_address,
+                        nqn, nic.trtype.lower(), nic.listen_address,
                         _port, ana_state="inaccessible")
                     if not _ret_listener:
                         logger.warning(

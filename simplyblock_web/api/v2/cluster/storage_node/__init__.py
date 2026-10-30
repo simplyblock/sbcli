@@ -4,7 +4,7 @@ from typing import Annotated, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import storage_node_ops
@@ -72,6 +72,18 @@ class StorageNodeParams(BaseModel):
     force_format: bool = False
     # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
     networks: Annotated[builtins.list[NetworkAttachment], Field(default_factory=builtins.list)]
+    # The SPDK pod serves on the pod network itself, fronted by a Service, with no
+    # attachment. Exclusive with networks.
+    pod_network: bool = False
+
+    @model_validator(mode="after")
+    def _one_way_off_the_host_network(self):
+        if self.networks and self.pod_network:
+            raise ValueError("a node is added with networks or on the pod network, not both")
+        # data_nics are host NIC names, which a pod off the host network does not see.
+        if self.data_nics and (self.networks or self.pod_network):
+            raise ValueError("data_nics are allowed only when the node is on the host network")
+        return self
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -105,6 +117,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "expansion": parameters.expand,
             "force_format": parameters.force_format,
             **({"networks": [network.model_dump() for network in parameters.networks]} if parameters.networks else {}),
+            **({"pod_network": True} if parameters.pod_network else {}),
         }
     )
     if not task_id_or_false:

@@ -131,7 +131,7 @@ class SNodeClient:
                            rpc_username=None, rpc_password: SecretStr | None = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
                            total_mem=None, system_mem=None, cluster_mode=None, socket=0, cluster_id=None,
                            spdk_proxy_image=None, mcp_max_unavailable=None, spdk_proxy_tls_secret=None,
-                           networks=None):
+                           networks=None, pod_network=False, published_ports=None):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -174,7 +174,19 @@ class SNodeClient:
             params["spdk_proxy_tls_secret"] = spdk_proxy_tls_secret
         if networks:
             params["networks"] = networks
+        if pod_network:
+            params["pod_network"] = True
+            params["published_ports"] = list(published_ports or [])
         return self._request("POST", "spdk_process_start", params)
+
+    def spdk_service_publish(self, rpc_port, cluster_id, ports):
+        """Set the ports the pod-network node's Service forwards."""
+        return self._request("POST", "spdk_service_publish",
+                             {"rpc_port": rpc_port, "cluster_id": cluster_id, "ports": list(ports)})
+
+    def spdk_service_delete(self, rpc_port, cluster_id):
+        """Remove the pod-network node's Service; its cluster address is gone for good."""
+        return self._request("GET", "spdk_service_delete", {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
         return True, None
@@ -239,6 +251,15 @@ class SNodeClient:
         from a whole disk (refused when busy)."""
         return self._request("POST", "wipe_block_device",
                              {"device_name": device_name})
+
+    def device_smart(self, device_path):
+        """Raw health log of a kernel block device on the node (lblk/AIO).
+
+        Returns ``(result, error)``; ``result`` is
+        ``{"supported", "source", "device_path", "data", "reason"}`` with
+        ``source`` one of ``"nvme-cli"``, ``"smartctl"`` or ``""``.
+        """
+        return self._request("GET", "device_smart", {"device_path": device_path})
 
     def spdk_process_is_up(self, rpc_port, cluster_id):
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}

@@ -316,9 +316,30 @@ class StorageNode(BaseNodeObject):
         return super().from_dict(data)
 
     @property
+    def pod_network(self) -> bool:
+        """Whether the SPDK pod serves on the pod network itself, fronted by a Service,
+        with no attachment: its one data NIC is the CNI's interface."""
+        from simplyblock_core.storage_network import POD_NET_TYPE
+
+        return any(nic.net_type == POD_NET_TYPE for nic in self.data_nics)
+
+    @property
     def on_pod_network(self) -> bool:
-        """Whether the SPDK pod is attached to extra networks rather than on the host's."""
-        return bool(self.networks)
+        """Whether the SPDK pod is off the host network: attached to extra networks, or
+        serving on the pod network itself."""
+        return bool(self.networks) or self.pod_network
+
+    @property
+    def socket_bind_device(self) -> str | None:
+        """The device SPDK pins its sockets to with SO_BINDTODEVICE, or None for no pin.
+
+        A node with one data NIC on the host or an attached network keeps every socket
+        on it. On the pod network the one NIC is fronted by a Service whose traffic the
+        CNI delivers on the pod's interface, and a pin would refuse it, so none is set.
+        """
+        if len(self.data_nics) != 1 or self.pod_network:
+            return None
+        return self.data_nics[0].if_name
 
     @property
     def rpc_host(self) -> str:
@@ -426,7 +447,7 @@ class StorageNode(BaseNodeObject):
                 }
 
             for iface in self.data_nics:
-                ip = iface.ip4_address
+                ip = iface.listen_address
                 if self.active_rdma:
                     if iface.trtype != "RDMA":
                         logger.debug("Skipping non-RDMA iface %s (active_rdma=True)", ip)
@@ -525,7 +546,7 @@ class StorageNode(BaseNodeObject):
                 for la in (subsys.get("listen_addresses") or [])
             }
         for iface in self.data_nics:
-            ip = iface.ip4_address
+            ip = iface.listen_address
             if self.active_rdma:
                 if iface.trtype != "RDMA":
                     continue

@@ -290,13 +290,13 @@ def demote_old_leader_listeners(sec_node, lvol_list, ana_state="non_optimized"):
             if not iface.ip4_address:
                 continue
             tr_type = "RDMA" if sec_node.active_rdma and iface.trtype == "RDMA" else "TCP"
-            key = (lvol.nqn, tr_type, iface.ip4_address, listener_port,
+            key = (lvol.nqn, tr_type, iface.listen_address, listener_port,
                    lvol.ns_id or None)
             if key in seen:
                 continue
             seen.add(key)
             nvmf_listener.ensure_listener(
-                sec_rpc, lvol.nqn, tr_type, iface.ip4_address, listener_port,
+                sec_rpc, lvol.nqn, tr_type, iface.listen_address, listener_port,
                 ana_state=ana_state, anagrpid=lvol.ns_id or None,
                 set_existing_ana=True)
 
@@ -457,7 +457,7 @@ def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
             # migrated, suspended or failed over independently.
             try:
                 rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
+                    lvol.nqn, iface.listen_address, listener_port, trtype=trtype, ana=ana_state,
                     anagrpid=lvol.ns_id)
             except RPCException as e:
                 logger.warning("Failed to set ANA state %s for %s on %s: %s",
@@ -1627,7 +1627,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
 
         for iface in snode.data_nics:
             logger.info(f"adding {iface.trtype} listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+            ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
             ip_list.append(iface.ip4_address)
 
     if len(ip_list) > 1:
@@ -1724,7 +1724,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
         for iface in snode.data_nics:
             if iface.ip4_address:
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
                 ip_list.append(iface.ip4_address)
 
     if len(ip_list) > 1:
@@ -1814,7 +1814,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
     for iface in snode.data_nics:
         if iface.ip4_address:
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+            ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
             ip_list.append(iface.ip4_address)
 
     logger.info(f"add {pt_name} to subsystem")
@@ -2175,7 +2175,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
             for iface in snode.data_nics:
                 if iface.ip4_address:
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                    ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
         jm_device.status = JMDevice.STATUS_ONLINE
         snode.jm_device = jm_device
         snode.write_to_db()
@@ -3603,6 +3603,43 @@ def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
     return True, ""
 
 
+def _delete_spdk_service_via_k8s(rpc_port, cluster_id):
+    """Delete the Service in front of a pod-network node's SPDK pod straight from
+    the Kubernetes API. The agent that created it runs on the host being torn
+    down, which in the common removal case is gone; see _delete_spdk_pod_via_k8s.
+    A Service that does not exist is already what was asked for.
+
+    Returns ``(ok, err)``."""
+    name = storage_network.service_name(rpc_port, cluster_id)
+    try:
+        k8s_core = utils.get_k8s_core_client()
+    except Exception as e:
+        return False, f"no Kubernetes API client available: {e}"
+    try:
+        k8s_core.delete_namespaced_service(name, constants.K8S_NAMESPACE)
+        logger.info(f"Deleted Service {name} directly via the Kubernetes API")
+    except ApiException as e:
+        if e.status != 404:
+            return False, f"failed to delete Service {name}: {e.body}"
+    except Exception as e:
+        return False, f"failed to delete Service {name}: {e}"
+    return True, None
+
+
+def _delete_spdk_service(snode, rpc_port, cluster_id):
+    """Remove the Service of a pod-network node: through the API server, and
+    through the agent only when that fails."""
+    ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
+    if ok:
+        return
+    logger.warning(f"Direct Kubernetes delete of the Service on port {rpc_port} failed ({err}); "
+                   "falling back to the node agent")
+    try:
+        snode.client(timeout=30, retry=1).spdk_service_delete(rpc_port, cluster_id)
+    except SNodeClientException as e:
+        logger.warning("The Service of the node on port %s was not deleted: %s", rpc_port, e)
+
+
 def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=None):
     """Tear down the SPDK pod add_node just started, before bailing out.
 
@@ -3631,6 +3668,12 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     logger.error(f"add_node aborting after SPDK start: {reason}")
 
     if cluster_mode == "kubernetes":
+        # A pod-network add created a Service before the pod, and nothing names
+        # it once the add is abandoned. Best effort: a node on the host network
+        # has none and the delete answers not-found.
+        ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
+        if not ok:
+            logger.warning(f"The Service of the aborted add on port {rpc_port} was not deleted: {err}")
         ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
         if ok:
             logger.info(
@@ -3664,7 +3707,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
              spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
-             force_format=False, networks=None):
+             force_format=False, networks=None, pod_network=False):
+    if networks and pod_network:
+        logger.error("A node is added with networks or on the pod network, not both")
+        return False
+    if data_nics_list and (networks or pod_network):
+        logger.error("data_nics are allowed only when the node is on the host network")
+        return False
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -3783,7 +3832,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         #     if node_info['cluster_id'] != cluster_id:
         #         logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
         #         return False
-        ip_iface = utils.get_mgmt_ip(node_info, iface_name, networks)
+        ip_iface = utils.get_mgmt_ip(node_info, iface_name, networks, pod_network)
         mgmt_ip = ip_iface[0] if ip_iface else None
 
         # A host's failure domain is immutable for the lifetime of its node
@@ -4034,11 +4083,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
-        mgmt_info = utils.get_mgmt_ip(node_info, iface_name, networks)
+        mgmt_info = utils.get_mgmt_ip(node_info, iface_name, networks, pod_network)
         if not mgmt_info:
-            if networks:
+            if networks or pod_network:
                 logger.error("The node agent reported no host_ip; the storage-node DaemonSet must "
-                             "set HOST_IP for a node added with networks")
+                             "set HOST_IP for a node added off the host network")
             else:
                 logger.error(f"No management interface with IP found in provided interfaces: {iface_name}")
             return False
@@ -4209,7 +4258,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
                 mcp_max_unavailable=mcp_max_unavailable,
-                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret, networks=networks)
+                spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret, networks=networks,
+                pod_network=pod_network)
             time.sleep(5)
 
         except Exception as e:
@@ -4275,7 +4325,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         fabric_tcp = cluster.fabric_tcp
         fabric_rdma = cluster.fabric_rdma
         names = data_nics_list or [mgmt_iface]
-        if networks:
+        if networks or pod_network:
             # The host's NICs say nothing about the pod's interfaces; use the pod's report.
             try:
                 spdk_ip, data_nics = storage_network.from_report(results)
@@ -4396,6 +4446,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.jc_singleton_mask = jc_singleton_mask or ""
         snode.compression_cpu_mask = compression_cpu_mask or ""
         snode.nvmf_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
+        # The pod's Service was created with the RPC port alone; it forwards the
+        # device port from here on.
+        storage_network.publish_ports(snode)
         snode.poller_cpu_cores = poller_cpu_cores or []
         snode.socket = node_socket
         snode.iobuf_small_pool_count = small_pool_count or 0
@@ -4467,10 +4520,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.warning("Failed to set nvmf max subsystems %s: %s", constants.NVMF_MAX_SUBSYSTEMS, e)
 
         # 2- set socket implementation options
-        bind_to_device = None
-        if snode.data_nics and len(snode.data_nics) == 1:
-            bind_to_device = snode.data_nics[0].if_name
-        ret = rpc_client.sock_impl_set_options(bind_to_device)
+        ret = rpc_client.sock_impl_set_options(snode.socket_bind_device)
         if not ret:
             logger.error("Failed to set optimized socket options")
             return False
@@ -4821,6 +4871,9 @@ def delete_storage_node(node_id, force=False):
             tasks_controller.cancel_task(task.uuid)
         time.sleep(1)
 
+    if snode.pod_network:
+        # The Service held the node's address; with the record gone nothing names it.
+        _delete_spdk_service(snode, snode.rpc_port, snode.cluster_id)
     snode.remove(db_controller.kv_store)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -6388,6 +6441,7 @@ def _prune_stale_lvstore_ports(node_id, lvstore, db_controller):
     if node.lvstore_ports and lvstore in node.lvstore_ports:
         del node.lvstore_ports[lvstore]
         node.write_to_db()
+        storage_network.publish_ports(node)
 
 
 def _teardown_lvol_subsystems_on_vacated_peer(peer, primary, db_controller):
@@ -7214,6 +7268,7 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
             "hublvol_port": occupant_primary.hublvol.nvmf_port if occupant_primary.hublvol else 0,
         }
         new_host.write_to_db()
+        storage_network.publish_ports(new_host)
 
     # Re-point every LVol hosted on occupant_primary before the old_host
     # teardown below -- see _update_lvol_nodes_for_replica_move's docstring.
@@ -8841,7 +8896,8 @@ def _restart_storage_node_impl(
             total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image,
-            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret, networks=snode.networks)
+            spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret, networks=snode.networks,
+            pod_network=snode.pod_network, published_ports=storage_network.published_ports(snode))
         if snode.on_pod_network:
             # A recreated pod can hold other addresses.
             snode.spdk_ip, snode.data_nics = storage_network.from_report(results, snode.data_nics)
@@ -8921,10 +8977,7 @@ def _restart_storage_node_impl(
     rpc_client.accel_set_options()
 
     # 2- set socket implementation options
-    bind_to_device = None
-    if snode.data_nics and len(snode.data_nics) == 1:
-        bind_to_device = snode.data_nics[0].if_name
-    ret = rpc_client.sock_impl_set_options(bind_to_device)
+    ret = rpc_client.sock_impl_set_options(snode.socket_bind_device)
     if not ret:
         logger.error("Failed socket implement set options")
         return False
@@ -10019,6 +10072,45 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
     return True, ""
 
 
+def _broadcast_devices_unavailable(snode):
+    """Shutdown Loop 1: mark the node's JM and NVMe devices unavailable.
+
+    The underlying device_set_unavailable() / set_jm_device_state()
+    helpers call distr_controller.send_dev_status_event() which already
+    fans out to all peers and skips offline/removed, so the peers update
+    their cluster maps and DISTRIB stops routing IO toward these devices.
+    Best effort: a failure is logged and the shutdown continues.
+    """
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        logger.info("Loop 1: setting JM unavailable on peers")
+        try:
+            device_controller.set_jm_device_state(
+                snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        except Exception as e:
+            logger.warning(
+                "Loop 1: set_jm_device_state failed (continuing): %s", e)
+
+    logger.info(
+        "Loop 1: marking %d nvme device(s) unavailable on peers",
+        len(snode.nvme_devices))
+    for dev in snode.nvme_devices:
+        if dev.status not in [
+            NVMeDevice.STATUS_UNAVAILABLE,
+            NVMeDevice.STATUS_ONLINE,
+            NVMeDevice.STATUS_CANNOT_ALLOCATE,
+            NVMeDevice.STATUS_READONLY,
+        ]:
+            continue
+        try:
+            # Default cause (CAUSE_OTHER): a node-driven shutdown
+            # must not count against the per-device flap budget.
+            device_controller.device_set_unavailable(dev.get_id())
+        except Exception as e:
+            logger.warning(
+                "Loop 1: device_set_unavailable(%s) failed (continuing): %s",
+                dev.get_id(), e)
+
+
 def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
                           current_restart_task_id=None):
     """Gracefully terminate a storage node.
@@ -10061,9 +10153,10 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     down their remote_alceml / remote_jm controllers — is now provided
     by Loop 2.
 
-    Forced (force=True) still skips Loops 1+2 and goes straight to
-    kill (matches the existing --force semantics: terminate immediately
-    and accept that peers discover the loss through TCP errors).
+    Forced (force=True) skips Loop 2 and goes straight to kill
+    (terminate immediately), then runs Loop 1 right after the kill, so
+    the peers stop routing IO to the dead devices at once instead of
+    waiting for the node's restart to bring them back.
     """
     db_controller = DBController()
     try:
@@ -10182,38 +10275,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     ])
 
     if not force:
-        # Step 3 (Loop 1): broadcast device-unavailable events. The
-        # underlying device_set_unavailable() / set_jm_device_state()
-        # helpers call distr_controller.send_dev_status_event() which
-        # already fans out to all peers and skips offline/removed.
-        if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-            logger.info("Loop 1: setting JM unavailable on peers")
-            try:
-                device_controller.set_jm_device_state(
-                    snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-            except Exception as e:
-                logger.warning(
-                    "Loop 1: set_jm_device_state failed (continuing): %s", e)
-
-        logger.info(
-            "Loop 1: marking %d nvme device(s) unavailable on peers",
-            len(snode.nvme_devices))
-        for dev in snode.nvme_devices:
-            if dev.status not in [
-                NVMeDevice.STATUS_UNAVAILABLE,
-                NVMeDevice.STATUS_ONLINE,
-                NVMeDevice.STATUS_CANNOT_ALLOCATE,
-                NVMeDevice.STATUS_READONLY,
-            ]:
-                continue
-            try:
-                # Default cause (CAUSE_OTHER): a node-driven shutdown
-                # must not count against the per-device flap budget.
-                device_controller.device_set_unavailable(dev.get_id())
-            except Exception as e:
-                logger.warning(
-                    "Loop 1: device_set_unavailable(%s) failed (continuing): %s",
-                    dev.get_id(), e)
+        # Step 3 (Loop 1): broadcast device-unavailable events.
+        _broadcast_devices_unavailable(snode)
 
         # Step 4 (Loop 2): detach remote_alceml / remote_jm controllers
         # on every peer still capable of receiving an RPC. Detach (vs.
@@ -10272,6 +10335,16 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
+    if force:
+        # Loop 1 after the kill: the devices are gone now. Without it the
+        # peers keep routing writes to them until the node's restart brings
+        # them back -- device errors the peers report meanwhile are skipped
+        # while the node is in_restart -- and a leader whose writes fail for
+        # longer than the lvol layer waits (6s) drops leadership and returns
+        # the queued IO as EIO: 2026-10-29 page copy soak, iteration 21,
+        # forced shutdown + restart, LVS_1 leader on a peer failed client
+        # writes after 10s of writes to the dead node's devices.
+        _broadcast_devices_unavailable(snode)
     pci_address = []
     for dev in snode.nvme_devices:
         if dev.bdev_type == "aio":
@@ -12624,6 +12697,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     # including the one this call is building.
     snode.lvstore_ports = _derive_lvstore_ports(snode, primary_node, db_controller)
     snode.write_to_db()
+    storage_network.publish_ports(snode)
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(primary_node.get_id()):
@@ -15085,7 +15159,7 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
             tr = "TCP"
         else:
             continue
-        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
+        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.listen_address, listener_port):
             logger.info("Listener %s %s:%s already on %s, skipping",
                         tr, iface.ip4_address, listener_port, lvol.nqn)
             continue
@@ -15095,7 +15169,7 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
         # listener this subsystem does not have is never mistaken for one
         # it does.
         if not rpc_client.listeners_create(
-                lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state):
+                lvol.nqn, tr, iface.listen_address, listener_port, ana_state=lvol_ana_state):
             msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "
                    f"for {lvol.nqn} on {snode.get_id()}")
             logger.error(msg)
@@ -15971,6 +16045,9 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         }
         snode.lvstore_status = "in_creation"
         snode.write_to_db()
+    # Outside the lock: it protects the allocation and the write, and the agent
+    # call that follows can take up to its timeout.
+    storage_network.publish_ports(snode)
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
     if err:
@@ -16005,6 +16082,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # creating lvstore on secondary
         sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
         sec_node.write_to_db()
+        storage_network.publish_ports(sec_node)
         ret, err = _create_bdev_stack(sec_node, lvstore_stack, primary_node=snode)
         if err:
             logger.error(f"Failed to create lvstore on node {sec_node.get_id()}")
@@ -16511,6 +16589,7 @@ def teardown_non_leader_lvstore(donor_node: StorageNode, primary_node: StorageNo
     if fresh_donor.lvstore_ports and primary_node.lvstore in fresh_donor.lvstore_ports:
         del fresh_donor.lvstore_ports[primary_node.lvstore]
     fresh_donor.write_to_db()
+    storage_network.publish_ports(fresh_donor)
 
     logger.info(
         f"teardown_non_leader_lvstore: tore down {sec_attr} for primary "

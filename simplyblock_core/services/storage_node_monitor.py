@@ -6,6 +6,7 @@ from simplyblock_core import (
     cluster_ops,
     constants,
     db_controller,
+    storage_network,
     storage_node_ops,
     utils,
 )
@@ -1592,7 +1593,7 @@ def node_port_check_fun(snode):
         data_results = []
         for data_nic in snode.data_nics:
             if data_nic.ip4_address:
-                data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
+                data_ping_check = health_controller._check_ping_from_node(data_nic.listen_address, ifname=data_nic.if_name, node=snode)
                 logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
                 data_results.append(data_ping_check)
 
@@ -1986,8 +1987,15 @@ _lvstore_in_creation_first_seen: dict = {}
 _restart_task_defer_first_seen: dict = {}
 
 
+#: How often the monitor re-publishes a pod-network node's Service ports: a safety net
+#: for a publish that failed where the ports changed, not the main path.
+PORT_PUBLISH_INTERVAL_SEC = 60
+
+
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
+    if snode.status == StorageNode.STATUS_ONLINE:
+        storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
 
     # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
     # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
