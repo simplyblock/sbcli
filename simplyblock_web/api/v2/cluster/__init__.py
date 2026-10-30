@@ -11,6 +11,7 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core import cluster_ops, constants
 from simplyblock_core import utils as core_utils
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
+from simplyblock_core.controllers import device_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
@@ -329,6 +330,31 @@ def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
 def rebalance_cluster( cluster: Cluster) -> Response:
     cluster_ops.rebalance(cluster.get_id())
     return Response(status_code=204)
+
+
+class DeviceRebalanceDTO(BaseModel):
+    weights_updated: bool
+    started: bool
+    reason: str
+
+
+class DeviceGrowthDTO(BaseModel):
+    devices: builtins.list[dict]
+    errors: dict[str, str]
+    uniform: bool
+    rebalance: DeviceRebalanceDTO | None = None
+
+
+@instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
+def grow_devices(cluster: Cluster, rebalance: bool = True) -> DeviceGrowthDTO:
+    """Grow every online lblk data device of the cluster to the size of its
+    block device, one device at a time. Used after the LUNs of the cluster
+    were grown on the storage array. If they have grown unevenly, the device
+    weights are set to the new sizes and the cluster is rebalanced, unless
+    ``rebalance`` is false."""
+    if cluster.device_mode != constants.DEVICE_MODE_LBLK:
+        raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
+    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id(), rebalance=rebalance))
 
 
 instance_api.include_router(alert_api, prefix='/alerts')

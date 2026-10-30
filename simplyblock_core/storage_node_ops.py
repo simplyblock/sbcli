@@ -1253,6 +1253,50 @@ def _repair_multipath_controller_locked(node, name, device, rpc_client, ret,
     return True
 
 
+#: Relative spread of size/placement_size across the data devices of a
+#: cluster that still counts as uniform growth of lblk devices.
+GROWTH_UNIFORM_TOLERANCE = 0.01
+
+
+def cluster_growth_ratios(db_controller, cluster_id):
+    """Growth of the data devices relative to their placement weight, as
+    ``(uniform, min_ratio, max_ratio)``. Journal, new, and failed devices are
+    ignored. A ratio above 1 means the device grew after it was placed (see
+    device_controller.resize_device)."""
+    ratios = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW,
+                              NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+                continue
+            if dev.cluster_device_order < 0:
+                continue
+            base = dev.weight_size()
+            ratios.append((dev.size / base) if base and base > 0 else 1.0)
+    if not ratios:
+        return True, 1.0, 1.0
+    lo, hi = min(ratios), max(ratios)
+    return (hi - lo) <= GROWTH_UNIFORM_TOLERANCE * lo, lo, hi
+
+
+def scaled_placement_size(db_controller, cluster_id, size):
+    """Placement size for a device that enters the cluster map now.
+
+    Weights only count relative to each other. After all data devices grew by
+    a common factor f, their weights still stand for their original sizes, so
+    a new device is weighted as size / f; weighting it by its full size would
+    give it f times its share of the data. Returns 0 (weight = size) when the
+    cluster has not grown, or has grown unevenly (then the next
+    grow-devices run sets every weight to its size anyway)."""
+    uniform, lo, hi = cluster_growth_ratios(db_controller, cluster_id)
+    factor = (lo + hi) / 2
+    if not uniform or factor <= 1.0 + GROWTH_UNIFORM_TOLERANCE or not size:
+        return 0
+    return int(size / factor)
+
+
 def get_next_cluster_device_order(db_controller, cluster_id):
     max_order = 0
     found = False
@@ -1937,6 +1981,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     for nvme in new_devices:
         if nvme.status == NVMeDevice.STATUS_ONLINE:
             if nvme.cluster_device_order < 0:
+                nvme.placement_size = scaled_placement_size(db_controller, snode.cluster_id, nvme.size)
                 nvme.cluster_device_order = dev_order
                 dev_order += 1
         device_events.device_create(nvme)
@@ -2001,6 +2046,7 @@ def _prepare_cluster_devices_jm_on_dev(snode: StorageNode, devices):
                 return False
             if nvme.status == NVMeDevice.STATUS_ONLINE:
                 if nvme.cluster_device_order < 0:
+                    nvme.placement_size = scaled_placement_size(db_controller, snode.cluster_id, nvme.size)
                     nvme.cluster_device_order = dev_order
                     dev_order += 1
                 device_events.device_create(nvme)
@@ -4675,6 +4721,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 for dev in snode.nvme_devices:
                     dev.physical_label = snode.physical_label
                     if dev.status == NVMeDevice.STATUS_ONLINE:
+                        dev.placement_size = scaled_placement_size(db_controller, snode.cluster_id, dev.size)
                         dev.cluster_device_order = dev_order
                         dev_order += 1
 

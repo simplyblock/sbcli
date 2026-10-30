@@ -566,6 +566,19 @@ commands:
             dest: force
             type: bool
             action: store_true
+      - name: resize-device
+        help: "Grows a Linux block device (lblk) online to the size of its block device."
+        usage: >
+          Re-reads the size of the device's block device on the storage node's host, for example, after its LUN was
+          grown on the storage array, and grows the storage device online without interrupting I/O. Shrinking is
+          refused. The placement weight of the device keeps its original size, so the added capacity is only fully
+          usable once all data devices of the cluster have grown by the same factor, or after cluster grow-devices
+          has updated the weights of unevenly grown devices and rebalanced the cluster.
+        arguments:
+          - name: "device_id"
+            help: "The storage device id."
+            dest: device_id
+            type: str
       - name: add-device
         help: "Adds a new storage device."
         usage: >
@@ -1432,6 +1445,27 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: grow-devices
+        help: "Grows every Linux block device (lblk) of the cluster online to the size of its block device."
+        usage: >
+          Re-reads the size of every online data device of an lblk cluster and grows the devices whose block device
+          has grown, one at a time. Used after the LUNs of the cluster were grown on the storage array. When all
+          devices have grown by the same factor, nothing else changes. When they have grown unevenly, the device
+          weights are set to the new sizes and the cluster is rebalanced, which re-places a large part of the data
+          in the background; this needs an active cluster with all nodes and devices online and no running
+          migration. Grow all LUNs on the array first, then run this command once.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--no-rebalance"
+            help: "Keep the device weights after an uneven growth and do not rebalance the cluster."
+            dest: no_rebalance
+            type: bool
+            default: false
+            action: store_true
       - name: show
         help: "Shows a cluster's statistics."
         arguments:

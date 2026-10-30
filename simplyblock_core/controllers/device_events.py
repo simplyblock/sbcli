@@ -97,3 +97,42 @@ def device_latency_outlier(device, message, caused_by=ec.CAUSED_BY_MONITOR):
         node_id=device.get_id(),
         event_level=EventObj.LEVEL_WARN,
         storage_id=device.cluster_device_order)
+
+
+def device_resized(device, old_size, new_size, caused_by=ec.CAUSED_BY_CLI):
+    _device_event(
+        device,
+        f"Device grown from {utils.humanbytes(old_size)} to {utils.humanbytes(new_size)}",
+        caused_by, ec.EVENT_STATUS_CHANGE)
+
+
+def devices_reweighted(cluster_id, rebalancing, caused_by=ec.CAUSED_BY_CLI):
+    """Cluster-log entry for new device weights after an uneven growth of
+    lblk devices; the rebalance that follows is logged by its tasks."""
+    ec.log_event_cluster(
+        cluster_id=cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=DBController().get_cluster_by_id(cluster_id),
+        caused_by=caused_by,
+        message="Device weights set to the current device sizes after uneven growth"
+                + ("; rebalancing started" if rebalancing else ""),
+        node_id=cluster_id)
+
+
+def device_resize_failed(device, message, caused_by=ec.CAUSED_BY_CLI):
+    """WARNING-level cluster-log entry for a device growth that could not
+    complete. The message says whether the device is unchanged or was set
+    unavailable."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(device.node_id)
+    ec.log_event_cluster(
+        cluster_id=snode.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=device,
+        caused_by=caused_by,
+        message=message,
+        node_id=device.get_id(),
+        event_level=EventObj.LEVEL_WARN,
+        storage_id=device.cluster_device_order)

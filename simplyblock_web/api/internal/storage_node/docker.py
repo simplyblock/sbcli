@@ -652,6 +652,30 @@ def wipe_block_device(body: _WipeBlockDeviceParams):
     return utils.get_response(True)
 
 
+class _RescanBlockDeviceParams(BaseModel):
+    device_path: str
+
+
+@api.post('/rescan_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'required': ['device', 'size', 'rescanned'],
+        'properties': {
+            'device': {'type': 'string'},
+            'size': {'type': 'integer'},
+            'rescanned': {'type': 'array', 'items': {'type': 'string'}},
+        },
+    })}}},
+})
+def rescan_block_device(body: _RescanBlockDeviceParams):
+    """Re-read the size of a whole-disk block device (a grown LUN) and
+    return the size in bytes the kernel reports afterwards."""
+    try:
+        return utils.get_response(node_utils.rescan_block_device(body.device_path))
+    except (ValueError, OSError) as e:
+        return utils.get_response(None, str(e))
+
+
 class _DeviceSmartQuery(BaseModel):
     device_path: str
 
