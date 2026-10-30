@@ -93,8 +93,8 @@ def test_each_attachment_with_a_device_resource_requests_one():
 
 def test_the_spdk_container_requests_the_device_a_plugin_hands_out():
     """An SR-IOV VF pool's device plugin allocates a VF only to a pod that requests
-    its resource; Multus then attaches that VF. Requests equal limits, which keeps the
-    pod Guaranteed."""
+    its resource; Multus then attaches that VF. Requests equal limits, as Kubernetes
+    requires of an extended resource; the QoS class is unchanged."""
     vf = NetworkAttachment(name="vf", namespace="infra", interface="data0", ips=["10.10.10.101/24"],
                            resource="intel.com/sriov_storage")
     pod = _render(NETWORKS=network_attachments.annotation([vf]),
