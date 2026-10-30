@@ -353,7 +353,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    inline_checksum=False,
                    atomic_4k=False,
                    cluster_vip=None,
-                   page_copy=False,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -512,7 +511,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
-    cluster.page_copy = bool(page_copy)
+    # Page copy is always on for new clusters; it is a property of the distribs, so clusters created
+    # before it keep it off (model default).
+    cluster.page_copy = True
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -626,7 +627,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
-                page_copy=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -660,7 +660,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
-        page_copy=page_copy,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
@@ -694,7 +693,6 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
-                page_copy=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -831,7 +829,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
-    cluster.page_copy = bool(page_copy)
+    # Page copy is always on for new clusters; it is a property of the distribs, so clusters created
+    # before it keep it off (model default).
+    cluster.page_copy = True
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
