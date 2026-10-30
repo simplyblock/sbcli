@@ -1,16 +1,17 @@
 """Campaign c2 fixes of the two-node arbiter (docs/design/two-node-arbitration.md).
 
-F1 restart precheck vs journal re-level, F2 re-grant while degraded, F3 planned
-loss, F4 self-fenced nodes re-admitted, F5 grant without the survivor's report,
-F6 partition recovery. Decision rules are table tests; the arbiter runs against
-the in-memory DB and fake nodes of test_two_node_arbiter.
+F2 re-grant while degraded, F3 planned loss, F4 self-fenced nodes re-admitted,
+F5 grant without the survivor's report, F6 partition recovery. Decision rules are
+table tests; the arbiter runs against the in-memory DB and fake nodes of
+test_two_node_arbiter. The restart's jc_compression status check is covered by
+test_restart_jc_compression_retry.py.
 """
 
 import errno
 
 import pytest
 
-from simplyblock_core import constants, storage_node_ops
+from simplyblock_core import constants
 from simplyblock_core.arbitration import decision as d
 from simplyblock_core.arbitration import planned, set_dual_node
 from simplyblock_core.models.arbitration import (
@@ -346,44 +347,6 @@ def test_set_dual_node_falls_back_for_older_nodes(reject, level, n):
 def test_set_dual_node_unarbitrated_sends_only_enable():
     rpc = _RPC(())
     assert set_dual_node(rpc, True, False) == (None, "plain") and rpc.sent == [{}]
-
-
-# ---- F1: restart precheck while the leader re-levels -----------------------------
-
-class _Leader:
-    def __init__(self, answers):
-        self.answers = list(answers)
-
-    def get_id(self):
-        return "leader"
-
-    def rpc_client(self):
-        return self
-
-    def jc_compression_get_status(self, _vuid):
-        a = self.answers.pop(0)
-        if isinstance(a, Exception):
-            raise a
-        return a
-
-
-def test_f1_compression_precheck_retries_while_the_journal_relevels():
-    t = [0.0]
-    leader = _Leader([RuntimeError("Compression request failed")] * 3 + [False])
-    got = storage_node_ops._jc_compression_status_with_retry(
-        leader, 1, timeout_s=60, interval_s=2, sleep=lambda s: t.__setitem__(0, t[0] + s),
-        clock=lambda: t[0])
-    assert got is False and t[0] == 6
-
-
-def test_f1_compression_precheck_gives_up_after_the_window():
-    t = [0.0]
-    leader = _Leader([RuntimeError("Compression request failed")] * 100)
-    with pytest.raises(RuntimeError):
-        storage_node_ops._jc_compression_status_with_retry(
-            leader, 1, timeout_s=10, interval_s=2,
-            sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0])
-    assert t[0] <= 10
 
 
 # ---- ultra c2 interface: "stalled" self-fence, remote_jm_timeout_ms in status ----

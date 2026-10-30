@@ -1,9 +1,11 @@
-"""The restart's ``jc_compression get_status`` precheck on the LVS leader.
+"""Tests for the restart's ``jc_compression get_status`` check on the LVS leader.
 
-While the leader re-levels or replicates the returning node's journal copy,
-the data plane answers the status request with a JSON-RPC error (code -5,
-"Compression request failed"). The precheck retries it on every cluster, not
-only on two-node arbitrated ones, and gives up only after the window.
+The check retries codes -4, -5 and -7 on every cluster. It also retries -6
+(journal stopped on error) on two-node clusters with arbitration enabled.
+Every other error is re-raised without another call or wait.
+
+Tests cover successful responses, errors on the first call and after a busy
+answer, arbitration lookups, call and wait counts, and a zero retry window.
 """
 
 import pytest
@@ -12,8 +14,8 @@ from simplyblock_core import storage_node_ops
 from simplyblock_core.rpc_client import RPCConnectionError, RPCRemoteError
 
 
-def _busy():
-    return RPCRemoteError("Compression request failed", code=-5)
+def _err(code):
+    return RPCRemoteError("Compression request failed", code=code)
 
 
 class _Leader:
@@ -48,52 +50,110 @@ class _Clock:
         return self.t
 
 
-@pytest.fixture(autouse=True)
-def no_arbitration_lookup(monkeypatch):
-    """The retry does not depend on the cluster's two-node arbitration flag."""
-    monkeypatch.setattr(storage_node_ops, "_cluster_two_node_arbitrated",
-                        lambda *a, **k: pytest.fail("arbitration flag consulted"))
+@pytest.fixture
+def arbitration(monkeypatch):
+    """The cluster's two-node arbitration flag; records every lookup."""
+    state = {"flag": False, "lookups": 0}
+
+    def lookup(*_a, **_k):
+        state["lookups"] += 1
+        return state["flag"]
+
+    monkeypatch.setattr(storage_node_ops, "_cluster_two_node_arbitrated", lookup)
+    return state
 
 
-def test_busy_leader_on_a_regular_cluster_is_retried_until_it_answers():
+def _check(leader, clock, **kw):
+    kw.setdefault("timeout_s", 60)
+    return storage_node_ops._jc_compression_status_with_retry(
+        leader, 1, interval_s=2, sleep=clock.sleep, clock=clock.now, **kw)
+
+
+@pytest.mark.parametrize("code", [-5, -4, -7])
+def test_busy_leader_is_retried_until_it_answers(arbitration, code):
     clock = _Clock()
-    leader = _Leader([_busy(), False])
-    got = storage_node_ops._jc_compression_status_with_retry(
-        leader, 1, timeout_s=60, interval_s=2, sleep=clock.sleep, clock=clock.now)
-    assert got is False
+    leader = _Leader([_err(code), False])
+    assert _check(leader, clock) is False
+    assert leader.calls == 2 and clock.t == 2
+    assert arbitration["lookups"] == 0
+
+
+@pytest.mark.parametrize("error", [
+    RPCRemoteError("Method not found", code=-32601),
+    RPCRemoteError("No such device", code=-19),
+    _err(-8),
+    RPCConnectionError("Could not reach remote"),
+], ids=["method-not-found", "enodev", "untracked-vuid", "connection-error"])
+def test_permanent_error_is_reraised_at_once(arbitration, error):
+    clock = _Clock()
+    leader = _Leader([error, False])
+    with pytest.raises(type(error)):
+        _check(leader, clock)
+    assert leader.calls == 1 and clock.t == 0
+    assert arbitration["lookups"] == 0
+
+
+@pytest.mark.parametrize("error", [
+    RPCRemoteError("Method not found", code=-32601),
+    _err(-11),
+    _err(-6),
+    RPCConnectionError("Could not reach remote"),
+], ids=["method-not-found", "journal-closed", "jcerr-regular-cluster", "connection-error"])
+def test_permanent_error_after_a_busy_answer_is_reraised_at_once(arbitration, error):
+    clock = _Clock()
+    leader = _Leader([_err(-5), error, False])
+    with pytest.raises(type(error)) as exc:
+        _check(leader, clock)
+    assert exc.value is error
     assert leader.calls == 2 and clock.t == 2
 
 
-def test_any_rpc_error_is_retried():
+def test_jcerr_on_a_regular_cluster_is_reraised_at_once(arbitration):
     clock = _Clock()
-    leader = _Leader([RPCConnectionError("Could not reach remote"), True])
-    got = storage_node_ops._jc_compression_status_with_retry(
-        leader, 1, timeout_s=60, interval_s=2, sleep=clock.sleep, clock=clock.now)
-    assert got is True and leader.calls == 2
+    leader = _Leader([_err(-6), False])
+    with pytest.raises(RPCRemoteError):
+        _check(leader, clock)
+    assert leader.calls == 1 and clock.t == 0
+    assert arbitration["lookups"] == 1
 
 
-def test_first_answer_is_returned_without_waiting():
+def test_jcerr_on_a_two_node_arbitrated_cluster_is_retried(arbitration):
+    arbitration["flag"] = True
+    clock = _Clock()
+    leader = _Leader([_err(-6), _err(-6), False])
+    assert _check(leader, clock) is False
+    assert leader.calls == 3 and clock.t == 4
+    assert arbitration["lookups"] == 1
+
+
+def test_first_answer_is_returned_without_waiting(arbitration):
     clock = _Clock()
     leader = _Leader([True])
-    got = storage_node_ops._jc_compression_status_with_retry(
-        leader, 1, sleep=clock.sleep, clock=clock.now)
-    assert got is True and leader.calls == 1 and clock.t == 0
+    assert _check(leader, clock) is True
+    assert leader.calls == 1 and clock.t == 0
 
 
-def test_error_outlasting_the_window_is_reraised():
+def test_busy_answer_outlasting_the_window_is_reraised(arbitration):
     clock = _Clock()
-    leader = _Leader([_busy()] * 100)
+    leader = _Leader([_err(-5)] * 100)
     with pytest.raises(RPCRemoteError) as exc:
-        storage_node_ops._jc_compression_status_with_retry(
-            leader, 1, timeout_s=60, interval_s=2, sleep=clock.sleep, clock=clock.now)
+        _check(leader, clock)
     assert exc.value.code == -5
-    assert clock.t <= 60 and leader.calls <= 30
+    assert leader.calls == 30 and clock.t == 58
 
 
-def test_window_is_bounded_by_rounds_when_sleep_does_not_advance_the_clock():
+def test_window_is_bounded_by_rounds_when_sleep_does_not_advance_the_clock(arbitration):
     clock = _Clock()
-    leader = _Leader([_busy()] * 100)
+    leader = _Leader([_err(-5)] * 100)
     with pytest.raises(RPCRemoteError):
         storage_node_ops._jc_compression_status_with_retry(
             leader, 1, timeout_s=60, interval_s=2, sleep=lambda s: None, clock=clock.now)
     assert leader.calls == 30
+
+
+def test_zero_window_means_no_retry(arbitration):
+    clock = _Clock()
+    leader = _Leader([_err(-5), False])
+    with pytest.raises(RPCRemoteError):
+        _check(leader, clock, timeout_s=0)
+    assert leader.calls == 1 and clock.t == 0

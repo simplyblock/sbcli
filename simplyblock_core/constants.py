@@ -1208,6 +1208,7 @@ TWO_NODE_HOST_FENCE_REASSERT_S = 10
 TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S = 5
 #: Node condition the operator sets on a host-fenced node's Kubernetes Node.
 TWO_NODE_STORAGE_FENCED_CONDITION = "StorageFenced"
-#: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
-#: retried while it fails (a journal re-level in progress) before the restart aborts.
+#: Restart flow: retry window in seconds for temporary jc_compression errors
+#: from the LVS leader. Other errors abort the restart without a retry. An RPC
+#: call can outlast the window; see _jc_compression_status_with_retry.
 RESTART_JC_COMPRESSION_RETRY_S = 60

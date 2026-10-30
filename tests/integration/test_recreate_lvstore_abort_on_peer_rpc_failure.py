@@ -20,7 +20,8 @@ These tests verify that:
   - non-leader port-block FW raise -> abort, leader port unblocked, SPDK killed
   - leader-detection RPC raise     -> abort, no _create_bdev_stack ran
   - replication-wait raise         -> abort
-  - jc_compression check raise     -> retried for the window, then abort
+  - jc_compression check raises an error outside the retry list
+                                   -> abort after one call
 
 External dependencies (FDB, RPC, SPDK) are mocked.
 """
@@ -434,10 +435,9 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             storage_node_ops.recreate_lvstore(snode)
 
         self.assertIn("Abort restart: jc_compression check", str(ctx.exception))
-        self.assertIn("after retrying for 60 s", str(ctx.exception))
-        # Retried for the whole window before giving up (sleep is patched, so
-        # the round bound ends it).
-        self.assertEqual(leader_rpc.jc_compression_get_status.call_count, 30)
+        self.assertIn("retried up to 60 s", str(ctx.exception))
+        # This error is not in the retry list: the check stops after one call.
+        self.assertEqual(leader_rpc.jc_compression_get_status.call_count, 1)
 
         # _create_bdev_stack should not have run yet (this check is pre-block)
         self.assertEqual(m["create_bdev"].call_count, 0)
