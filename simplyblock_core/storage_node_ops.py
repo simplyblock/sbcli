@@ -14261,7 +14261,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         # (2026-08-31: unblock landed at 13:33:29.13, one second after the
         # client had already failed IO at 13:33:28). Killing our own SPDK
         # can wait; a fenced healthy peer cannot.
-        for peer in blocked_peers:
+        #
+        # Iterate over a copy: _unblock_peer_port removes the peer from
+        # blocked_peers, and a loop over the live list skips every second
+        # entry. The leader is appended after the non-leaders, so it was the
+        # one left fenced (EKS bed 2026-10-30: the acting leader's client port
+        # went to reject mode, clients failed over to the tertiary, which
+        # took the JM write lock, and the two writers' JC aborted both nodes).
+        for peer in list(blocked_peers):  # noqa: PERF101
             _unblock_peer_port(peer)
         _persist_deferred_node_fields()
         _release_hub_locks()
