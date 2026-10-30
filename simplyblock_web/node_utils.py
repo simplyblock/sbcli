@@ -720,8 +720,9 @@ def partition_disk_for_journal(disk_name: str, jm_bytes: int) -> tuple[dict, dic
             number = _read_sysfs(f"/sys/block/{disk_name}/{entry}/partition")
             if number:
                 by_number[int(number)] = entry
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as e:
+        # Reported below as missing partitions.
+        logger.warning("could not list the partitions of %s: %s", disk_name, e)
     jm_name, data_name = by_number.get(1, ""), by_number.get(2, "")
     if not jm_name or not data_name:
         raise ValueError(
