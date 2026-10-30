@@ -209,9 +209,9 @@ class CLIWrapperBase:
                 "with each other, but not with --pci-allowed or --pci-blocked), or --lblk with "
                 "its --blk-* selectors."
             )
-        lblk_journal_split = getattr(args, 'lblk_journal_split', False)
-        if lblk_journal_split and not lblk:
-            self.parser.error("--lblk-journal-split requires --lblk")
+        lblk_journal_device = getattr(args, 'lblk_journal_device', False)
+        if lblk_journal_device and not lblk:
+            self.parser.error("--lblk-journal-device requires --lblk")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -224,7 +224,7 @@ class CLIWrapperBase:
                 "names": [str(x) for x in blk_names.split(',')] if blk_names else None,
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
-                "journal_split": bool(lblk_journal_split),
+                "journal_device": bool(lblk_journal_device),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
