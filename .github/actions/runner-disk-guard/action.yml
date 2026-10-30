@@ -1,0 +1,165 @@
+name: Runner disk guard
+description: >-
+  Reap per-run debris left on a shared self-hosted runner by earlier runs, then
+  refuse to start if the disk still has no room. A full disk does not fail a run
+  where the run can see it -- it fails the Actions worker itself, hours in, with
+  an unhandled System.IO.IOException and exit 134.
+
+inputs:
+  min-free-gb:
+    description: >-
+      Fail the job when the filesystem holding /tmp has less free space than
+      this after reaping. 0 disables the check and only reports.
+
+      15 GiB, not a tighter number: a run's own footprint on the runner's
+      local disk is a couple of GB -- the bulk of what it writes goes to the
+      NFS share -- so this is several times what a run needs, while still far
+      enough from zero that the Actions worker never gets there. It is an
+      input because these runners do not all have the same disk, and a
+      threshold that blocks every run on a chronically tight host is worse
+      than the failure it prevents.
+    required: false
+    default: "15"
+  token:
+    description: >-
+      Token for asking the API whether another run's debris belongs to a run
+      that is still going. Without one, nothing another run owns is ever
+      touched -- it is only reported.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Reap leaked per-run debris and check free space
+      shell: bash
+      env:
+        MIN_FREE_GB: ${{ inputs.min-free-gb }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -uo pipefail
+
+        echo "::group::Disk before"
+        df -h /tmp "${RUNNER_TEMP:-/tmp}" "$GITHUB_WORKSPACE" 2>/dev/null | sort -u
+        echo "::endgroup::"
+
+        # ---------------------------------------------------------------- #
+        # Leaked MinIO tracers.
+        #
+        # Every workflow that traces MinIO starts `mc admin trace -v --all`
+        # with nohup and stops it in an `if: always()` step. Neither half of
+        # that holds when a job is CANCELLED: the cleanup step is skipped and
+        # the backgrounded tracer -- already reparented to init, which nohup
+        # does the moment the starting step's shell exits -- keeps writing
+        # until someone notices.
+        #
+        # Run 40404230630 was cancelled on 2026-10-27. Its tracer wrote
+        # 55 GB to vm22's 94 GB root filesystem over the next three days and
+        # took down an unrelated 8h28m k8s stress run (40906656766) at
+        # 00:31Z on 2026-10-30 -- not by failing a test, but by leaving the
+        # Actions worker unable to write its own log:
+        #
+        #   System.IO.IOException: No space left on device :
+        #     '.../actions-runner-4/_diag/Worker_20261029-160210-utc.log'
+        #   Finished process 521975 with exit code 134
+        #
+        # The run id is in both the binary name and the log name, so debris
+        # is attributable. We never touch our own, and we only touch another
+        # run's once the API says that run has finished.
+        # ---------------------------------------------------------------- #
+        reaped=0
+        skipped=0
+
+        # "yes" only on a definite answer from the API. Anything else -- no
+        # token, a timeout, a 5xx, an unparseable body -- answers "no", so a
+        # reap never rests on a guess about someone else's run.
+        run_is_over() {   # $1 = run id
+          local rid="$1" body rc status
+          [ -n "${GH_TOKEN:-}" ] || { echo no; return; }
+          body=$(curl -sSL -m 20 -w '\n%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/runs/${rid}" \
+            2>/dev/null)
+          rc=$(printf '%s' "${body}" | tail -1)
+          case "${rc}" in
+            404) echo yes; return ;;   # no such run: debris by definition
+            200) ;;
+            *)   echo no;  return ;;
+          esac
+          status=$(printf '%s' "${body}" | sed -n 's/.*"status": *"\([a-z_]*\)".*/\1/p' | head -1)
+          if [ "${status}" = "completed" ]; then echo yes; else echo no; fi
+        }
+
+        for pid in $(ls -1 /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+          cmd=$( { tr "\0" " " < "/proc/${pid}/cmdline"; } 2>/dev/null ) || continue
+          case "${cmd}" in
+            */mc-[0-9]*" admin trace"*) ;;
+            *) continue ;;
+          esac
+          rid=$(printf '%s' "${cmd}" | grep -oE '/mc-[0-9]+' | head -1 | tr -dc '0-9')
+          [ -n "${rid}" ] || continue
+          if [ "${rid}" = "${GITHUB_RUN_ID}" ]; then
+            continue
+          fi
+          size=$(wc -c < "/tmp/minio-trace-${rid}.log" 2>/dev/null || echo 0)
+          if [ "$(run_is_over "${rid}")" != "yes" ]; then
+            echo "::warning::run ${rid}'s MinIO tracer (pid ${pid}, $(( size / 1048576 )) MiB) is still running and so is that run -- leaving it alone"
+            skipped=$(( skipped + 1 ))
+            continue
+          fi
+          echo "reaping run ${rid}'s leaked MinIO tracer: pid ${pid}, log $(( size / 1048576 )) MiB"
+          kill "${pid}" 2>/dev/null || true
+          for _ in 1 2 3 4 5; do
+            [ -d "/proc/${pid}" ] || break
+            sleep 1
+          done
+          [ -d "/proc/${pid}" ] && kill -9 "${pid}" 2>/dev/null || true
+          sleep 1
+          # Only after the writer is gone: unlinking a file a process still
+          # holds open frees no blocks at all.
+          rm -f "/tmp/minio-trace-${rid}.log" "/tmp/mc-${rid}" 2>/dev/null || true
+          reaped=$(( reaped + 1 ))
+        done
+
+        # Logs and binaries whose tracer is already gone but which nobody
+        # deleted. Same attribution rule: never ours, never a live run's.
+        for f in /tmp/minio-trace-*.log /tmp/mc-[0-9]*; do
+          [ -e "${f}" ] || continue
+          rid=$(printf '%s' "${f}" | grep -oE '[0-9]{6,}' | head -1)
+          [ -n "${rid}" ] || continue
+          [ "${rid}" = "${GITHUB_RUN_ID}" ] && continue
+          [ "$(run_is_over "${rid}")" = "yes" ] || continue
+          echo "removing orphaned $(du -h "${f}" | cut -f1) ${f} (run ${rid} is over)"
+          rm -f "${f}" 2>/dev/null || true
+        done
+
+        echo "reaped=${reaped} left-alone=${skipped}"
+
+        # ---------------------------------------------------------------- #
+        # Free space.
+        # ---------------------------------------------------------------- #
+        echo "::group::Disk after"
+        df -h /tmp
+        echo "::endgroup::"
+
+        free_kb=$(df -Pk /tmp | awk 'NR==2 {print $4}')
+        free_gb=$(( free_kb / 1048576 ))
+        echo "free on the filesystem holding /tmp: ${free_gb} GiB"
+
+        if [ "${MIN_FREE_GB}" -gt 0 ] && [ "${free_gb}" -lt "$(( MIN_FREE_GB * 2 ))" ]            && [ "${free_gb}" -ge "${MIN_FREE_GB}" ]; then
+          # Above the floor but heading for it. Say so now, while a run still
+          # completes, instead of letting the next one be the one that dies.
+          echo "::warning::${free_gb} GiB free on $(hostname) is above the ${MIN_FREE_GB} GiB floor but not by much. Something on this runner is accumulating; the largest users are listed below."
+          du -shx /tmp/* 2>/dev/null | sort -h | tail -8
+        fi
+
+        if [ "${MIN_FREE_GB}" -gt 0 ] && [ "${free_gb}" -lt "${MIN_FREE_GB}" ]; then
+          echo "::group::What is using the disk"
+          du -shx /* 2>/dev/null | sort -h | tail -12
+          echo "--- /tmp ---"
+          du -shx /tmp/* 2>/dev/null | sort -h | tail -12
+          echo "::endgroup::"
+          echo "::error::Only ${free_gb} GiB free where this run needs ${MIN_FREE_GB} GiB. Refusing to start: a run that fills this disk does not fail with a test error, it kills the Actions worker mid-step with exit 134 and loses every hour it had already spent."
+          exit 1
+        fi

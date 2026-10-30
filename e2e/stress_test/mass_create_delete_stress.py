@@ -71,6 +71,17 @@ def _rand_seq(length: int = 8) -> str:
 class _MassCreateDeleteMixin:
     """Shared orchestration for mass-creation/deletion stress test."""
 
+    # Phase-shaped, not iteration-shaped: phase N+1 consumes the registry
+    # phase N built in memory. Re-entering at phase 5 with an empty
+    # _clone_registry would delete nothing and call it a pass, so --resume
+    # refuses here instead of appearing to work.
+    RESUME_SUPPORTED = False
+    RESUME_UNSUPPORTED_REASON = (
+        "phase-based: _lvol_registry/_snapshot_registry/_clone_registry are "
+        "built in memory by earlier phases and would have to be rebuilt from "
+        "the cluster before a later phase could run"
+    )
+
     # ── Scale (overridden per ratio class) ─────────────────────────────────
     # NxM = N namespaces per subsystem × M subsystems
     NUM_SUBSYSTEMS = 1
@@ -146,6 +157,13 @@ class _MassCreateDeleteMixin:
     _metrics: dict
 
     def _init_mixin_state(self):
+        # Everything the FIO log collector is allowed to look at has to be
+        # newer than this. Set before any FIO runs, and paired with the purge
+        # in _purge_stale_fio_logs: the mtime filter is what makes a missed
+        # purge harmless, and the purge is what keeps /tmp from growing
+        # without bound on clients that are never rebuilt.
+        self._fio_log_epoch = time.time()
+        self._purge_stale_fio_logs()
         self._lvol_registry = {}      # name -> {id, parent_name}
         self._snapshot_registry = {}  # snap_name -> {snap_id, parent_lvol}
         self._clone_registry = {}     # clone_name -> {clone_id, snap_name}
@@ -2191,12 +2209,50 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     # ── FIO log collection ────────────────────────────────────────────────
 
+    def _purge_stale_fio_logs(self):
+        """Drop FIO logs earlier runs left in the clients' /tmp.
+
+        Best effort on purpose. The mtime filter in
+        :meth:`_collect_fio_logs_to_nfs` is what actually guarantees
+        correctness; this only stops /tmp accumulating on clients that are
+        never rebuilt, and gives a human looking at the box a /tmp that
+        belongs to the run in front of them. A client we cannot reach here is
+        not worth failing a run over -- the filter still covers it.
+        """
+        for client in getattr(self, "fio_node", None) or []:
+            try:
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command="rm -f /tmp/fio_*.log 2>/dev/null || true",
+                    supress_logs=True,
+                )
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "Could not clear stale FIO logs on %s: %s. Collection "
+                    "filters by mtime regardless, so this is cosmetic.",
+                    client, str(exc)[:120])
+
     def _collect_fio_logs_to_nfs(self, label, threads=None):
         """Collect FIO log files from client nodes to the NFS share.
 
         Reads /tmp/fio_{label}_*.log from each client node and writes
         them into the test's NFS log directory under a fio_results/
         subdirectory.
+
+        Only files this run produced. The clients' /tmp is never cleared
+        between runs, so a plain glob picks up every fio log any previous run
+        left there -- and since a log is judged by searching it for the word
+        "error", one genuine failure then fails every run that follows it, for
+        as long as the file survives.
+
+        That is not hypothetical. Run 20260929-203251 failed on
+        "[Phase_2] 1 FIO log(s) contain errors" pointing at a corruption whose
+        fio banner read `Tue Sep 29 10:30:23` -- ten hours before that run
+        started. 23 of its 87 collected logs were leftovers, and the offending
+        one was byte-identical (md5 a690fdad531a362d7605da88897a4d28) to the
+        copy taken from the 10:00 run, which is where the corruption really
+        happened. The second run found nothing and reported the first one's
+        finding as its own.
         """
         if not getattr(self, 'docker_logs_path', None):
             self.logger.warning(
@@ -2209,12 +2265,18 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
         collected = 0
         fio_errors = 0
+        copied = {}   # client -> remote paths safely on NFS
         for client in self.fio_node:
             # List FIO log files on the client
             try:
                 out, _ = self.ssh_obj.exec_command(
                     node=client,
-                    command=f"ls /tmp/fio_{label}_*.log /tmp/fio_mcd_*.log 2>/dev/null || true",
+                    command=(
+                        f"find /tmp -maxdepth 1 "
+                        f"\\( -name 'fio_{label}_*.log' "
+                        f"-o -name 'fio_mcd_*.log' \\) "
+                        f"-newermt '@{int(self._fio_log_epoch)}' "
+                        f"2>/dev/null || true"),
                     supress_logs=True,
                 )
             except Exception as exc:
@@ -2243,6 +2305,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                         with open(local_path, "w") as f:
                             f.write(file_data)
                         collected += 1
+                        copied.setdefault(client, []).append(remote_path)
                         # Check for FIO errors in the log
                         lower = file_data.lower()
                         if "error" in lower or "fail" in lower:
@@ -2256,6 +2319,35 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                         f"[{label}] Failed to collect {remote_path} "
                         f"from {client}: {exc}"
                     )
+
+        # Now that the copies are safely on NFS, take the originals away.
+        #
+        # Nothing has ever done this. The only rm for these paths anywhere in
+        # the repo -- python or workflow -- is the purge added alongside this,
+        # so every FIO log written by every run has been accumulating in the
+        # clients' /tmp since the machines were built. That is what let a
+        # corruption from 10:30 still be sitting there at 20:32 to fail the
+        # next run.
+        #
+        # -mmin +2 because a join can time out and leave FIO running: deleting
+        # a log still being appended to would cost us the tail of exactly the
+        # job that overran. Anything younger stays, and the purge at the start
+        # of the next run takes it.
+        for client, paths in copied.items():
+            try:
+                quoted = " ".join(f"'{p}'" for p in paths)
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command=(f"find {quoted} -maxdepth 0 -mmin +2 -delete "
+                             f"2>/dev/null || true"),
+                    supress_logs=True,
+                )
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    f"[{label}] Copied {len(paths)} log(s) from {client} but "
+                    f"could not remove the originals: {exc}. Harmless -- "
+                    f"collection filters by mtime and the next run purges."
+                )
 
         self.logger.info(
             f"[{label}] Collected {collected} FIO log files to "

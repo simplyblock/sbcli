@@ -143,6 +143,34 @@ transport_error() {
     exit 1
 }
 
+# True when the lock's owning run is over, so the lock is debris.
+#
+# The owner is "<repo>#<run_id>". Everything here is conservative: no id, no
+# gh, no token, an API that errors, a run in another repository, or any status
+# that is not `completed` all answer "not stale", because the cost of waiting
+# out a live run is a delayed job and the cost of getting it wrong is two runs
+# wiping the same machines.
+stale_holder() {
+    local holder="$1" repo run_id state
+    [[ -n "${holder}" ]] || return 1
+    command -v gh >/dev/null 2>&1 || return 1
+    [[ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]] || return 1
+
+    repo="$(sed -n 's/.*"owner"[[:space:]]*:[[:space:]]*"\([^"#]*\)#[0-9]*".*/\1/p' <<<"${holder}" | head -1)"
+    run_id="$(sed -n 's/.*"owner"[[:space:]]*:[[:space:]]*"[^"#]*#\([0-9]*\)".*/\1/p' <<<"${holder}" | head -1)"
+    [[ -n "${run_id}" ]] || return 1
+    # Only this repository. A run id is meaningless against another one, and
+    # the API would answer about a completely unrelated run.
+    [[ "${repo}" == "${GITHUB_REPOSITORY:-${repo}}" ]] || return 1
+
+    state="$(gh api "repos/${repo}/actions/runs/${run_id}" --jq .status 2>/dev/null)" || return 1
+    [[ "${state}" == "completed" ]] || return 1
+
+    echo "  ${host}: lock belongs to ${repo}#${run_id}, which the API reports" >&2
+    echo "    as completed. Taking it over -- its release never ran." >&2
+    return 0
+}
+
 report_conflict() {
     local host="$1" holder="$2" verb="$3"
     echo "::error::lab host ${host} ${verb}:" >&2
@@ -163,7 +191,18 @@ acquire)
             set +e; holder="$(remote "${host}" create "${payload_b64}")"; rc=$?; set -e
             case "${rc}" in
                 0) taken+=("${host}"); echo "  ${host}: acquired" ;;
-                1) conflict_host="${host}"; conflict_holder="${holder}" ;;
+                1)  # A conflict with a finished run is debris, not contention.
+                    # Clear it and take the host on this pass rather than
+                    # sleeping out a grace nothing is going to use.
+                    if stale_holder "${holder}"; then
+                        remote "${host}" force-remove >/dev/null 2>&1 || true
+                        set +e; holder="$(remote "${host}" create "${payload_b64}")"; rc=$?; set -e
+                        if [[ "${rc}" -eq 0 ]]; then
+                            taken+=("${host}"); echo "  ${host}: acquired (cleared a dead run's lock)"
+                            continue
+                        fi
+                    fi
+                    conflict_host="${host}"; conflict_holder="${holder}" ;;
                 *) transport_error "${host}" "${rc}" ;;
             esac
             [[ -z "${conflict_host}" ]] || break
