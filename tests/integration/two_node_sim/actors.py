@@ -229,13 +229,24 @@ class ControlPlane:
             # restart precheck on the LVS leader (campaign c2, F1)
             own = next(v for v in node.lvstores.values() if v.primary_node == node.uuid)
             leader = next((n for n in w.nodes if n.up and n.lvstores[own.name].leader), None)
+            if leader is None:
+                # recreate_lvstore: no connected peer reports leadership of the
+                # node's own primary LVS, so the precheck runs on the presumed
+                # acting leader (the connected secondary)
+                disconnected = set() if peer.up and w.net.data_ok(node, peer) else {peer.uuid}
+                rec = w.sn(node)
+                if sno._presumed_acting_leader(rec, [w.sn(peer)], disconnected, rec) is not None:
+                    leader = peer
             if leader is not None:
                 try:
                     with w.vt.context("restart-precheck"):
                         sno._jc_compression_status_with_retry(w.sn(leader), own.vuid)
                 except Exception as e:              # noqa: BLE001 - the restart aborts
-                    w.log("CP: restart of %s aborted: %s" % (node.name, e))
-                    node.abort("restart aborted: %s" % e)
+                    code = getattr(e, "code", None)
+                    w.log("CP: restart of %s aborted: jc_compression on %s: %s (code %s)"
+                          % (node.name, leader.name, e, code))
+                    node.abort("restart aborted: jc_compression on %s: %s (code %s)"
+                               % (leader.name, e, code))
                     self.restarting.pop(node.uuid, None)
                     self._finish(task, "aborted")
                     continue

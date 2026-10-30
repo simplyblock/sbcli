@@ -70,6 +70,7 @@ main and asserts that it passes.
 - Faults are injected 0.5 s into a second of fio's log; the bed's alignment was random, so a bed stall can be one second shorter or longer.
 - The flows' shells are models: a change inside `exec_port_allow_task`, the restart flow or the monitor that is not one of the guards above is not exercised here.
 - `TWO_NODE_STABLE_FOR_S` is 5 s in the simulator (30 s in production); it only delays the heal.
+- F6's restart remedy (`F6c-partition-restart-remedy`, `F6b-restart-precheck-fenced-peer`): the condition `jm_reconnect_ineffective` makes only a node restart bring the remote JMs back (c1/c2), so the partition recovery hands a node to the restart flow. The restart's jc_compression precheck then runs on the presumed acting leader (the real `_presumed_acting_leader`), the fenced peer. With `jc_error_while_fenced` that peer's JC is in error mode (ultra keeps a holding or fenced vuid in JCERR until `jc_grant_solo`/`jc_unfence`) and answers -6, and the restart aborts: F6b is open on main (review of #1559). The restart runner's retries are not modelled; each would meet the same fenced peer, because the arbiter unfences only after the restarting node is healthy.
 
 ## Adding a finding
 
