@@ -112,7 +112,7 @@ def _task(fn, lvol_id, status=JobSchedule.STATUS_SUSPENDED, canceled=False, uuid
 
 
 def test_only_the_volumes_open_cutover_is_cancelled(monkeypatch):
-    cancelled = []
+    cancelled: list[str] = []
     monkeypatch.setattr(lvol_controller.tasks_controller, "cancel_task", cancelled.append)
     tasks = [
         _task(JobSchedule.FN_REPLICATION_FINAL, "V1", uuid="open"),
