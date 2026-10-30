@@ -85,7 +85,7 @@ commands:
             type: str
             default: ""
           - name: "--lblk"
-            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition."
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Each storage node gets its journal from its own devices: its smallest selected partition is split in two, or its smallest whole disk is partitioned, into a journal partition (--jm-percent of the node's capacity) and a data partition. A disk that carries simplyblock data is never partitioned; a node on such disks keeps a dedicated journal device. Use --lblk-journal-device for a dedicated journal device on whole disks. Minimum 2 partitions or SSDs per node, or a single whole disk."
             dest: lblk
             type: bool
             action: store_true
@@ -107,8 +107,13 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk-journal-device"
+            help: "With --lblk and whole disks: dedicate each node's smallest disk to the journal instead of partitioning it into a journal partition and a data partition (the default). Needs at least two disks per node. Partition selections always carry their journal in a split partition."
+            dest: lblk_journal_device
+            type: bool
+            action: store_true
           - name: "--jm-percent"
-            help: "Journal size in percent of the node's total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`."
+            help: "Journal size in percent of the node's total selected capacity when the journal is carved from a selected partition or disk (requires --lblk, not with --lblk-journal-device). Default: `3`."
             dest: jm_percent
             required: false
             type: int

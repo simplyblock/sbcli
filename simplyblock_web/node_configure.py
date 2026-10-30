@@ -221,9 +221,18 @@ def parse_arguments() -> argparse.Namespace:
         required=False
     )
     parser.add_argument(
+        '--lblk-journal-device',
+        help='With --lblk and whole disks: dedicate each node\'s smallest disk to the '
+             'journal instead of partitioning it into a journal partition and a data '
+             'partition (the default). Needs at least two disks per node',
+        action='store_true',
+        dest='lblk_journal_device',
+    )
+    parser.add_argument(
         '--jm-percent',
         help='Journal size in percent of the node\'s total selected capacity when the '
-             'journal is carved by splitting a selected partition (requires --lblk with partitions)',
+             'journal is carved from a selected partition or disk (requires --lblk, not with '
+             '--lblk-journal-device)',
         type=int,
         default=3,
         dest='jm_percent',
@@ -279,6 +288,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
         if use_lblk and not lblk:
             raise argparse.ArgumentError(
                 None, "--blk-names/--blk-names-exclude/--blk-serials require --lblk")
+        if getattr(args, 'lblk_journal_device', False) and not lblk:
+            raise argparse.ArgumentError(None, "--lblk-journal-device requires --lblk")
         if use_lblk and (args.pci_allowed or args.pci_blocked
                          or getattr(args, 'device_model', '')
                          or getattr(args, 'size_range', '')
@@ -355,6 +366,10 @@ def main() -> None:
                 "names": [x.strip() for x in args.blk_names.split(',') if x.strip()] or None,
                 "names_exclude": [x.strip() for x in args.blk_names_exclude.split(',') if x.strip()] or None,
                 "serials": [x.strip() for x in args.blk_serials.split(',') if x.strip()] or None,
+                "journal_device": bool(getattr(args, 'lblk_journal_device', False)),
+                # Read before the discard below: the disks of an existing node
+                # with a dedicated journal device are never partitioned.
+                "keep_serials": sorted(utils.previous_lblk_dedicated_journal_serials()),
             }
 
         _discard_previous_config()

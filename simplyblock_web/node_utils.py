@@ -413,6 +413,86 @@ def get_block_devices_info() -> list[dict]:
 SB_GPT_PARTITION_TYPECODE = "6527994e-2c5a-4eec-9613-8f5944074e8b"
 
 
+ALCEML_STORAGE_SIGNATURE = b"ALCEML_STORAGE\x00"
+
+
+def simplyblock_data_signature(device_name: str) -> bool | None:
+    """Whether a block device carries simplyblock data.
+
+    Every device a storage node uses -- a data device as well as a dedicated
+    journal device, a whole disk as well as a partition -- starts with the
+    alceml storage header, whose first field is the ``ALCEML_STORAGE``
+    signature. Neither blkid nor lsblk know it, so a device in use looks like
+    an empty, unpartitioned disk to both; this reads it directly.
+
+    Returns True when the signature is present, False when the first block
+    was read and carries no signature, and None when the device could not be
+    read, which callers must treat like True: a device whose content is
+    unknown is never partitioned."""
+    try:
+        with open(f"/dev/{device_name}", "rb", buffering=0) as handle:
+            head = handle.read(4096)
+    except OSError as e:
+        logger.warning(f"cannot read the first block of /dev/{device_name}: {e}")
+        return None
+    return head.startswith(ALCEML_STORAGE_SIGNATURE)
+
+
+def _logical_block_size(disk_name: str) -> int:
+    """Logical sector size of a disk, in bytes: the unit sgdisk counts in.
+    sysfs reports partition start and size in 512-byte units regardless."""
+    try:
+        size = int(_read_sysfs(f"/sys/block/{disk_name}/queue/logical_block_size") or 512)
+    except ValueError:
+        size = 512
+    return size if size > 0 else 512
+
+
+def split_partition_partner(part: dict, devices: list[dict]) -> tuple[dict, dict] | None:
+    """The ``(journal, data)`` pair a previous split_partition_for_journal
+    made of a partition, when ``part`` is one of the two; otherwise None.
+
+    The journal partition (``sb_jm``) keeps the number, the start, and the
+    PARTUUID of the partition that was split, so a re-configure that selects
+    the original partition gets the journal partition. Its data partition
+    (``sb_data``) is the simplyblock partition that starts right after it.
+    Both carry the simplyblock GPT type. Raises ValueError for a simplyblock
+    partition without its partner, which is never treated as a fresh
+    partition: splitting it again would destroy the journal or the data."""
+    fields = _partition_entry_fields(part["name"])
+    if fields.get("type") != SB_GPT_PARTITION_TYPECODE or fields.get("name") not in ("sb_jm", "sb_data"):
+        return None
+    parent = part.get("parent_name", "")
+
+    def _extent(name):
+        try:
+            start = int(_read_sysfs(f"/sys/block/{parent}/{name}/start"))
+            size = int(_read_sysfs(f"/sys/block/{parent}/{name}/size"))
+        except (ValueError, TypeError):
+            return None
+        return start, start + size
+
+    own = _extent(part["name"])
+    siblings = [d for d in devices
+                if d.get("type") == "part" and d.get("parent_name") == parent
+                and d.get("name") != part["name"]]
+    want = "sb_data" if fields["name"] == "sb_jm" else "sb_jm"
+    for sibling in siblings:
+        extent = _extent(sibling["name"])
+        if own is None or extent is None:
+            continue
+        adjacent = extent[0] == own[1] if want == "sb_data" else extent[1] == own[0]
+        if not adjacent:
+            continue
+        sibling_fields = _partition_entry_fields(sibling["name"])
+        if (sibling_fields.get("type") == SB_GPT_PARTITION_TYPECODE
+                and sibling_fields.get("name") == want):
+            return (part, sibling) if want == "sb_data" else (sibling, part)
+    raise ValueError(
+        f"partition {part['name']} is a simplyblock {fields['name']} partition, but its "
+        f"{want} partner was not found next to it on {parent}; it is not split again")
+
+
 def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, dict]:
     """Split an existing GPT partition into two: a journal partition of
     ``jm_bytes`` at its original start and a data partition covering the
@@ -421,13 +501,19 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
     disk belongs to the OS or other software).
 
     The parent disk's partition table is modified ONLY within the bounds of
-    the partition being split. The partition must be idle (unmounted, no
-    holders, not backing root). Returns ``(jm_device, data_device)`` — the
-    two new partitions' inventory dicts (get_block_devices_info shape).
-    Raises ValueError on any precondition or tool failure.
+    the partition being split. The journal partition keeps the number and the
+    PARTUUID of the original partition, so the selector the partition was
+    chosen by (``/dev/disk/by-partuuid/...``, ``...-partN``) still answers
+    and a re-configure recognises the split (split_partition_partner).
+    Geometry is converted from the 512-byte units of sysfs to the disk's
+    logical sectors, which sgdisk counts in, so 4K-native disks are split
+    correctly. The partition must be idle (unmounted, no holders, not backing
+    root) and must not carry simplyblock data. Returns ``(jm_device,
+    data_device)`` -- the two new partitions' inventory dicts
+    (get_block_devices_info shape). Raises ValueError on any precondition or
+    tool failure.
     """
     import math
-    import os
 
     inventory = {d["name"]: d for d in get_block_devices_info()}
     part = inventory.get(part_name)
@@ -439,6 +525,9 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
         raise ValueError(f"partition {part_name} is held by {part['holders']} (busy)")
     if part.get("is_root_disk"):
         raise ValueError(f"partition {part_name} backs the root filesystem")
+    if simplyblock_data_signature(part_name) is not False:
+        raise ValueError(f"partition {part_name} carries simplyblock data or cannot be read; "
+                         f"it is not split")
     parent = part.get("parent_name", "")
     if not parent:
         raise ValueError(f"cannot determine parent disk of {part_name}")
@@ -454,25 +543,29 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
     sys_part = f"/sys/block/{parent}/{part_name}"
     try:
         part_number = int(_read_sysfs(f"{sys_part}/partition"))
-        start_sector = int(_read_sysfs(f"{sys_part}/start"))
-        size_sectors = int(_read_sysfs(f"{sys_part}/size"))
+        start_512 = int(_read_sysfs(f"{sys_part}/start"))
+        size_512 = int(_read_sysfs(f"{sys_part}/size"))
     except (ValueError, TypeError):
         raise ValueError(f"cannot read geometry of {part_name} from sysfs")
 
-    # 1 MiB alignment (2048 x 512b sectors) for the data partition start.
-    align = 2048
-    jm_sectors = int(math.ceil(jm_bytes / 512 / align) * align)
+    sector = _logical_block_size(parent)
+    start_sector = start_512 * 512 // sector
+    size_sectors = size_512 * 512 // sector
+    # 1 MiB alignment of the journal size, in logical sectors.
+    align = max(1, (1024 * 1024) // sector)
+    jm_sectors = int(math.ceil(jm_bytes / sector / align) * align)
     end_sector = start_sector + size_sectors - 1
     data_start = start_sector + jm_sectors
     if data_start + align > end_sector:
         raise ValueError(
-            f"partition {part_name} ({size_sectors * 512} bytes) is too small "
+            f"partition {part_name} ({size_512 * 512} bytes) is too small "
             f"to split into a {jm_bytes}-byte journal plus a data partition")
 
+    guid = f" -u {part_number}:{part['partuuid']}" if part.get("partuuid") else ""
     cmds = [
         f"sgdisk -d {part_number} /dev/{parent}",
         (f"sgdisk -a 1 -n {part_number}:{start_sector}:{data_start - 1} "
-         f"-t {part_number}:{SB_GPT_PARTITION_TYPECODE} -c {part_number}:sb_jm /dev/{parent}"),
+         f"-t {part_number}:{SB_GPT_PARTITION_TYPECODE} -c {part_number}:sb_jm{guid} /dev/{parent}"),
         (f"sgdisk -a 1 -n 0:{data_start}:{end_sector} "
          f"-t 0:{SB_GPT_PARTITION_TYPECODE} -c 0:sb_data /dev/{parent}"),
     ]
@@ -488,7 +581,9 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
             raise ValueError(f"failed to re-read partition table of {parent}: {err}")
     shell_utils.run_command("udevadm settle -t 5")
 
-    # Identify the two new partitions by their start sectors.
+    # Identify the two new partitions by their start, in sysfs (512-byte) units.
+    jm_start_512 = start_sector * sector // 512
+    data_start_512 = data_start * sector // 512
     jm_name = data_name = ""
     try:
         for entry in os.listdir(f"/sys/block/{parent}"):
@@ -497,9 +592,9 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
             e_start = _read_sysfs(f"/sys/block/{parent}/{entry}/start")
             if not e_start:
                 continue
-            if int(e_start) == start_sector:
+            if int(e_start) == jm_start_512:
                 jm_name = entry
-            elif int(e_start) == data_start:
+            elif int(e_start) == data_start_512:
                 data_name = entry
     except OSError:
         pass
@@ -507,13 +602,138 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
         raise ValueError(
             f"split of {part_name} completed but the new partitions were not "
             f"found on {parent} (journal at sector {start_sector}, data at "
-            f"{data_start})")
+            f"{data_start}, {sector}-byte sectors)")
 
     inventory = {d["name"]: d for d in get_block_devices_info()}
     if jm_name not in inventory or data_name not in inventory:
         raise ValueError(
             f"new partitions {jm_name}/{data_name} missing from inventory "
             f"after split of {part_name}")
+    return inventory[jm_name], inventory[data_name]
+
+
+def _partition_entry_fields(part_name: str) -> dict:
+    """GPT entry name and type of one partition, probed from the device
+    (``blkid -p``): lsblk reads PARTLABEL/PARTTYPE from the udev database,
+    which the storage-node container does not mount."""
+    out, _, rc = shell_utils.run_command(f"blkid -p -o export /dev/{part_name}")
+    if rc != 0:
+        return {}
+    fields = {}
+    for line in (out or "").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip()
+    return {"name": fields.get("PART_ENTRY_NAME", ""),
+            "type": fields.get("PART_ENTRY_TYPE", "").lower()}
+
+
+def journal_split_partitions(disk_name: str, devices: list[dict]) -> tuple[dict, dict] | None:
+    """The ``(journal, data)`` partitions of a whole disk that
+    partition_disk_for_journal laid out, or None.
+
+    A disk qualifies only when it carries exactly two partitions, both of the
+    simplyblock GPT type, labelled ``sb_jm`` and ``sb_data``. A disk with any
+    other partition belongs, at least in part, to someone else, and is never
+    taken for a previous journal split. ``devices`` is a
+    get_block_devices_info() inventory of the host."""
+    parts = [d for d in devices if d.get("type") == "part" and d.get("parent_name") == disk_name]
+    if len(parts) != 2:
+        return None
+    jm = data = None
+    for part in parts:
+        entry = _partition_entry_fields(part["name"])
+        if entry.get("type") != SB_GPT_PARTITION_TYPECODE:
+            return None
+        if entry.get("name") == "sb_jm":
+            jm = part
+        elif entry.get("name") == "sb_data":
+            data = part
+    if jm is None or data is None:
+        return None
+    return jm, data
+
+
+def partition_disk_for_journal(disk_name: str, jm_bytes: int) -> tuple[dict, dict]:
+    """Lay out an unpartitioned whole disk as a journal partition of
+    ``jm_bytes`` followed by a data partition covering the rest.
+
+    Used by lblk nodes that run on a single disk per journal, typically a
+    RAID-protected LUN of a storage array, where a separate journal device is
+    neither needed nor wanted. The disk must be idle (unmounted, no holders,
+    not backing root) and carry no partition table. Sizes are given to sgdisk
+    in MiB, so the layout is correct on 512-byte and on 4K-native disks, and
+    both partitions start on a 1 MiB boundary. Returns ``(jm_device,
+    data_device)`` in the get_block_devices_info() shape. Raises ValueError
+    on any precondition or tool failure.
+    """
+    import math
+
+    inventory = {d["name"]: d for d in get_block_devices_info()}
+    disk = inventory.get(disk_name)
+    if disk is None or disk.get("type") != "disk":
+        raise ValueError(f"disk {disk_name} not found")
+    if disk.get("mounted_in_subtree"):
+        raise ValueError(f"disk {disk_name} is mounted (busy)")
+    if disk.get("holders"):
+        raise ValueError(f"disk {disk_name} is held by {disk['holders']} (busy)")
+    if disk.get("is_root_disk"):
+        raise ValueError(f"disk {disk_name} backs the root filesystem")
+    if disk.get("has_partitions"):
+        raise ValueError(f"disk {disk_name} already carries partitions")
+    if simplyblock_data_signature(disk_name) is not False:
+        raise ValueError(f"disk {disk_name} carries simplyblock data or cannot be read; "
+                         f"it is not partitioned")
+
+    jm_mib = math.ceil(jm_bytes / (1024 * 1024))
+    # 1 MiB at the start for the GPT, 1 MiB at the end for its backup, and at
+    # least 1 MiB of data.
+    if (jm_mib + 3) * 1024 * 1024 > int(disk.get("size") or 0):
+        raise ValueError(
+            f"disk {disk_name} ({disk.get('size')} bytes) is too small to hold a "
+            f"{jm_bytes}-byte journal plus a data partition")
+
+    dev = f"/dev/{disk_name}"
+    cmds = [
+        f"sgdisk -o {dev}",
+        f"sgdisk -n 1:0:+{jm_mib}M -t 1:{SB_GPT_PARTITION_TYPECODE} -c 1:sb_jm {dev}",
+        f"sgdisk -n 2:0:0 -t 2:{SB_GPT_PARTITION_TYPECODE} -c 2:sb_data {dev}",
+    ]
+    for cmd in cmds:
+        out, err, rc = shell_utils.run_command(cmd)
+        if rc != 0:
+            raise ValueError(f"{cmd} failed (rc={rc}): {err or out}")
+
+    _, _, rc = shell_utils.run_command(f"partprobe {dev}")
+    if rc != 0:
+        _, err, rc = shell_utils.run_command(f"partx -u {dev}")
+        if rc != 0:
+            raise ValueError(f"failed to re-read partition table of {disk_name}: {err}")
+    shell_utils.run_command("udevadm settle -t 5")
+
+    # Identify the two partitions by their numbers: nvme1n1p1 and sdb1 alike.
+    by_number = {}
+    try:
+        for entry in os.listdir(f"/sys/block/{disk_name}"):
+            if not entry.startswith(disk_name):
+                continue
+            number = _read_sysfs(f"/sys/block/{disk_name}/{entry}/partition")
+            if number:
+                by_number[int(number)] = entry
+    except (OSError, ValueError) as e:
+        # Reported below as missing partitions.
+        logger.warning("could not list the partitions of %s: %s", disk_name, e)
+    jm_name, data_name = by_number.get(1, ""), by_number.get(2, "")
+    if not jm_name or not data_name:
+        raise ValueError(
+            f"partitioning of {disk_name} completed but the journal and data "
+            f"partitions were not found")
+
+    inventory = {d["name"]: d for d in get_block_devices_info()}
+    if jm_name not in inventory or data_name not in inventory:
+        raise ValueError(
+            f"new partitions {jm_name}/{data_name} missing from inventory "
+            f"after partitioning {disk_name}")
     return inventory[jm_name], inventory[data_name]
 
 
