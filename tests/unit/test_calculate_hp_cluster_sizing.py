@@ -1,6 +1,6 @@
 """`sn configure --calculate-hp-only` sized for a stated cluster.
 
-Without --hp-max-subsys/--hp-vcpu-count the calculator sizes for the product
+Without --max-subsys/--vcpu-count the calculator sizes for the product
 default and the host's own core layout; with them, for the cluster's values.
 """
 from unittest.mock import patch
@@ -28,7 +28,7 @@ def _calculate(*extra):
 
 
 def test_the_calculator_takes_the_cluster_sizing():
-    call = _calculate("--hp-max-subsys", "30", "--hp-vcpu-count", "4")
+    call = _calculate("--max-subsys", "30", "--vcpu-count", "4")
     assert call.args[0] == 30
     assert call.kwargs["vcpu_count"] == 4
 
@@ -41,6 +41,6 @@ def test_the_calculator_defaults_to_the_product_default():
 
 def test_the_sizing_flags_need_calculate_hp_only():
     w = _wrapper()
-    args = w.parser.parse_args(["storage-node", "configure", "--hp-max-subsys", "30"])
+    args = w.parser.parse_args(["storage-node", "configure", "--max-subsys", "30"])
     with pytest.raises(SystemExit):
         w.storage_node__configure("configure", args)

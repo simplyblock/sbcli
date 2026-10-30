@@ -227,20 +227,20 @@ class CLIWrapperBase:
         # is added or restarted; here the default heuristic lays out a usable
         # baseline for a host that does not belong to a cluster yet.
         vcpu_count = 0
-        hp_max_subsys = getattr(args, 'hp_max_subsys', None)
-        hp_vcpu_count = getattr(args, 'hp_vcpu_count', None)
-        if (hp_max_subsys or hp_vcpu_count) and not args.calculate_hp_only:
-            self.parser.error("--hp-max-subsys and --hp-vcpu-count require --calculate-hp-only")
+        max_subsys = getattr(args, 'max_subsys', None)
+        requested_vcpus = getattr(args, 'vcpu_count', None)
+        if (max_subsys or requested_vcpus) and not args.calculate_hp_only:
+            self.parser.error("--max-subsys and --vcpu-count require --calculate-hp-only")
         if args.calculate_hp_only:
             if not args.number_of_devices:
                 self.parser.error("For calculating huge pages memory, you must provide the --number-of-devices")
             else:
                 number_of_devices = args.number_of_devices
             # Size for the cluster the host will join, when the caller states it.
-            if hp_max_subsys:
-                max_lvol = hp_max_subsys
-            if hp_vcpu_count:
-                vcpu_count = hp_vcpu_count
+            if max_subsys:
+                max_lvol = max_subsys
+            if requested_vcpus:
+                vcpu_count = requested_vcpus
 
         return storage_ops.generate_automated_deployment_config(
             max_lvol, max_prov, sockets_to_use, args.nodes_per_socket,
