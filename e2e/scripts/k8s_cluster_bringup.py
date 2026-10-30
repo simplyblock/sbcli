@@ -103,6 +103,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -477,8 +478,107 @@ def uncordon_leftovers() -> list:
     return [n for n in cordoned if n not in (still or [])]
 
 
+# The probe runs on the node itself. No backslashes: it is passed as a single
+# argv element, so the shell never re-parses it.
+_NVME_REBIND_SH = (
+    "for d in /sys/bus/pci/devices/*; do "
+    "  c=$(cat $d/class 2>/dev/null); "
+    "  case $c in 0x010802*) "
+    "    if [ ! -e $d/driver ]; then "
+    "      a=$(basename $d); "
+    "      if echo $a > /sys/bus/pci/drivers/nvme/bind 2>/dev/null; then "
+    "        echo REBOUND $a; else echo FAILED $a; fi; "
+    "    fi;; "
+    "  esac; "
+    "done"
+)
+
+
+def rebind_orphaned_nvme(workers) -> int:
+    """Bind NVMe devices that no driver owns back to the kernel nvme driver.
+
+    SPDK takes its devices off the nvme driver while it runs. A node drained
+    and rebooted mid-run, or a run that dies before its recovery path, can
+    leave them owned by nothing at all. A driverless NVMe exposes no block
+    device, so discovery sees 0B and declines it:
+
+        declined by size range because it is 0B and the range
+          1500G-2000G starts above it
+        declined by has devices because no device of it survived the
+          device rules
+
+    and the bring-up then refuses on stripe width, naming neither the worker
+    nor the driver. worker-5 cost two manual interventions exactly this way,
+    in runs 41037615762 and 41041716675 -- both traceable to the single run
+    that drained it at 08:42 and died at 08:56 without recovering it.
+
+    Only devices with NO driver are touched. One bound to vfio-pci may belong
+    to a running SPDK; one bound to nothing is unusable by anything, so
+    rebinding it cannot take it away from anyone.
+
+    Best effort throughout: if this cannot run, discovery still refuses with
+    its own message and nothing is worse than before.
+    """
+    if DRY_RUN:
+        return 0
+    if not workers:
+        # An empty WORKER_NODES means "inspect every worker", not "none".
+        out, _ = kubectl_out(
+            "get", "nodes", "--no-headers", "-o", "custom-columns=:metadata.name")
+        workers = [n.strip() for n in (out or "").splitlines()
+                   if n.strip() and "master" not in n]
+    if not workers:
+        return 0
+    debug = None
+    for cand in ("oc", "kubectl"):
+        if shutil.which(cand):
+            debug = cand
+            break
+    if debug is None:
+        log("WARNING: neither oc nor kubectl is on PATH; cannot check for "
+            "NVMe devices left unbound by a previous run")
+        return 0
+
+    total = 0
+    for node in workers:
+        cmd = [debug, "debug", f"node/{node}", "--to-namespace=default",
+               "-q", "--", "chroot", "/host", "bash", "-c",
+               _NVME_REBIND_SH]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=180)
+        except Exception as exc:                          # noqa: BLE001
+            log(f"WARNING: could not check {node} for unbound NVMe "
+                f"devices: {str(exc)[:140]}")
+            continue
+        done = [ln.split()[1] for ln in (proc.stdout or "").splitlines()
+                if ln.startswith("REBOUND ")]
+        bad = [ln.split()[1] for ln in (proc.stdout or "").splitlines()
+               if ln.startswith("FAILED ")]
+        if done:
+            total += len(done)
+            log(f"rebound {len(done)} NVMe device(s) on {node} that no "
+                f"driver owned ({', '.join(done)}); a previous run left "
+                f"them that way and discovery reports them as 0B")
+        if bad:
+            log(f"WARNING: {node} has NVMe device(s) no driver owns that "
+                f"would not rebind: {', '.join(bad)}. Discovery will "
+                f"decline them as 0B and the stripe check will then fail "
+                f"on node count.")
+    if total:
+        # Give the kernel a moment to enumerate the block devices before
+        # discovery goes looking for them.
+        time.sleep(10)
+    return total
+
+
 def run_discovery(config_name: str, timeout: int) -> str:
     freed = uncordon_leftovers()
+    # Same class of leftover as a cordon, and the same consequence: a worker
+    # that discovery will not count. Both have to be cleared before the
+    # snapshot discovery takes, and both invalidate an older snapshot.
+    if rebind_orphaned_nvme(resolve_workers(env_list("WORKER_NODES"))):
+        freed = freed or ["a worker whose NVMe devices were unbound"]
     op = build_discovery(config_name)
     op_name = op["metadata"]["name"]
 
@@ -1640,6 +1740,12 @@ def approve_and_wait(name: str, timeout: int) -> None:
             log(f"WARNING: MachineConfigPool(s) {joined} are still rolling "
                 f"after {MCO_GRACE_TOTAL}s of grace; the deadline is running "
                 f"again.")
+        # The operator creates service accounts while we sit here, and any
+        # it makes after the workflow's patch step pull anonymously. Repair
+        # them as they appear, and un-stick anything already backing off.
+        if ensure_pull_secret():
+            kick_image_pull_backoff()
+
         time.sleep(15)
     dump_stall_state(name)
     raise RuntimeError(
@@ -1857,6 +1963,95 @@ def discover_with_retries(base_name: str, timeout: int) -> str:
     raise RuntimeError(
         f"discovery did not produce a usable draft in {DISCOVERY_ATTEMPTS} "
         f"attempts. Last failure: {last}")
+
+
+PULL_SECRET = os.environ.get("IMAGE_PULL_SECRET", "regcred")
+
+
+def ensure_pull_secret(secret: str = "") -> int:
+    """Put the registry pull secret on every ServiceAccount that lacks it.
+
+    The workflow patches service accounts before and after this script runs,
+    and neither moment is the one that matters. The accounts the SPDK pods
+    use -- simplyblock-storage-node-sa, simplyblock-sa, the CSI and FDB
+    accounts, the node probes -- are created BY THE OPERATOR while this
+    script is waiting for the deployment, so the "before" step cannot see
+    them and the "after" step only runs if this script succeeds.
+
+    That is a circular dependency, not just a gap on the failure path: the
+    pods come up with an account that has no pull secret, pull
+    anonymously, and Docker Hub answers
+
+        toomanyrequests: You have reached your unauthenticated pull rate
+        limit
+
+    which left snode-spdk-pod-4420-039582 in ImagePullBackOff for half an
+    hour in run 41041716675. node_add then reported "Could not reach
+    remote" for worker-3, the other five serialised behind it on
+    AwaitingSlot, and the 1800s deadline expired -- so the step that would
+    have added the pull secret never ran at all.
+
+    Called from inside the wait loop, which is the only code running while
+    those accounts appear. Returns how many it patched.
+    """
+    secret = secret or PULL_SECRET
+    if DRY_RUN or not secret:
+        return 0
+    out, err = kubectl_out("get", "secret", secret, "-o", "name")
+    if err and err.strip():
+        return 0            # no such secret here; nothing to attach
+
+    out, _ = kubectl_out("get", "sa", "-o", "json")
+    try:
+        items = (json.loads(out or "{}") or {}).get("items", []) or []
+    except ValueError:
+        return 0
+
+    patched = 0
+    for sa in items:
+        name = (sa.get("metadata") or {}).get("name", "")
+        have = [p.get("name") for p in (sa.get("imagePullSecrets") or [])]
+        if not name or secret in have:
+            continue
+        merged = [{"name": n} for n in have if n] + [{"name": secret}]
+        kubectl("patch", "serviceaccount", name, "--type", "merge", "-p",
+                json.dumps({"imagePullSecrets": merged}), check=False)
+        patched += 1
+    if patched:
+        log(f"attached pull secret {secret} to {patched} service "
+            f"account(s) the operator created after the workflow's patch "
+            f"step ran; without it their pods pull anonymously and Docker "
+            f"Hub rate-limits them")
+    return patched
+
+
+def kick_image_pull_backoff() -> int:
+    """Delete pods stuck pulling, so a fixed pull secret takes effect now.
+
+    A pod already in ImagePullBackOff keeps its old spec and its backoff
+    timer; patching the service account does nothing for it. Deleting it
+    lets its controller make a new one that picks the secret up. Only pods
+    whose containers are actually stuck on the image are touched.
+    """
+    if DRY_RUN:
+        return 0
+    out, _ = kubectl_out(
+        "get", "pods", "--no-headers", "-o",
+        "custom-columns=:metadata.name,"
+        ":status.containerStatuses[*].state.waiting.reason,"
+        ":status.initContainerStatuses[*].state.waiting.reason")
+    stuck = []
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if any(r in parts[1:] for r in ("ImagePullBackOff", "ErrImagePull")):
+            stuck.append(parts[0])
+    for name in stuck:
+        log(f"deleting {name}: stuck pulling its image, so it is holding a "
+            f"stale spec and a backoff timer")
+        kubectl("delete", "pod", name, "--ignore-not-found", check=False)
+    return len(stuck)
 
 
 def main() -> int:
