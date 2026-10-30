@@ -417,7 +417,39 @@ class TestGrowClusterDevices:
 
         assert response.status_code == 200
         assert response.json()['uniform'] is True
-        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID)
+        assert response.json()['rebalance'] is None
+        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID, rebalance=True)
+
+    def test_uneven_growth_reports_rebalance(self, client, db, cluster, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import simplyblock_web.api.v2.cluster as cluster_module
+        mock = MagicMock()
+        mock.grow_cluster_devices.return_value = {
+            'devices': [RESIZE_RESULT], 'errors': {}, 'uniform': False,
+            'rebalance': {'weights_updated': True, 'started': True, 'reason': ''}}
+        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+        cluster.device_mode = 'lblk'
+
+        response = client.post(self.URL)
+
+        assert response.status_code == 200
+        assert response.json()['rebalance'] == {'weights_updated': True, 'started': True, 'reason': ''}
+
+    def test_rebalance_can_be_disabled(self, client, db, cluster, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import simplyblock_web.api.v2.cluster as cluster_module
+        mock = MagicMock()
+        mock.grow_cluster_devices.return_value = {
+            'devices': [], 'errors': {}, 'uniform': False, 'rebalance': None}
+        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+        cluster.device_mode = 'lblk'
+
+        response = client.post(self.URL, params={'rebalance': 'false'})
+
+        assert response.status_code == 200
+        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID, rebalance=False)
 
     def test_nvme_cluster_returns_409(self, client, db, cluster):
         cluster.device_mode = 'nvme'

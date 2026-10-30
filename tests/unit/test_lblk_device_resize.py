@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, call, patch
 
-from simplyblock_core import constants, distr_controller, utils
+from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -105,6 +105,8 @@ class _ResizeHarness:
         self.node = _node([dev, *others], status=node_status)
         self.cluster = MagicMock()
         self.cluster.device_mode = device_mode
+        self.cluster.status = "active"
+        self.cluster.reweight_pending = False
         self.rpc = MagicMock()
         self.node.rpc_client.return_value = self.rpc
         self.client = MagicMock()
@@ -117,6 +119,8 @@ class _ResizeHarness:
         self.db.get_storage_node_by_id.return_value = self.node
         self.db.get_storage_nodes_by_cluster_id.return_value = [self.node]
         self.db.get_cluster_by_id.return_value = self.cluster
+        self.db.get_job_tasks.return_value = []
+        self.push_ok = True
 
         def _atomic(node, mut):
             mut(node)
@@ -129,6 +133,10 @@ class _ResizeHarness:
                           "get_active_dev_restart_task", return_value=None), \
              patch.object(device_controller, "device_set_unavailable") as self.set_unavail, \
              patch.object(device_controller, "device_events") as self.events, \
+             patch.object(device_controller.distr_controller, "send_cluster_map_to_node",
+                          side_effect=lambda n: self.push_ok) as self.push, \
+             patch.object(device_controller.tasks_controller, "add_device_mig_task_for_node",
+                          return_value=True) as self.rebalance_task, \
              patch.object(device_controller.time, "sleep"):
             return (fn or device_controller.resize_device)(*(args or (self.dev.get_id(),)))
 
@@ -273,6 +281,145 @@ class TestGrowClusterDevices(unittest.TestCase):
         self.assertEqual([r["device_id"] for r in res["devices"]], ["dev-1"])
         self.assertIn("dev-2", res["errors"])
         self.assertNotIn("jm", res["errors"])
+
+
+class _GrowHarness(_ResizeHarness):
+    """Several devices whose block devices report their own new sizes."""
+
+    def __init__(self, sizes_gib, **kw):
+        devs = [_aio_dev(f"dev-{i}", size_gib=100, order=i) for i in range(len(sizes_gib))]
+        super().__init__(devs[0], 0, others=devs[1:], **kw)
+        self.devs = devs
+        by_path = {d.by_id_path: g * _GIB for d, g in zip(devs, sizes_gib)}
+        self.client.rescan_block_device.side_effect = lambda path: (
+            {"device": "sdx", "size": by_path[path], "rescanned": []}, None)
+
+    def grow(self, **kw):
+        return self.run(lambda cid: device_controller.grow_cluster_devices(cid, **kw), "cluster-1")
+
+
+class TestRebalanceAfterGrowth(unittest.TestCase):
+
+    def test_uniform_growth_keeps_weights_and_does_not_rebalance(self):
+        h = _GrowHarness([200, 200, 200])
+        res = h.grow()
+        self.assertTrue(res["uniform"])
+        self.assertIsNone(res["rebalance"])
+        self.assertEqual([d.weight_size() for d in h.devs], [100 * _GIB] * 3)
+        h.push.assert_not_called()
+        h.rebalance_task.assert_not_called()
+
+    def test_uneven_growth_reweights_pushes_and_rebalances(self):
+        h = _GrowHarness([200, 300, 100])
+        res = h.grow()
+        self.assertFalse(res["uniform"])
+        self.assertEqual(res["rebalance"], {"weights_updated": True, "started": True, "reason": ""})
+        self.assertEqual([d.weight_size() for d in h.devs], [200 * _GIB, 300 * _GIB, 100 * _GIB])
+        h.push.assert_called_once_with(h.node)
+        h.rebalance_task.assert_called_once_with("node-1")
+        self.assertFalse(h.cluster.reweight_pending)
+        h.events.devices_reweighted.assert_called_once_with("cluster-1", True)
+
+    def test_no_rebalance_keeps_frozen_weights(self):
+        h = _GrowHarness([200, 300])
+        res = h.grow(rebalance=False)
+        self.assertFalse(res["uniform"])
+        self.assertIsNone(res["rebalance"])
+        self.assertEqual([d.weight_size() for d in h.devs], [100 * _GIB] * 2)
+        h.push.assert_not_called()
+
+    def test_open_migration_blocks_reweight(self):
+        h = _GrowHarness([200, 300])
+        task = MagicMock(function_name=device_controller.JobSchedule.FN_NEW_DEV_MIG,
+                         status="running", canceled=False, uuid="t-1")
+        h.db.get_job_tasks.return_value = [task]
+        res = h.grow()
+        self.assertFalse(res["rebalance"]["started"])
+        self.assertIn("t-1", res["rebalance"]["reason"])
+        self.assertEqual([d.weight_size() for d in h.devs], [100 * _GIB] * 2)
+        self.assertFalse(h.cluster.reweight_pending)
+        h.push.assert_not_called()
+
+    def test_inactive_cluster_blocks_reweight(self):
+        h = _GrowHarness([200, 300])
+        h.cluster.status = "degraded"
+        res = h.grow()
+        self.assertIn("degraded", res["rebalance"]["reason"])
+        self.assertEqual([d.weight_size() for d in h.devs], [100 * _GIB] * 2)
+
+    def test_failed_growth_does_not_reweight(self):
+        h = _GrowHarness([200, 300])
+        h.devs[1].testing_bdev = "x"
+        res = h.grow()
+        self.assertIn("dev-1", res["errors"])
+        self.assertFalse(res["rebalance"]["started"])
+        self.assertIn("failed to grow", res["rebalance"]["reason"])
+        h.push.assert_not_called()
+
+    def test_failed_push_keeps_pending_and_retry_finishes(self):
+        h = _GrowHarness([200, 300])
+        h.push_ok = False
+        res = h.grow()
+        self.assertFalse(res["rebalance"]["started"])
+        self.assertIn("push failed", res["rebalance"]["reason"])
+        self.assertTrue(h.cluster.reweight_pending)
+        self.assertEqual([d.weight_size() for d in h.devs], [200 * _GIB, 300 * _GIB])
+        h.rebalance_task.assert_not_called()
+
+        # Re-run: sizes unchanged, growth now looks uniform, but the pending
+        # flag makes it push again and start the rebalance.
+        h.push_ok = True
+        res = h.grow()
+        self.assertTrue(res["rebalance"]["started"])
+        self.assertFalse(h.cluster.reweight_pending)
+        h.rebalance_task.assert_called_once_with("node-1")
+
+    def test_weights_updated_without_volume_stores_to_rebalance(self):
+        h = _GrowHarness([200, 300])
+
+        def _grow_without_queue(cluster_id):
+            h.rebalance_task.return_value = False
+            return device_controller.grow_cluster_devices(cluster_id)
+        res = h.run(_grow_without_queue, "cluster-1")
+        self.assertTrue(res["rebalance"]["weights_updated"])
+        self.assertFalse(res["rebalance"]["started"])
+        self.assertIn("no rebalance was queued", res["rebalance"]["reason"])
+        self.assertFalse(h.cluster.reweight_pending)
+        self.assertEqual([d.weight_size() for d in h.devs], [200 * _GIB, 300 * _GIB])
+
+    def test_cluster_map_carries_new_weights_after_reweight(self):
+        h = _GrowHarness([200, 300])
+        h.grow()
+        cl_map = TestPlacementWeight._build_map(None, h.node)
+        weights = [i["weight"] for i in cl_map["map_prob"][0]["items"]]
+        self.assertEqual(weights, [200, 300])
+
+
+class TestScaledPlacementSize(unittest.TestCase):
+
+    def _db(self, devs):
+        db = MagicMock()
+        db.get_storage_nodes_by_cluster_id.return_value = [_node(devs)]
+        return db
+
+    def test_no_growth_uses_full_size(self):
+        db = self._db([_aio_dev("a", size_gib=100), _aio_dev("b", size_gib=100, order=1)])
+        self.assertEqual(storage_node_ops.scaled_placement_size(db, "cluster-1", 100 * _GIB), 0)
+
+    def test_uniform_growth_scales_new_device(self):
+        db = self._db([_aio_dev("a", size_gib=200, placement_gib=100),
+                       _aio_dev("b", size_gib=200, placement_gib=100, order=1)])
+        self.assertEqual(storage_node_ops.scaled_placement_size(db, "cluster-1", 200 * _GIB), 100 * _GIB)
+
+    def test_uneven_growth_uses_full_size(self):
+        db = self._db([_aio_dev("a", size_gib=200, placement_gib=100),
+                       _aio_dev("b", size_gib=100, order=1)])
+        self.assertEqual(storage_node_ops.scaled_placement_size(db, "cluster-1", 200 * _GIB), 0)
+
+    def test_new_and_unordered_devices_are_ignored(self):
+        db = self._db([_aio_dev("a", size_gib=200, placement_gib=100),
+                       _aio_dev("n", size_gib=50, status=NVMeDevice.STATUS_NEW, order=-1)])
+        self.assertEqual(storage_node_ops.scaled_placement_size(db, "cluster-1", 400 * _GIB), 200 * _GIB)
 
 
 class TestRescanBlockDevice(unittest.TestCase):

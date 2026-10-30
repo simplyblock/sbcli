@@ -325,6 +325,11 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = default_factory(dict)
+    # Set while new device weights (placement sizes after an uneven growth of
+    # lblk devices) are written but not yet pushed to every node and handed to
+    # a rebalance. A re-run of `cluster grow-devices` finishes the job. See
+    # device_controller.rebalance_after_growth.
+    reweight_pending: bool = False
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`

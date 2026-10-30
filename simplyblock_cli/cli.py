@@ -552,6 +552,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__grow_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows every Linux block device (lblk) of the cluster online to the size of its block device.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--no-rebalance', help='Keep the device weights after an uneven growth and do not rebalance the cluster.', default=False, dest='no_rebalance', action='store_true')
 
     def init_cluster__show(self, subparser):
         subcommand = self.add_sub_command(subparser, 'show', 'Shows a cluster\'s statistics.')

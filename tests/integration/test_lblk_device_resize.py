@@ -157,6 +157,40 @@ class TestGrowCluster:
         assert res["uniform"] is True
         assert sorted(r["device_id"] for r in res["devices"]) == sorted([a.get_id(), b.get_id()])
         assert db.get_storage_device_by_id(jm.get_id()).size == 10 * _GIB
+        assert res["rebalance"] is None
+        assert db.get_storage_device_by_id(a.get_id()).placement_size == 100 * _GIB
+
+    def test_uneven_growth_reweights_and_rebalances(self, db):
+        _seed_cluster(db)
+        a, b = _aio_device("S1", 0), _aio_device("S2", 1)
+        node = _seed_node(db, [a, b])
+        agent = _agent({a.by_id_path: 200 * _GIB, b.by_id_path: 300 * _GIB})
+
+        with patch.object(device_controller.tasks_controller, "add_device_mig_task_for_node",
+                          return_value=True) as queue:
+            res = _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
+
+        assert res["uniform"] is False
+        assert res["rebalance"] == {"weights_updated": True, "started": True, "reason": ""}
+        queue.assert_called_once_with(node.get_id())
+        assert db.get_storage_device_by_id(a.get_id()).placement_size == 200 * _GIB
+        assert db.get_storage_device_by_id(b.get_id()).placement_size == 300 * _GIB
+        assert db.get_cluster_by_id(CLUSTER_ID).reweight_pending is False
+
+        fresh = db.get_storage_node_by_id(node.get_id())
+        cl_map = distr_controller.get_distr_cluster_map([fresh], fresh, "distr-1")
+        weights = [i["weight"] for i in cl_map["map_prob"][0]["items"]]
+        assert weights == [200, 300]
+
+    def test_device_added_after_uniform_growth_is_weighted_on_the_same_scale(self, db):
+        from simplyblock_core import storage_node_ops
+        _seed_cluster(db)
+        a, b = _aio_device("S1", 0), _aio_device("S2", 1)
+        _seed_node(db, [a, b])
+        agent = _agent({a.by_id_path: 200 * _GIB, b.by_id_path: 200 * _GIB})
+        _run(agent, MagicMock(), device_controller.grow_cluster_devices, CLUSTER_ID)
+
+        assert storage_node_ops.scaled_placement_size(db, CLUSTER_ID, 200 * _GIB) == 100 * _GIB
 
 
 class TestResizeFailure:
