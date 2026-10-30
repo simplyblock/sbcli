@@ -2064,9 +2064,9 @@ def _reopen_alceml(snode, dev):
         raise _resize_failed(device_id, dev, f"AIO rescan failed: {rescan_error}", False)
 
 
-def _growth_result(grown, factor, devices, errors, reason):
+def _growth_result(grown, factor, devices, errors, reason, shrunk=()):
     return {"grown": grown, "factor": round(factor, 6), "devices": devices,
-            "errors": errors, "reason": reason}
+            "errors": errors, "reason": reason, "shrunk": list(shrunk)}
 
 
 def _device_report(dev, old_size):
@@ -2089,7 +2089,8 @@ def grow_cluster_devices(cluster_id):
     finishes the job. Repeated runs without new growth change nothing.
 
     Returns ``{"grown": bool, "factor": float, "devices": [...],
-    "errors": {device_id: message}, "reason": str}``; every device entry has
+    "errors": {device_id: message}, "reason": str, "shrunk": [device_id]}``;
+    every device entry has
     ``device_id``, ``old_size``, ``new_size``, ``backend_size``,
     ``unused_size`` and ``placement_size``."""
     db_controller = DBController()
@@ -2135,7 +2136,9 @@ def grow_cluster_devices(cluster_id):
                 f"The block device shrank to {dev.backend_size} bytes, below the device size of "
                 f"{dev.size} bytes. Shrinking is not supported: restore the LUN to at least the "
                 f"device size")
-        return _growth_result(False, 1.0, [], errors, "A block device is smaller than its device; nothing was grown")
+        return _growth_result(False, 1.0, [], errors,
+                              "A block device is smaller than its device; nothing was grown",
+                              shrunk=[dev.get_id() for _, dev in shrunk])
 
     factor = min(backend[dev.get_id()] / dev.size for _, dev in pairs)
     if factor < GROWTH_MIN_FACTOR:

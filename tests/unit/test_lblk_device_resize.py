@@ -203,6 +203,7 @@ class TestGrowClusterDevices(unittest.TestCase):
         self.assertFalse(res["grown"])
         self.assertIn("dev-1", res["errors"])
         self.assertIn("shrank", res["errors"]["dev-1"])
+        self.assertEqual(res["shrunk"], ["dev-1"])
         h.rpc.alceml_bdev_backend_resize_begin.assert_not_called()
         self.assertEqual(h.sizes(), [100, 100, 100])
         self.assertTrue(h.devs[1].is_shrunk())

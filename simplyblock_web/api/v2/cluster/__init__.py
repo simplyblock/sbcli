@@ -347,6 +347,7 @@ class DeviceGrowthDTO(BaseModel):
     devices: builtins.list[DeviceGrowthEntryDTO]
     errors: dict[str, str]
     reason: str
+    shrunk: builtins.list[str] = []
 
 
 @instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
@@ -358,8 +359,8 @@ def grow_devices(cluster: Cluster) -> DeviceGrowthDTO:
     of all of them; the rest of a larger block device stays unused
     (`unused_size`). If one block device did not grow, nothing grows
     (`grown` false, `reason`). Device weights and data placement never change.
-    A block device smaller than its device is refused, reported in `errors`,
-    and raises the device_shrunk alert.
+    A block device smaller than its device is refused, listed in `shrunk`
+    and `errors`, and raises the device_shrunk alert.
     """
     if cluster.device_mode != constants.DEVICE_MODE_LBLK:
         raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
