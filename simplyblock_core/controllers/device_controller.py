@@ -1085,25 +1085,45 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     if not snode.jm_device.raid_bdev:
         remove_jm_device(snode.jm_device.get_id())
     else:
-        nvme_controller = device.nvme_controller
-        dev_to_remove = None
-        for part in snode.jm_device.jm_nvme_bdev_list:
-            if part.startswith(nvme_controller):
-                dev_to_remove = part
-                break
-
-        if dev_to_remove:
-            raid_found = False
-            for raid_info in rpc_client.bdev_raid_get_bdevs():
-                if raid_info["name"] == snode.jm_device.raid_bdev:
-                    raid_found = True
-                    base_bdevs = raid_info.get("base_bdevs_list", [])
-                    if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
-                        remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
-            if not raid_found:
-                set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        _remove_jm_raid_leg_of_device(snode, device, rpc_client)
 
     return True
+
+
+def _remove_jm_raid_leg_of_device(snode, device, rpc_client):
+    """Take the removed device's JM partition out of the JM raid -- but only
+    when that partition is physically gone.
+
+    device_remove() also runs for logical removals (the alceml stuck-IO
+    watchdog, distrib errors) that leave the SSD and its JM partition in
+    place. Pulling a still-present partition out of the raid lets it go stale
+    while the JM keeps writing to the other leg, and the raid is rebuilt
+    without a superblock on node restart, so the stale leg is then mounted as
+    current and the JM alceml fails to load (SFAM-2843).
+    """
+    dev_to_remove = None
+    for part in snode.jm_device.jm_nvme_bdev_list:
+        if part.startswith(device.nvme_controller):
+            dev_to_remove = part
+            break
+
+    if not dev_to_remove:
+        return
+
+    raid_found = False
+    for raid_info in rpc_client.bdev_raid_get_bdevs():
+        if raid_info["name"] == snode.jm_device.raid_bdev:
+            raid_found = True
+            base_bdevs = raid_info.get("base_bdevs_list", [])
+            if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
+                if rpc_client.bdev_get(dev_to_remove):
+                    logger.info(
+                        "JM partition %s is still present: keeping it in %s",
+                        dev_to_remove, snode.jm_device.raid_bdev)
+                else:
+                    remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
+    if not raid_found:
+        set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 
 def remove_from_jm_device(device_id, jm_bdev):
