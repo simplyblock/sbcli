@@ -994,15 +994,49 @@ class K8sUtils:
         a recent volume complaint against them.
         """
         ns = namespace or self.namespace
+        # Phase alone is the wrong question, and asking it cost run
+        # 41015882185 a 1h58m cycle. A pod running an INIT container reports
+        # Pending, and our FIO Jobs run `fio-warmup` as an init container --
+        # for minutes. Such a pod plainly has its volume: the kubelet mounts
+        # it before any container can start. The clone that failed that run
+        # had, in its own event list and in this order:
+        #
+        #   FailedAttachVolume      Multi-Attach error for volume ...
+        #   SuccessfulAttachVolume  AttachVolume.Attach succeeded
+        #
+        # It was eight minutes into its warmup, Pending, with a resolved
+        # Multi-Attach event still inside the window -- and was reported as
+        # "a volume did not re-attach".
+        #
+        # So ask whether anything has STARTED. A container that has ever run,
+        # init or main, running or terminated, is proof the volume mounted. A
+        # pod genuinely stuck behind Multi-Attach never reaches that point:
+        # it has no container statuses at all. custom-columns prints <none>
+        # for a field a pod does not have, so a missing list is not an error.
+        cols = ",".join((
+            ":metadata.name",
+            ":status.phase",
+            ":status.initContainerStatuses[*].state.running.startedAt",
+            ":status.initContainerStatuses[*].state.terminated.startedAt",
+            ":status.containerStatuses[*].state.running.startedAt",
+            ":status.containerStatuses[*].state.terminated.startedAt",
+        ))
         out, _ = self._exec_kubectl(
             f"kubectl get pods -n {ns} "
-            f"-o custom-columns=':metadata.name,:status.phase' --no-headers "
+            f"-o custom-columns='{cols}' --no-headers "
             f"2>/dev/null || true", supress_logs=True, timeout=120)
         pending = set()
         for line in (out or "").splitlines():
             parts = line.split()
-            if len(parts) >= 2 and parts[1] not in ("Running", "Succeeded"):
-                pending.add(parts[0])
+            if len(parts) < 2:
+                continue
+            name, phase, started = parts[0], parts[1], parts[2:]
+            if phase in ("Running", "Succeeded"):
+                continue
+            if any(v != "<none>" for v in started):
+                # Mounted. Whatever it is waiting on, it is not the volume.
+                continue
+            pending.add(name)
         if not pending:
             return []
 

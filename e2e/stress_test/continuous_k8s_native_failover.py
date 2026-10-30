@@ -2472,6 +2472,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"{str(exc)[:140]}")
             return
         if not pv:
+            # Silent before, which made "the wait ran and the volume was
+            # free" indistinguishable from "the wait never looked" -- and
+            # the whole method only logs on failure, so the absence of
+            # [detach] lines proved nothing either way.
+            self.logger.warning(
+                f"[detach] {pvc_name} has no bound PV to wait on; skipping "
+                f"the detach wait. If its replacement reports Multi-Attach, "
+                f"this is why nothing was waited for.")
             return
         if not self.k8s_utils.wait_volume_detached(pv, timeout=timeout):
             held = self.k8s_utils.get_volume_attachments(pv)
