@@ -473,6 +473,12 @@ KNOWN_FAILING = {
                                               "takeover waits on the frozen primary's data devices "
                                               "(fix: ultra #219 with F24, F25 and F26)",
                                               "F23"),
+    "F6b-restart-precheck-fenced-peer": ("the restart's jc_compression precheck on a fenced peer "
+                                         "whose JC is in error mode answers -6 until jc_unfence; "
+                                         "the arbiter unfences only after the restarting node is "
+                                         "healthy, so the restart the partition recovery hands "
+                                         "over aborts (review of #1559)",
+                                         "code -6"),
     "F21-takeover-reader-frozen-peer-jm": ("F21: the survivor's takeover reader picks the frozen "
                                            "peer's JM and waits for the 8 s NVMe IO timeout "
                                            "(fix: a solo LVS skips the peer JM the HA layer knows "
@@ -564,6 +570,22 @@ EXTRA = [
     # reader restart still waits for that read (F26: 7 s client stall, 0 IO errors).
     Scenario("F26-takeover-read-inflight-on-peer-jm", ("F23", "F26"), hang("sn2", 8.0), aborts_ok=("sn2",),
              grant_within_s=2.6, conditions=("reader_read_inflight_on_peer_jm",)),
+    # F6, the restart remedy (c1/c2): after the partition the remote JMs do not
+    # come back on a reconnect, so after TWO_NODE_PARTITION_RESTART_AFTER_S the
+    # arbiter hands one node to the restart flow. No LVS has a leader (fence
+    # both), so the restart's jc_compression precheck runs on the presumed
+    # acting leader: the fenced peer. Its JC is still active, so the restart
+    # goes through and the pair heals.
+    Scenario("F6c-partition-restart-remedy", ("F6",), partition(), io_errors_ok=True,
+             stall_limit_s=None, heal_s=300,
+             conditions=("jm_needs_reconnect", "jm_reconnect_ineffective")),
+    # The same with the fenced peer's JC in error mode (the held client IO failed
+    # at the fence): jc_compression answers -6 until jc_unfence, and the arbiter
+    # unfences only after the restarting node is healthy -- which the aborted
+    # restart prevents. Review of #1559.
+    Scenario("F6b-restart-precheck-fenced-peer", ("F6",), partition(), io_errors_ok=True,
+             stall_limit_s=None, heal_s=300,
+             conditions=("jm_needs_reconnect", "jm_reconnect_ineffective", "jc_error_while_fenced")),
 ]
 
 #: Findings the simulator cannot express, and why.
