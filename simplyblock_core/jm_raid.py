@@ -134,3 +134,28 @@ def plan_reconfigure(legs: list[list], *, failed=None, added=None) -> dict:
         rebuild.add(i)
 
     return {"rebuild": sorted(rebuild), "legs": new}
+
+
+def leg_of(member: str, leg_bdevs: list[str], leg_members: list) -> str:
+    """The top-raid1 base bdev that carries ``member``.
+
+    Under RAID 0+1 with more than two drives a member partition sits inside a
+    raid0 leg, so the unit the top raid1 adds, removes and rebuilds is that
+    leg. A single-drive leg is the bare partition, and the legacy N-way mirror
+    (no recorded legs) has the partitions themselves as its base bdevs.
+    """
+    for leg, members in zip(leg_bdevs, leg_members):
+        if member in members:
+            return leg
+    return member
+
+
+def leg_in_sync(raid_info: dict, leg: str) -> bool:
+    """True if ``leg`` is a configured base bdev of the raid described by
+    ``raid_info`` (one ``bdev_raid_get_bdevs`` entry) and no rebuild targets it.
+    """
+    process = raid_info.get("process") or {}
+    if process.get("target") == leg:
+        return False
+    return any(b.get("name") == leg and b.get("is_configured", True)
+               for b in raid_info.get("base_bdevs_list", []))
