@@ -605,7 +605,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 
     def _disconnect_partial_interface(self, node, node_ip):
-        data_nics = self.sbcli_utils.get_storage_node_details(node)[0]["data_nics"]
+        _nd = self.sbcli_utils.get_storage_node_details(node)
+        if not _nd:
+            raise RuntimeError(f"No storage node details for {node}")
+        data_nics = _nd[0]["data_nics"]
         active_interfaces = [data_nics[0]["if_name"]]
         self.logger.info(f"Partial NIC disconnect on {node_ip}: {active_interfaces}")
         self.disconnect_thread = threading.Thread(

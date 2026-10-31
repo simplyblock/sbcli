@@ -28,6 +28,44 @@ from datetime import UTC, datetime
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
+
+class ControlPlaneUnreachable(RuntimeError):
+    """The API server, or the kubelet behind the admin pod, could not be reached.
+
+    Deliberately not the same thing as a command that ran and failed. When
+    this is raised nothing has been learned about the cluster under test, so
+    a caller must not fold it into a result.
+    """
+
+
+#: stderr fragments meaning "we could not ask", as opposed to "we asked and
+#: the answer was empty". Run 41058481784 died on those two being conflated:
+#: the lab's only DNS server and default gateway (10.0.0.1, which is also what
+#: api-int.ocp.simplyblock.ai resolves to) went away for five minutes, every
+#: worker lost the API server, a `kubectl exec` came back with empty stdout,
+#: and `_json_or_empty` turned that into `[]` -- which a storage-node shutdown
+#: helper then indexed. None of these strings mean the control plane answered.
+_CONTROL_PLANE_UNREACHABLE_MARKERS = (
+    "error dialing backend",
+    "i/o timeout",
+    "no route to host",
+    "http2: client connection lost",
+    "unexpected EOF",
+    "TLS handshake timeout",
+    "etcdserver: request timed out",
+    "the server was unable to return a response",
+    "an error on the server",
+    "Unable to connect to the server",
+    "connection refused",
+    "context deadline exceeded",
+    "subprocess timed out after",
+)
+
+
+def _is_control_plane_unreachable(stderr: str) -> bool:
+    """True when *stderr* says the API server or a kubelet could not be reached."""
+    return any(m in (stderr or "") for m in _CONTROL_PLANE_UNREACHABLE_MARKERS)
+
 #: How a v1alpha1 StoragePool's storageClassParameters key spells itself under
 #: v1alpha2's typed volumeDefaults. storageClassParameters was a free-form map;
 #: volumeDefaults is a struct, so a key with no field here is an error rather
@@ -115,6 +153,17 @@ class K8sUtils:
         self.use_local_kubectl = _local_env or _same_as_bastion
         if self.use_local_kubectl:
             self.logger.info("[K8sUtils] Local kubectl mode enabled (subprocess)")
+        #: Control-plane outage bookkeeping, read by control_plane_downtime().
+        #: An outage is open from the first transport failure until the next
+        #: call that gets through.
+        self._cp_outage_started: float | None = None
+        self._cp_downtime_total: float = 0.0
+        #: How long exec_sbcli waits out an unreachable control plane before
+        #: giving up. Comfortably longer than any blip measured here (the
+        #: worst was five minutes) and still bounded, so a genuinely dead
+        #: cluster fails the run instead of hanging it.
+        self.cp_unreachable_budget: float = float(
+            os.environ.get("SB_CP_UNREACHABLE_BUDGET", "900"))
 
     # ── kubectl dispatch ─────────────────────────────────────────────────────
 
@@ -150,32 +199,90 @@ class K8sUtils:
 
     # ── Admin pod discovery ──────────────────────────────────────────────────
 
-    def get_admin_pod(self, refresh: bool = False) -> str:
+    def get_admin_pod(self, refresh: bool = False,
+                      avoid: str | None = None) -> str:
         """
-        Return the name of the simplyblock-admin-control-* pod.
+        Return a **Ready** simplyblock-admin-control-* pod.
 
-        The result is cached after the first successful call.
-        Pass ``refresh=True`` to force a fresh lookup (e.g. after a restart).
+        The result is cached after the first successful call. Pass
+        ``refresh=True`` to force a fresh lookup (e.g. after a restart), and
+        *avoid* to name the pod we have just failed against.
+
+        This used to be ``| head -1``, which picks by name order and knows
+        nothing about whether the pod can serve. The deployment runs more than
+        one replica precisely so that one being unusable is survivable, and
+        sorting threw that away: run 41058481784 sent every sbctl call of its
+        last half hour at one pod on an unreachable node, and never tried the
+        other, which was Ready throughout.
+
+        custom-columns rather than jsonpath on purpose -- jsonpath's range and
+        newline syntax does not survive being embedded in a Python string and
+        passed through ``bash -c``.
         """
         if self._admin_pod and not refresh:
             return self._admin_pod
 
+        cols = (
+            "custom-columns=NAME:.metadata.name,"
+            "PHASE:.status.phase,"
+            "READY:.status.conditions[?(@.type=='Ready')].status"
+        )
         out, _ = self._exec_kubectl(
-            (
-                f"kubectl get pods -n {self.namespace} --no-headers "
-                f"-o custom-columns=:metadata.name "
-                f"| grep simplyblock-admin-control | head -1"
-            ),
+            f'kubectl get pods -n {self.namespace} --no-headers -o "{cols}" '
+            f"| grep simplyblock-admin-control",
             supress_logs=True,
         )
-        pod = out.strip()
+        ready, present = [], []
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            name, phase, is_ready = parts[0], parts[1], parts[2]
+            present.append(name)
+            if phase == "Running" and is_ready == "True":
+                ready.append(name)
+
+        pool = ready or present
+        pod = next((p for p in pool if p != avoid), pool[0] if pool else "")
         if not pod:
             raise RuntimeError(
                 f"[K8sUtils] No simplyblock-admin-control pod found in namespace '{self.namespace}'"
             )
+        if not ready:
+            self.logger.warning(
+                "[K8sUtils] no Ready admin pod; falling back to %s", pod)
         self._admin_pod = pod
         self.logger.info(f"[K8sUtils] Admin pod resolved: {pod}")
         return pod
+
+    # -- control-plane reachability ------------------------------------------
+
+    def _note_control_plane_down(self, when: float) -> None:
+        if self._cp_outage_started is None:
+            self._cp_outage_started = when
+
+    def _note_control_plane_up(self) -> None:
+        if self._cp_outage_started is None:
+            return
+        elapsed = time.time() - self._cp_outage_started
+        self._cp_downtime_total += elapsed
+        self._cp_outage_started = None
+        self.logger.info(
+            "[K8sUtils] control plane reachable again after %.0fs "
+            "(%.0fs total this run)", elapsed, self._cp_downtime_total)
+
+    def control_plane_downtime(self) -> float:
+        """Seconds this run has spent unable to reach the control plane.
+
+        Outage helpers subtract this from their own deadlines. Five minutes of
+        dead API server must not consume a five-minute node-shutdown budget,
+        which is how run 41058481784 would have failed even with the IndexError
+        fixed: the control plane came back 45 seconds after the deadline.
+        """
+        total = self._cp_downtime_total
+        if self._cp_outage_started is not None:
+            total += time.time() - self._cp_outage_started
+        return total
 
     # ── sbcli command execution ──────────────────────────────────────────────
 
@@ -183,45 +290,87 @@ class K8sUtils:
         """
         Execute *command* inside the simplyblock-admin-control pod via kubectl exec.
 
-        If the cached admin pod no longer exists (NotFound), the pod name is
-        re-resolved and the command is retried once.
+        Two failure modes are handled, and they are emphatically not the same:
+
+        * **the admin pod is gone** (rollout, eviction, node drain) -- the pod
+          name is re-resolved and the command retried. kubectl spells this
+          several ways depending on the phase of termination: ``NotFound``,
+          ``unable to upgrade connection: pod does not exist``,
+          ``pod ... not found``.
+
+        * **the control plane could not be reached** -- the API server is
+          down, or it cannot dial the kubelet hosting the pod. Nothing has
+          been learned about the cluster under test, so this is waited out
+          rather than reported. If it outlasts ``cp_unreachable_budget`` the
+          call raises :class:`ControlPlaneUnreachable`; it never returns an
+          empty result that a caller would read as data.
+
+        That second branch is the whole point. Run 41058481784 lost 9h22m of
+        passing rapid-failover to its absence: the lab's single DNS server and
+        gateway at 10.0.0.1 went away for five minutes, every worker lost
+        api-int, this method returned ``("", "error dialing backend: ...")``,
+        `_json_or_empty` turned the blank stdout into ``[]``, and
+        `_graceful_shutdown_node` indexed ``[0]`` on it.
 
         Returns the same (stdout, stderr) tuple as SshUtils.exec_command.
         """
         if not supress_logs:
             self.logger.info(f"[sbcli] {command}")
-        admin_pod = self.get_admin_pod()
-        kubectl_cmd = (
-            f"kubectl exec -n {self.namespace} {admin_pod} -- "
-            f"bash -c {shlex.quote(command)}"
-        )
-        stdout, stderr = self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
 
-        # If the admin pod was recreated (e.g. during upgrade), retry with
-        # a freshly-resolved pod.  kubectl may report different error strings
-        # depending on the phase of termination:
-        #   - "NotFound"                                (pod fully deleted)
-        #   - "unable to upgrade connection: pod does not exist"
-        #   - "pod … not found"
-        _err = stderr or ""
-        _pod_gone = (
-            "NotFound" in _err
-            or "pod does not exist" in _err
-            or "pod not found" in _err.lower()
-        )
-        if _pod_gone:
-            self.logger.warning(
-                f"[K8sUtils] Admin pod '{admin_pod}' gone ({_err.strip()[:80]}), "
-                "re-resolving..."
-            )
-            admin_pod = self.get_admin_pod(refresh=True)
+        admin_pod = self.get_admin_pod()
+        deadline: float | None = None   # armed by the first transport failure
+        attempt = 0
+
+        while True:
+            attempt += 1
             kubectl_cmd = (
                 f"kubectl exec -n {self.namespace} {admin_pod} -- "
                 f"bash -c {shlex.quote(command)}"
             )
-            stdout, stderr = self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
+            stdout, stderr = self._exec_kubectl(kubectl_cmd,
+                                                supress_logs=supress_logs)
+            _err = stderr or ""
 
-        return stdout, stderr
+            _pod_gone = (
+                "NotFound" in _err
+                or "pod does not exist" in _err
+                or "pod not found" in _err.lower()
+            )
+            if _pod_gone:
+                self.logger.warning(
+                    f"[K8sUtils] Admin pod '{admin_pod}' gone "
+                    f"({_err.strip()[:80]}), re-resolving..."
+                )
+                admin_pod = self.get_admin_pod(refresh=True, avoid=admin_pod)
+                continue
+
+            if not _is_control_plane_unreachable(_err):
+                self._note_control_plane_up()
+                return stdout, stderr
+
+            now = time.time()
+            if deadline is None:
+                deadline = now + self.cp_unreachable_budget
+                self._note_control_plane_down(now)
+                self.logger.warning(
+                    "[K8sUtils] control plane unreachable via %s: %s -- "
+                    "waiting up to %.0fs for it to come back",
+                    admin_pod, _err.strip()[:160], self.cp_unreachable_budget)
+            if now >= deadline:
+                self._note_control_plane_up()
+                raise ControlPlaneUnreachable(
+                    f"control plane unreachable for "
+                    f"{self.cp_unreachable_budget:.0f}s while running "
+                    f"{command!r}: {_err.strip()[:300]}"
+                )
+
+            # Re-resolve before sleeping: the pod's own kubelet may be the
+            # unreachable part, in which case another replica answers at once.
+            try:
+                admin_pod = self.get_admin_pod(refresh=True, avoid=admin_pod)
+            except RuntimeError:
+                pass        # listing pods needs the same API server
+            sleep_n_sec(min(15, 2 ** min(attempt, 4)))
 
     # ── K8s node name resolution ─────────────────────────────────────────────
 

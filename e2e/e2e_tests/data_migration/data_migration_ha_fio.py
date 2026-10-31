@@ -341,7 +341,11 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info("Test completed successfully.")
 
     def get_node_ip(self, node_id):
-        return self.sbcli_utils.get_storage_node_details(node_id)[0]["mgmt_ip"]
+        details = self.sbcli_utils.get_storage_node_details(node_id)
+        if not details:
+            raise RuntimeError(
+                f"No storage node details for {node_id}; cannot resolve its IP")
+        return details[0]["mgmt_ip"]
 
     def run_fio(self, lvol_fio_path):
         self.logger.info("Starting fio workloads on the logical volumes with different configurations.")

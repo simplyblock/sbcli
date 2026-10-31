@@ -597,7 +597,10 @@ class _DualOutageK8s(_DualOutageMixin, K8sNativeFailoverTest):
         cannot strand a node.
         """
         node = random.choice(list(self.sn_primary_secondary_map.keys()))
-        details = self.sbcli_utils.get_storage_node_details(node)[0]
+        _nd = self.sbcli_utils.get_storage_node_details(node)
+        if not _nd:
+            raise RuntimeError(f"No storage node details for {node}")
+        details = _nd[0]
         nics = details.get("data_nics") or []
         if len(nics) < 2:
             self.logger.info("[dual-outage] %s has %d data NIC(s), nothing to "

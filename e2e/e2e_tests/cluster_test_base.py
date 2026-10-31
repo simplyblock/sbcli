@@ -2983,6 +2983,17 @@ class TestClusterBase:
                          "dmesg -T 2>/dev/null || dmesg"),
                         (f"journalctl_{ip}{suffix}.txt",
                          "journalctl -k --no-pager 2>/dev/null || true"),
+                        # Kernel logs alone cannot see a kubelet, CRI-O or
+                        # DNS fault. Run 41058481784 was a five-minute outage
+                        # of the lab's only resolver: every worker lost
+                        # api-int, and the node dmesg we collected was
+                        # spotless, so the evidence bundle said nothing at
+                        # all about the cause. Warnings and above only --
+                        # kubelet at info level is unreadably large.
+                        (f"journalctl_units_{ip}{suffix}.txt",
+                         "journalctl -u kubelet -u crio -u NetworkManager "
+                         "-p warning --since '90 min ago' --no-pager "
+                         "2>/dev/null || true"),
                     ):
                         out, _err = k8s.run_on_node(ip, hostcmd, timeout=180,
                                                     check=False)

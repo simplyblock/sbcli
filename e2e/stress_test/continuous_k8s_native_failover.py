@@ -2528,9 +2528,33 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"[K8s] container_stop: deleted SPDK pod {pod_name!r} for node {node_ip}"
         )
 
+    def _control_plane_downtime(self) -> float:
+        """Seconds the control plane has been unreachable, 0 off the k8s path."""
+        fn = getattr(getattr(self, "k8s_utils", None),
+                     "control_plane_downtime", None)
+        return fn() if callable(fn) else 0.0
+
     def _graceful_shutdown_node(self, node: str):
+        """Ask the control plane to shut *node* down, and wait until it is.
+
+        Two things here are deliberate, and run 41058481784 is why.
+
+        ``node_detail`` is checked before it is indexed. An empty list from
+        `get_storage_node_details` means "could not read it", which is one
+        more not-yet-offline pass, not a result -- the bare ``[0]`` turned a
+        transient read into `IndexError: list index out of range` and took
+        down 9h22m of otherwise-passing failover.
+
+        And the budget does not run while the control plane is unreachable.
+        Five minutes of dead API server is not five minutes of a node
+        refusing to shut down. Without the discount, that same run would
+        still have failed: the deadline fell 45 seconds before the API
+        server came back.
+        """
         self.logger.info(f"Issuing graceful shutdown for node {node}.")
-        deadline = time.time() + 300
+        budget = 300
+        deadline = time.time() + budget
+        cp_seen = self._control_plane_downtime()
         while True:
             try:
                 self.sbcli_utils.shutdown_node(node_uuid=node, force=False)
@@ -2538,12 +2562,23 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.warning(f"shutdown_node raised: {e}")
             sleep_n_sec(20)
             node_detail = self.sbcli_utils.get_storage_node_details(node)
-            if node_detail[0]["status"] == "offline":
+            if node_detail and node_detail[0].get("status") == "offline":
                 self.logger.info(f"Node {node} is offline.")
                 return
+            if not node_detail:
+                self.logger.warning(
+                    f"No details returned for {node}; treating as "
+                    f"not-yet-offline and retrying.")
+
+            cp_now = self._control_plane_downtime()
+            deadline += cp_now - cp_seen
+            cp_seen = cp_now
+
             if time.time() >= deadline:
                 raise RuntimeError(
-                    f"Node {node} did not go offline within 5 minutes."
+                    f"Node {node} did not go offline within "
+                    f"{budget // 60} minutes "
+                    f"(excluding {cp_now:.0f}s of control-plane downtime)."
                 )
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 

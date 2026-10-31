@@ -694,7 +694,10 @@ class _ProductLimitsDocker(_ProductLimitsMixin, TestClusterBase):
         return ["container_stop", "graceful_shutdown"]
 
     def _perform_outage(self, node_uuid, outage_type):
-        details = self.sbcli_utils.get_storage_node_details(node_uuid)[0]
+        _nd = self.sbcli_utils.get_storage_node_details(node_uuid)
+        if not _nd:
+            raise RuntimeError(f"No storage node details for {node_uuid}")
+        details = _nd[0]
         if outage_type == "container_stop":
             # Auto-restart is expected to bring this back unaided; that is
             # exactly the behaviour under test.
@@ -718,7 +721,10 @@ class _ProductLimitsK8s(_ProductLimitsMixin, TestClusterBase):
         return ["pod_delete", "graceful_shutdown"]
 
     def _perform_outage(self, node_uuid, outage_type):
-        details = self.sbcli_utils.get_storage_node_details(node_uuid)[0]
+        _nd = self.sbcli_utils.get_storage_node_details(node_uuid)
+        if not _nd:
+            raise RuntimeError(f"No storage node details for {node_uuid}")
+        details = _nd[0]
         if outage_type == "pod_delete":
             # restart_spdk_pod only issues the delete and does not wait; the
             # wait for online happens in _random_outages, which is the number
