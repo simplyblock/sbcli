@@ -8878,6 +8878,9 @@ def _restart_storage_node_impl(
                         logger.error(e)
                     snode.ssd_pcie.append(new_ssd)
 
+        if not lblk_mode:
+            _rebind_own_devices_to_spdk(snode, snode_api, node_info)
+
         fdb_connection = cluster.db_connection
         if lvol_changed:
             # Keyword args: the positional order here silently paired
@@ -11151,6 +11154,61 @@ def _set_restart_phase(snode: StorageNode, lvs_name, phase, db_controller):
     elif old_phase == StorageNode.RESTART_PHASE_POST_UNBLOCK and phase == "":
         drain_restart_queue(node_id, lvs_name)
 
+
+def _rebind_own_devices_to_spdk(snode, snode_api, node_info):
+    """Bind the node's own NVMe devices back to the SPDK driver before SPDK
+    starts.
+
+    A shutdown hands them to the kernel nvme driver (shutdown step 5), and
+    SPDK's setup.sh will not take them back: a device carrying a partition
+    table counts as in use (scripts/common.sh block_in_use), and ours carry
+    the JM and data partitions. Node add binds explicitly; restart relied on
+    setup.sh, so every restart after a shutdown failed with "No NVMe devices
+    was found!" (bf7 2026-10-30: e0ad4fa0 and 5055ad5c, shut down by the
+    suspend drain, stayed offline for hours).
+    """
+    kernel_bound = set((node_info or {}).get("nvme_pcie_list") or [])
+    own = list(snode.ssd_pcie or [])
+    for dev in snode.nvme_devices:
+        if dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own:
+            own.append(dev.pcie_address)
+    for pci in own:
+        if pci not in kernel_bound:
+            continue
+        logger.info("Binding %s back to SPDK on %s (left on the kernel driver by a shutdown)",
+                    pci, snode.get_id())
+        try:
+            snode_api.bind_device_to_spdk(pci)
+        except Exception as e:
+            logger.error("Failed to bind %s to SPDK on %s: %s", pci, snode.get_id(), e)
+
+
+def resume_jc_compression(node, jm_vuid):
+    """Resume JC compression for ``jm_vuid`` on ``node``, falling back to a
+    retry task when the RPC fails.
+
+    A JC context starts with auto-compression suspended (ultra 38fb5595), so
+    every SPDK start leaves each journal it hosts uncompressed until the
+    control plane resumes it. With distrib page copy every first write after
+    a snapshot appends a page-copy record, so a node whose own journal is
+    never resumed fills its JM partition and aborts (bf7 2026-10-30: the
+    13 GiB JM filled within ~3h of the 16:38 restart, 19:20 JM full -> JCERR
+    -> abort cascade -> cluster suspended).
+    """
+    # Release-upgrade guard (remove with the jc_compression_upgrade plugin):
+    # resumes are held until `cluster upgrade-complete`.
+    if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(node.cluster_id)):
+        logger.info("JC compression resume held: cluster upgrade in progress")
+        return False
+    try:
+        if node.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=False):
+            return True
+    except Exception as e:
+        logger.warning("JC compression resume for jm_vuid %s on %s failed: %s",
+                       jm_vuid, node.get_id(), e)
+    logger.info("Failed to resume JC compression adding task...")
+    tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=jm_vuid)
+    return False
 
 
 def _set_lvstore_status_atomic(node_id, value, db_controller):
@@ -15110,6 +15168,12 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         _set_restart_phase(snode, lvs_name, "", db_controller)
 
         _set_lvstore_status_atomic(lvs_node.get_id(), "ready", db_controller)
+
+        # The leader's JC context for this LVS is new (SPDK restarted, or the
+        # takeover created it) and starts with compression suspended. Nothing
+        # else resumes it until a migration on the node finishes, which under
+        # write load with page copy is hours -- the JM fills first.
+        resume_jc_compression(snode, lvs_jm_vuid)
 
         # reset snapshot delete status (only for own primary LVS)
         if not is_takeover:
