@@ -121,7 +121,7 @@ def jc_comp(monkeypatch):
     db = MagicMock()
     monkeypatch.setattr(runner, "db", db)
     monkeypatch.setattr(runner, "tasks_controller", MagicMock())
-    runner.tasks_controller.get_active_node_tasks.return_value = []
+    runner.tasks_controller.get_jc_comp_blocking_node_tasks.return_value = []
     db.get_storage_nodes_by_cluster_id.return_value = [_node()]
     # An unstubbed MagicMock attribute auto-creates, so `release_upgrade_state`
     # would answer .get() with a truthy mock and hold every resume.
@@ -175,9 +175,9 @@ def test_jc_comp_defers_while_node_is_offline(jc_comp):
         jc_comp.SPEC.handler(_task())
 
 
-def test_jc_comp_defers_while_another_task_runs_on_the_node(jc_comp):
+def test_jc_comp_defers_while_data_moves_on_the_node(jc_comp):
     jc_comp.db.get_storage_node_by_id.return_value = _node()
-    jc_comp.tasks_controller.get_active_node_tasks.return_value = [_task()]
+    jc_comp.tasks_controller.get_jc_comp_blocking_node_tasks.return_value = [_task()]
     with pytest.raises(trb.TaskDefer):
         jc_comp.SPEC.handler(_task())
 

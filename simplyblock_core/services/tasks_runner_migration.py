@@ -185,7 +185,7 @@ def _roll_up(master_task, tasks):
 
 def resume_jc_compression(task):
     """A finished migration frees the node for JC compression again."""
-    if tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id):
+    if tasks_controller.get_jc_comp_blocking_node_tasks(task.cluster_id, task.node_id):
         return
 
     # Release-upgrade guard (remove with the jc_compression_upgrade plugin):
