@@ -1,8 +1,9 @@
 
+import time
 from logging import DEBUG, ERROR, INFO
 from typing import Any
 
-from simplyblock_core import distr_controller, storage_node_ops, utils
+from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
@@ -166,10 +167,89 @@ def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None) -> bool:
     return bool(listeners) and bool(namespaces)
 
 
+# ---- distrib IO errors: the one trace an unreadable stripe leaves ----------
+#
+# A distrib that cannot serve an IO from the chunks it can reach reports
+# ``error_read`` / ``error_write`` / ... through the event collector, which
+# files it under status ``distr error <vuid>``. There is no RPC that lists
+# degraded stripes, so these events are the only read-only signal the control
+# plane has that an lvstore has lost redundancy somewhere. prod 2026-11-01:
+# two weeks of ``distr error 7857`` sat in the cluster log before a planned
+# reboot of one of that stripe's nodes took the volume down. The check
+# surfaces below make them part of ``sbctl volume check`` and
+# ``sbctl cluster check`` so an operator sees them before the next restart.
+
+DISTR_ERROR_STATUS_PREFIX = "distr error "
+
+
+def summarize_distr_errors(events):
+    """{vuid: {"count", "last_ms", "errors", "reported_by"}} over a list of
+    EventObj. Pure: feed it ``DBController.get_events_since``."""
+    summary: dict[int, dict[str, Any]] = {}
+    for ev in events:
+        if ev.vuid is None or ev.vuid < 0 or not str(ev.status).startswith(DISTR_ERROR_STATUS_PREFIX):
+            continue
+        entry = summary.setdefault(ev.vuid, {"count": 0, "last_ms": 0, "errors": set(), "reported_by": set()})
+        entry["count"] += max(1, int(ev.count or 1))
+        entry["last_ms"] = max(entry["last_ms"], int(ev.date or 0))
+        entry["errors"].add(ev.message)
+        if ev.node_id:
+            entry["reported_by"].add(ev.node_id)
+    return summary
+
+
+def lvstore_distrib_vuids(node):
+    """The vuids of the distribs in ``node``'s own lvstore stack."""
+    vuids = set()
+    for bdev in node.lvstore_stack or []:
+        if bdev.get("type") != "bdev_raid":
+            continue
+        for name in bdev.get("distribs_list", []):
+            _, _, vuid = str(name).rpartition("_")
+            if vuid.isdigit():
+                vuids.add(int(vuid))
+    return vuids
+
+
+def distr_errors_for_lvstore(node, summary):
+    """The part of ``summary`` that belongs to ``node``'s lvstore."""
+    mine = lvstore_distrib_vuids(node)
+    return {vuid: info for vuid, info in summary.items() if vuid in mine}
+
+
+def recent_distr_error_summary(db_controller, cluster_id, lookback_sec=None):
+    lookback_sec = constants.DISTR_ERROR_LOOKBACK_SEC if lookback_sec is None else lookback_sec
+    since_ms = int((time.time() - lookback_sec) * 1000)
+    return summarize_distr_errors(db_controller.get_events_since(cluster_id, since_ms))
+
+
+def _describe_distr_error(vuid, info):
+    last = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(info["last_ms"] / 1000)) if info["last_ms"] else "?"
+    errors = ",".join(sorted(info["errors"]))
+    return f"distrib {vuid}: {errors} x{info['count']}, last {last} UTC"
+
+
+def report_lvstore_distr_errors(node, summary) -> bool:
+    """Log every distrib IO error recorded against ``node``'s lvstore inside
+    the lookback. True when there are none."""
+    errors = distr_errors_for_lvstore(node, summary)
+    if not errors:
+        logger.info(f"Checking distrib IO errors on {node.lvstore} ... ok")
+        return True
+    for vuid, info in sorted(errors.items()):
+        logger.warning(
+            f"Checking distrib IO errors on {node.lvstore} ... {_describe_distr_error(vuid, info)} "
+            f"-- a stripe of this lvstore could not be served from the reachable chunks; its "
+            f"redundancy is lost and volumes on {node.lvstore} fail that IO whenever one of the "
+            f"stripe's nodes is down")
+    return False
+
+
 def check_cluster(cluster_id):
     db_controller = DBController()
     st = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
+    distr_summary = recent_distr_error_summary(db_controller, cluster_id)
     result = True
     for node in st:
         # check if node is online, unavailable, restarting
@@ -193,7 +273,7 @@ def check_cluster(cluster_id):
             })
 
     for lvol in db_controller.get_lvols(cluster_id):
-        ret = check_lvol(lvol.get_id())
+        ret = check_lvol(lvol.get_id(), distr_summary=distr_summary)
         result &= ret
         print("*" * 100)
         data.append({
@@ -201,6 +281,16 @@ def check_cluster(cluster_id):
             "UUID": lvol.get_id(),
             "Status": "ok" if ret else "failed"
         })
+
+    for node in st:
+        for vuid, info in sorted(distr_errors_for_lvstore(node, distr_summary).items()):
+            result = False
+            data.append({
+                "Kind": "Distrib",
+                "UUID": f"{node.lvstore}/distrib_{vuid}",
+                "Status": f"failed: {_describe_distr_error(vuid, info)}"
+            })
+
     print(utils.print_table(data))
     return result
 
@@ -1301,7 +1391,16 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     return passed
 
 
-def check_lvol(lvol_id):
+def check_lvol(lvol_id, distr_summary=None):
+    """The operator's volume check (``sbctl volume check``). Besides the
+    bdev/subsystem presence that ``check_lvol_on_node`` verifies, it fails on
+    any distrib IO error recorded against the volume's lvstore inside
+    ``DISTR_ERROR_LOOKBACK_SEC``: a stripe there has lost its redundancy, and
+    the record cannot say which volume owns it, so every volume on the
+    lvstore is at risk. ``distr_summary`` lets ``check_cluster`` read the
+    event window once for all volumes. The health-check service does not use
+    this function (it calls ``check_lvol_on_node``), so the stored lvol health
+    flag is unaffected."""
     db_controller = DBController()
 
     try:
@@ -1311,8 +1410,7 @@ def check_lvol(lvol_id):
         return False
 
     if lvol.ha_type == 'single':
-        ret = check_lvol_on_node(lvol_id, lvol.node_id)
-        return ret
+        passed = check_lvol_on_node(lvol_id, lvol.node_id)
 
     elif lvol.ha_type == "ha":
         passed = True
@@ -1322,7 +1420,17 @@ def check_lvol(lvol_id):
                 ret = check_lvol_on_node(lvol_id, nodes_id)
                 if not ret:
                     passed = False
-        return passed
+    else:
+        return False
+
+    try:
+        owner = db_controller.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
+        logger.error(f"lvol {lvol_id}: primary node {lvol.node_id} not found")
+        return False
+    if distr_summary is None:
+        distr_summary = recent_distr_error_summary(db_controller, owner.cluster_id)
+    return report_lvstore_distr_errors(owner, distr_summary) and passed
 
 
 def check_snap(snap_id):

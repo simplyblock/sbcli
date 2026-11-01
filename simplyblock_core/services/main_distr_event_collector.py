@@ -12,7 +12,11 @@ from simplyblock_core import (
     utils,
 )
 from simplyblock_core.arbitration import events as arbitration_events
-from simplyblock_core.controllers import device_controller, events_controller
+from simplyblock_core.controllers import (
+    device_controller,
+    events_controller,
+    storage_events,
+)
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -443,10 +447,54 @@ def process_device_event(event, logger):
         device_obj.release_device_connection()
 
 
+#: (vuid, error) -> wall-clock time the operator alert was last raised. One
+#: collector process serves a cluster (one thread per node), and this only
+#: rate-limits a duplicate alert -- every raw event is still written to the
+#: cluster log below -- so a per-process memory is enough.
+_distr_error_alerted: dict = {}
+_distr_error_alerted_lock = threading.Lock()
+
+
+def lvstore_owner_of_distrib(vuid, nodes):
+    """The node whose lvstore stack holds ``distrib_<vuid>``, or None."""
+    name = f"distrib_{vuid}"
+    for node in nodes:
+        for bdev in node.lvstore_stack or []:
+            if bdev.get("type") == "bdev_raid" and name in bdev.get("distribs_list", []):
+                return node
+    return None
+
+
+def alert_distr_error(event, vuid, nodes, logger, now=None):
+    """Raise the operator alert for a distrib IO error, once per
+    (distrib, error) per DISTR_ERROR_ALERT_DEBOUNCE_SEC.
+
+    The raw ``error_read``/... event already reaches the cluster log; what it
+    lacked was an owner and a meaning. A distrib error says a stripe could not
+    be served from the chunks the distrib can reach -- redundancy is lost on
+    that stripe, and every volume on the owning lvstore is exposed the next
+    time one of the stripe's nodes is down. prod 2026-11-01: these events sat
+    in the log for two weeks before the outage they predicted.
+    """
+    now = time.time() if now is None else now
+    key = (vuid, event.message)
+    with _distr_error_alerted_lock:
+        if now - _distr_error_alerted.get(key, 0.0) < constants.DISTR_ERROR_ALERT_DEBOUNCE_SEC:
+            return False
+        _distr_error_alerted[key] = now
+    owner = lvstore_owner_of_distrib(vuid, nodes)
+    if owner is None:
+        logger.error(f"Distrib {vuid} reported {event.message} but no lvstore stack owns it")
+        return False
+    storage_events.snode_distrib_io_error(owner, vuid, event.message, event.count, event.node_id)
+    return True
+
+
 def process_lvol_event(event, logger):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
         event.status = f'distr error {vuid}'
+        alert_distr_error(event, vuid, db.get_storage_nodes_by_cluster_id(event.cluster_uuid), logger)
     else:
         logger.error(f"Unknown event message: {event.message}")
         event.status = "event_unknown"

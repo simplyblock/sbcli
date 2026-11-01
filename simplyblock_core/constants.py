@@ -68,6 +68,24 @@ PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
 DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
+#: A distrib ``error_read``/``error_write``/... event names an IO the distrib
+#: could not serve from the chunks it can reach -- a stripe that has lost its
+#: redundancy. The raw event goes to the cluster log every time; the operator
+#: alert naming the owning LVS is raised at most once per (distrib, error)
+#: in this many seconds, so a client retrying the same read every 20 s does
+#: not turn one defect into hundreds of alerts.
+DISTR_ERROR_ALERT_DEBOUNCE_SEC = 600
+#: How far back ``sbctl volume check`` / ``sbctl cluster check`` look for
+#: those events when reporting an lvstore's distrib read errors.
+DISTR_ERROR_LOOKBACK_SEC = 7 * 24 * 3600
+#: Fence-release budget (models/fence_release.py). A client LVS port that
+#: SPDK fenced may be reopened by the control plane this many times inside
+#: FENCE_RELEASE_WINDOW_SEC; the next refusal leaves it fenced and raises an
+#: event. Three is well above anything legitimate -- a leaked fence is lifted
+#: once -- and stops the leader/peer ping-pong of an unreadable stripe within
+#: a minute instead of letting it run until the missing node returns.
+FENCE_RELEASE_BUDGET = 3
+FENCE_RELEASE_WINDOW_SEC = 600
 #: JM events are polled on their own cadence. Unlike the distrib source there
 #: is no discard counterpart -- jm_get_events returns every event it holds on
 #: every call -- so the collector filters what it has already logged and the
