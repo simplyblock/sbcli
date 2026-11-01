@@ -2,10 +2,10 @@
 import time
 
 
-from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
+from simplyblock_core import constants, db_controller, utils, storage_node_ops, distr_controller
 from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCRemoteError
 from simplyblock_core.controllers import (
-    tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller,
+    tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller, port_release_budget,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -990,9 +990,29 @@ def exec_port_allow_task(task):
     if port_number and port_number not in lvs_ports:
         lvs_ports.append(port_number)
     logger.info(f"Allow LVS ports {lvs_ports} on node {node.get_id()}")
+    # Release budget (models/fence_release.py): a port this control plane
+    # already reopened FENCE_RELEASE_BUDGET times inside the window is being
+    # re-fenced by SPDK on every IO. Skip it, reopen the others, and abort the
+    # task if the skipped port is the one it was created for -- the health
+    # check schedules a fresh task once the window has rolled past.
+    looping = [p for p in lvs_ports if port_release_budget.exhausted(db, node, p)]
     for p in lvs_ports:
+        if p in looping:
+            logger.warning(
+                "Port %s on %s was released %d times in the last %ds and SPDK fenced "
+                "it again each time; leaving it blocked",
+                p, node.get_id(), constants.FENCE_RELEASE_BUDGET, constants.FENCE_RELEASE_WINDOW_SEC)
+            continue
         node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)
+        port_release_budget.record_release(db, node, p)
         tcp_ports_events.port_allowed(node, p)
+    if port_number in looping:
+        task.function_result = (
+            f"port {port_number} released {constants.FENCE_RELEASE_BUDGET} times in "
+            f"{constants.FENCE_RELEASE_WINDOW_SEC}s and fenced again each time; left blocked (fence loop)")
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return
 
     # Deferred ANA failover, AFTER the port release: a secondary recovering
     # while its primary is OFFLINE returns with non-optimized listeners
