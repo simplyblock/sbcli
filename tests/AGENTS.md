@@ -47,8 +47,6 @@ That is not hypothetical. The snapshot-replication retention suite had a `_FakeD
 
 So, when a unit test seems to need a fake DB: **the need is the signal that it is not a unit test.** Move it to `tests/integration/`, seed real models with `write_to_db(db.kv_store)`, and mock only what sits above the database. If the code under test does not actually need the database, delete the stand-in rather than feeding it a fake.
 
-`.agents/hooks/guard-fake-db-tests.py` enforces this (see the root `AGENTS.md` § Guard hooks). It is a **ratchet**: the suite carries ~400 pre-existing stand-ins, so the guard compares each file before and after an edit and refuses only what that edit *introduces*. Editing or cleaning up a grandfathered file is unaffected. `python3 .agents/hooks/guard-fake-db-tests.py --scan` lists what is left.
-
 > **Migration in progress, here too.** `simplyblock_core/test/` is a second unit-tier directory (also collected by `tox run -e unit`, with its own `fdb` stub) and holds the densest concentration of these fakes. Treat it as legacy: don't add files there, and convert what you touch.
 
 ### `tests/integration/`
@@ -62,6 +60,14 @@ Controller-flow tests, **all of which run against a real FoundationDB**. `tests/
 - assign `db.kv_store = MagicMock()` / mock `write_to_db` / `get_*` DB accessors.
 
 Build real model objects and persist them with `write_to_db(db.kv_store)`; read them back through `DBController()`. The `ftt2/` and `migration/` conftests show the canonical pattern (real `Cluster`/`StorageNode`/`LVol` written to FDB, torn down after).
+
+**A patched DB only covers the modules the test names, and code moves.** `patch.object(cluster_ops, "DBController", ...)` does nothing for `storage_node_ops`, which opens its own `DBController()`. When production code moves a lookup into another module, the moved code reads the real, empty FDB and the test fails with `KeyError: 'Cluster ... not found'`, which says nothing about the behaviour under test. That is how #1576 broke the activation tests (`test_activate_portblock_and_suspend_no_demote.py`, `test_activation_ana_inaccessible.py`) without touching them. When a grandfathered fake-DB test fails like this, **convert it to real FDB**. Do not add a matching patch for the new module. That only resets the trap for the next move.
+
+Consequences of seeding real records:
+
+- **Node-side mocks go on the class.** The code under test reads its nodes back from FDB as new instances, so `node.rpc_client = MagicMock()` on the object the test built is never called. Patch `StorageNode.rpc_client` (and `recreate_hublvol`, `connect_to_hublvol`, …) with `patch.object(StorageNode, ...)`. To record fences per node, use `tests._mocks.patch_fences`, the class-level counterpart of `route_fences`.
+- **The seeded topology must be one production accepts.** A fake DB swallows writes, so a test could seed an invalid cluster and stub the helpers that would repair it. Against real FDB those repairs land and show up in the assertions. Example: an HA node with no secondary of its own gets one assigned during activation. Seed a valid topology (for two HA nodes: each owns an LVS and is the other's secondary) instead of stubbing `get_secondary_nodes`.
+- **Don't stub controllers that only write to the DB** (`set_cluster_status`, `qos_controller`, …). To observe ordering, wrap the real function and call through to it.
 
 > **Migration in progress.** Several top-level files still carry the old stubbed-DB pattern (`test_cluster_duplicate_name.py`, `test_dual_fault_tolerance.py`, `backup/test_legacy.py`, …). These are the broken tests being sorted onto real FDB — do not copy them, and convert them when you touch them. As a transition guard, `integration/conftest.py`'s `pytest_configure` imports the real `fdb` before collection so a stray `setdefault("fdb", MagicMock())` becomes a no-op instead of poisoning the session.
 
