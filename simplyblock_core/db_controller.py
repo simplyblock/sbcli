@@ -698,6 +698,26 @@ class DBController(metaclass=Singleton):
     def get_events(self, event_id: str = " ", limit: int = 0, reverse: bool = False) -> list[EventObj]:
         return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
 
+    def get_events_since(self, cluster_id: str, since_ms: int) -> list[EventObj]:
+        """One cluster's events dated ``since_ms`` (epoch ms) or later, oldest
+        first. The event key is ``<cluster>/<date_ms>/<uuid>`` and the date is
+        a fixed 13 digits, so the window is a single range read from the date
+        boundary to the end of the cluster's prefix -- the cluster's older
+        events are never touched. Read in chunks like ``read_from_db`` so a
+        wide window stays inside one transaction's limits per round trip."""
+        model = EventObj()
+        prefix = model.get_db_id(f"{cluster_id}/").encode()
+        begin = model.get_db_id(f"{cluster_id}/{int(since_ms)}").encode()
+        end = BaseModel._next_prefix(prefix)
+        objects: list[EventObj] = []
+        chunk = BaseModel._READ_CHUNK_SIZE
+        while True:
+            kvs = list(self.kv_store.get_range(begin, end, limit=chunk))
+            objects.extend(EventObj().from_dict(json.loads(kv.value)) for kv in kvs)
+            if len(kvs) < chunk:
+                return objects
+            begin = bytes(kvs[-1].key) + b'\x00'
+
     def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> list[JobSchedule]:
         if source is not None:
             ret = [t for t in source if t.cluster_id == cluster_id]
