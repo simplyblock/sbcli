@@ -35,6 +35,41 @@ def generate_random_sequence(length):
 
     return first_char + remaining_chars
 
+
+class _ExportBudget:
+    """Wall-clock budget shared by every thread of one Graylog export.
+
+    The export used to have no overall bound. Individual requests carried
+    timeouts, so nothing ever hung, but a stream large enough simply paged
+    for as long as it took. In run 40942305637 that was the whole remaining
+    job: the test failed at 08:51, the export ran until the 72-hour cancel
+    at 19:46 with 501 of 503 streams done, and the last two were still being
+    written two hours later by the orphaned process at 3.25 GB and 2.76 GB.
+
+    A budget of zero or less means unlimited, for the case where someone
+    genuinely wants every byte and is willing to wait.
+    """
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self._deadline = (time.monotonic() + seconds) if seconds > 0 else None
+        # list.append is atomic, so workers can record into this directly.
+        self.truncated = []
+
+    @property
+    def expired(self):
+        return self._deadline is not None and time.monotonic() >= self._deadline
+
+    @property
+    def remaining(self):
+        if self._deadline is None:
+            return float("inf")
+        return max(0.0, self._deadline - time.monotonic())
+
+    def note_truncated(self, label, written):
+        self.truncated.append((label, written))
+
+
 def _snake_case(name):
     """MigrationSmoke -> migration_smoke. Safe as a directory name."""
     s = re.sub(r"(?<!^)(?=[A-Z])", "_", str(name)).lower()
@@ -4298,12 +4333,15 @@ class TestClusterBase:
 
     def _os_fetch_container_logs(
         self, session, os_url, container_name, source,
-        from_iso, to_iso, out_path, probe_cache=None,
+        from_iso, to_iso, out_path, probe_cache=None, budget=None,
     ):
         """Fetch logs from OpenSearch using the scroll API.
 
         Adapted from scripts/collect_logs.py opensearch_fetch_all().
-        Returns number of lines written.
+        Returns ``(lines_written, truncated)``. *budget* is an
+        :class:`_ExportBudget`; when it expires the scroll stops at a page
+        boundary and the file gets a marker line, because a short file that
+        says so is worth more than a complete one nobody waited for.
         """
         import requests as _requests
 
@@ -4369,6 +4407,10 @@ class TestClusterBase:
 
         init_url = f"{os_url}/{index}/_search?scroll=2m"
         written = 0
+        truncated = False
+        label = f"{container_name}@{source}" if source else container_name
+        pages = 0
+        last_progress = time.monotonic()
 
         try:
             r = session.post(init_url, json=body, timeout=60)
@@ -4378,14 +4420,14 @@ class TestClusterBase:
                     f"{container_name}: HTTP {r.status_code} {r.text[:300]}"
                 )
                 Path(out_path).touch()
-                return 0
+                return 0, False
         except _requests.RequestException as exc:
             self.logger.warning(
                 f"[graylog-export] OpenSearch scroll failed for "
                 f"{container_name}: {exc}"
             )
             Path(out_path).touch()
-            return 0
+            return 0, False
 
         data = r.json()
         scroll_id = data.get("_scroll_id")
@@ -4408,6 +4450,36 @@ class TestClusterBase:
                     written += 1
                 if len(hits) < PAGE_SIZE or not scroll_id:
                     break
+
+                pages += 1
+                if budget is not None and budget.expired:
+                    # Stop on a page boundary and say so in the file itself,
+                    # so nobody later reads a truncated export as the whole
+                    # record of the window.
+                    truncated = True
+                    fh.write(
+                        f"... TRUNCATED by the graylog export budget after "
+                        f"{written} lines of about {total}; raise or disable "
+                        f"it with GRAYLOG_EXPORT_BUDGET_MIN ...\n"
+                    )
+                    self.logger.warning(
+                        f"[graylog-export]   {label}: budget expired at "
+                        f"{written}/{total} lines, truncating"
+                    )
+                    budget.note_truncated(label, written)
+                    break
+
+                # Only a finished stream used to produce a log line, so a
+                # large one was silent for hours and read as a hang.
+                now = time.monotonic()
+                if now - last_progress >= 60:
+                    left = "unlimited" if budget is None else f"{int(budget.remaining)}s"
+                    self.logger.info(
+                        f"[graylog-export]   {label}: {written}/{total} lines "
+                        f"after {pages} pages, budget left {left}"
+                    )
+                    last_progress = now
+
                 try:
                     sc_r = session.post(
                         f"{os_url}/_search/scroll",
@@ -4436,11 +4508,11 @@ class TestClusterBase:
             except Exception:
                 pass
 
-        return written
+        return written, truncated
 
     def _graylog_fetch_container_logs(
         self, session, base_url, container_name, source,
-        from_iso, to_iso, out_path,
+        from_iso, to_iso, out_path, budget=None,
     ):
         """Fetch all log lines for *container_name* on *source* and write to *out_path*.
 
@@ -4513,6 +4585,39 @@ class TestClusterBase:
             text = str(msg.get("message", "")).replace("\n", "\\n")
             return f"{ts}  src={src}  ctr={cname}  lvl={lvl}  {text}"
 
+        # Shared across the nested window helpers: once the budget is gone
+        # every loop unwinds instead of starting another window.
+        state = {"truncated": False, "written": 0,
+                 "last_progress": time.monotonic()}
+        label = f"{container_name}@{source}" if source else container_name
+
+        def _out_of_budget(fh):
+            if budget is None or state["truncated"] or not budget.expired:
+                return state["truncated"]
+            state["truncated"] = True
+            fh.write(
+                f"... TRUNCATED by the graylog export budget after "
+                f"{state['written']} lines; raise or disable it with "
+                f"GRAYLOG_EXPORT_BUDGET_MIN ...\n"
+            )
+            self.logger.warning(
+                f"[graylog-export]   {label}: budget expired at "
+                f"{state['written']} lines, truncating"
+            )
+            budget.note_truncated(label, state["written"])
+            return True
+
+        def _progress():
+            now = time.monotonic()
+            if now - state["last_progress"] < 60:
+                return
+            left = "unlimited" if budget is None else f"{int(budget.remaining)}s"
+            self.logger.info(
+                f"[graylog-export]   {label}: {state['written']} lines so far, "
+                f"budget left {left}"
+            )
+            state["last_progress"] = now
+
         def _write_window_simple(fh, q, f_iso, t_iso):
             """Paginate a single Graylog window, stopping at MAX_RESULT_WINDOW."""
             written = 0
@@ -4522,13 +4627,17 @@ class TestClusterBase:
                 return written, total
             capped_total = min(total, MAX_RESULT_WINDOW)
             while offset < capped_total:
+                if _out_of_budget(fh):
+                    break
                 msgs, _ = _fetch_page(q, f_iso, t_iso, PAGE_SIZE, offset)
                 if not msgs:
                     break
                 for m in msgs:
                     fh.write(_fmt(m.get("message", {})) + "\n")
                     written += 1
+                    state["written"] += 1
                 offset += len(msgs)
+                _progress()
                 if len(msgs) < PAGE_SIZE:
                     break
             return written, total
@@ -4567,6 +4676,8 @@ class TestClusterBase:
             delta = timedelta(minutes=sub_minutes)
             written = 0
             while t < t_end:
+                if _out_of_budget(fh):
+                    break
                 c_end = min(t + delta, t_end)
                 c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                 c_to = c_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -4580,7 +4691,7 @@ class TestClusterBase:
         msgs, total = _fetch_page(query, from_iso, to_iso, 1, 0)
         if msgs is None:
             Path(out_path).touch()
-            return 0
+            return 0, False
 
         written = 0
         with open(out_path, "w") as fh:
@@ -4599,6 +4710,8 @@ class TestClusterBase:
                 t_end = datetime.fromisoformat(to_iso)
                 chunk = timedelta(minutes=10)
                 while t < t_end:
+                    if _out_of_budget(fh):
+                        break
                     chunk_end = min(t + chunk, t_end)
                     c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                     c_to = chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -4607,7 +4720,7 @@ class TestClusterBase:
                     )
                     t = chunk_end
 
-        return written
+        return written, state["truncated"]
 
     def export_graylog_logs(self):
         """Export all container logs from Graylog / OpenSearch for the test window.
@@ -4759,10 +4872,18 @@ class TestClusterBase:
             # Prefer OpenSearch scroll for fetching (handles large time
             # windows reliably); fall back to Graylog only if needed.
             use_opensearch = opensearch_ok
+
+            # This export runs on the failure path, when the job's remaining
+            # time is whatever is left of its timeout. Bound it.
+            budget_min = int(os.getenv("GRAYLOG_EXPORT_BUDGET_MIN", "45"))
+            budget = _ExportBudget(budget_min * 60)
+
             self.logger.info(
                 f"[graylog-export] Fetching logs for {len(pairs)} "
                 f"(container, source) pairs -> {graylog_dir}  "
-                f"(via {'OpenSearch' if use_opensearch else 'Graylog'})"
+                f"(via {'OpenSearch' if use_opensearch else 'Graylog'}, "
+                f"budget "
+                f"{str(budget_min) + 'm' if budget_min > 0 else 'unlimited'})"
             )
 
             def _safe(s):
@@ -4809,45 +4930,107 @@ class TestClusterBase:
                 thread_os_session = self._build_opensearch_session()
                 thread_gl_session = self._build_graylog_session()
 
+                # A stream that has not started when the budget is already
+                # gone writes an empty marker rather than opening a request
+                # nobody will wait for.
+                if budget.expired:
+                    Path(out_path).write_text(
+                        "... SKIPPED: the graylog export budget was already "
+                        "spent when this stream came up in the queue ...\n"
+                    )
+                    budget.note_truncated(label, 0)
+                    return label, 0, "skipped"
+
                 if use_opensearch:
-                    n = self._os_fetch_container_logs(
+                    n, truncated = self._os_fetch_container_logs(
                         thread_os_session, os_url,
                         container_name, source,
                         from_iso, to_iso, out_path,
-                        probe_cache=os_probe_cache,
+                        probe_cache=os_probe_cache, budget=budget,
                     )
                 else:
-                    n = self._graylog_fetch_container_logs(
+                    n, truncated = self._graylog_fetch_container_logs(
                         thread_gl_session, base_url,
                         container_name, source,
-                        from_iso, to_iso, out_path,
+                        from_iso, to_iso, out_path, budget=budget,
                     )
-                return label, n
+                return label, n, ("truncated" if truncated else "ok")
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Not a context manager: its __exit__ joins every worker, which
+            # is the one thing we must not do unboundedly here. Workers check
+            # the budget between pages, so they drain within about one request
+            # timeout of it expiring; the grace below covers that, and the
+            # shutdown afterwards never waits.
+            from concurrent.futures import TimeoutError as _FuturesTimeout
+
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            done_count = 0
+            try:
                 futures = {
                     executor.submit(_fetch_one, cname, src): (cname, src)
                     for cname, src in sorted(pairs)
                 }
-                for future in as_completed(futures):
-                    cname, src = futures[future]
-                    label = f"{cname}@{src}" if src else cname
-                    try:
-                        label, n = future.result()
-                        with lock:
-                            total_lines += n
-                        self.logger.info(
-                            f"[graylog-export]   {label}: {n} lines"
-                        )
-                    except Exception as exc:
-                        self.logger.warning(
-                            f"[graylog-export] Failed to fetch {label}: {exc}"
-                        )
+                drain_timeout = (
+                    None if budget.seconds <= 0 else budget.remaining + 300
+                )
+                try:
+                    for future in as_completed(futures, timeout=drain_timeout):
+                        cname, src = futures[future]
+                        label = f"{cname}@{src}" if src else cname
+                        try:
+                            label, n, status = future.result()
+                            with lock:
+                                total_lines += n
+                            suffix = {
+                                "truncated": "  (TRUNCATED: budget expired "
+                                             "mid-stream)",
+                                "skipped": "  (SKIPPED: budget already spent "
+                                           "before this stream started)",
+                            }.get(status, "")
+                            self.logger.info(
+                                f"[graylog-export]   {label}: {n} lines{suffix}"
+                            )
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[graylog-export] Failed to fetch "
+                                f"{label}: {exc}"
+                            )
+                        done_count += 1
+                except _FuturesTimeout:
+                    stuck = [
+                        (f"{c}@{sr}" if sr else c)
+                        for f, (c, sr) in futures.items() if not f.done()
+                    ]
+                    self.logger.warning(
+                        f"[graylog-export] Giving up on {len(stuck)} stream(s) "
+                        f"that outlived the budget by 5 minutes: "
+                        f"{', '.join(stuck[:10])}"
+                        f"{' ...' if len(stuck) > 10 else ''}"
+                    )
+                    for f in futures:
+                        f.cancel()
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
             self.logger.info(
                 f"[graylog-export] Complete: {total_lines} total lines "
-                f"from {len(pairs)} (container, source) pairs"
+                f"from {done_count}/{len(pairs)} (container, source) pairs"
             )
+            if budget.truncated:
+                # Say this loudly. A truncated export read as a complete one
+                # is how an absent log line becomes evidence of absence.
+                self.logger.warning(
+                    f"[graylog-export] INCOMPLETE: {len(budget.truncated)} "
+                    f"of {len(pairs)} stream(s) were cut short or skipped by "
+                    f"the {budget_min}-minute budget. Raise "
+                    f"GRAYLOG_EXPORT_BUDGET_MIN, or set it to 0 for no limit, "
+                    f"if you need the whole window: "
+                    + ", ".join(
+                        f"{lbl} ({n} lines)"
+                        for lbl, n in budget.truncated[:10]
+                    )
+                    + (" ..." if len(budget.truncated) > 10 else "")
+                )
 
             # Post-process: extract delay-qpair entries for quick analysis
             try:
