@@ -851,8 +851,19 @@ class TestClusterBase:
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
-        if not self.k8s_test:
-            self.start_root_monitor()
+        # The /root monitor is deliberately not started. It dates from when
+        # the harness wrote its logs under /root on each node; they go to the
+        # NFS share now, so the files it knows how to delete
+        # (/root/distrib_*, /root/bdev_*, /etc/simplyblock/LVS_*) are no
+        # longer what fills the disk. In run 40942305637 it ran hourly for
+        # three days against a mgmt node climbing 27% -> 96% and logged
+        # "usage after cleanup: 96% (was 96%)" every time: it freed nothing,
+        # and its output was the background noise that made a dead run look
+        # alive. start_root_monitor()/stop_root_monitor() are left in place
+        # for anyone who wants to call them explicitly.
+        #
+        # if not self.k8s_test:
+        #     self.start_root_monitor()
 
         self.start_nvme_iostat_monitor()
         try:

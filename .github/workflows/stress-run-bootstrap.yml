@@ -1376,7 +1376,7 @@ jobs:
               er="$(date -u -d "${anchor_ts}" +%s 2>/dev/null || echo 0)"
               if [[ "${ea}" -gt 0 && "${er}" -gt 0 && $((ea-er)) -gt 900 ]]; then
                 gap=$((ea-er))
-                stall_note="${anchor_what} at ${anchor_ts} UTC. The job then ran on for $((gap/3600))h $(((gap%3600)/60))m with nothing but background threads logging, until ${last_any} UTC."
+                stall_note="${anchor_what} at ${anchor_ts} UTC, then $((gap/3600))h $(((gap%3600)/60))m with no test activity logged, until ${last_any} UTC. This is usually post-failure log collection rather than a hang -- export_graylog_logs only logs when a whole stream finishes, and it has no overall deadline, so a multi-GB stream is silent for hours. Check mtimes under <RUN_BASE_DIR>/graylog_logs before calling it a hang."
               fi
             fi
 
