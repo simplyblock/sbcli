@@ -1308,8 +1308,89 @@ jobs:
             [[ -n "${mgmt_files}" ]] || mgmt_files="(empty)"
           fi
 
+          # --- progress derived from output.log ------------------------------
+          # Everything above this point reads lines that stress.py only prints
+          # once it finishes ("Number of Total Cases:", "MultipleExceptions:").
+          # A job killed by the 4320-minute timeout never reaches them, so the
+          # summary reported a 72-hour run as "? cases" with a failure reason
+          # scraped off whatever line last happened to contain the word Error.
+          # Run 40942305637 is the worked example: 441 outages over 61 hours
+          # and a real failure at 08:51:31, none of which reached the summary.
+          # The markers below are written as the run goes, so a cancel keeps
+          # them.
+          outages_done=0
+          outage_breakdown=""
+          outage_first=""
+          outage_last=""
+          real_failure=""
+          real_failure_exc=""
+          stall_note=""
+          disk_note=""
+          if [[ -f "${out_log}" ]]; then
+            outages_done="$(grep -cE '\[V2\] Single outage|Starting outage ' "${out_log}" || true)"
+            outage_breakdown="$(grep -ohE 'post-outage check after [a-z_]+' "${out_log}" \
+              | sed 's/post-outage check after //' | sort | uniq -c | sort -rn || true)"
+            outage_first="$(grep -E 'post-outage check after ' "${out_log}" \
+              | head -n 1 | grep -oE '^[0-9-]{10} [0-9:]{8}' || true)"
+            outage_last="$(grep -E 'post-outage check after ' "${out_log}" \
+              | tail -n 1 | grep -oE '^[0-9-]{10} [0-9:]{8}' || true)"
+
+            # The first thing that actually broke, rather than the last line
+            # mentioning an error. On a cancelled run this is the only honest
+            # answer available.
+            real_failure="$(grep -E 'ERROR - .*(loop failed|Outage\(s\) failed|Test failed)' "${out_log}" \
+              | head -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -n "${real_failure}" ]]; then
+              fl="$(grep -nE 'ERROR - .*(loop failed|Outage\(s\) failed|Test failed)' "${out_log}" \
+                | head -n 1 | cut -d: -f1 || true)"
+              if [[ -n "${fl}" ]]; then
+                real_failure_exc="$(sed -n "${fl},$((fl+80))p" "${out_log}" \
+                  | grep -E '^[A-Za-z_.]+(Error|Exception):' | head -n 1 \
+                  | sed 's/\x1b\[[0-9;]*m//g' || true)"
+              fi
+            fi
+
+            # Did the run keep working to the end, or sit in a background
+            # thread for hours? Both the iostat sampler and the disk monitor
+            # keep logging long after the test itself is dead, which is what
+            # makes a stalled run look alive. Exclude everything they emit --
+            # the disk monitor's own lines are not tagged RootMonitor.
+            last_any="$(grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' "${out_log}" \
+              | tail -n 1 || true)"
+            last_real="$(grep -vE 'NVMeIostat|RootMonitor|/root usage|Delete command:|rm -rf /root/' "${out_log}" \
+              | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' \
+              | tail -n 1 || true)"
+            # When the run did fail, the number that matters is how long the
+            # job went on afterwards -- that is dead runner time, and on a
+            # 4320-minute budget it is the difference between a result and a
+            # cancel.
+            anchor_ts="${last_real}"
+            anchor_what="Last real activity"
+            fail_ts="$(printf '%s' "${real_failure}" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' || true)"
+            if [[ -n "${fail_ts}" ]]; then
+              anchor_ts="${fail_ts}"
+              anchor_what="Test failed"
+            fi
+            if [[ -n "${last_any}" && -n "${anchor_ts}" ]]; then
+              ea="$(date -u -d "${last_any}" +%s 2>/dev/null || echo 0)"
+              er="$(date -u -d "${anchor_ts}" +%s 2>/dev/null || echo 0)"
+              if [[ "${ea}" -gt 0 && "${er}" -gt 0 && $((ea-er)) -gt 900 ]]; then
+                gap=$((ea-er))
+                stall_note="${anchor_what} at ${anchor_ts} UTC. The job then ran on for $((gap/3600))h $(((gap%3600)/60))m with nothing but background threads logging, until ${last_any} UTC."
+              fi
+            fi
+
+            # The harness warns before it dies of a full mgmt disk, and that
+            # warning is the single most useful line when a run stalls for no
+            # visible reason.
+            disk_note="$(grep -ohE '\[[0-9.]+\] /root usage [0-9]+% >= [0-9]+%' "${out_log}" \
+              | sort -u | head -n 10 || true)"
+          fi
+
           conclusion="SUCCESS"
-          if [[ "${{ job.status }}" != "success" ]]; then
+          if [[ "${{ job.status }}" == "cancelled" ]]; then
+            conclusion="CANCELLED (job timeout or manual cancel)"
+          elif [[ "${{ job.status }}" != "success" ]]; then
             conclusion="FAILED"
           fi
 
@@ -1341,6 +1422,17 @@ jobs:
             echo "- Mgmt details: \`${RUN_BASE_DIR:-<run_dir>}/${mgmt_ip}/mgmt_details\`"
             echo ""
             echo "### Outages"
+            echo "- **Outages performed:** ${outages_done}"
+            [[ -n "${outage_first}" ]] && echo "- **First outage:** ${outage_first} UTC"
+            [[ -n "${outage_last}" ]]  && echo "- **Last outage:** ${outage_last} UTC"
+            if [[ -n "${outage_breakdown}" ]]; then
+              echo ""
+              echo "By type:"
+              echo '```'
+              printf '%s\n' "${outage_breakdown}"
+              echo '```'
+            fi
+            echo ""
             echo "- Outage files matched: \`${outage_dir}/outage*\`"
             echo "- **Outage file count:** ${outage_count}"
             echo "- **Total outage log lines:** ${outage_lines}"
@@ -1356,9 +1448,30 @@ jobs:
             fi
             echo ""
             echo "### Failure Reason"
+            if [[ -n "${real_failure}" ]]; then
+              echo "First failure in the run:"
+              echo '```'
+              printf '%s\n' "${real_failure}"
+              [[ -n "${real_failure_exc}" ]] && printf '%s\n' "${real_failure_exc}"
+              echo '```'
+            fi
+            echo "End-of-run summary line (absent when the job was cancelled):"
             echo '```'
             printf '%s\n' "${failure_summary}"
             echo '```'
+            if [[ -n "${stall_note}" ]]; then
+              echo ""
+              echo "### :hourglass: Stall"
+              echo "${stall_note}"
+            fi
+            if [[ -n "${disk_note}" ]]; then
+              echo ""
+              echo "### :floppy_disk: Disk pressure warnings"
+              echo "The harness cleans at 80% and logs this when it cannot free enough."
+              echo '```'
+              printf '%s\n' "${disk_note}"
+              echo '```'
+            fi
             if [[ -n "${log_tail}" ]]; then
               echo ""
               echo "<details><summary>Last 50 lines of output.log</summary>"
