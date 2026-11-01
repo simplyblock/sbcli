@@ -821,14 +821,52 @@ jobs:
             --overwrite
 
       - name: Create Docker registry secret
-        if: ${{ inputs.use_existing_cluster != 'true' }}
+        # Deliberately unconditional -- this used to be skipped whenever
+        # use_existing_cluster was true, which is every resumed run.
+        #
+        # Run 41251077444 lost worker-2 to
+        #   toomanyrequests: You have reached your unauthenticated pull rate limit
+        # while regcred was present on the pod and on
+        # simplyblock-storage-node-sa, and while the credential itself was
+        # valid. A node Restart could not pull its SPDK image, so the
+        # StorageNodeOps op sat in Awaiting until its 30-minute deadline.
+        #
+        # Two changes, for two separate reasons.
+        #
+        # It is applied rather than created. `create ... || true` silently does
+        # nothing when the secret already exists, so a cluster kept across runs
+        # held whatever credential it was built with until someone deleted it
+        # by hand -- the exact case the old `if:` meant we never refreshed.
+        #
+        # And it carries a plain `docker.io` key beside the legacy
+        # `https://index.docker.io/v1/` one that `kubectl create secret
+        # docker-registry` writes on its own. CRI-O matched neither and fell
+        # back to an anonymous pull; the node's own auth file
+        # (/var/lib/kubelet/config.json, CRI-O's global_auth_file) has no
+        # docker.io entry at all, so there was nothing else for it to use.
+        # Which key it wants is unconfirmed, so supply all three -- they hold
+        # the same credential, and an unused key costs nothing.
         run: |
-          kubectl create secret docker-registry regcred \
-            --docker-server=https://index.docker.io/v1/ \
-            --docker-username=${DOCKER_USER} \
-            --docker-password=${DOCKER_PASSWORD} \
-            --docker-email=a@b.com \
-            -n simplyblock || true
+          umask 077
+          CFG=$(mktemp)
+          trap 'rm -f "$CFG"' EXIT
+          python3 - > "$CFG" <<'PY'
+          import base64, json, os, sys
+          user, pwd = os.environ["DOCKER_USER"], os.environ["DOCKER_PASSWORD"]
+          entry = {
+              "username": user,
+              "password": pwd,
+              "email": "a@b.com",
+              "auth": base64.b64encode(f"{user}:{pwd}".encode()).decode(),
+          }
+          keys = ("https://index.docker.io/v1/", "index.docker.io", "docker.io")
+          json.dump({"auths": {k: entry for k in keys}}, sys.stdout)
+          PY
+          kubectl create secret generic regcred \
+            --type=kubernetes.io/dockerconfigjson \
+            --from-file=.dockerconfigjson="$CFG" \
+            -n simplyblock --dry-run=client -o yaml \
+            | kubectl apply -f -
         env:
           DOCKER_USER: ${{ secrets.DOCKER_USER }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
