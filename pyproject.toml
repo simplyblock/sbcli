@@ -101,15 +101,13 @@ constraint-dependencies = [
 ]
 
 [tool.ruff]
+required-version = ">=0.17"
 extend-exclude = ['simplyblock_cli/cli.py']
 
 [tool.ruff.lint]
 extend-select = ["TID251"]
 ignore = [
     "BLE001",
-    "DTZ005",
-    "DTZ006",
-    "DTZ007",
     "FA100",
     "FLY002",
     "LOG015",
