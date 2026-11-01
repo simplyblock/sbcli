@@ -13,6 +13,7 @@ from simplyblock_core import (
 from simplyblock_core.controllers import (
     device_controller,
     health_controller,
+    port_release_budget,
     storage_events,
     tasks_controller,
 )
@@ -1870,6 +1871,17 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
                 port, snode.get_id(), held, owner.lvstore, keep)
             continue
 
+        # Release budget (models/fence_release.py): a fence this remediation
+        # has already lifted FENCE_RELEASE_BUDGET times inside the window is
+        # not a leak, it is SPDK re-fencing on every IO because that IO cannot
+        # be served anywhere -- an unreadable stripe. Reopening the port just
+        # lets the client's next retry move the leadership and the fence to a
+        # peer (prod 2026-11-01: 60 leadership switches in nine minutes, and
+        # the churn drove a peer's SPDK into a self-abort). Leave it fenced.
+        if port_release_budget.exhausted(db, snode, port):
+            port_release_budget.refuse(db, snode, port, owner.lvstore, held)
+            continue
+
         logger.error(
             "Port %s on %s has been blocked %.0fs on a %s node with a "
             "healthy hublvol and no restart owning %s -- SPDK fenced it and "
@@ -1878,6 +1890,7 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
         try:
             snode.rpc_client(timeout=5, retry=1).nvmf_port_unblock(port)
             _blocked_port_since.pop(key, None)
+            port_release_budget.record_release(db, snode, port)
         except Exception as e:
             logger.error("Failed to unblock stale port %s on %s: %s",
                          port, snode.get_id(), e)
