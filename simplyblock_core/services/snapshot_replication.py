@@ -31,6 +31,23 @@ utils.init_sentry_sdk(__name__)
 db = db_controller.DBController()
 
 
+# Test build (replication lag diagnostics): the delta transfer window can be
+# changed at run time by writing a number into this file in the pod; it is
+# read at every transfer start.
+_PARTIAL_BATCH_FILE = "/tmp/repl_xfer_partial_batch"
+
+
+def _partial_batch():
+    try:
+        with open(_PARTIAL_BATCH_FILE, encoding="utf-8") as fh:
+            n = int(fh.read().strip())
+        if 1 <= n <= 8192:
+            logger.info("replication window override: %d", n)
+            return n
+    except (OSError, ValueError):
+        pass
+    return constants.REPL_XFER_PARTIAL_BATCH
+
 def _set_transfer_class(node_ids, bdev, wire_class, what):
     """Best-effort: set the IO service class of *bdev* on each online node.
 
@@ -1022,7 +1039,7 @@ def process_snap_replicate_start(task, snapshot):
         # sends requests of at most 64 KiB, so 16 of them were only ~1 MiB in
         # flight and the transfer could not keep up with the writes it chases;
         # it keeps 256 in flight (16 MiB) instead.
-        batch_size=(constants.REPL_XFER_PARTIAL_BATCH if allow_partial
+        batch_size=(_partial_batch() if allow_partial
                     else constants.REPL_XFER_BATCH),
         bdev_name=hub_bdev,
         operation="replicate",
