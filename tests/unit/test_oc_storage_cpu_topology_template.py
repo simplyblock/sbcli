@@ -26,15 +26,15 @@ def _render() -> str:
 
 class TestOcStorageCpuTopologyTemplate(unittest.TestCase):
 
-    def test_plugin_pod_is_looked_up_in_every_namespace(self):
-        """The NUMA device plugin is run by the operator in its own namespace,
-        owned by the ControlPlane, so the readiness wait cannot assume
-        kube-system. The service account reads pods cluster-wide through its
-        ClusterRoleBinding, so the lookup spans all namespaces."""
-        lookup = [line for line in _render().splitlines() if "kubectl get pod" in line]
-        self.assertEqual(len(lookup), 1, "the plugin pod lookup is missing from the template")
-        self.assertIn(" -A", lookup[0])
-        self.assertNotIn("kube-system", lookup[0])
+    def test_numa_readiness_does_not_look_up_the_plugin_pod(self):
+        """The operator runs the NUMA plugin in a namespace this template does
+        not know. The node's allocatable numa-align count is the readiness
+        signal: the kubelet reports it only while the plugin is registered."""
+        rendered = _render()
+        self.assertNotIn("kubectl get pod", rendered)
+        self.assertNotIn("simplyblock-numa-resource-plugin", rendered)
+        self.assertIn("{.status.allocatable.numa-align/numa-0}", rendered)
+        self.assertIn('[ "$NUMA_ALLOC" = "100" ]', rendered)
 
 
 if __name__ == "__main__":
