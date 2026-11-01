@@ -6,7 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
-from exceptions.custom_exception import LvolNotConnectException
+from exceptions.custom_exception import (
+    CapacityCeilingExceeded,
+    LvolNotConnectException,
+)
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
@@ -30,6 +33,22 @@ class TestLvolHACluster(FioWorkloadTest):
         self.fio_size = "8G"  # default; overridden by _compute_fio_size()
         self.fio_numjobs = 1
         self.TARGET_DATA_PER_NODE_GB = 200
+        # Capacity guardrail. A full cluster does not fail IO cleanly -- see
+        # CapacityCeilingExceeded -- so the run stops itself with headroom
+        # left. CAPACITY_START_PCT is the most the cluster may already hold
+        # when a run begins (a reused cluster that is fuller than this needs
+        # reclaiming first); CAPACITY_CEILING_PCT is the hard stop during the
+        # run, and also the budget _compute_fio_size() sizes writes against.
+        self.CAPACITY_START_PCT = 80
+        self.CAPACITY_CEILING_PCT = 85
+        # Over-commitment is the signal a reused cluster gives before it gives
+        # any other: thin provisioning means a cluster can be 126% provisioned
+        # while still reporting 47% used, and it only breaks once FIO writes
+        # enough to find out. Checked at start only -- during a run a node
+        # being out shrinks absolute capacity and inflates this legitimately.
+        # A healthy run of this lane sits well under 100% (run 39380260756
+        # peaked at 82%).
+        self.CAPACITY_START_PROV_PCT = 100
         self.total_lvols = 10
         self.snapshot_per_lvol = 2
         self.lvol_name = "lvl"
@@ -242,6 +261,110 @@ class TestLvolHACluster(FioWorkloadTest):
             )
         )
 
+    def get_cluster_capacity_snapshot(self):
+        """Newest cluster capacity record, as (used_pct, prov_pct, used, total).
+
+        Byte figures are effective (client-visible) bytes and the two
+        percentages are integers -- mirrors ``size_util`` / ``size_prov_util``
+        / ``size_used`` / ``size_total`` in ``simplyblock_core/models/stats.py``
+        (``StatsObject``). Those definitions and this reader must move together.
+
+        Returns ``(None, None, None, None)`` if the capacity endpoint cannot be
+        read, so a transient API failure never fails a run on its own.
+        """
+        try:
+            latest = self.get_latest_cluster_util()
+        except Exception as exc:
+            self.logger.warning(f"[capacity] could not read cluster capacity: {exc}")
+            return None, None, None, None
+        return (
+            latest.get("size_util"),
+            latest.get("size_prov_util"),
+            latest.get("size_used"),
+            latest.get("size_total"),
+        )
+
+    def log_cluster_capacity(self, context=""):
+        """Log current utilisation and return the used percentage (or None)."""
+        used_pct, prov_pct, used, total = self.get_cluster_capacity_snapshot()
+        if used_pct is None:
+            return None
+        gib = 1024 ** 3
+        self.logger.info(
+            f"[capacity] {context}: used={used_pct}% provisioned={prov_pct}% "
+            f"({(used or 0) / gib:.0f}/{(total or 0) / gib:.0f} GiB, "
+            f"ceiling={self.CAPACITY_CEILING_PCT}%)"
+        )
+        return used_pct
+
+    def assert_capacity_headroom(self, context=""):
+        """Stop the run while the cluster can still serve IO.
+
+        Driving the cluster to 100% does not produce a clean test failure: the
+        devices go ``cannot_allocate``, every node stops completing IO, and the
+        clients' multipath exhausts ``fast_io_fail_tmo`` and EIOs, which aborts
+        ext4 journals and shuts XFS down. Failing here instead keeps the
+        filesystems -- and the evidence -- intact.
+        """
+        used_pct = self.log_cluster_capacity(context)
+        if used_pct is None or used_pct < self.CAPACITY_CEILING_PCT:
+            return
+        raise CapacityCeilingExceeded(
+            f"Cluster is {used_pct}% full ({context}), at or past the "
+            f"{self.CAPACITY_CEILING_PCT}% ceiling this harness runs to. "
+            "Stopping while IO still completes: at 100% the devices answer "
+            "error_write_cannot_allocate and the clients EIO, which destroys "
+            "the filesystems under test. Reclaim the cluster (delete leftover "
+            "clones, snapshots, lvols and pools) before running again."
+        )
+
+    def assert_capacity_to_start(self):
+        """Refuse to start a run on a cluster that is already too full.
+
+        Relevant to the no-bootstrap lanes, which reuse a live cluster: if the
+        previous run's volumes were never reclaimed, the new run provisions on
+        top of them and runs out of space mid-flight instead of at a point the
+        harness can attribute.
+        """
+        used_pct, prov_pct, used, total = self.get_cluster_capacity_snapshot()
+        if used_pct is None:
+            return
+        gib = 1024 ** 3
+        self.logger.info(
+            f"[capacity] at start: used={used_pct}% provisioned={prov_pct}% "
+            f"({(used or 0) / gib:.0f}/{(total or 0) / gib:.0f} GiB)"
+        )
+        over_used = used_pct >= self.CAPACITY_START_PCT
+        over_prov = (prov_pct or 0) >= self.CAPACITY_START_PROV_PCT
+        if not (over_used or over_prov):
+            return
+        reason = (
+            f"{used_pct}% full (limit {self.CAPACITY_START_PCT}%)" if over_used
+            else f"{prov_pct}% provisioned (limit {self.CAPACITY_START_PROV_PCT}%), "
+                 f"so more space is promised to volumes than the cluster has"
+        )
+        raise CapacityCeilingExceeded(
+            f"Cluster is already {reason} before this run has created anything "
+            f"(used={used_pct}%, provisioned={prov_pct}%). It is carrying a "
+            "previous run's data. Reclaim it (clones, snapshots, lvols, pools) "
+            "and start again -- otherwise this run fills the cluster mid-flight "
+            "and the clients lose their filesystems rather than failing cleanly."
+        )
+
+    def _capacity_budget_gb(self, total_lvols):
+        """GiB of new data each FIO job may write before hitting the ceiling.
+
+        Returns ``None`` when capacity cannot be read, meaning "no opinion" --
+        the caller keeps its own computed size.
+        """
+        used_pct, _prov_pct, used, total = self.get_cluster_capacity_snapshot()
+        if used_pct is None or not total:
+            return None
+        gib = 1024 ** 3
+        headroom_gb = ((self.CAPACITY_CEILING_PCT / 100.0) * total - (used or 0)) / gib
+        jobs = max(1, total_lvols * self.fio_numjobs)
+        return max(0.0, headroom_gb) / jobs
+
     def _compute_fio_size(self, extra_lvols: int = 0) -> str:
         """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
 
@@ -270,6 +393,17 @@ class TestLvolHACluster(FioWorkloadTest):
         # Usable capacity ≈ 80% of lvol_size (ext4/xfs overhead ~5-15%).
         max_fio_gb = int(self.int_lvol_size * 0.80) // max(1, self.fio_numjobs)
         fio_size_gb = min(fio_size_gb, max_fio_gb)
+
+        # Cap against what the cluster can actually absorb. TARGET_DATA_PER_NODE_GB
+        # is an absolute target and knows nothing about what is already stored, so
+        # on a reused cluster it happily asks for data the cluster has no room for.
+        # Only ever lowers the figure; None means capacity was unreadable.
+        budget_gb = self._capacity_budget_gb(total_lvols)
+        capped_by_capacity = False
+        if budget_gb is not None and budget_gb < fio_size_gb:
+            fio_size_gb = int(budget_gb)
+            capped_by_capacity = True
+
         fio_size_gb = max(fio_size_gb, 1)
 
         self.fio_size = f"{fio_size_gb}G"
@@ -278,6 +412,11 @@ class TestLvolHACluster(FioWorkloadTest):
             f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
             f"total_lvols={total_lvols}, nodes={num_nodes}, "
             f"jobs/node={jobs_per_node:.1f})"
+            + (
+                f" -- capped by cluster capacity, {budget_gb:.1f}G/job left "
+                f"below the {self.CAPACITY_CEILING_PCT}% ceiling"
+                if capped_by_capacity else ""
+            )
         )
         return self.fio_size
     

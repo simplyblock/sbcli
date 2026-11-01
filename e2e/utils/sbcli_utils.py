@@ -13,19 +13,54 @@ class SbcliUtils:
     def __init__(self, cluster_secret, cluster_api_url, cluster_id):
         self.cluster_id = cluster_id
         self.cluster_secret = cluster_secret
-        # Endpoints are all rooted ("/lvol", ...), so a trailing slash here would
-        # produce "//lvol". requests <2.34 silently collapsed that; it no longer does.
-        self.cluster_api_url = cluster_api_url.rstrip("/")
+        # Every call site builds a URL as `cluster_api_url + "/some/path"`, so a
+        # base that ends in "/" produces a doubled slash: API_BASE_URL defaults
+        # to "http://192.168.10.210/" in the workflows, which turns "/mgmtnode/"
+        # into "//mgmtnode/". requests sends that verbatim and haproxy forwards
+        # the path untouched, so it arrives at the API as a path that matches no
+        # route -- 404 {"detail":"Not Found"}, ten retries, then the run dies
+        # before a single test starts.
+        #
+        # Normalising here rather than at the five call sites, and rather than in
+        # the workflows, so e2e is correct whichever form of the URL it is handed.
+        self.cluster_api_url = (cluster_api_url or "").rstrip("/")
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"{cluster_id} {cluster_secret}"
         }
         self.logger = setup_logger(__name__)
-        # Extended API recovery: when > 0, wait up to this many seconds
-        # for the API to come back after quick retries exhaust on 503 or
-        # connection errors.  Callers (e.g. stress tests) opt-in by
-        # setting this to a positive value (e.g. 1800).
-        self.api_recovery_timeout = 0
+        # Extended API recovery: after the quick retries exhaust on a 503,
+        # 502, 504 or a connection error, wait up to this many seconds for
+        # the API to come back and then try once more.
+        #
+        # On by default, because opt-in meant off everywhere that mattered.
+        # Only mass_create_delete_stress set it, so a 23h soak
+        # (run 39380260756) ended on a 32-second control-plane restart: the
+        # quick retries covered 17s of it, this waiter was disabled, and the
+        # API returned 15 seconds after the run had already failed. The
+        # mechanism existed, classified the 503 correctly, and did nothing.
+        #
+        # 300s rather than the 1800s the stress lanes ask for: long enough
+        # to ride out a stack restart several times over, short enough that
+        # an API which is genuinely gone still fails the run in minutes
+        # instead of half an hour. A lane that wants to wait longer sets its
+        # own value, as the stress lanes already do.
+        self.api_recovery_timeout = 300
+
+    def _url(self, api_url):
+        """Join the base and an endpoint with exactly one slash between them.
+
+        Every endpoint in the suite is written with a leading slash today, so
+        rstrip()ing the base in __init__ is on its own enough. But that is a
+        convention, not a guarantee, and the next person to add a call site
+        with "pool" instead of "/pool" would get
+        "http://192.168.10.210pool" -- a worse failure than the one this
+        replaced, and one that only shows up at runtime.
+
+        Normalising both halves costs nothing and makes the join correct for
+        any combination.
+        """
+        return f"{self.cluster_api_url}/{api_url.lstrip('/')}"
 
     @staticmethod
     def _is_transient_error(exc):
@@ -58,7 +93,7 @@ class SbcliUtils:
             time.sleep(interval)
             try:
                 resp = requests.get(
-                    self.cluster_api_url + "/storagenode",
+                    self._url("/storagenode"),
                     headers=self.headers,
                     timeout=10,
                 )
@@ -91,7 +126,7 @@ class SbcliUtils:
         """
         print(self.cluster_api_url)
         print(api_url)
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         print(request_url)
         headers = headers if headers else self.headers
         print(headers)
@@ -151,7 +186,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         while retry > 0:
@@ -207,7 +242,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         headers = headers if headers else self.headers
         self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
         retry = 10
@@ -266,7 +301,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         retry = 5
@@ -588,6 +623,20 @@ class SbcliUtils:
         if crypto:
             body["crypto"] = True
         
+        # Default None, i.e. omitted, and that matters for the namespaced
+        # path below. It was briefly defaulted to 30 (2026-10-14) to make
+        # every test exercise a shared subsystem; that broke the children.
+        # A child created with namespace=True joins a parent whose ceiling
+        # the parent chose -- 10 in the rapid-failover lane -- and sending
+        # a different ceiling alongside "namespaced" made the join stop
+        # producing a block device on the client. The control plane still
+        # reported the child as joined, so it failed silently: 0 of 4
+        # children lost a device on 10-13 before the change, then 2 of 6,
+        # 2 of 5, 5 of 6 and finally 6 of 6, at which point the lane could
+        # not find a single shared subsystem and failed in bootstrap.
+        #
+        # A test that wants a specific ceiling passes one. A child that is
+        # joining an existing subsystem must inherit it.
         if max_namespace_per_subsys is not None:
             body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
 
@@ -607,7 +656,7 @@ class SbcliUtils:
         """
         try:
             lvol_id = self.get_lvol_id(lvol_name=lvol_name)
-        except:
+        except Exception:
             if skip_error:
                 self.logger.info(f"Lvol {lvol_name} not not found!! Continuing without Delete!!")
                 return True
