@@ -464,7 +464,8 @@ def _backoff_seconds(retry):
                constants.REPL_RETRY_BACKOFF_MAX_SEC)
 
 
-def _suspend_for_retry(task, msg, backoff=False, count=True, level=logging.WARNING):
+def _suspend_for_retry(task, msg, backoff=False, count=True, level=logging.WARNING,
+                       backoff_step=None):
     """Suspend *task* for another attempt, and say why.
 
     Every retry is logged: several of these paths used to count a retry
@@ -490,7 +491,8 @@ def _suspend_for_retry(task, msg, backoff=False, count=True, level=logging.WARNI
     if count:
         task.retry += 1
     if backoff:
-        task.function_params["not_before"] = int(time.time()) + _backoff_seconds(task.retry)
+        step = task.retry if backoff_step is None else backoff_step
+        task.function_params["not_before"] = int(time.time()) + _backoff_seconds(step)
     task.write_to_db()
 
 
@@ -1372,11 +1374,17 @@ def _restart_elsewhere(task, msg):
     task has switched nodes more than REPL_MAX_NODE_SWITCHES times, so a
     flapping node cannot keep a task alive for ever.
     """
-    task.function_params["node_switches"] = int(task.function_params.get("node_switches") or 0) + 1
+    switches = int(task.function_params.get("node_switches") or 0) + 1
+    task.function_params["node_switches"] = switches
     task.function_params.pop("offset", None)
+    # The delay follows the node switches, not task.retry: retry also counts
+    # waits that are no failure (a chain ancestor replicating first), and on
+    # bf8 (2026-11-01) four of those turned a target primary crash into a
+    # 240 s delay -- longer than the crashed node took to come back, so the
+    # transfer was never repeated on the new leader during the outage.
     _suspend_for_retry(task, f"{msg}; restarting the transfer on the next "
                              f"available member", backoff=True,
-                       count=_switches_exhausted(task))
+                       count=_switches_exhausted(task), backoff_step=switches - 1)
 
 
 def _switches_exhausted(task):
