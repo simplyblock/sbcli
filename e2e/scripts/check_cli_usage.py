@@ -139,9 +139,9 @@ def main():
         for f in flags:
             if f not in spec[key]:
                 bad.append((p, line,
-                            f"{noun} {verb}: {f} is not a flag of this "
-                            f"subcommand (it has: "
-                            f"{' '.join(sorted(spec[key])) or 'no flags'})"))
+                            (f"{noun} {verb}: {f} is not a flag of this "
+                             f"subcommand (it has: "
+                             f"{' '.join(sorted(spec[key])) or 'no flags'})")))
 
     print(f"checked {checked} invocation(s); {skipped} not statically "
           f"parseable (interpolated verb or command built across lines)")

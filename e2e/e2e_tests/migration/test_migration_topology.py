@@ -399,8 +399,8 @@ class MigrationConcurrent(MigrationTestBase):
                                     what=f"MIG-T-011 deferred {v['name']}")
             except Exception as exc:                  # noqa: BLE001
                 failures.append((v["name"], "deferred-then-failed",
-                                 f"refused while busy ({why}); then "
-                                 f"{self.detail(exc)}"))
+                                 (f"refused while busy ({why}); then "
+                                  f"{self.detail(exc)}")))
         con = time.time() - t0
 
         if failures:

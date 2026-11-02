@@ -1735,8 +1735,8 @@ class SshUtils:
                                  if pid else
                                  "sudo coredumpctl info 2>&1 | head -80"),
             ("coredumpctl list", "sudo coredumpctl list --no-pager 2>&1 | tail -10"),
-            ("file", f"sudo zstd -dc /etc/simplyblock/{core_name} 2>/dev/null "
-                     f"| head -c 4096 | file - 2>&1 | head -2"),
+            ("file", (f"sudo zstd -dc /etc/simplyblock/{core_name} 2>/dev/null "
+                      f"| head -c 4096 | file - 2>&1 | head -2")),
         ]
         for label, cmd in probes:
             try:

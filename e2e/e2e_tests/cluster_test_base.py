@@ -3037,9 +3037,9 @@ class TestClusterBase:
                         # all about the cause. Warnings and above only --
                         # kubelet at info level is unreadably large.
                         (f"journalctl_units_{ip}{suffix}.txt",
-                         "journalctl -u kubelet -u crio -u NetworkManager "
-                         "-p warning --since '90 min ago' --no-pager "
-                         "2>/dev/null || true"),
+                         ("journalctl -u kubelet -u crio -u NetworkManager "
+                          "-p warning --since '90 min ago' --no-pager "
+                          "2>/dev/null || true")),
                     ):
                         out, _err = k8s.run_on_node(ip, hostcmd, timeout=180,
                                                     check=False)

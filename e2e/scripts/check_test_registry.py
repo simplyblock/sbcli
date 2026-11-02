@@ -64,8 +64,8 @@ def main():
     for key, fn_name in sorted(wired.items()):
         fn = getattr(suite, fn_name, None)
         if fn is None:
-            problems.append((key, f"_GROUPS maps to {fn_name}, which does not "
-                                  f"exist in e2e/__init__.py"))
+            problems.append((key, (f"_GROUPS maps to {fn_name}, which does not "
+                                   f"exist in e2e/__init__.py")))
             continue
         try:
             classes = fn()
