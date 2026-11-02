@@ -231,20 +231,40 @@ def _describe_distr_error(vuid, info):
     return f"distrib {vuid}: {errors} x{info['count']}, last {last} UTC"
 
 
-def report_lvstore_distr_errors(node, summary) -> bool:
+def distr_error_is_active(info, now=None) -> bool:
+    """Whether the newest occurrence is inside DISTR_ERROR_ACTIVE_SEC: the
+    error is still arriving, not a trace of an outage that is over."""
+    now = time.time() if now is None else now
+    return now - info["last_ms"] / 1000 < constants.DISTR_ERROR_ACTIVE_SEC
+
+
+def report_lvstore_distr_errors(node, summary, now=None) -> bool:
     """Log every distrib IO error recorded against ``node``'s lvstore inside
-    the lookback. True when there are none."""
+    the lookback. False only while one is still active; an older error is a
+    warning, not a failed check -- one error must not fail every volume on
+    the lvstore for the whole lookback with no way to clear it (review of
+    #1580)."""
+    now = time.time() if now is None else now
     errors = distr_errors_for_lvstore(node, summary)
     if not errors:
         logger.info(f"Checking distrib IO errors on {node.lvstore} ... ok")
         return True
+    passed = True
     for vuid, info in sorted(errors.items()):
-        logger.warning(
-            f"Checking distrib IO errors on {node.lvstore} ... {_describe_distr_error(vuid, info)} "
-            f"-- a stripe of this lvstore could not be served from the reachable chunks; its "
-            f"redundancy is lost and volumes on {node.lvstore} fail that IO whenever one of the "
-            f"stripe's nodes is down")
-    return False
+        why = (f"a stripe of this lvstore could not be served from the reachable chunks; its "
+               f"redundancy is lost and volumes on {node.lvstore} fail that IO whenever one of the "
+               f"stripe's nodes is down")
+        if distr_error_is_active(info, now):
+            passed = False
+            logger.error(
+                f"Checking distrib IO errors on {node.lvstore} ... {_describe_distr_error(vuid, info)} "
+                f"-- still failing: {why}")
+        else:
+            logger.warning(
+                f"Checking distrib IO errors on {node.lvstore} ... {_describe_distr_error(vuid, info)} "
+                f"-- not seen in the last {constants.DISTR_ERROR_ACTIVE_SEC // 60} min, reported as a "
+                f"warning: {why}")
+    return passed
 
 
 def check_cluster(cluster_id):
@@ -286,11 +306,12 @@ def check_cluster(cluster_id):
 
     for node in st:
         for vuid, info in sorted(distr_errors_for_lvstore(node, distr_summary).items()):
-            result = False
+            active = distr_error_is_active(info)
+            result &= not active
             data.append({
                 "Kind": "Distrib",
                 "UUID": f"{node.lvstore}/distrib_{vuid}",
-                "Status": f"failed: {_describe_distr_error(vuid, info)}"
+                "Status": f"{'failed' if active else 'warning'}: {_describe_distr_error(vuid, info)}"
             })
 
     print(utils.print_table(data))

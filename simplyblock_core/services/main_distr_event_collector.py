@@ -5,6 +5,8 @@ import time
 from datetime import datetime
 from typing import Any
 
+import fdb
+
 from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller, storage_events
 from simplyblock_core.models.events import EventObj
@@ -442,7 +444,7 @@ def lvstore_owner_of_distrib(vuid, nodes):
     return None
 
 
-def alert_distr_error(event, vuid, nodes, logger, now=None):
+def alert_distr_error(event, vuid, load_nodes, logger, now=None):
     """Raise the operator alert for a distrib IO error, once per
     (distrib, error) per DISTR_ERROR_ALERT_DEBOUNCE_SEC.
 
@@ -455,37 +457,67 @@ def alert_distr_error(event, vuid, nodes, logger, now=None):
     """
     now = time.time() if now is None else now
     key = (vuid, event.message)
+    # Debounce first, so the hundreds of suppressed repeats never load the
+    # node list; the key is stamped only once the alert is actually out, so a
+    # failed alert is retried on the next event instead of silenced for a
+    # whole window (review of #1580).
     with _distr_error_alerted_lock:
         if now - _distr_error_alerted.get(key, 0.0) < constants.DISTR_ERROR_ALERT_DEBOUNCE_SEC:
             return False
-        _distr_error_alerted[key] = now
-    owner = lvstore_owner_of_distrib(vuid, nodes)
+    owner = lvstore_owner_of_distrib(vuid, load_nodes())
     if owner is None:
         logger.error(f"Distrib {vuid} reported {event.message} but no lvstore stack owns it")
         return False
     storage_events.snode_distrib_io_error(owner, vuid, event.message, event.count, event.node_id)
+    with _distr_error_alerted_lock:
+        _distr_error_alerted[key] = now
     return True
 
 
+#: What the alert may fail with without costing the event: the node-list
+#: read and the event write both go to FDB; a node vanishing between the
+#: two is a KeyError.
+_ALERT_ERRORS = (fdb.FDBError, KeyError)  # type: ignore[attr-defined]
+
+
+def alert_distr_error_after_write(event, vuid, logger) -> bool:
+    """The alert, once the event itself is safely in FDB. Never raises:
+    an alert that fails must not leave the event in status ``new`` (where
+    the check surfaces would not count it) or make the batch handler
+    re-process the whole page (review of #1580)."""
+    try:
+        return alert_distr_error(
+            event, vuid, lambda: db.get_storage_nodes_by_cluster_id(event.cluster_uuid), logger)
+    except _ALERT_ERRORS as e:
+        logger.error(f"Distrib {vuid} {event.message}: event {event.get_id()} filed, alert failed: {e}")
+        return False
+
+
 def process_lvol_event(event, logger):
+    """Set the event's status. Returns the distrib vuid when the event is an
+    IO error that deserves an alert (raised by the caller after the write),
+    None otherwise."""
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
         event.status = f'distr error {vuid}'
-        alert_distr_error(event, vuid, db.get_storage_nodes_by_cluster_id(event.cluster_uuid), logger)
-    else:
-        logger.error(f"Unknown event message: {event.message}")
-        event.status = "event_unknown"
+        return vuid
+    logger.error(f"Unknown event message: {event.message}")
+    event.status = "event_unknown"
+    return None
 
 
 def process_event(event, logger):
+    alert_vuid = None
     if event.event == "device_status":
         if event.storage_id >= 0:
             process_device_event(event, logger)
 
         if event.vuid >= 0:
-            process_lvol_event(event, logger)
+            alert_vuid = process_lvol_event(event, logger)
 
     event.write_to_db(db.kv_store)
+    if alert_vuid is not None:
+        alert_distr_error_after_write(event, alert_vuid, logger)
 
 
 def start_event_collector_on_node(node_id):

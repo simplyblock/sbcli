@@ -1860,13 +1860,15 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
                 port, snode.get_id(), held, owner.lvstore)
             continue
 
-        # Release budget (models/fence_release.py): a fence this remediation
-        # has already lifted FENCE_RELEASE_BUDGET times inside the window is
-        # not a leak, it is SPDK re-fencing on every IO because that IO cannot
-        # be served anywhere -- an unreadable stripe. Reopening the port just
-        # lets the client's next retry move the leadership and the fence to a
-        # peer (prod 2026-11-01: 60 leadership switches in nine minutes, and
-        # the churn drove a peer's SPDK into a self-abort). Leave it fenced.
+        # Release budget (models/fence_release.py): a fence on an lvstore
+        # whose paths this control plane has already reopened
+        # FENCE_RELEASE_BUDGET times inside the window is not a leak, it is
+        # SPDK re-fencing on every IO because that IO cannot be served
+        # anywhere -- an unreadable stripe. Reopening the port just lets the
+        # client's next retry move the leadership and the fence to a peer
+        # (prod 2026-11-01: 60 leadership switches in nine minutes, and the
+        # churn drove a peer's SPDK into a self-abort). Leave it fenced. The
+        # lvstore's preferred path is exempt, so one route in always stays.
         if port_release_budget.exhausted(db, snode, port):
             port_release_budget.refuse(db, snode, port, owner.lvstore, held)
             continue

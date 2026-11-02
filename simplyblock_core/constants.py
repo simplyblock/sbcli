@@ -75,6 +75,9 @@ DISTR_ERROR_ALERT_DEBOUNCE_SEC = 600
 #: How far back ``sbctl volume check`` / ``sbctl cluster check`` look for
 #: those events when reporting an lvstore's distrib read errors.
 DISTR_ERROR_LOOKBACK_SEC = 7 * 24 * 3600
+# A distrib error newer than this fails `volume check` / `cluster check`;
+# an older one inside the lookback is reported as a warning only.
+DISTR_ERROR_ACTIVE_SEC = 3600
 #: Fence-release budget (models/fence_release.py). A client LVS port that
 #: SPDK fenced may be reopened by the control plane this many times inside
 #: FENCE_RELEASE_WINDOW_SEC; the next refusal leaves it fenced and raises an
