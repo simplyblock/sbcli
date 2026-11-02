@@ -2307,8 +2307,11 @@ STALE_PORT_BLOCK_SEC = 12.0
 #: check_ports_on_node just answered over JSON-RPC, so SPDK is alive and the
 #: unblock RPC has somewhere to land; and because DOWN is precisely the status
 #: set_node_down assigns when every liveness probe passed and only the port
-#: check failed. The three gates that keep this off deliberate fences --
-#: restart-owns-LVS, hublvol health, and the 12s age -- are unchanged.
+#: check failed. For a DOWN node, as for an ONLINE one, three conditions
+#: protect deliberate port blocks from this remediation: no restart task owns
+#: the LVS; the hublvol is healthy and connected, or not required (the
+#: passive triplet, whose paths the ANA fence closes); and the block has been
+#: seen for at least 12 s.
 _REMEDIABLE_FENCE_STATUSES = (
     StorageNode.STATUS_ONLINE,
     StorageNode.STATUS_DOWN,
@@ -2344,12 +2347,17 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
       * no restart task owns that LVS -- the restart flow is the legitimate
         author of port blocks during its phases and must not be raced;
       * the block has persisted past STALE_PORT_BLOCK_SEC;
-      * and the node's hublvol for that LVS is healthy and connected.
+      * and the node's hublvol for that LVS is healthy and connected, or not
+        expected (the passive triplet, whose paths the ANA fence closes).
 
     That last one is not optional. Unblocking a peer that still has no
     redirect just re-opens the path to a node that will promote itself on the
     next write and fence itself again -- the same loop, with client IO let
-    back in each time round.
+    back in each time round. A member of the LVS's passive triplet (the LVS is
+    led from the other site) holds no hublvol by design. Both hublvol checks
+    return success for it without sending a hublvol RPC. No client IO reaches
+    it, because the ANA fence publishes its paths inaccessible; this is also
+    what keeps the passive triplet leaderless.
     """
     for port, ok in port_results.items():
         key = (snode.get_id(), port)
@@ -2378,8 +2386,9 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
             continue
 
         # Hublvol gate: only lift the fence once this node can actually
-        # redirect. See the docstring -- unblocking without a redirect
-        # reopens the loop.
+        # redirect, or needs no redirect (the passive triplet, whose paths
+        # the ANA fence closes). See the docstring -- unblocking without a
+        # redirect reopens the loop.
         try:
             if owner_id == snode.get_id():
                 hub_ok = health_controller._check_node_hublvol(snode)
@@ -2415,8 +2424,8 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
 
         logger.error(
             "Port %s on %s has been blocked %.0fs on a %s node with a "
-            "healthy hublvol and no restart owning %s -- SPDK fenced it and "
-            "nothing released it. Unblocking.",
+            "hublvol that is healthy or not required and no restart owning %s -- "
+            "SPDK fenced it and nothing released it. Unblocking.",
             port, snode.get_id(), held, snode.status, owner.lvstore)
         try:
             snode.rpc_client(timeout=5, retry=1).nvmf_port_unblock(port)

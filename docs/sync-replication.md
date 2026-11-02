@@ -91,6 +91,26 @@ promote, the site record and the site activation flag), `simplyblock_core/servic
 - The triplet on the other site - the **passive triplet** - holds non-leader instances whose paths are
   closed by ANA. It never takes the leadership: not at a restart, and not when the whole active triplet
   is down. Only a promote makes it the active one.
+- **The hublvol of an LVS belongs to its active triplet.** The active triplet exposes and connects the
+  hublvol within its site, as the triplet of a cluster without sync replication does. The passive
+  triplet takes no part in it (a hublvol never connects nodes on two sites): a restart rebuilds its
+  members without one, and the promote that makes it active creates the hublvol and connects its
+  members (see [Promote](#promote)).
+  - The health check, the storage-node monitor and port-allow neither expect nor repair a hublvol on a
+    member of the passive triplet. Both hublvol checks return success for it without sending an RPC to
+    the node. The node check does not expose a secondary hublvol on it, and port-allow neither exposes
+    nor connects a hublvol there.
+  - The monitor watches only the roles of the home triplet (see
+    [Known limitations](#8-known-limitations)). On a member of the passive triplet in one of those
+    roles, it releases a stale port block once it has seen the block for at least 12 s and no restart
+    task owns the LVS. This is safe because no client IO reaches that member: the ANA fence publishes
+    its paths `inaccessible`.
+  - While the LVS is being moved (`moving:*`) neither triplet is exempt: every member that the checks
+    cover is held to the hublvol rules of the active triplet, and a missing or unhealthy hublvol keeps
+    a stale port block in place. Even then the checks cover only the roles of the home triplet.
+  - A relocation can build a replica on a node before the owner lists that node in either triplet.
+    That replica is wired to the hublvol like a member of the active triplet, subject to the same-site
+    rule.
 - While a move is in flight (`moving:*`) no member of either triplet is rebuilt as a leader.
 - **The primary of the active triplet runs the migrations of the LVS.** This holds on either site.
   The passive triplet runs no migrations. On a cluster without sync replication, the migrations run on
@@ -881,5 +901,9 @@ Leadership inside the triplets:
 - After a network outage inside an active **remote** triplet (no node restarted) the leadership is not
   handed back to its primary: a secondary that took over by IO keeps leading until the primary or
   that secondary restarts. The port-allow failback handles the home triplet only.
-- Neither the health service nor the storage-node monitor watches the client port of an LVS on a
-  member of its remote triplet: a port left blocked there is neither reported nor reopened by them.
+- The health service and the storage-node monitor check an LVS on its home triplet only: no member of
+  its remote triplet is watched by them. When the LVS is led from its remote triplet, the hublvol and
+  the client ports of that active triplet are neither checked nor repaired by them: a broken redirect
+  or a port left blocked there is neither reported nor fixed. Port-allow has the same gap: its hublvol
+  checks and repairs cover a node's home-triplet roles only, while it also reopens the ports of the
+  node's active remote roles.

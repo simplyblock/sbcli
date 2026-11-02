@@ -70,6 +70,86 @@ class TestActiveTriplet:
         assert ops.lvs_led_from_home(_owner(lvs_active_site=active_site)) is home
 
 
+_HOME = ("p", "s", "t")
+_REMOTE = ("rp", "rs", "rt")
+
+
+class TestHublvolExpected:
+
+    @pytest.mark.parametrize("active_site", ["", "site-a"])
+    def test_home_led_expects_it_on_the_home_triplet_only(self, active_site):
+        owner = _owner(lvs_active_site=active_site)
+        assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME)
+        assert not any(ops.lvs_hublvol_expected(owner, nid) for nid in _REMOTE)
+
+    def test_led_from_the_other_site_expects_it_on_the_remote_triplet_only(self):
+        owner = _owner(lvs_active_site="site-b")
+        assert not any(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME)
+        assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _REMOTE)
+
+    @pytest.mark.parametrize("active_site", ["moving:site-b", "moving:site-a"])
+    def test_a_move_in_flight_expects_it_on_both_triplets(self, active_site):
+        owner = _owner(lvs_active_site=active_site)
+        assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME + _REMOTE)
+
+    def test_ftt1_follows_the_active_triplet(self):
+        owner = _owner(tertiary_node_id="", remote_tertiary_node_id="", lvs_active_site="site-b")
+        assert [ops.lvs_hublvol_expected(owner, nid) for nid in ("p", "s", "rp", "rs")] == [
+            False, False, True, True]
+
+    def test_non_sync_owner_expects_it_on_every_member(self):
+        owner = _owner(site="", remote_primary_node_id="", remote_secondary_node_id="",
+                       remote_tertiary_node_id="")
+        assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME)
+
+    @pytest.mark.parametrize("fields", [
+        {"lvs_active_site": ""},
+        {"lvs_active_site": "site-b"},
+        {"site": "", "remote_primary_node_id": "", "remote_secondary_node_id": "",
+         "remote_tertiary_node_id": ""},
+    ], ids=["home-led", "remote-led", "non-sync"])
+    def test_a_node_in_neither_triplet_keeps_it(self, fields):
+        # A relocation target that the owner does not list in either triplet yet.
+        assert ops.lvs_hublvol_expected(_owner(**fields), "new-host")
+
+
+def _site_node(node_id, site):
+    return SimpleNamespace(site=site, get_id=lambda: node_id)
+
+
+class TestNonLeaderHubOk:
+    """The restart's hub_ok: ``_non_leader_hub_ok`` combines
+    ``lvs_hublvol_expected`` with the same-site check. It equals the same-site
+    check alone wherever the leader is a member of the active triplet."""
+
+    @pytest.mark.parametrize("sync, owner_fields, node, leader, expected", [
+        (False, {"site": "", "remote_primary_node_id": "", "remote_secondary_node_id": "",
+                 "remote_tertiary_node_id": ""},
+         ("new-host", ""), ("p", ""), True),
+        (True, {"lvs_active_site": ""}, ("s", "site-a"), ("p", "site-a"), True),
+        (True, {"lvs_active_site": "site-b"}, ("s", "site-a"), ("rp", "site-b"), False),
+        (True, {"lvs_active_site": "moving:site-b"}, ("s", "site-a"), ("p", "site-a"), True),
+        (True, {"lvs_active_site": "moving:site-b"}, ("rs", "site-b"), ("p", "site-a"), False),
+        (True, {"lvs_active_site": ""}, ("new-host", "site-a"), ("p", "site-a"), True),
+    ], ids=["non-sync-relocation", "active-member", "passive-member", "moving-same-site",
+            "moving-other-site", "relocation-new-host"])
+    def test_equals_the_site_rule(self, sync, owner_fields, node, leader, expected):
+        cluster = SimpleNamespace(sync_replication=sync)
+        snode, leader_node = _site_node(*node), _site_node(*leader)
+        owner = _owner(**owner_fields)
+        assert ops._non_leader_hub_ok(cluster, snode, leader_node, owner) is expected
+        assert ops._hublvol_same_site(cluster, snode, leader_node) is expected
+
+    def test_a_passive_member_behind_a_same_site_leader_gets_none(self):
+        # Cluster expansion rebuilds a new home member behind the owner even
+        # when the LVS is led from the other site.
+        cluster = SimpleNamespace(sync_replication=True)
+        snode, leader_node = _site_node("s", "site-a"), _site_node("p", "site-a")
+        owner = _owner(lvs_active_site="site-b")
+        assert ops._hublvol_same_site(cluster, snode, leader_node) is True
+        assert ops._non_leader_hub_ok(cluster, snode, leader_node, owner) is False
+
+
 class TestInstanceRole:
 
     @pytest.mark.parametrize("node_id, leading, role", [

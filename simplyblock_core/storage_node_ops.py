@@ -13281,7 +13281,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     is_remote = cluster.sync_replication and snode_id in remote_triplet_refs(primary_node)
     _, triplet_secondary_id, triplet_tertiary_id = lvs_triplet_of(
         primary_node, snode_id)
-    hub_ok = _hublvol_same_site(cluster, snode, leader_node)
+    hub_ok = _non_leader_hub_ok(cluster, snode, leader_node, primary_node)
     # The persisted role of an examined lvstore is PRIMARY; a non-leader with
     # that role takes the leadership on the first IO it sees. Outside
     # activation mode a local secondary / tertiary is stamped again AFTER the
@@ -17575,6 +17575,22 @@ def active_position(owner: StorageNode, node_id: str) -> ActivePosition:
     return _TRIPLET_POSITIONS[triplet.index(node_id)]
 
 
+def lvs_hublvol_expected(owner: StorageNode, node_id: str) -> bool:
+    """Whether the instance of ``owner``'s LVS on ``node_id`` is expected to
+    expose or connect to the LVS's hublvol now. The leader and its triplet's
+    secondary expose it; the other members connect to it.
+    False only for a member of the PASSIVE triplet (active_position
+    INACTIVE): it holds a non-leader instance with no hublvol, because a
+    hublvol never connects nodes on two sites. True for the active triplet,
+    for both triplets while a move is in flight, for every member outside
+    sync replication, and for a node in neither triplet, such as a relocation
+    target that the owner does not list in either triplet yet."""
+    try:
+        return active_position(owner, node_id) is not ActivePosition.INACTIVE
+    except ValueError:
+        return True
+
+
 def active_triplet_ids(owner: StorageNode) -> tuple[str, str, str]:
     """Return the node ids of the ACTIVE triplet of ``owner``'s LVS
     (lvs_active_triplet) as ``(primary, secondary, tertiary)``. An empty slot
@@ -18141,6 +18157,16 @@ def _hublvol_same_site(cluster, node: StorageNode, target: StorageNode) -> bool:
     """Whether ``node`` may wire a hublvol path to ``target``: always outside
     sync replication, only within a site on it (no cross-site IO redirect)."""
     return not cluster.sync_replication or node.site == target.site
+
+
+def _non_leader_hub_ok(cluster, snode: StorageNode, leader_node: StorageNode, owner: StorageNode) -> bool:
+    """Whether a non-leader rebuild of ``owner``'s LVS on ``snode`` wires a
+    hublvol to ``leader_node``: only when ``snode``'s instance takes part in
+    the hublvol at all (lvs_hublvol_expected - never on the passive triplet)
+    and ``leader_node`` is on the same site as ``snode`` (_hublvol_same_site;
+    the site condition applies only on a sync-replication cluster)."""
+    return (lvs_hublvol_expected(owner, snode.get_id())
+            and _hublvol_same_site(cluster, snode, leader_node))
 
 
 def non_leader_rebuild_candidates(owner: StorageNode, node_id: str) -> list[str]:

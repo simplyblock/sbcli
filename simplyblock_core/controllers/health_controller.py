@@ -400,6 +400,10 @@ def _check_ping_from_node(ip, ifname, node):
 
 
 def _check_node_hublvol(node: StorageNode) -> bool:
+    if not storage_node_ops.lvs_hublvol_expected(node, node.get_id()):
+        logger.info("%s is led from site %s: %s exposes no hublvol",
+                    node.lvstore, storage_node_ops.lvs_active_site_of(node), node.get_id())
+        return True
     if not node.hublvol:
         logger.error(f"Node {node.get_id()} does not have a hublvol")
         return False
@@ -466,7 +470,12 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
     except KeyError:
         logger.exception("Primary node not found")
         return False
-    
+
+    if not storage_node_ops.lvs_hublvol_expected(primary_node, node.get_id()):
+        logger.info("%s is led from site %s: %s connects to no hublvol",
+                    primary_node.lvstore, storage_node_ops.lvs_active_site_of(primary_node), node.get_id())
+        return True
+
     if not primary_node.hublvol:
         logger.error(f"Primary node {primary_node.get_id()} does not have a hublvol")
         return False
@@ -1190,8 +1199,11 @@ def check_node(node_id, with_devices=True):
                     lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1, stack_src_node=snode)
                     print("*" * 100)
                 lvstore_check &= _check_node_hublvol(snode)
-                # Ensure sec_1 has its secondary hublvol exposed (same NQN, non-optimized)
-                if second_node_1.status == StorageNode.STATUS_ONLINE:
+                # Ensure sec_1 has its secondary hublvol exposed (same NQN,
+                # non-optimized) - unless sec_1 is in the passive triplet,
+                # which exposes no hublvol.
+                if second_node_1.status == StorageNode.STATUS_ONLINE \
+                        and storage_node_ops.lvs_hublvol_expected(snode, second_node_1.get_id()):
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
                     try:
                         sec1_rpc = second_node_1.rpc_client(timeout=8, retry=1)

@@ -5,10 +5,14 @@ pass grants the leadership, queues a task, or changes a node's status or the
 state of an LVS port because of it. The taker is stamped primary and reports
 no leadership: (a) the owner after a fail-back promote, (b) the remote
 primary after a promote to the other site.
-No product code of its own implements this. It holds because the leadership a hublvol check lists as expected is never
-compared (health_controller._check_node_hublvol / _check_sec_node_hublvol)
-and because both services check an LVS on its home triplet only - the owner's
-own lvstore and its local secondaries - never an instance of the remote one.
+Neither service has a rule of its own for this leaderless state. In state
+(b) the owner's triplet is the passive one, for which no hublvol is expected
+(storage_node_ops.lvs_hublvol_expected), so both hublvol checks return
+success for it without an RPC. In state (a) a mismatch of the reported
+leadership never makes a hublvol check fail
+(health_controller._check_node_hublvol / _check_sec_node_hublvol). Both
+services check an LVS only on its home triplet - the owner and its local
+secondaries - and never query the instances of its remote triplet.
 Storage nodes (RPC, node API), ping and the port block are mocked; the
 database, the task queue and the status writes never are.
 """
@@ -290,14 +294,20 @@ class TestHealthPass:
         assert sorted(checks.sec) == sorted([
             (a[1].get_id(), a[0].get_id(), True), (a[2].get_id(), a[0].get_id(), True),
             (b[1].get_id(), b[0].get_id(), True), (b[2].get_id(), b[0].get_id(), True)])
-        # An LVS is read on its HOME triplet only, wherever it is led from: the
-        # owner's instance (as the distrib stack check and as the hublvol
-        # check), never the remote triplet's - the taker's in state (b).
+        # An LVS is read on its HOME triplet only, wherever it is led from.
+        # The owner's instance is read; the remote triplet's instances are
+        # not, including the taker's in state (b). The distrib stack check
+        # reads the owner's instance in both states, the hublvol check only in
+        # state (a): in state (b) the owner is passive and its hublvol check
+        # makes no RPC.
         for node in a:
             assert set(spdk.lvstore_reads(node)) == {"LVS_1"}
         for node in b:
             assert set(spdk.lvstore_reads(node)) == {"LVS_2"}
-        assert spdk.lvstore_reads(a[0]).count("LVS_1") >= 2
+        if site == SITE_A:
+            assert spdk.lvstore_reads(a[0]).count("LVS_1") >= 2
+        else:
+            assert spdk.lvstore_reads(a[0]).count("LVS_1") == 1
         # healthy all the same, and nothing was dialled to get there
         for node in layout.nodes:
             assert _fresh(db, node).health_check is True
