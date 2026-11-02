@@ -343,7 +343,12 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             f"{lvol_bdev_name}. Keeping the record in_deletion for the next pass")
         return
 
-    # Check if any non-leader node needs sync lock
+    # Check if any non-leader node needs sync lock. Every exit below must end
+    # in lvol_del_sync_lock_reset(): the lock blocks snapshot and volume
+    # creation on this node, and the three early returns used to leave it set
+    # with nothing left to clear it (bf8 2026-11-02: replication of two volumes
+    # stalled for over an hour on "Timed out waiting for in-flight LVol sync
+    # deletion to drain" with no sync-delete task pending anywhere).
     for nln in non_leader_nodes:
         if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
             primary_node.lvol_del_sync_lock()
@@ -361,6 +366,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             logger.warning(
                 f"LVol {lvol.get_id()}: teardown on primary_node "
                 f"{primary_node.get_id()} deferred: {e}")
+            primary_node.lvol_del_sync_lock_reset()
             return
         except RuntimeError as e:
             logger.error(
@@ -370,6 +376,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             # pass; the record stays either way.
             tasks_controller.add_lvol_sync_del_task(
                 cluster.get_id(), primary_node.get_id(), lvol_bdev_name, lvol.node_id)
+            primary_node.lvol_del_sync_lock_reset()
             return
 
     # Post-condition, not just an acknowledged RPC: confirm the bdev is really
@@ -380,6 +387,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
         logger.error(
             f"LVol {lvol.get_id()}: could not verify {lvol_bdev_name} is gone "
             f"from {primary_node.get_id()[:8]} ({e}); keeping the record in_deletion")
+        primary_node.lvol_del_sync_lock_reset()
         return
     if not primary_confirmed:
         logger.error(
