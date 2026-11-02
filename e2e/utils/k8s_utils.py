@@ -6103,9 +6103,60 @@ class K8sSbcliUtils:
                         f"Clone delete failed (continuing): {name}, err={e}"
                     )
 
+    def _lvols_claimed_by_live_pvcs(self):
+        """Return ``{pv_name: pvc_name}`` for every PVC still in the namespace.
+
+        An lvol carries the name of the PV that fronts it, so a PV name in
+        here means a live claim owns that lvol and no sweep may touch it.
+        """
+        ns = self.k8s.namespace
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pvc -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name,VOLUME:.spec.volumeName "
+            f"2>/dev/null || true",
+            supress_logs=True,
+        )
+        claimed = {}
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] not in ("<none>", ""):
+                claimed[parts[1]] = parts[0]
+        return claimed
+
     def delete_all_lvols(self):
+        """Delete the lvols no PVC still claims. Not every lvol there is.
+
+        This used to delete every lvol on the cluster, which on a k8s-native
+        cluster includes volumes the *product* provisioned for itself. Run
+        41437507378 is what that costs: the pNFS metadata server keeps its
+        state on an ordinary simplyblock PVC
+        (``state-simplyblock-pnfs-mds-<cluster>-0``, lvol
+        ``1c9c15d3-66ab-4ebe-b278-601f8e45bb9e``), and the first test's
+        teardown deleted it along with its own. The MDS pod kept running --
+        zero restarts -- but its state device was gone underneath it, so
+        ``/readyz`` answered 503 from then until the lab was torn down. Every
+        later pNFS test failed on ``PVC not Bound within 600s`` with the
+        control plane repeating "waiting for the metadata server guest ... to
+        turn healthy", and it never would. One case passed; the other three
+        died of our own cleanup.
+
+        ``delete_all_storage_pools`` above learned this same lesson already,
+        for the same reason, on the same kind of shared cluster. The rule
+        here is narrower than tracking what we created, and stronger: an lvol
+        still backing a live PVC is not ours to delete, whoever made it. The
+        harness drops its own claims in ``_k8s_default_teardown`` before this
+        runs, so what remains protected is other people's -- and anything of
+        ours still claimed is reclaimed by CSI, which is the correct path on
+        this platform anyway.
+        """
+        protected = self._lvols_claimed_by_live_pvcs()
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
+            if name in protected:
+                self.logger.info(
+                    "[lvol] leaving %s: PVC %s still claims it",
+                    name, protected[name])
+                continue
             self.logger.info(f"Deleting lvol: {name}")
             self.delete_lvol(lvol_name=name)
 
