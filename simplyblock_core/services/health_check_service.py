@@ -5,6 +5,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import (
+    device_controller,
     device_events,
     health_controller,
     storage_events,
@@ -13,6 +14,7 @@ from simplyblock_core.controllers import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -257,7 +259,7 @@ def check_node(snode):
         node_rpc_check = _probe(f_rpc, "rpc")
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+    logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 
@@ -395,6 +397,11 @@ def check_node(snode):
                 if rpc_client.bdev_get(jm_device.jm_bdev):
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     connected_jms.append(jm_device.get_id())
+                    if jm_device.stale_jm_legs:
+                        try:
+                            device_controller.clear_rebuilt_jm_legs(snode, rpc_client)
+                        except RPCException as e:
+                            logger.warning("JM raid rebuild check failed: %s", e)
                 else:
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
 

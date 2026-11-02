@@ -45,6 +45,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            {% if AGENT_IP %}
+            - name: API_HOST
+              value: "{{ AGENT_IP }}"
+            {% endif %}
           volumeMounts:
             - name: host-proc
               mountPath: /proc
@@ -99,7 +103,7 @@ spec:
                 {% set SCHEME = "https" %}
                 {% set CURL_TLS_FLAGS = "-k --cert /etc/simplyblock/tls/tls.crt --key /etc/simplyblock/tls/tls.key" %}
                 {% endif %}
-                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST {{ CURL_TLS_FLAGS }} {{ SCHEME }}://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
+                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST {{ CURL_TLS_FLAGS }} {{ SCHEME }}://${API_HOST:-$NODE_IP}:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
                 echo "HTTP status: $RESPONSE"
                 if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
                   echo "Failed to apply config"

@@ -202,6 +202,14 @@ class Cluster(BaseModel):
     # (its devices are not all rebuilt yet); without that node it would be
     # ACTIVE. A removal driver must not pause on that degraded state.
     is_degraded_by_removal: bool = False
+    # Migrations that ended with errors while every node and device was online,
+    # so retrying them would only hit the same errors: "<node_id>/<distr_name>"
+    # -> {"error", "ft_impacted_pages", "time"}. Only entries whose pages are not
+    # fully fault tolerant are kept (ft_impacted_pages None: the data plane does
+    # not report it, counted as impacted); while any is kept the cluster is
+    # DEGRADED instead of ACTIVE. A later migration of the distrib that completes
+    # without error removes its entry.
+    migration_ft_impact: dict = default_factory(dict)
     # Suspend-recovery drain phase marker.
     #
     # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes
@@ -347,6 +355,11 @@ class Cluster(BaseModel):
     # Inline CRC checksum validation for silent-data-error protection.
     # Frozen at cluster create time; no upgrade path for existing clusters.
     inline_checksum: bool = False
+    # Page copy: a snapshot copy-on-write is done in the distribution layer as
+    # a metadata-only page copy (no data copy), merged back when the snapshot
+    # is deleted. Frozen at cluster create time: create_lvstore sets it on every
+    # distrib stack entry, so restarts re-create the distribs the same way.
+    page_copy: bool = False
     # Device guarantees 4K write atomicity despite a <4K logical block size
     # (e.g. AWS NVMe, which is 512B but atomic at 4K). When set, alceml creation
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
@@ -370,6 +383,11 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = default_factory(dict)
+    # Set while new device weights (placement sizes after an uneven growth of
+    # lblk devices) are written but not yet pushed to every node and handed to
+    # a rebalance. A re-run of `cluster grow-devices` finishes the job. See
+    # device_controller.rebalance_after_growth.
+    reweight_pending: bool = False
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`

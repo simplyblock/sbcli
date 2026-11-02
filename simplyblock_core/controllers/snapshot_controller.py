@@ -93,7 +93,12 @@ def _wait_for_node_sync_delete(node, timeout=None, poll=0.5):
     deadline = time.time() + timeout
     while node.lvol_sync_del():
         if time.time() >= deadline:
-            return False
+            # Last resort before failing the create: the lock may be left over
+            # from a pass that died between setting and clearing it. The reset
+            # removes it only when no sync-delete task is pending for the
+            # node's peers -- exactly when nothing would ever clear it.
+            node.lvol_del_sync_lock_reset()
+            return not node.lvol_sync_del()
         time.sleep(poll)
     return True
 
@@ -649,6 +654,112 @@ def check_snapshot_capacity(pool, cluster, lvol, all_snaps=None):
     return None
 
 
+def _snapshots_in_creation(lvol_id):
+    """This volume's snapshots whose record is still only an intent."""
+    return [s for s in db_controller.get_snapshots_by_lvol_id(lvol_id)
+            if s.status == SnapShot.STATUS_IN_CREATION]
+
+
+def _drop_snapshot_intent(snap):
+    """Remove an intent record whose snapshot was not (or no longer is) in
+    SPDK."""
+    try:
+        snap.remove(db_controller.kv_store)
+    except Exception as e:
+        logger.error("Could not remove snapshot intent record %s: %s", snap.get_id(), e)
+
+
+def _settle_failed_intent(snap, lvol):
+    """A create failed or raised: drop the intent only when no member of the
+    volume's lvstore holds the snapshot bdev. If one still holds it, or a
+    member cannot answer, the record stays in_creation and
+    reap_snapshot_intents rolls the bdev back later.
+
+    bf9 (2026-11-02): SNAP_160 was created on the LVS_7 primary, its replica
+    registration failed, and the rollback's delete was refused ("Deleting
+    async lvol on non-leader lvs": the primary had just lost leadership).
+    Dropping the intent anyway left a blob with no record, and the volume's
+    replication was blocked for good."""
+    for nid in (lvol.nodes or [lvol.node_id]):
+        try:
+            node = db_controller.get_storage_node_by_id(nid)
+            held = node.rpc_client(timeout=5, retry=1).bdev_get(snap.snap_bdev)
+        except Exception as e:
+            logger.error("Snapshot intent %s (%s): cannot confirm it is absent on %s (%s); "
+                         "keeping the record for the reaper", snap.get_id(), snap.snap_bdev, nid, e)
+            return False
+        if held:
+            logger.error("Snapshot intent %s: %s is still on %s after the failed create; "
+                         "keeping the record for the reaper", snap.get_id(), snap.snap_bdev, nid)
+            return False
+    _drop_snapshot_intent(snap)
+    return True
+
+
+_intent_reap_attempts: dict[str, float] = {}
+
+
+def reap_snapshot_intents(cluster_id, now_ts=None, max_age=None):
+    """Roll back snapshots whose record stayed in_creation.
+
+    The creating process died after writing the intent and possibly after
+    the SPDK create (and some replica registrations). Such a snapshot never
+    went online, so nothing references it: its bdev is deleted on the leader
+    and every other member of the volume's lvstore, through the same rollback
+    a failed registration uses, and the record goes once the leader confirms
+    the bdev is gone. A leaderless lvstore or a failed delete keeps the record
+    for a later pass (at most one attempt per ``max_age``). Returns the number
+    of intents resolved."""
+    now_ts = time.time() if now_ts is None else now_ts
+    max_age = constants.SNAPSHOT_INTENT_REAP_SEC if max_age is None else max_age
+    resolved = 0
+    for snap in db_controller.get_snapshots(cluster_id):
+        if snap.status != SnapShot.STATUS_IN_CREATION:
+            continue
+        if now_ts - (snap.created_at or 0) < max_age:
+            continue
+        if now_ts - _intent_reap_attempts.get(snap.get_id(), 0) < max_age:
+            continue
+        _intent_reap_attempts[snap.get_id()] = now_ts
+        try:
+            lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
+        except KeyError:
+            logger.warning("Snapshot intent %s: volume %s is gone; dropping the record",
+                           snap.get_id(), snap.lvol.get_id())
+            _drop_snapshot_intent(snap)
+            resolved += 1
+            continue
+        members = []
+        for nid in (lvol.nodes or [lvol.node_id]):
+            try:
+                members.append(db_controller.get_storage_node_by_id(nid))
+            except KeyError:
+                continue
+        leader = _find_lvs_leader(snap.cluster_id, lvol.lvs_name, members)
+        if leader is None:
+            logger.warning("Snapshot intent %s (%s): no leader for %s; retrying later",
+                           snap.get_id(), snap.snap_bdev, lvol.lvs_name)
+            continue
+        logger.warning("Snapshot intent %s (%s) stayed in_creation for %ds; rolling it back",
+                       snap.get_id(), snap.snap_bdev, int(now_ts - (snap.created_at or 0)))
+        _rollback_snapshot_bdev(snap.cluster_id, lvol.lvs_name, leader,
+                                snap.snap_bdev.split("/", 1)[1], members)
+        try:
+            still_there = leader.rpc_client().bdev_get(snap.snap_bdev)
+        except Exception as e:
+            logger.error("Snapshot intent %s: cannot confirm %s is gone (%s); retrying later",
+                         snap.get_id(), snap.snap_bdev, e)
+            continue
+        if still_there:
+            logger.error("Snapshot intent %s: %s is still on %s after the rollback; retrying later",
+                         snap.get_id(), snap.snap_bdev, leader.get_id())
+            continue
+        _drop_snapshot_intent(snap)
+        _intent_reap_attempts.pop(snap.get_id(), None)
+        resolved += 1
+    return resolved
+
+
 def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
         bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
@@ -785,160 +896,24 @@ def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
     snap_uuid = ""
     used_size = 0
 
-    if lvol.ha_type == "single":
-        if snode.status == StorageNode.STATUS_ONLINE:
-            rpc_client = snode.rpc_client()
-            logger.info("Creating Snapshot bdev")
-            ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
-            if not ret:
-                return False, f"Failed to create snapshot on node: {snode.get_id()}"
-
-            snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
-            if snap_bdev:
-                snap_uuid = snap_bdev['uuid']
-                blobid = snap_bdev['driver_specific']['lvol']['blobid']
-                cluster_size = cluster.page_size_in_blocks
-                num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
-                used_size = int(num_allocated_clusters*cluster_size)
-        else:
-            msg = f"Host node is not online {snode.get_id()}"
-            logger.error(msg)
-            return False, msg
-
-    if lvol.ha_type == "ha":
-        from simplyblock_core.storage_node_ops import check_non_leader_for_operation
-
-        host_node = db_controller.get_storage_node_by_id(snode.get_id())
-
-        # Build nodes list with all secondaries (skip empty role ids)
-        secondary_ids = lvol_controller.role_secondary_ids(host_node)
-        lvol.nodes = [host_node.get_id()] + secondary_ids
-
-        # Detect leader via RPC (no status checks)
-        all_nodes = [host_node]
-        for sid in secondary_ids:
-            try:
-                all_nodes.append(db_controller.get_storage_node_by_id(sid))
-            except KeyError:
-                pass
-
-        secondary_nodes = []
-        primary_node = _find_lvs_leader(pool.cluster_id, lvol.lvs_name, all_nodes)
-        if not primary_node:
-            # Never fall back to the configured primary: a create attempted on
-            # a non-leader fails on SPDK anyway, and under mass-create retries
-            # the per-request leader probing stormed every LVS member for
-            # hours (run 20260712-231123). Fail until a leader is
-            # re-established (recovery runs inside _find_lvs_leader, at most
-            # once per NO_LEADER_TTL_SEC).
-            msg = (f"No leader available for LVS {lvol.lvs_name} — "
-                   f"rejecting snapshot create until leadership is re-established")
-            logger.error(msg)
-            return False, msg
-
-        # Check non-leader nodes (no status checks)
-        for candidate in all_nodes:
-            if candidate.get_id() == primary_node.get_id():
-                continue
-            action = check_non_leader_for_operation(
-                candidate.get_id(), lvol.lvs_name, operation_type="create")
-            if action == "reject":
-                msg = f"Cannot create snapshot: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
-                logger.error(msg)
-                return False, msg
-            elif action == "proceed":
-                secondary_nodes.append(candidate)
-            # "skip", "queue" — handled by the registration gate below
-
-        # OUTER per-object lock: serialize the whole snapshot-create sequence
-        # for this source lvol, so its snapshot chain is created and registered
-        # in blobid order and no concurrent delete/resize/clone of the same
-        # lvol races it. The INNER lvstore_op_lock wraps each single-node RPC
-        # (primary create, each replica register) so no two object operations
-        # touch the lvstore on a node at once.
-        with object_mutation_lock(pool.cluster_id, lvol.uuid, enabled=lock):
-            if primary_node:
-                rpc_client = primary_node.rpc_client()
-
-                logger.info("Creating Snapshot bdev")
-
-                @retry(
-                    retry=retry_if_result(lambda result: not result[0] and result[1] and result[1].get("code") == -32602),
-                    stop=stop_after_attempt(5),
-                    wait=wait_fixed(2),
-                    before_sleep=before_sleep_log(logger, lg.WARNING),
-                    retry_error_callback=lambda state: state.outcome.result() if state.outcome else (False, None),
-                )
-                def _create_snapshot_bdev():
-                    try:
-                        return rpc_client.lvol_create_snapshot2(
-                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name), None
-                    except RPCRemoteError as e:
-                        return None, {"code": e.code, "message": str(e), "data": e.data}
-
-                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
-                                     node_id=primary_node.get_id(), enabled=lock):
-                    ret, err = _create_snapshot_bdev()
-                if not ret:
-                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
-
-                # Read-only follow-up — deliberately OUTSIDE the lvstore lock:
-                # the lock exists to keep lvstore mutations from interleaving,
-                # and holding it across this read serialized every other
-                # waiter behind a query that mutates nothing.
-                snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
-                if snap_bdev:
-                    snap_uuid = snap_bdev['uuid']
-                    blobid = snap_bdev['driver_specific']['lvol']['blobid']
-                    cluster_size = cluster.page_size_in_blocks
-                    num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
-                    used_size = int(num_allocated_clusters*cluster_size)
-                else:
-                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
-
-            # On any register failure, the rollback owes sync deletes to
-            # EVERY non-leader LVS member unconditionally (see
-            # _rollback_snapshot_bdev) — no per-peer bookkeeping needed.
-            for sec in secondary_nodes:
-                # Per design: gate snapshot registration around restart port block.
-                from simplyblock_core.storage_node_ops import (
-                    queue_for_restart_drain,
-                    wait_or_delay_for_restart_gate,
-                )
-                gate = wait_or_delay_for_restart_gate(sec.get_id(), lvol.lvs_name)
-                if gate == "delay":
-                    queue_for_restart_drain(
-                        sec.get_id(), lvol.lvs_name,
-                        lambda s=sec: s.rpc_client().bdev_lvol_snapshot_register(
-                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid),
-                        f"register snapshot {snap_bdev_name} on {sec.get_id()[:8]}")
-                    continue
-
-                sec_rpc_client = sec.rpc_client()
-
-                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
-                                     node_id=sec.get_id(), enabled=lock):
-                    try:
-                        ret = sec_rpc_client.bdev_lvol_snapshot_register(
-                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
-                    except RPCException:
-                        ret = None
-                if not ret:
-                    msg = f"Failed to register snapshot on node: {sec.get_id()}"
-                    logger.error(msg)
-                    logger.info(f"Removing snapshot from {primary_node.get_id()}")
-                    _rollback_snapshot_bdev(
-                        pool.cluster_id, lvol.lvs_name, primary_node,
-                        snap_bdev_name, all_nodes, lock=lock)
-                    return False, msg
-
+    # Intent record first (status in_creation): a process that dies between
+    # the SPDK create and the record write used to leave a snapshot blob no
+    # record knows about. It sits in the volume's chain for good and blocks
+    # its replication ("chain blob ... has no snapshot record"): bf8,
+    # 2026-11-02, a control-plane restart at 10:47:48 during an internal
+    # snapshot of a migrating volume. A record left in_creation is rolled
+    # back by reap_snapshot_intents once it is older than any create can be.
+    pending = _snapshots_in_creation(lvol.get_id())
+    if pending:
+        msg = (f"Cannot create snapshot of {lvol_id}: snapshot "
+               f"{pending[0].snap_bdev} of this volume is still being created "
+               f"or resolved")
+        logger.error(msg)
+        return False, msg
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
     snap.data_uuid = str(uuid.uuid4())
-    snap.snap_uuid = snap_uuid
     snap.size = size
-    snap.used_size = used_size
-    snap.blobid = blobid
     snap.pool_uuid = pool.get_id()
     snap.cluster_id = pool.cluster_id
     snap.snap_name = snapshot_name
@@ -947,10 +922,176 @@ def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
     snap.lvol = lvol
     snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
-    snap.status = SnapShot.STATUS_ONLINE
+    snap.status = SnapShot.STATUS_IN_CREATION
     snap.snap_type = snap_type
     snap.create_dt = str(datetime.now())
+    snap.write_to_db(db_controller.kv_store)
 
+    def _create_in_spdk():
+        """The SPDK create (and replica registration). Returns
+        (False, msg) on failure, None on success."""
+        nonlocal snap_uuid, blobid, used_size
+
+        if lvol.ha_type == "single":
+            if snode.status == StorageNode.STATUS_ONLINE:
+                rpc_client = snode.rpc_client()
+                logger.info("Creating Snapshot bdev")
+                ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                if not ret:
+                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
+
+                snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
+                if snap_bdev:
+                    snap_uuid = snap_bdev['uuid']
+                    blobid = snap_bdev['driver_specific']['lvol']['blobid']
+                    cluster_size = cluster.page_size_in_blocks
+                    num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
+                    used_size = int(num_allocated_clusters*cluster_size)
+            else:
+                msg = f"Host node is not online {snode.get_id()}"
+                logger.error(msg)
+                return False, msg
+
+        if lvol.ha_type == "ha":
+            from simplyblock_core.storage_node_ops import check_non_leader_for_operation
+
+            host_node = db_controller.get_storage_node_by_id(snode.get_id())
+
+            # Build nodes list with all secondaries (skip empty role ids)
+            secondary_ids = lvol_controller.role_secondary_ids(host_node)
+            lvol.nodes = [host_node.get_id()] + secondary_ids
+
+            # Detect leader via RPC (no status checks)
+            all_nodes = [host_node]
+            for sid in secondary_ids:
+                try:
+                    all_nodes.append(db_controller.get_storage_node_by_id(sid))
+                except KeyError:
+                    pass
+
+            secondary_nodes = []
+            primary_node = _find_lvs_leader(pool.cluster_id, lvol.lvs_name, all_nodes)
+            if not primary_node:
+                # Never fall back to the configured primary: a create attempted on
+                # a non-leader fails on SPDK anyway, and under mass-create retries
+                # the per-request leader probing stormed every LVS member for
+                # hours (run 20260712-231123). Fail until a leader is
+                # re-established (recovery runs inside _find_lvs_leader, at most
+                # once per NO_LEADER_TTL_SEC).
+                msg = (f"No leader available for LVS {lvol.lvs_name} — "
+                       f"rejecting snapshot create until leadership is re-established")
+                logger.error(msg)
+                return False, msg
+
+            # Check non-leader nodes (no status checks)
+            for candidate in all_nodes:
+                if candidate.get_id() == primary_node.get_id():
+                    continue
+                action = check_non_leader_for_operation(
+                    candidate.get_id(), lvol.lvs_name, operation_type="create")
+                if action == "reject":
+                    msg = f"Cannot create snapshot: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
+                    logger.error(msg)
+                    return False, msg
+                elif action == "proceed":
+                    secondary_nodes.append(candidate)
+                # "skip", "queue" — handled by the registration gate below
+
+            # OUTER per-object lock: serialize the whole snapshot-create sequence
+            # for this source lvol, so its snapshot chain is created and registered
+            # in blobid order and no concurrent delete/resize/clone of the same
+            # lvol races it. The INNER lvstore_op_lock wraps each single-node RPC
+            # (primary create, each replica register) so no two object operations
+            # touch the lvstore on a node at once.
+            with object_mutation_lock(pool.cluster_id, lvol.uuid, enabled=lock):
+                if primary_node:
+                    rpc_client = primary_node.rpc_client()
+
+                    logger.info("Creating Snapshot bdev")
+
+                    @retry(
+                        retry=retry_if_result(lambda result: not result[0] and result[1] and result[1].get("code") == -32602),
+                        stop=stop_after_attempt(5),
+                        wait=wait_fixed(2),
+                        before_sleep=before_sleep_log(logger, lg.WARNING),
+                        retry_error_callback=lambda state: state.outcome.result() if state.outcome else (False, None),
+                    )
+                    def _create_snapshot_bdev():
+                        try:
+                            return rpc_client.lvol_create_snapshot2(
+                                f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name), None
+                        except RPCRemoteError as e:
+                            return None, {"code": e.code, "message": str(e), "data": e.data}
+
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
+                                         node_id=primary_node.get_id(), enabled=lock):
+                        ret, err = _create_snapshot_bdev()
+                    if not ret:
+                        return False, f"Failed to create snapshot on node: {snode.get_id()}"
+
+                    # Read-only follow-up — deliberately OUTSIDE the lvstore lock:
+                    # the lock exists to keep lvstore mutations from interleaving,
+                    # and holding it across this read serialized every other
+                    # waiter behind a query that mutates nothing.
+                    snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
+                    if snap_bdev:
+                        snap_uuid = snap_bdev['uuid']
+                        blobid = snap_bdev['driver_specific']['lvol']['blobid']
+                        cluster_size = cluster.page_size_in_blocks
+                        num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
+                        used_size = int(num_allocated_clusters*cluster_size)
+                    else:
+                        return False, f"Failed to create snapshot on node: {snode.get_id()}"
+
+                # On any register failure, the rollback owes sync deletes to
+                # EVERY non-leader LVS member unconditionally (see
+                # _rollback_snapshot_bdev) — no per-peer bookkeeping needed.
+                for sec in secondary_nodes:
+                    # Per design: gate snapshot registration around restart port block.
+                    from simplyblock_core.storage_node_ops import (
+                        queue_for_restart_drain,
+                        wait_or_delay_for_restart_gate,
+                    )
+                    gate = wait_or_delay_for_restart_gate(sec.get_id(), lvol.lvs_name)
+                    if gate == "delay":
+                        queue_for_restart_drain(
+                            sec.get_id(), lvol.lvs_name,
+                            lambda s=sec: s.rpc_client().bdev_lvol_snapshot_register(
+                                f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid),
+                            f"register snapshot {snap_bdev_name} on {sec.get_id()[:8]}")
+                        continue
+
+                    sec_rpc_client = sec.rpc_client()
+
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
+                                         node_id=sec.get_id(), enabled=lock):
+                        try:
+                            ret = sec_rpc_client.bdev_lvol_snapshot_register(
+                                f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+                        except RPCException:
+                            ret = None
+                    if not ret:
+                        msg = f"Failed to register snapshot on node: {sec.get_id()}"
+                        logger.error(msg)
+                        logger.info(f"Removing snapshot from {primary_node.get_id()}")
+                        _rollback_snapshot_bdev(
+                            pool.cluster_id, lvol.lvs_name, primary_node,
+                            snap_bdev_name, all_nodes, lock=lock)
+                        return False, msg
+
+    try:
+        failed = _create_in_spdk()
+    except BaseException:
+        _settle_failed_intent(snap, lvol)
+        raise
+    if failed:
+        _settle_failed_intent(snap, lvol)
+        return failed
+
+    snap.snap_uuid = snap_uuid
+    snap.used_size = used_size
+    snap.blobid = blobid
+    snap.status = SnapShot.STATUS_ONLINE
     snap.write_to_db(db_controller.kv_store)
 
     _parent_snap = None
@@ -1113,6 +1254,12 @@ def delete(snapshot_uuid, force_delete=False, lock=True):
     ops_gate.assert_object_ops_allowed("snapshot delete",
                                        cluster_id=snap.cluster_id)
 
+    if snap.status == SnapShot.STATUS_IN_CREATION:
+        # Its create is running, or reap_snapshot_intents rolls it back; a
+        # delete now would race either.
+        logger.error(f"Snapshot {snapshot_uuid} is still being created")
+        return False
+
     # OUTER per-object lock: make the clone-count check and the data-plane
     # delete atomic against a concurrent clone-create of this same snapshot
     # (which holds the same lock for its whole sequence). Without it a clone
@@ -1132,6 +1279,25 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     if snap.status == SnapShot.STATUS_IN_DELETION:
         logger.error(f"Snapshot is in deletion {snapshot_uuid}")
         if not force_delete:
+            return True
+
+    # A replicated copy of this snapshot on another cluster that a live volume
+    # is cloned from (a failed-over volume) holds this snapshot back: soft
+    # delete, nothing removed. Removing it would hand its delete on to that
+    # copy (snapshot_monitor, snap.instances), which then stays in_deletion
+    # behind its live clone, and the reverse replication -- which chains onto
+    # this pair -- refuses the chain for good: "chain ancestor ... is
+    # mid-deletion" (KI-12: the fail-back of run 20261026, where the healed
+    # origin's stop cleanup deleted the source half of the pair the fail-over
+    # had used). Deleting the clone finishes it (delete_held_sources).
+    if not force_delete:
+        held_by = _replicated_copy_with_live_clone(snap)
+        if held_by:
+            logger.info("Soft delete snapshot %s: its replicated copy %s has a live clone; "
+                        "deleted once that clone is gone", snapshot_uuid, held_by)
+            snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+            snap.deleted = True
+            snap.write_to_db(db_controller.kv_store)
             return True
 
     # Block during restart Phase 5
@@ -1868,6 +2034,43 @@ def _has_live_clone(snapshot_uuid):
         if lvol.cloned_from_snap == snapshot_uuid and lvol.status != LVol.STATUS_IN_DELETION:
             return True
     return False
+
+
+def _replicated_copies(snap):
+    """The ids of *snap*'s replicated copies on other clusters: its pair link
+    and the instances recorded there (instances are dicts once read back, the
+    objects themselves before)."""
+    ids = [snap.target_replicated_snap_uuid] if snap.target_replicated_snap_uuid else []
+    for inst in snap.instances:
+        field = inst.get if isinstance(inst, dict) else lambda k, o=inst: getattr(o, k, "")
+        uuid, cluster_id = field("uuid"), field("cluster_id")
+        if uuid and cluster_id and cluster_id != snap.cluster_id and uuid not in ids:
+            ids.append(uuid)
+    return ids
+
+
+def _replicated_copy_with_live_clone(snap):
+    """The id of a replicated copy of *snap* that a live volume is cloned
+    from, or ""."""
+    return next((c for c in _replicated_copies(snap) if _has_live_clone(c)), "")
+
+
+def delete_held_sources(copy_id):
+    """Finish the deletes that a live clone of the replicated copy *copy_id*
+    held back (_delete_locked): called when a clone of it is being deleted,
+    i.e. after the fail-back, when the old primary's volume goes. Once no live
+    clone is left, each soft-deleted source of the copy is deleted; its delete
+    hands on to the copy, which the snapshot monitor removes once the clone is
+    gone."""
+    if _has_live_clone(copy_id):
+        return
+    for snap in db_controller.get_snapshots():
+        if (snap.deleted and snap.status != SnapShot.STATUS_IN_DELETION
+                and copy_id in _replicated_copies(snap)):
+            logger.info("Deleting snapshot %s: no live clone of its replicated copy %s is left",
+                        snap.get_id(), copy_id)
+            if not delete(snap.get_id()):
+                logger.warning("Could not delete snapshot %s", snap.get_id())
 
 
 def delete_replicated(snapshot_id):

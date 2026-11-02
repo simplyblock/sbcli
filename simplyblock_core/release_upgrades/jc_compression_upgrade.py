@@ -7,7 +7,8 @@ and the ``resume_is_held`` guards it exports — in the next release. Guarded ca
   * services/tasks_runner_jc_comp.py (FN_JC_COMP_RESUME runner)
   * services/tasks_runner_migration.py (resume after data migration)
   * services/lvol_monitor.py resume_comp (resume after delete-rebalance)
-  * cluster_ops.cluster_activate (resume on activation from UNREADY)
+  * storage_node_ops.resume_jc_compression (leader's own LVS after restart
+    or takeover, and cluster_ops.cluster_activate on every activation)
 
 Flow:
   1. ``pre_update`` — first step of ``cluster update``: refuses unless every

@@ -1284,6 +1284,24 @@ def get_active_node_tasks(cluster_id, node_id):
     return out
 
 
+# Data movement on a node that JC compression waits for: migration and
+# restart work, after which the journal stops growing and one compression
+# pass is effective. Not every active task: replication, backup and sync
+# tasks are always open on a node that replicates, and counting them kept
+# the resume from ever firing (bf7 2026-10-30: the 16:39 rebalancing
+# finished, no node's own journal was resumed, the JMs filled by 19:20).
+_JC_COMP_WAITS_FOR = (
+    JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_NODE_RESTART, JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_ADD,
+    JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG, JobSchedule.FN_CLUSTER_EXPAND,
+)
+
+
+def get_jc_comp_blocking_node_tasks(cluster_id, node_id):
+    return [t for t in get_active_node_tasks(cluster_id, node_id)
+            if t.function_name in _JC_COMP_WAITS_FOR]
+
+
 def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
     """The open new-device migration of ``distr_name`` on ``node_id``; on any
     node when ``node_id`` is None."""
@@ -1605,6 +1623,16 @@ def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
 
 def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
     snapshot = db.get_snapshot_by_id(snapshot_id)
+    # Nothing to queue when the base already has its copy on the target, or a
+    # replication of it is already queued. Without these checks every
+    # replication task of a clone (every migrated volume is one) queued its
+    # base again: bf8 2026-11-02, 66 tasks for one repl_commit base, each
+    # answering "already replicated" after ~3.6 s, ~16 % of the serial
+    # replication runner -- enough to keep migrations above the cutover gate.
+    if snapshot.target_replicated_snap_uuid:
+        return
+    if _active_snapshot_replication_task(snapshot.cluster_id, snapshot.get_id()):
+        return
     for sn_inst in snapshot.instances:
         if sn_inst["lvol"]["node_id"] == node_id:
             logger.info("Snapshot instance found on node, skip adding replication task")
@@ -1618,6 +1646,16 @@ def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
               function_params={"snapshot_id": snapshot.get_id(), "replicate_to_source": False,
                                "replicate_as_snap_instance": True},
               send_to_cluster_log=False)
+
+
+def _active_snapshot_replication_task(cluster_id, snapshot_id):
+    """An open (not done, not canceled) replication task of *snapshot_id*."""
+    for task in db.get_job_tasks(cluster_id):
+        if (task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                and task.status != JobSchedule.STATUS_DONE and not task.canceled
+                and (task.function_params or {}).get("snapshot_id") == snapshot_id):
+            return task.uuid
+    return False
 
 
 def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False,

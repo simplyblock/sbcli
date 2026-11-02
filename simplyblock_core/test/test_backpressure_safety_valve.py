@@ -10,6 +10,8 @@ the replicated marker never came and the cadence froze for the rest of the run
 (outstanding=0, not one new snapshot in 20 minutes). The chaining bug is fixed;
 this pins the guard so no FUTURE terminal failure can halt replication quietly.
 """
+import pytest
+
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_monitor as sm
@@ -42,6 +44,7 @@ class _Full:
         self.uuid = uuid
         self.target_replicated_snap_uuid = target
         self.source_replicated_snap_uuid = source
+        self.cluster_id = "CL1"
         self.lvol = _LvolRef()
 
     def get_id(self):
@@ -96,34 +99,64 @@ def test_suspended_retrying_transfer_still_blocks(monkeypatch):
     assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is not None
 
 
-def test_finished_task_without_a_marker_does_not_block(monkeypatch):
-    """The regression: DONE but never replicated is terminal, not pending."""
+@pytest.fixture
+def requeued(monkeypatch):
+    """Records the transfers the cadence re-queues for an outstanding snapshot."""
+    from simplyblock_core.controllers import tasks_controller
+    calls = []
+    monkeypatch.setattr(tasks_controller, "add_snapshot_replication_task",
+                        lambda cluster_id, node_id, snap_id, **kw: calls.append(snap_id))
+    return calls
+
+
+# A transfer that ended without its marker is terminal. It is queued again,
+# a bounded number of times, before the cadence moves on: resuming at once
+# stacked a new snapshot behind every transfer that gave up (bf6 2026-10-29:
+# 14 unreplicated snapshots on one volume). After the limit the cadence is
+# released, so a snapshot that cannot replicate still never halts it.
+
+def test_finished_task_without_a_marker_is_queued_again(monkeypatch, requeued):
     monkeypatch.setattr(sm, "db", _db(
         _Full("S1"), [_Task("S1", JobSchedule.STATUS_DONE)]))
-    assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is None
+    out = sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")])
+    assert out is not None and out.get_id() == "S1"
+    assert requeued == ["S1"]
 
 
-def test_cancelled_task_does_not_block(monkeypatch):
+def test_cancelled_task_is_queued_again(monkeypatch, requeued):
     monkeypatch.setattr(sm, "db", _db(
         _Full("S1"), [_Task("S1", JobSchedule.STATUS_RUNNING, canceled=True)]))
-    assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is None
+    assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is not None
+    assert requeued == ["S1"]
 
 
-def test_no_task_at_all_does_not_block(monkeypatch):
-    """A dropped task never sets the marker -- waiting on it is waiting for ever."""
+def test_no_task_at_all_is_queued_again(monkeypatch, requeued):
+    """A dropped task never sets the marker: queue the transfer again."""
     monkeypatch.setattr(sm, "db", _db(_Full("S1"), []))
+    assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is not None
+    assert requeued == ["S1"]
+
+
+def test_after_the_limit_the_cadence_is_released(monkeypatch, requeued):
+    """The guard against a silent halt: a snapshot that keeps failing lets go."""
+    tasks = [_Task("S1", JobSchedule.STATUS_DONE)
+             for _ in range(sm._CADENCE_REQUEUE_LIMIT + 1)]
+    monkeypatch.setattr(sm, "db", _db(_Full("S1"), tasks))
     assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is None
+    assert requeued == []
 
 
-def test_another_snapshots_task_does_not_count_as_live(monkeypatch):
+def test_another_snapshots_task_does_not_count_as_live(monkeypatch, requeued):
     monkeypatch.setattr(sm, "db", _db(_Full("S1"), [_Task("SOMETHING_ELSE")]))
-    assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is None
+    sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")])
+    assert requeued == ["S1"]
 
 
-def test_a_non_replication_task_does_not_count_as_live(monkeypatch):
+def test_a_non_replication_task_does_not_count_as_live(monkeypatch, requeued):
     monkeypatch.setattr(sm, "db", _db(
         _Full("S1"), [_Task("S1", fn="other_function")]))
-    assert sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")]) is None
+    sm._outstanding_internal_snapshot(_Lvol(), [_Mini("S1")])
+    assert requeued == ["S1"]
 
 
 def test_unreadable_tasks_keep_back_pressure_on(monkeypatch):

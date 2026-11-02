@@ -297,8 +297,8 @@ class TestSendLvolAna:
         node.active_tcp = True
         node.rpc_client.return_value = rpc
         node.get_lvol_subsys_port.return_value = 4402
-        node.data_nics = [SimpleNamespace(ip4_address="10.0.0.1", trtype="TCP"),
-                          SimpleNamespace(ip4_address="10.0.0.2", trtype="TCP")]
+        node.data_nics = [SimpleNamespace(ip4_address="10.0.0.1", listen_address="10.0.0.1", trtype="TCP"),
+                          SimpleNamespace(ip4_address="10.0.0.2", listen_address="10.0.0.2", trtype="TCP")]
         lvol = SimpleNamespace(nqn="nqn.v1", fabric="tcp", ns_id=3, lvs_name="LVS_1")
         ops._send_lvol_ana(lvol, node, "inaccessible")
         assert [(c.args[1], c.kwargs["ana"], c.kwargs["anagrpid"])

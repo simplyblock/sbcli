@@ -46,6 +46,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
 from ..models.mgmt_node import MgmtNode
+from . import host_network
 from . import pci as pci_utils
 from . import shell as shell_utils
 from .helpers import parse_thread_siblings_list
@@ -134,7 +135,7 @@ def get_nvme_info(dev_name):
 
 def get_nics_data():
     logger.debug("function:get_nics_data start")
-    out, err, rc = shell_utils.run_command("ip -j address show")
+    out, err, rc = shell_utils.run_command(host_network.host_command("ip -j address show"))
     if rc != 0:
         logger.error(err)
         return []
@@ -1429,7 +1430,8 @@ def addNvmeDevices(rpc_client, snode, devs):
             # Node-add cold path: full dump is fine, the node carries no lvols yet.
             bdevs = rpc_client.bdev_list()
             for bdev in bdevs:
-                if bdev['name'].startswith(nvme_controller):
+                # <ctrl>n...: nvme_61 must not pick up nvme_611's bdevs.
+                if bdev['name'].startswith(f"{nvme_controller}n"):
                     nvme_bdevs.append(bdev['name'])
         else:
             pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
@@ -1512,22 +1514,47 @@ def aio_bdev_name_for_serial(serial: str) -> str:
     return f"aio_{sanitized}"
 
 
+def _unsafe_live_device_reason(dev):
+    """Safety checks that must hold for ANY live device before SPDK is told
+    to open it as storage — whether it was selected at add-node time
+    (`filter_eligible_block_devices`) or re-resolved at restart
+    (`resolve_lblk_entries`). A name/partuuid fallback match can land on a
+    device that merely shares a slot with the configured one on a
+    different host (e.g. a restart onto new hardware); without this check
+    it would be handed straight to `bdev_aio_create` with no re-validation,
+    including the possibility of landing on the host's own mounted root
+    disk."""
+    if dev.get("mounted_in_subtree"):
+        return "mounted (busy)"
+    if dev.get("holders"):
+        return f"held by {dev['holders']} (busy)"
+    if dev.get("is_root_disk"):
+        return "backs the root filesystem"
+    return None
+
+
 def resolve_lblk_entries(configured_entries, host_devices):
     """Match the node's configured lblk devices against the live host
-    inventory. Returns ``(resolved, missing)`` where resolved entries carry
-    the CURRENT name/path/by-id.
+    inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
+    name is only a fallback for devices without a resolvable serial. Partition
+    entries additionally resolve by PARTUUID — it survives a parent-disk
+    serial change (e.g. a hypervisor re-exposing the volume) while the
+    derived partition serial would not. Returns ``(resolved, missing)``
+    where resolved entries carry the CURRENT name/path/by-id/serial — the
+    live serial wins whenever one is reported, even when the match itself
+    was made by name/partuuid, so a device that only *looks* like the
+    configured one (same slot, genuinely different hardware — e.g. this
+    node restarted on a brand-new host) is truthfully reported as having a
+    new identity instead of silently inheriting the old serial. Callers
+    rely on that to tell "same device, renamed" from "different device,
+    coincidentally in the same slot": only the former is safe to treat as
+    already-initialized storage.
 
-    An entry carrying a ``path`` was selected by that stable path, and the
-    path is its identity: it matches the device that answers to the path
-    now, and nothing else. A device that only shares its serial or its kernel
-    name is not the one the caller named, and an absent path is a missing
-    device.
-
-    Every other entry resolves SERIAL-FIRST: kernel names shift across
-    reboots, so the stored name is only a fallback for devices without a
-    resolvable serial. Partition entries additionally resolve by PARTUUID —
-    it survives a parent-disk serial change (e.g. a hypervisor re-exposing
-    the volume) while the derived partition serial would not."""
+    A match that resolves to a live device failing `_unsafe_live_device_reason`
+    (mounted, held, or backing the root filesystem) is demoted to `missing`
+    rather than returned as resolved — a fallback match by name/partuuid
+    must clear the same safety bar `filter_eligible_block_devices` enforces
+    at add-node time, not just "something is attached at that name now"."""
     by_path = _index_by_selector(host_devices)
     by_serial = {d["serial"]: d for d in host_devices}
     by_name = {d["name"]: d for d in host_devices}
@@ -1537,20 +1564,37 @@ def resolve_lblk_entries(configured_entries, host_devices):
     for entry in configured_entries:
         path = entry.get("path")
         if path:
+            # A caller-selected path is the device's whole identity: a path
+            # that no longer answers is a missing device, not an invitation
+            # to fall back to serial/partuuid/name and guess at a different
+            # one that happens to still be there.
             live = by_path.get(path)
+            matched_by = "path"
         else:
             live = by_serial.get(entry.get("serial"))
+            matched_by = "serial"
             if live is None and entry.get("partuuid"):
                 live = by_partuuid.get(entry["partuuid"].lower())
+                matched_by = "partuuid"
             if live is None:
                 live = by_name.get(entry.get("name"))
+                matched_by = "name"
         if live is None:
+            missing.append(entry)
+            continue
+        unsafe_reason = _unsafe_live_device_reason(live)
+        if unsafe_reason:
+            logger.warning(
+                f"Configured block device {entry.get('name')} (serial "
+                f"{entry.get('serial')}) matched live device {live.get('name')} "
+                f"by {matched_by}, but it is {unsafe_reason}; refusing to "
+                f"reuse it as storage")
             missing.append(entry)
             continue
         resolved_entry = {
             "name": live["name"],
             "current_path": live["device_path"],
-            "serial": entry.get("serial") or live["serial"],
+            "serial": live.get("serial") or entry.get("serial"),
             "by_id": path or live.get("by_id_path") or entry.get("by_id", ""),
             "size": int(live.get("size") or entry.get("size") or 0),
             "numa": int(live.get("numa_node", entry.get("numa", -1))),
@@ -1923,12 +1967,9 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
             return "not a disk or partition"
         if dev["name"].startswith(constants.LBLK_EXCLUDED_NAME_PREFIXES):
             return "special device type"
-        if dev.get("mounted_in_subtree"):
-            return "mounted (busy)"
-        if dev.get("holders"):
-            return f"held by {dev['holders']} (busy)"
-        if dev.get("is_root_disk"):
-            return "backs the root filesystem"
+        unsafe_reason = _unsafe_live_device_reason(dev)
+        if unsafe_reason:
+            return unsafe_reason
         if dev.get("ro"):
             return "read-only"
         if not dev.get("size"):
@@ -1994,20 +2035,104 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     return selected, rejected
 
 
+def _journal_split_disks(devices):
+    """``{disk_name: (jm_part, data_part)}`` for every whole disk of the
+    inventory that a previous configure laid out with
+    node_utils.partition_disk_for_journal."""
+    found = {}
+    for dev in devices:
+        if dev.get("type") == "disk" and dev.get("has_partitions"):
+            pair = node_utils.journal_split_partitions(dev["name"], devices)
+            if pair:
+                found[dev["name"]] = pair
+    return found
+
+
+def _paired_entries(jm_dev, data_dev):
+    """Config entries of a journal partition and its data partition. The
+    journal entry names its data partner (``_pair``), which keeps the two on
+    the same storage node when the devices are dealt to the nodes of a host;
+    generate_configs removes the marker before the config is written."""
+    for part in (jm_dev, data_dev):
+        unsafe = _unsafe_live_device_reason(part)
+        if unsafe:
+            raise ValueError(f"simplyblock partition {part['name']} is {unsafe}")
+    jm_entry = _lblk_entry_from_inventory(jm_dev)
+    jm_entry["journal"] = True
+    data_entry = _lblk_entry_from_inventory(data_dev)
+    jm_entry["_pair"] = data_entry["name"]
+    return jm_entry, data_entry
+
+
 def detect_lblk_devices(include_names=None, exclude_names=None,
-                        include_serials=None, force_format=False):
+                        include_serials=None, force_format=False,
+                        min_units=constants.LBLK_MIN_DEVICES_PER_NODE):
     """Local-host block-device detection for `sn configure --lblk`.
     Returns ``{name: config_entry}`` where config_entry is the shape stored
-    in the node config file's ``lblk_devices`` list."""
+    in the node config file's ``lblk_devices`` list.
+
+    A configure runs again on every start of a storage node pod, so the
+    selection may name devices that an earlier configure already split into
+    a journal and a data partition:
+
+    - A whole disk laid out by partition_disk_for_journal carries the two
+      partitions and is no longer an unpartitioned disk. It is offered to the
+      selection as the whole disk it was, and is replaced by its two
+      partitions in the result.
+    - A partition split by split_partition_for_journal is now the journal
+      partition (it kept its number and PARTUUID); its data partition is
+      added next to it.
+
+    The two partitions of a split are returned next to each other, at the
+    position the device had in the selection, with the journal flagged, so a
+    re-configure deals the same devices to the same nodes as the first one.
+
+    ``min_units`` is the number of selected units below which the selection
+    is refused. A caller that splits devices into journal and data
+    partitions afterwards passes 1 and checks the result itself."""
     devices = node_utils.get_block_devices_info()
+    split_disks = _journal_split_disks(devices)
+    taken: set = set()
+    for jm_part, data_part in split_disks.values():
+        taken.update((jm_part["name"], data_part["name"]))
+    # A split disk is offered as the whole disk it was, without its
+    # partitions: it is exactly what the selection asked for, and neither its
+    # partitions nor (with --force) the disk itself may be taken separately.
+    offered = []
+    for dev in devices:
+        if dev.get("name") in taken:
+            continue
+        if dev.get("name") in split_disks:
+            dev = dict(dev, has_partitions=False)
+        offered.append(dev)
     selected, rejected = filter_eligible_block_devices(
-        devices, include_names=include_names, exclude_names=exclude_names,
+        offered, include_names=include_names, exclude_names=exclude_names,
         include_serials=include_serials, force_format=force_format)
     for dev, reason in rejected:
         logger.debug(f"block device {dev['name']} skipped: {reason}")
     requested = set(include_names or [])
     result = {}
     for dev in selected:
+        if dev["name"] in split_disks:
+            jm_part, data_part = split_disks[dev["name"]]
+            logger.info(f"block device {dev['name']} already carries a journal and a data "
+                        f"partition; using {jm_part['name']} and {data_part['name']}")
+            jm_entry, data_entry = _paired_entries(jm_part, data_part)
+            result[jm_entry["name"]] = jm_entry
+            result[data_entry["name"]] = data_entry
+            continue
+        if dev.get("type") == "part":
+            pair = node_utils.split_partition_partner(dev, devices)
+            if pair:
+                if pair[0]["name"] in result:
+                    continue  # both partitions of the split were selected
+                logger.info(f"partition {dev['name']} was split into journal "
+                            f"{pair[0]['name']} and data {pair[1]['name']} before; "
+                            f"using both")
+                jm_entry, data_entry = _paired_entries(*pair)
+                result[jm_entry["name"]] = jm_entry
+                result[data_entry["name"]] = data_entry
+                continue
         if dev.get("serial_synthetic"):
             logger.warning(
                 f"block device {dev['name']} has no hardware serial/WWN; using "
@@ -2031,12 +2156,25 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
             entry["partuuid"] = dev.get("partuuid", "")
             entry["parent_serial"] = dev.get("parent_serial", "")
         result[dev["name"]] = entry
-    if len(result) < constants.LBLK_MIN_DEVICES_PER_NODE:
+    if len(result) < min_units:
         raise ValueError(
-            f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
+            f"lblk mode requires at least {min_units} "
             f"partitions or SSDs per node; only {len(result)} eligible unit(s) "
             f"selected: {sorted(result)}")
     return result
+
+
+def lblk_device_units(lblk_entries) -> dict:
+    """``{unit_key: [entry names]}`` in selection order: the devices that are
+    dealt to the storage nodes of a host as one. The journal and the data
+    partition of a split are one unit, every other device is its own."""
+    units: dict = {}
+    partners = {e["_pair"] for e in lblk_entries.values() if e.get("_pair")}
+    for name, entry in lblk_entries.items():
+        if name in partners:
+            continue
+        units[name] = [name] + ([entry["_pair"]] if entry.get("_pair") else [])
+    return units
 
 
 def _lblk_entry_from_inventory(dev) -> dict:
@@ -2058,21 +2196,19 @@ def _lblk_entry_from_inventory(dev) -> dict:
 def split_lblk_journal_partition(lblk_entries, jm_percent=3):
     """Carve the journal for a partition-backed lblk node.
 
-    When the selection contains partitions, the journal can neither dedicate
-    a whole drive (journal-on-device) nor relabel one (the rest of the disk
-    is not ours) — instead the SMALLEST selected partition is split in two:
-    a journal partition and a data partition covering the remainder. The
-    journal is sized at ``jm_percent`` of the node's total selected capacity,
-    floored at LBLK_JM_MIN_SIZE and capped at LBLK_JM_SPLIT_MAX_FRACTION of
-    the partition being split.
+    When the selection contains partitions, the SMALLEST selected partition is
+    split in two: a journal partition and a data partition covering the
+    remainder. The journal is sized at ``jm_percent`` of the node's total
+    selected capacity, floored at LBLK_JM_MIN_SIZE and capped at
+    LBLK_JM_SPLIT_MAX_FRACTION of the partition being split.
 
-    Whole-disk-only selections are returned unchanged (they keep the
-    journal-on-device layout: the smallest disk becomes the journal at
-    add-node). Idempotent: a selection already carrying a journal-flagged
+    Whole-disk-only selections are returned unchanged (split_lblk_journal_disk
+    handles them). Idempotent: a selection already carrying a journal-flagged
     entry is returned unchanged.
 
     Runs on the storage node during `sn configure`. Returns the updated
-    ``{name: entry}`` dict with the journal entry flagged ``journal: True``.
+    ``{name: entry}`` dict with the journal entry flagged ``journal: True``,
+    in place of the partition that was split.
     """
     partitions = {n: e for n, e in lblk_entries.items() if e.get("type") == "part"}
     if not partitions:
@@ -2095,14 +2231,139 @@ def split_lblk_journal_partition(lblk_entries, jm_percent=3):
     logger.info(f"Splitting partition {target_name} into a {jm_bytes}-byte "
                 f"journal partition and a data partition")
     jm_dev, data_dev = node_utils.split_partition_for_journal(target_name, jm_bytes)
+    return _replace_with_pair(lblk_entries, target_name, jm_dev, data_dev)
 
-    result = {n: e for n, e in lblk_entries.items() if n != target_name}
+
+def _replace_with_pair(lblk_entries, target_name, jm_dev, data_dev):
+    """``lblk_entries`` with the entry ``target_name`` replaced, at its
+    position, by the journal and the data partition it was split into."""
     jm_entry = _lblk_entry_from_inventory(jm_dev)
     jm_entry["journal"] = True
-    result[jm_entry["name"]] = jm_entry
     data_entry = _lblk_entry_from_inventory(data_dev)
-    result[data_entry["name"]] = data_entry
+    result = {}
+    for name, entry in lblk_entries.items():
+        if name == target_name:
+            result[jm_entry["name"]] = jm_entry
+            result[data_entry["name"]] = data_entry
+        else:
+            result[name] = entry
     return result
+
+
+def split_lblk_journal_disk(lblk_entries, jm_percent=3):
+    """Carve the journal from a whole disk of the selection.
+
+    The smallest selected disk is partitioned into a journal partition and a
+    data partition covering the remainder. The journal is sized at
+    ``jm_percent`` of the node's total selected capacity, floored at
+    LBLK_JM_MIN_SIZE and capped at LBLK_JM_SPLIT_MAX_FRACTION of the disk.
+
+    The journal stays on that disk for the life of the node: disks selected
+    later do not receive a share of it.
+
+    Runs on the storage node during `sn configure`. Returns the updated
+    ``{name: entry}`` dict with the journal entry flagged ``journal: True``,
+    in place of the disk that was partitioned.
+    """
+    target_name = min(lblk_entries, key=lambda n: lblk_entries[n]["size"])
+    target = lblk_entries[target_name]
+    total_size = sum(e["size"] for e in lblk_entries.values())
+    jm_bytes = max(total_size * int(jm_percent) // 100, constants.LBLK_JM_MIN_SIZE)
+    max_jm = int(target["size"] * constants.LBLK_JM_SPLIT_MAX_FRACTION)
+    if jm_bytes > max_jm:
+        raise ValueError(
+            f"journal needs {jm_bytes} bytes ({jm_percent}% of {total_size}, "
+            f"min {constants.LBLK_JM_MIN_SIZE}) but the smallest selected "
+            f"disk {target_name} ({target['size']} bytes) may contribute "
+            f"at most {max_jm}; provide a larger disk")
+
+    logger.info(f"Partitioning disk {target_name} into a {jm_bytes}-byte "
+                f"journal partition and a data partition")
+    jm_dev, data_dev = node_utils.partition_disk_for_journal(target_name, jm_bytes)
+    return _replace_with_pair(lblk_entries, target_name, jm_dev, data_dev)
+
+
+def previous_lblk_dedicated_journal_serials(config_paths=None) -> set:
+    """Serials of the whole disks that an existing node configuration of this
+    host runs with a dedicated journal device.
+
+    Such a node keeps the journal on the smallest of its disks, chosen at
+    add-node, and its config carries whole disks only and no journal-flagged
+    entry. After the first add-node every one of those disks holds data, so
+    none of them may ever be partitioned for a journal split, whatever the
+    default layout of a later configure is. The configuration is read from
+    the node config file and its read-only copy, which a configure discards
+    and rewrites; the caller reads them before the discard."""
+    serials: set = set()
+    paths = config_paths or (constants.NODES_CONFIG_FILE,
+                             f"{constants.NODES_CONFIG_FILE}_read_only")
+    for path in paths:
+        try:
+            with open(path) as handle:
+                config = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        for node in (config or {}).get("nodes", []) or []:
+            entries = node.get("lblk_devices") or []
+            if not entries:
+                continue
+            if any(e.get("journal") or e.get("type") == "part" for e in entries):
+                continue
+            serials.update(e["serial"] for e in entries if e.get("serial"))
+    return serials
+
+
+def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
+                             keep_serials=()):
+    """Give one storage node's devices their journal.
+
+    The default is a journal partition carved from the node's own devices:
+
+    - A node that already has a journal-flagged entry (an earlier split,
+      reused by detect_lblk_devices) keeps it.
+    - A node with partitions gets its smallest partition split into a journal
+      and a data partition (split_lblk_journal_partition).
+    - A node of whole disks gets its smallest disk partitioned into a journal
+      and a data partition (split_lblk_journal_disk).
+
+    A node of whole disks keeps a dedicated journal device instead -- the
+    smallest disk, chosen at add-node -- when that was asked for
+    (``journal_device``), when one of its disks belongs to an existing node
+    that runs that layout (``keep_serials``), or when one of its disks
+    carries simplyblock data or cannot be read. A disk is never partitioned
+    when it might hold data: a configure runs again at every start of a
+    storage node pod, and the data of an existing node starts at the first
+    block of its disks, invisible to blkid.
+
+    Returns the updated ``{name: entry}`` dict of the node."""
+    if not lblk_entries or any(e.get("journal") for e in lblk_entries.values()):
+        return lblk_entries
+    if any(e.get("type") == "part" for e in lblk_entries.values()):
+        for name, entry in lblk_entries.items():
+            if entry.get("type") == "part" and node_utils.simplyblock_data_signature(name) is not False:
+                raise ValueError(
+                    f"partition {name} carries simplyblock data or cannot be read, but "
+                    f"is not a journal or data partition of a previous split; it is not "
+                    f"split")
+        return split_lblk_journal_partition(lblk_entries, jm_percent=jm_percent)
+    if journal_device:
+        logger.info(f"devices {sorted(lblk_entries)}: dedicated journal device requested")
+        return lblk_entries
+    kept = sorted(n for n, e in lblk_entries.items() if e.get("serial") in set(keep_serials))
+    if kept:
+        logger.info(f"devices {kept} belong to an existing node with a dedicated journal "
+                    f"device; keeping that layout")
+        return lblk_entries
+    in_use = sorted(n for n in lblk_entries
+                    if node_utils.simplyblock_data_signature(n) is not False)
+    if in_use:
+        logger.warning(
+            f"devices {in_use} carry simplyblock data or cannot be read; no disk is "
+            f"partitioned and the node keeps a dedicated journal device. To reuse "
+            f"such a disk for a new node, clear its first MiB (blkdiscard or dd) "
+            f"before the configure")
+        return lblk_entries
+    return split_lblk_journal_disk(lblk_entries, jm_percent=jm_percent)
 
 
 def node_config_device_count(node) -> int:
@@ -2523,15 +2784,20 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                 include_names=lblk_selection.get("names"),
                 exclude_names=lblk_selection.get("names_exclude"),
                 include_serials=lblk_selection.get("serials"),
-                force_format=force)
-            # Partition-backed nodes: carve the journal by splitting the
-            # smallest selected partition in two (journal + data remainder).
-            lblk_entries = split_lblk_journal_partition(lblk_entries, jm_percent=jm_percent)
+                force_format=force, min_units=1)
         except ValueError as e:
             logger.error(str(e))
             return False, False
-        nvmes = {name: {"pci_address": "", "numa_node": entry["numa"]}
-                 for name, entry in lblk_entries.items()}
+        # The journal is given per node, after the devices are dealt to the
+        # nodes (lblk_node_journal_layout), so a node's journal and data stay
+        # on that node. Until then the two partitions of an earlier split
+        # travel as one unit.
+        lblk_units = lblk_device_units(lblk_entries)
+        lblk_keep_serials = lblk_selection.get("keep_serials")
+        if lblk_keep_serials is None:
+            lblk_keep_serials = previous_lblk_dedicated_journal_serials()
+        nvmes = {key: {"pci_address": "", "numa_node": lblk_entries[key]["numa"]}
+                 for key in lblk_units}
         if not nvmes:
             logger.error("No eligible Linux block devices found on this system "
                          "(devices must be unmounted, unheld, unpartitioned whole disks)")
@@ -2666,11 +2932,26 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
 
             nvme_neg1_list = all_nvmes_neg1_per_node[node_index]
             if lblk_mode:
-                node_info["lblk_devices"] = []
-                for dev_name in nvme_neg1_list:
-                    node_info["lblk_devices"].append(lblk_entries[dev_name])
-                for dev_name in nvme_per_core_group[idx]:
-                    node_info["lblk_devices"].append(lblk_entries[dev_name])
+                node_entries = {}
+                for unit in list(nvme_neg1_list) + list(nvme_per_core_group[idx]):
+                    for dev_name in lblk_units[unit]:
+                        entry = dict(lblk_entries[dev_name])
+                        entry.pop("_pair", None)
+                        node_entries[dev_name] = entry
+                try:
+                    node_entries = lblk_node_journal_layout(
+                        node_entries, jm_percent=jm_percent,
+                        journal_device=bool(lblk_selection.get("journal_device")),
+                        keep_serials=lblk_keep_serials)
+                    if node_entries and len(node_entries) < constants.LBLK_MIN_DEVICES_PER_NODE:
+                        raise ValueError(
+                            f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
+                            f"partitions or SSDs per node; only {len(node_entries)} unit(s) "
+                            f"for the node on socket {nid}: {sorted(node_entries)}")
+                except ValueError as e:
+                    logger.error(str(e))
+                    return False, False
+                node_info["lblk_devices"] = list(node_entries.values())
             else:
                 for nvme_name in nvme_neg1_list:
                     node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
@@ -3779,12 +4060,21 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
-def get_mgmt_ip(node_info: Any, iface_names: str | list[str]) -> tuple[str, str] | None:
+def get_mgmt_ip(node_info: Any, iface_names: str | list[str], networks=None,
+                pod_network: bool = False) -> tuple[str, str] | None:
+    """The worker's address and the interface it is on. With attached ``networks`` or
+    on the ``pod_network`` the agent runs in the pod network and cannot see the host's
+    interfaces, so it reports the host's address itself (``host_ip``, set by the
+    DaemonSet) and no interface."""
     if isinstance(node_info, (bytes, bytearray)):
         try:
             node_info = json.loads(node_info.decode("utf-8"))
         except Exception:
             return None
+
+    if networks or pod_network:
+        host_ip = node_info.get("host_ip")
+        return (host_ip, "") if host_ip else None
 
     if isinstance(iface_names, str):
         iface_names = [iface_names]

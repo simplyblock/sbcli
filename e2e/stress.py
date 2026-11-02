@@ -60,6 +60,17 @@ def main():
     parser.add_argument('--preserve_resources_on_failure', type=bool,
                         help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
                         default=False)
+    parser.add_argument('--case', type=str, default=None,
+                        help="Case id for a matrix test, e.g. "
+                             "dual_graceful_shutdown_container_stop_sep0_drain. "
+                             "Matrix tests run their whole table when omitted.")
+    parser.add_argument('--resume', action='store_true',
+                        default=os.environ.get("RESUME", "") not in ("", "0",
+                                                                     "false"),
+                        help="Adopt the objects left by the previous run on "
+                             "this cluster and continue from its checkpoint, "
+                             "instead of wiping and starting over. Also "
+                             "settable with RESUME=1 for the workflows.")
     args = parser.parse_args()
     
     tests = get_stress_tests() + get_backup_stress_tests()
@@ -130,6 +141,23 @@ def main():
                         k8s_run=args.run_k8s,
                         tls_enabled=args.tls_enabled,
                         preserve_resources_on_failure=args.preserve_resources_on_failure)
+
+        # Both flags have to land before setup(): the object wipe lives inside
+        # setup(), and eleven classes override it without calling super(), so
+        # anything wired afterwards would arrive after the objects were gone.
+        if args.resume:
+            test_obj.resume_requested = True
+            logger.info("[resume] enabled for %s -- existing objects will be "
+                        "adopted, not deleted", test.__name__)
+        if args.case:
+            if not hasattr(test_obj, "CASE_ID"):
+                logger.warning("[case] %s does not take --case, ignoring %r",
+                               test.__name__, args.case)
+            else:
+                test_obj.CASE_ID = args.case
+                test_obj._init_mixin_state()
+                logger.info("[case] %s running case %s", test.__name__,
+                            args.case)
         try:
             test_obj.setup()
             # After setup(), not inside it: eleven test classes replace
@@ -151,6 +179,16 @@ def main():
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         log_path = getattr(test_obj, "docker_logs_path", "")
+        # The workflow summary builds its per-test table by grepping
+        # output.log for "Logs Path:". e2e.py prints it (e2e.py:420); this
+        # runner never did, so every stress run reported "Test logs: not
+        # detected" while the logs sat on NFS the whole time. Printed here,
+        # before the collection and copy steps that can throw or hang.
+        try:
+            test_obj.get_logs_path()
+        except Exception:
+            logger.error("Error printing logs path")
+            logger.error(traceback.format_exc())
         try:
             if args.run_k8s:
                 test_obj.stop_k8s_log_collect()
@@ -212,10 +250,39 @@ def main():
                     except Exception:
                         pass
 
-        if check_for_dumps():
+        # Guarded, like every other post-test step in this loop. This one was
+        # not, and it is the only thing between a finished test and the counts
+        # below. On 2026-09-28 a 10h31m MassCreateRapidRestart_6k_3Snap_Docker
+        # run completed every phase -- 1500 lvols, 4500 snapshots, 1500 clones,
+        # 30 restart cycles, all deleted -- and then this raised
+        #
+        #   Exception: Tunnel established, but all usernames failed for target
+        #   192.168.10.201. Last error: AuthenticationException(...)
+        #
+        # which killed the process before "Number of Passed Cases" was ever
+        # printed. The run reported FAILURE with "(test counts not found in
+        # log)", and a passing result was discarded by its own core-dump check.
+        #
+        # A diagnostic that cannot reach a node is worth a warning, not the
+        # result. Treated as "no dumps found", because that is the honest
+        # reading: we did not look, so we cannot claim we found one -- and the
+        # message says so rather than letting a silent False imply a clean scan.
+        try:
+            dumps_found = check_for_dumps()
+        except Exception:
+            logger.warning("Could not check for core dumps; treating as none "
+                           "found. The test result above stands -- this step "
+                           "only decides whether LATER tests run.")
+            logger.warning(traceback.format_exc())
+            dumps_found = False
+        if dumps_found:
             logger.info("Found a core dump during test execution. "
                         "Cannot execute more tests as cluster is not stable. Exiting")
-            test_obj.collect_management_details()
+            try:
+                test_obj.collect_management_details()
+            except Exception:
+                logger.error("Error collecting management details after a dump")
+                logger.error(traceback.format_exc())
             break
 
     failed_cases = list(errors.keys())

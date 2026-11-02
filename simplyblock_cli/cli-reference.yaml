@@ -85,7 +85,7 @@ commands:
             type: str
             default: ""
           - name: "--lblk"
-            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition."
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Each storage node gets its journal from its own devices: its smallest selected partition is split in two, or its smallest whole disk is partitioned, into a journal partition (--jm-percent of the node's capacity) and a data partition. A disk that carries simplyblock data is never partitioned; a node on such disks keeps a dedicated journal device. Use --lblk-journal-device for a dedicated journal device on whole disks. Minimum 2 partitions or SSDs per node, or a single whole disk."
             dest: lblk
             type: bool
             action: store_true
@@ -107,8 +107,13 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk-journal-device"
+            help: "With --lblk and whole disks: dedicate each node's smallest disk to the journal instead of partitioning it into a journal partition and a data partition (the default). Needs at least two disks per node. Partition selections always carry their journal in a split partition."
+            dest: lblk_journal_device
+            type: bool
+            action: store_true
           - name: "--jm-percent"
-            help: "Journal size in percent of the node's total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`."
+            help: "Journal size in percent of the node's total selected capacity when the journal is carved from a selected partition or disk (requires --lblk, not with --lblk-journal-device). Default: `3`."
             dest: jm_percent
             required: false
             type: int
@@ -565,6 +570,19 @@ commands:
             dest: force
             type: bool
             action: store_true
+      - name: resize-device
+        help: "Grows a Linux block device (lblk) online to the size of its block device."
+        usage: >
+          Re-reads the size of the device's block device on the storage node's host, for example, after its LUN was
+          grown on the storage array, and grows the storage device online without interrupting I/O. Shrinking is
+          refused. The placement weight of the device keeps its original size, so the added capacity is only fully
+          usable once all data devices of the cluster have grown by the same factor, or after cluster grow-devices
+          has updated the weights of unevenly grown devices and rebalanced the cluster.
+        arguments:
+          - name: "device_id"
+            help: "The storage device id."
+            dest: device_id
+            type: str
       - name: add-device
         help: "Adds a new storage device."
         usage: >
@@ -1054,6 +1072,13 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
+          - name: "--enable-page-copy"
+            help: >
+              Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the
+              cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.
+            dest: page_copy
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1110,9 +1135,10 @@ commands:
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >
-              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
-              limit and larger values are rejected. Set here rather than per node so every node
-              in the cluster is sized alike; a node adopts a change on its next restart.
+              Cluster-wide ceiling on nvmf subsystems per storage node. 500 is a hard product
+              limit and larger values are rejected; 0 sizes each node for the default of 75.
+              Set here rather than per node so every node in the cluster is sized alike; a
+              node adopts a change on its next restart.
             dest: max_subsys
             type: int
             default: 0
@@ -1304,6 +1330,13 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
+          - name: "--enable-page-copy"
+            help: >
+              Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the
+              cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.
+            dest: page_copy
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1338,9 +1371,10 @@ commands:
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >
-              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
-              limit and larger values are rejected. Set here rather than per node so every node
-              in the cluster is sized alike; a node adopts a change on its next restart.
+              Cluster-wide ceiling on nvmf subsystems per storage node. 500 is a hard product
+              limit and larger values are rejected; 0 sizes each node for the default of 75.
+              Set here rather than per node so every node in the cluster is sized alike; a
+              node adopts a change on its next restart.
             dest: max_subsys
             type: int
             default: 0
@@ -1425,6 +1459,27 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: grow-devices
+        help: "Grows every Linux block device (lblk) of the cluster online to the size of its block device."
+        usage: >
+          Re-reads the size of every online data device of an lblk cluster and grows the devices whose block device
+          has grown, one at a time. Used after the LUNs of the cluster were grown on the storage array. When all
+          devices have grown by the same factor, nothing else changes. When they have grown unevenly, the device
+          weights are set to the new sizes and the cluster is rebalanced, which re-places a large part of the data
+          in the background; this needs an active cluster with all nodes and devices online and no running
+          migration. Grow all LUNs on the array first, then run this command once.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--no-rebalance"
+            help: "Keep the device weights after an uneven growth and do not rebalance the cluster."
+            dest: no_rebalance
+            type: bool
+            default: false
+            action: store_true
       - name: show
         help: "Shows a cluster's statistics."
         arguments:

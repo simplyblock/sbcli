@@ -4,7 +4,7 @@
     per nvmf subsystem — bounds caller-supplied max_namespace_per_subsys,
     joins into legacy subsystems recorded with a larger max, and the value
     seeded into new subsystems inside the FDB claim transaction;
-  - at most constants.MAX_SUBSYSTEMS_PER_NODE (75) subsystems per node —
+  - at most constants.MAX_SUBSYSTEMS_PER_NODE (500) subsystems per node —
     enforced at every surface that SETS max_lvol (configure, add, restart,
     cluster update); admission honours the node's configured max_lvol so
     legacy nodes from releases predating the cap keep provisioning as
@@ -50,7 +50,7 @@ def _pick(node_id, lvols, pool=POOL, **kw):
 class TestMaxSubsystemsForNode(unittest.TestCase):
     def test_hard_cap_values(self):
         self.assertEqual(NS_CAP, 50)
-        self.assertEqual(SUBSYS_CAP, 75)
+        self.assertEqual(SUBSYS_CAP, 500)
 
     def test_legacy_over_cap_max_is_grandfathered(self):
         # A max_lvol above the cap can only come from a record written by a

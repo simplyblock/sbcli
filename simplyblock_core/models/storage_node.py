@@ -95,6 +95,8 @@ class StorageNode(BaseNodeObject):
     cpu_hz: int = 0
     ctrl_secret: SecretStr = SecretStr("")
     data_nics: list[IFace] = default_factory(list)
+    # Dumped storage_network.NetworkAttachment entries; empty on the host network.
+    networks: list[dict] = default_factory(list)
     distrib_cpu_cores: list[int] = default_factory(list)
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
@@ -107,6 +109,9 @@ class StorageNode(BaseNodeObject):
     host_nqn: str = ""
     host_secret: SecretStr = SecretStr("")
     hostname: str = ""
+    # The Kubernetes node the pod runs on; "" on a record that predates it, which the
+    # hostname (<node>_<rpc_port>) then stands in for.
+    k8s_node_name: str = ""
     hugepages: int = 0
     ib_devices: list[IFace] = default_factory(list)
     id_device_by_nqn: bool = False
@@ -135,6 +140,7 @@ class StorageNode(BaseNodeObject):
     max_snap: int = 0
     memory: int = 0
     mgmt_ip: str = ""
+    # SPDK RPC address of a pod on attached networks; mgmt_ip stays the worker's address.
     namespace: str = ""
     node_lvs: str = "lvs"
     num_partitions_per_dev: int = 1
@@ -327,6 +333,47 @@ class StorageNode(BaseNodeObject):
                     break
         return super().from_dict(data)
 
+    @property
+    def pod_network(self) -> bool:
+        """Whether the SPDK pod serves on the pod network itself, fronted by a Service,
+        with no attachment: its one data NIC is the CNI's interface."""
+        from simplyblock_core.storage_network import POD_NET_TYPE
+
+        return any(nic.net_type == POD_NET_TYPE for nic in self.data_nics)
+
+    @property
+    def on_pod_network(self) -> bool:
+        """Whether the SPDK pod is off the host network: attached to extra networks, or
+        serving on the pod network itself."""
+        return bool(self.networks) or self.pod_network
+
+    @property
+    def socket_bind_device(self) -> str | None:
+        """The device SPDK pins its sockets to with SO_BINDTODEVICE, or None for no pin.
+
+        A node with one data NIC on the host or an attached network keeps every socket
+        on it. On the pod network the one NIC is fronted by a Service whose traffic the
+        CNI delivers on the pod's interface, and a pin would refuse it, so none is set.
+        """
+        if len(self.data_nics) != 1 or self.pod_network:
+            return None
+        return self.data_nics[0].if_name
+
+    @property
+    def rpc_host(self) -> str:
+        """Where the control plane dials the SPDK proxy: a name for a pod, whose address
+        changes on every restart, and the worker's address for a pod on the host network.
+
+        Under TLS or on attached networks it is the node's name in the proxy's headless
+        Service, which resolves to the pod's primary address. On the pod network it is
+        the node's own Service, the one peers and clients hold the address of."""
+        if Settings().tls_connect != "disabled" or self.networks:
+            return self._k8s_service_host(self.spdk_proxy_service)
+        if self.pod_network:
+            from simplyblock_core.storage_network import service_name
+            return f"{service_name(self.rpc_port, self.cluster_id)}.{self.namespace}.svc"
+        return self.mgmt_ip
+
     def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
 
@@ -345,15 +392,12 @@ class StorageNode(BaseNodeObject):
             timeout, retry = budget
             kwargs.setdefault("timeout", timeout)
             kwargs.setdefault("retry", retry)
-        host = self.mgmt_ip
-        if Settings().tls_connect != "disabled":
-            host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(
-            host, self.rpc_port,
+            self.rpc_host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
     def _k8s_node_label(self) -> str:
-        return self.hostname.removesuffix(f"_{self.rpc_port}")
+        return self.k8s_node_name or self.hostname.removesuffix(f"_{self.rpc_port}")
 
     def _k8s_service_host(self, service: str) -> str:
         """The node's hostname in one of its cluster's headless Services.
@@ -370,7 +414,7 @@ class StorageNode(BaseNodeObject):
             keep = _MAX_DNS_LABEL - len(suffix) - _HOSTNAME_DIGEST - 1
             digest = hashlib.sha256(label.encode()).hexdigest()[:_HOSTNAME_DIGEST]
             label = f"{label[:keep].rstrip('-')}-{digest}"
-        return f"{label}{suffix}.{service}.{self.cr_namespace}.svc.cluster.local"
+        return f"{label}{suffix}.{service}.{self.cr_namespace}.svc"
 
     def record_workload_names(self, cluster: "Cluster") -> None:
         """Copy the cluster's workload names onto this node."""
@@ -428,7 +472,7 @@ class StorageNode(BaseNodeObject):
                 }
 
             for iface in self.data_nics:
-                ip = iface.ip4_address
+                ip = iface.listen_address
                 if self.active_rdma:
                     if iface.trtype != "RDMA":
                         logger.debug("Skipping non-RDMA iface %s (active_rdma=True)", ip)
@@ -527,7 +571,7 @@ class StorageNode(BaseNodeObject):
                 for la in (subsys.get("listen_addresses") or [])
             }
         for iface in self.data_nics:
-            ip = iface.ip4_address
+            ip = iface.listen_address
             if self.active_rdma:
                 if iface.trtype != "RDMA":
                     continue

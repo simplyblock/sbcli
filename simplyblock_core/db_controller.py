@@ -1206,8 +1206,8 @@ class DBController(metaclass=Singleton):
         if cluster is None:
             return [f"cluster {cluster_id} not found"]
         if cluster.lost_site != lost_site or cluster.lost_site_state not in allowed_states:
-            return [f"lost site is {cluster.lost_site!r} ({cluster.lost_site_state!r}), expected "
-                    f"{lost_site!r} in {sorted(allowed_states)}"]
+            return [(f"lost site is {cluster.lost_site!r} ({cluster.lost_site_state!r}), expected "
+                     f"{lost_site!r} in {sorted(allowed_states)}")]
         nodes = []
         for node_id in node_ids:
             node = BaseModel._read_record(tr, StorageNode().get_db_id(node_id).encode(), StorageNode)

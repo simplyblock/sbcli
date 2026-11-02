@@ -347,8 +347,8 @@ def create_or_add_cluster(mgmt_ip, cfg):
     before = set() if cfg["bootstrap"] else list_cluster_uuids(mgmt_ip)
     verb = "create" if cfg["bootstrap"] else "add"
     ssh_exec(mgmt_ip, [
-        f"{SBCTL} -d cluster {verb} --enable-node-affinity --max-subsys {MAX_LVOL}"
-        f" --data-chunks-per-stripe {cfg['ndcs']} --parity-chunks-per-stripe {cfg['npcs']}"
+        (f"{SBCTL} -d cluster {verb} --enable-node-affinity --max-subsys {MAX_LVOL}"
+        f" --data-chunks-per-stripe {cfg['ndcs']} --parity-chunks-per-stripe {cfg['npcs']}")
     ], check=True)
     after = list_cluster_uuids(mgmt_ip)
     new = after - before
@@ -368,8 +368,8 @@ def add_nodes_to_cluster(mgmt_ip, cluster_uuid, priv_ips, ha_jm_count):
                 ssh_exec(mgmt_ip, [
                     # --dev unlocks --spdk-image (developer_mode, cli.py); the
                     # plain -d is only debug logging and does NOT.
-                    f"{SBCTL} --dev -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
-                    f"{jm_flag} --spdk-image {SPDK_IMAGE}"
+                    (f"{SBCTL} --dev -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
+                    f"{jm_flag} --spdk-image {SPDK_IMAGE}")
                 ], check=True)
                 return
             except RuntimeError:
@@ -444,12 +444,12 @@ def main():
         "sudo dnf install git python3.11 python3.11-pip nvme-cli -y",
         # sbctl loads libfdb_c on import, so the client library must be there
         # before the first sbctl call (install_deps.sh runs too late for that)
-        "rpm -q foundationdb-clients || sudo dnf install -y https://github.com/apple/foundationdb/"
-        "releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm",
+        ("rpm -q foundationdb-clients || sudo dnf install -y https://github.com/apple/foundationdb/"
+        "releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm"),
         "sudo python3.11 -m pip install --upgrade pip setuptools wheel",
         "sudo python3.11 -m pip install ruamel.yaml",
-        f"sudo python3.11 -m pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
-        " --upgrade --force --ignore-installed requests",
+        (f"sudo python3.11 -m pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
+        " --upgrade --force --ignore-installed requests"),
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
     ]
     print(f"Phase 1: installing sbcli@{BRANCH} on {len(setup_ips)} nodes...")
@@ -535,8 +535,8 @@ def main():
     print(f"Configuring replication {REPLICATION['source']} -> {REPLICATION['target']}"
           f" (target pool {tgt_pool} = {tgt_pool_uuid})...")
     ssh_exec(mgmt_ip, [
-        f"{SBCTL} -d cluster replication-target-add {src_uuid} tgt_{tgt_uuid[:8]}"
-        f" {tgt_uuid} --target-pool {tgt_pool_uuid} --timeout {REPLICATION['timeout']}"
+        (f"{SBCTL} -d cluster replication-target-add {src_uuid} tgt_{tgt_uuid[:8]}"
+        f" {tgt_uuid} --target-pool {tgt_pool_uuid} --timeout {REPLICATION['timeout']}")
     ], check=True)
 
     # --- Phase 6: prep clients ---

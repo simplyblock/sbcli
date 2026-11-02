@@ -372,9 +372,12 @@ class TestLookupWithoutRecovery:
         assert ops.find_leader_with_failover(_home(db, a), "LVS_1", recover=False) == (None, [])
         for node in (*a, *b):
             rpcs[node.get_id()].bdev_lvol_set_lvs_signal.assert_not_called()
-        # in this very state the default lookup forces the change through b1
-        ops.find_leader_with_failover(_home(db, a), "LVS_1")
-        rpcs[b[1].get_id()].bdev_lvol_set_lvs_signal.assert_called_once_with("LVS_1")
+        # nor does the default lookup: b0 cannot be proven non-leader, so it
+        # may still lead and nobody else is made leader
+        assert ops.find_leader_with_failover(_home(db, a), "LVS_1") == (None, [])
+        for node in (*a, *b):
+            rpcs[node.get_id()].bdev_lvol_set_lvs_signal.assert_not_called()
+        _nothing_granted(rpcs, [*a, *b])
 
 
 # ---------------------------------------------------------------------------

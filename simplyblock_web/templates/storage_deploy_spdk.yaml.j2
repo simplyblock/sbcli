@@ -6,17 +6,29 @@ metadata:
   labels:
     app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
-  {% if MODE == "kubernetes" %}
+    {% if FULL_CLUSTER_ID %}
+    simplyblock.io/cluster: {{ FULL_CLUSTER_ID }}
+    {% endif %}
+  {% if MODE == "kubernetes" or NETWORKS %}
   annotations:
+    {% if MODE == "kubernetes" %}
     log-collector/enabled: "true"
+    {% endif %}
+    {% if NETWORKS %}
+    k8s.v1.cni.cncf.io/networks: {{ NETWORKS | tojson }}
+    {% endif %}
   {% endif %}
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
   nodeSelector:
     kubernetes.io/hostname: {{ HOSTNAME }}
+  {% if NETWORKS or POD_NETWORK %}
+  dnsPolicy: ClusterFirst
+  {% else %}
   hostNetwork: true
   dnsPolicy: ClusterFirstWithHostNet
+  {% endif %}
   tolerations:
     - effect: NoSchedule
       operator: Exists
@@ -138,12 +150,18 @@ spec:
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          {% for name, count in (DEVICE_RESOURCES or {}).items() %}
+          {{ name }}: {{ count }}
+          {% endfor %}
         requests:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
           {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          {% for name, count in (DEVICE_RESOURCES or {}).items() %}
+          {{ name }}: {{ count }}
+          {% endfor %}
 
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
@@ -168,6 +186,12 @@ spec:
           readOnly: true
         {% endif %}
       env:
+        {% if NETWORKS or POD_NETWORK %}
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        {% endif %}
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
         - name: RPC_PORT

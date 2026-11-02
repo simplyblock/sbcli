@@ -106,7 +106,8 @@ def task_runner(task):
         started = mig.start_migration(task, lambda: rpc_client.distr_migration_expansion_start(
             task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
             job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-            relaxed_mode=mig.migration_relaxed(snode.cluster_id)),
+            relaxed_mode=mig.migration_relaxed(snode.cluster_id),
+            keep_placed=bool(getattr(db.get_cluster_by_id(snode.cluster_id), "page_copy", False))),
             migration_devices=_online_device_count(task.cluster_id))
         if started is None:
             raise TaskAbort("canceled while starting migration")
@@ -201,7 +202,7 @@ def _roll_up(master_task, tasks):
 
 def resume_jc_compression(task):
     """A finished migration frees the node for JC compression again."""
-    if tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id):
+    if tasks_controller.get_jc_comp_blocking_node_tasks(task.cluster_id, task.node_id):
         return
 
     # Release-upgrade guard (remove with the jc_compression_upgrade plugin):

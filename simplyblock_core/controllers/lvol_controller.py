@@ -225,8 +225,8 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
-            return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
-                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            return False, (f"Invalid LVol size: {utils.humanbytes(size)} " \
+                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}")
 
     # Name uniqueness via the per-pool name index (O(1)) instead of scanning
     # every lvol in the DB.
@@ -2397,7 +2397,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
             # node), otherwise left as it is.
             try:
                 outcome = nvmf_listener.ensure_listener(
-                    rpc_client, lvol.nqn, iface.trtype, iface.ip4_address,
+                    rpc_client, lvol.nqn, iface.trtype, iface.listen_address,
                     recreate_lvs_port, ana_state="inaccessible" if sync else ana_state)
             except Exception as e:
                 logger.error("listener for %s on %s:%s: %s", lvol.nqn,
@@ -3007,6 +3007,19 @@ def _delete_base_unless_recovery_point(db_controller, snapshot_id):
     snapshot_controller.delete(snapshot_id)
 
 
+def _delete_held_sources(lvol):
+    """A clone of a replicated copy being deleted releases the source
+    snapshots that copy's live clone held back (a failed-over volume going
+    after the fail-back; snapshot_controller.delete_held_sources)."""
+    if not lvol.cloned_from_snap:
+        return
+    try:
+        snapshot_controller.delete_held_sources(lvol.cloned_from_snap)
+    except Exception:
+        logger.exception("Could not finish the held-back deletes of the sources of %s",
+                         lvol.cloned_from_snap)
+
+
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
     db_controller = DBController()
     ops_gate.assert_object_ops_allowed("volume delete", pool_uuid=lvol.pool_uuid)
@@ -3036,6 +3049,14 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
             return
+
+    # A deleted volume cuts over nowhere: end a cutover still running for it.
+    try:
+        cluster_id = (snode.cluster_id if snode
+                      else db_controller.get_pool_by_id(lvol.pool_uuid).cluster_id)
+        _cancel_replication_cutover(lvol.get_id(), db_controller.get_job_tasks(cluster_id))
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not cancel the cutover task of %s: %s", lvol.get_id(), e)
 
     # Consistency-group detach on delete (design §8.2): close the member's
     # epoch so future generations exclude it, but PRESERVE its snapshots in
@@ -3117,6 +3138,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
                         _delete_base_unless_recovery_point(db_controller, snap.get_id())
             except KeyError:
                 pass # already removed
+        _delete_held_sources(lvol)
 
         logger.info("Done")
         return
@@ -3200,6 +3222,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
                 _delete_base_unless_recovery_point(db_controller, snap.get_id())
         except KeyError:
             pass # already deleted
+    _delete_held_sources(lvol)
 
     cl = db_controller.get_cluster_by_id(snode.cluster_id)
 
@@ -5314,7 +5337,32 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
             if snap.lvol.uuid == lvol.uuid:
                 tasks_controller.cancel_task(task.uuid)
 
+    _cancel_replication_cutover(lvol_id, tasks)
     return True
+
+
+def _cancel_replication_cutover(lvol_id, tasks):
+    """Cancel the volume's cutover task that has not finished.
+
+    A cutover cannot finish once the volume stops replicating or is deleted,
+    yet nothing ended its task: the claim of a volume deleted mid-migration
+    left the task suspended for good, holding the volume's turn and naming a
+    volume that no longer exists (bf6 2026-10-29, vol-2 and vol-3).
+
+    A cutover that has committed (``end_time`` recorded) is left alone: its
+    own wrap-up stops the source's replication and, with --delete-source,
+    deletes the source, both of which land here while the task is still
+    running. Cancelling it then marked a completed cutover canceled, the
+    operator reported the volume's migration failed and never pointed its
+    PersistentVolume at the target (bf7 2026-10-30, vol-3/5/6)."""
+    for task in tasks:
+        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
+                and task.status != JobSchedule.STATUS_DONE and not task.canceled
+                and not task.function_params.get("end_time")
+                and task.function_params.get("lvol_id") == lvol_id):
+            logger.info("Cancelling cutover task %s of volume %s: it no longer replicates",
+                        task.uuid, lvol_id)
+            tasks_controller.cancel_task(task.uuid)
 
 
 def _claim_target_nsid(db_controller, new_lvol, target_node):
@@ -6778,7 +6826,7 @@ def suspend_lvol(lvol_id):
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible",
+                lvol.nqn, iface.listen_address, lvol.subsys_port, ana="inaccessible",
                 anagrpid=lvol.ns_id)
             if not ret:
                 logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
@@ -6791,7 +6839,7 @@ def suspend_lvol(lvol_id):
                 if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                     ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible",
+                        lvol.nqn, iface.listen_address, lvol.subsys_port, ana="inaccessible",
                         anagrpid=lvol.ns_id)
                     if not ret:
                         logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
@@ -6815,7 +6863,7 @@ def resume_lvol(lvol_id):
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=True,
+                lvol.nqn, iface.listen_address, lvol.subsys_port, is_optimized=True,
                 anagrpid=lvol.ns_id)
             if not ret:
                 logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
@@ -6828,7 +6876,7 @@ def resume_lvol(lvol_id):
                 if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                     ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=False,
+                        lvol.nqn, iface.listen_address, lvol.subsys_port, is_optimized=False,
                         anagrpid=lvol.ns_id)
                     if not ret:
                         logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")

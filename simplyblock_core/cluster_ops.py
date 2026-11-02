@@ -75,7 +75,6 @@ from simplyblock_core.models.stats import (
 )
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils import pull_docker_image_with_retry
 
@@ -394,6 +393,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    atomic_4k=False,
                    cluster_vip=None,
                    sync_replication=False,
+                   page_copy=False,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -555,6 +555,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.page_copy = bool(page_copy)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -670,6 +671,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 atomic_4k=False,
                 sync_replication=False,
                 leader_site="",
+                page_copy=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -705,6 +707,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         atomic_4k=atomic_4k,
         sync_replication=sync_replication,
         leader_site=leader_site,
+        page_copy=page_copy,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
@@ -740,6 +743,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 atomic_4k=False,
                 sync_replication=False,
                 leader_site="",
+                page_copy=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -881,6 +885,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.page_copy = bool(page_copy)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -2483,15 +2488,13 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
         logger.info("Setting Alcemls QOS weights")
         qos_controller.push_qos_weights(cl_id)
 
-    # Start JC compression on each node
-    # (release-upgrade guard: held until `cluster upgrade-complete`, remove
-    # with the jc_compression_upgrade plugin)
-    if is_fresh_activation and not jc_compression_upgrade.resume_is_held(cluster):
-        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-            if node.status == StorageNode.STATUS_ONLINE:
-                if not node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False):
-                    logger.info("Failed to resume JC compression adding task...")
-                    tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
+    # Start JC compression on each node -- on every activation, not only the
+    # first one: re-activating a suspended cluster restarts SPDK on its nodes,
+    # and a fresh JC context starts with compression suspended. The release-
+    # upgrade hold is applied inside storage_node_ops.resume_jc_compression.
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        if node.status == StorageNode.STATUS_ONLINE:
+            storage_node_ops.resume_jc_compression(node, node.jm_vuid)
 
     if not cluster.cluster_max_size and site_activation is None:
         cluster = db_controller.get_cluster_by_id(cl_id)
@@ -3612,10 +3615,10 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
     update = ["sudo", "docker", "service", "update", "--force"]
     if enabled:
         if not settings['plugin']['preinstalled']:
-            update += ["--env-add", f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
-                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}"]
-        update += ["--mount-add", f"type=bind,src={datasource_path},"
-                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly"]
+            update += ["--env-add", (f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
+                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}")]
+        update += ["--mount-add", (f"type=bind,src={datasource_path},"
+                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly")]
 
     logger.info("Restarting Grafana...")
     subprocess.check_call(update + [constants.MONITORING_GRAFANA_SERVICE])

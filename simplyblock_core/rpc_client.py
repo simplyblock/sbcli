@@ -445,6 +445,10 @@ class RPCClient:
         self.session = _session_pool.get(
             self.host, self.port, self.username, self.password, self.retry, Settings())
 
+    def net_check(self, ifname: str, ip: str) -> bool:
+        """Whether the interface has carrier and the address answers a ping sent out of
+        it, in the SPDK pod's network namespace."""
+        return self._request("sbcli_net_check", ifname=ifname, ip=ip)
 
     def get_version(self):
         return self._request("spdk_get_version")
@@ -992,8 +996,8 @@ class RPCClient:
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
-                            write_protection_v2=False, synchronous_replication_mode=None,
-                            jm_n_local=None):
+                            write_protection_v2=False, page_copy=False,
+                            synchronous_replication_mode=None, jm_n_local=None):
         """"
             // Optional, sync replication only: 0 disabled, 1 full. Not sent when None.
           "synchronous_replication_mode": 1
@@ -1054,6 +1058,8 @@ class RPCClient:
             params["synchronous_replication_mode"] = synchronous_replication_mode
         if jm_n_local is not None:
             params["jm_n_local"] = jm_n_local
+        if page_copy:
+            params["page_copy"] = True
         return self._request("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):
@@ -1493,6 +1499,22 @@ class RPCClient:
         """Re-read the backing device's size (device grow pickup)."""
         return self._request("bdev_aio_rescan", name=name)
 
+    def alceml_bdev_backend_resize_begin(self, name, request_timeout=None):
+        """Put an alceml bdev into its resize state: new I/O is held, pending
+        I/O drains, and the backing bdev is closed. Answers once the backing
+        bdev is closed, so the timeout covers the drain."""
+        return self._request("alceml_bdev_backend_resize_begin",
+                             request_timeout=request_timeout, name=name)
+
+    def alceml_bdev_backend_resize_end(self, name, b_fail=False, cntr_path="", request_timeout=None):
+        """Leave the resize state. With ``b_fail`` False, alceml reopens its
+        backing bdev (``cntr_path``, or its own when empty), takes its new
+        size, and releases the held I/O. With ``b_fail`` True, alceml fails
+        all held and future I/O until it is destroyed."""
+        return self._request("alceml_bdev_backend_resize_end",
+                             request_timeout=request_timeout,
+                             name=name, b_fail=b_fail, cntr_path=cntr_path)
+
     def bdev_set_qd_sampling_period(self, name, period_us):
         """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
         queue_depth/io_time — the hung-IO watchdog's signal for AIO base
@@ -1587,7 +1609,7 @@ class RPCClient:
         return self._request("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                        relaxed_mode=False):
+                                        relaxed_mode=False, keep_placed=False):
         params = {
             "name": name,
         }
@@ -1599,6 +1621,10 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        # Page copy distribs only (older data planes reject the parameter): a balancing migration keeps
+        # columns that page copies placed on another online device with anti-affinity kept.
+        if keep_placed:
+            params["keep_placed"] = True
         return self._request("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -2235,15 +2261,31 @@ class RPCClient:
                                name)
         return self._request("bdev_lvol_transfer", **params)
 
-    def bdev_lvol_merge_base(self, name):
+    def bdev_lvol_merge_base(self, name, priority_class=None):
         """After a partial transfer into the landing volume *name*: START
         filling every block the transfer did not write from the volume's base
         (its parent), before it is converted. Returns the job's state at once
         (``state`` none/running/done/failed, ``rc``, ``clusters``, ``ranges``,
         ``bytes``, ``ms``); idempotent. A failed job with ``rc`` ``-ESTALE``:
         the node no longer knows what arrived (it restarted), and the transfer
-        must be repeated into a fresh landing volume."""
-        return self._request("bdev_lvol_merge_base", lvol_name=name)
+        must be repeated into a fresh landing volume.
+
+        *priority_class* is the wire IO class of the merge's reads and writes
+        (the replication's, like the transfer's source reads); None leaves the
+        blobs' own classes. An SPDK older than the parameter refuses it as an
+        undecodable request: the merge is then started without it."""
+        if priority_class is None:
+            return self._request("bdev_lvol_merge_base", lvol_name=name)
+        try:
+            return self._request("bdev_lvol_merge_base", lvol_name=name,
+                                 priority_class=priority_class)
+        except RPCRemoteError as e:
+            if "decode" not in str(e):
+                raise
+            logger.warning("bdev_lvol_merge_base on %s:%s does not take priority_class "
+                           "(older SPDK): merging %s in the blobs' own classes",
+                           self.host, self.port, name)
+            return self._request("bdev_lvol_merge_base", lvol_name=name)
 
     def bdev_lvol_merge_base_stat(self, name):
         """State of the landing volume *name*'s merge job (see bdev_lvol_merge_base)."""

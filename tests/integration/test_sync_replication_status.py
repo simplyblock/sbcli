@@ -323,8 +323,8 @@ class TestGates:
         layout = _Layout(db, rpcs)
         _record(layout.a[1], "secondary_zone_unavailable", "2026-09-30T10:00:00Z", vuid=12)
         problems = _gate_problems(src.check_disaster_gate, layout.cluster.get_id(), SITE_A)
-        assert problems == [f"LVS LVS_1: zone desync secondary_zone_unavailable at 2026-09-30T10:00:00Z "
-                            f"reported by {layout.a[1].get_id()}"]
+        assert problems == [(f"LVS LVS_1: zone desync secondary_zone_unavailable at 2026-09-30T10:00:00Z "
+                             f"reported by {layout.a[1].get_id()}")]
 
     def test_the_lost_sites_latest_journal_event_wins(self, db, rpcs):
         layout = _Layout(db, rpcs)

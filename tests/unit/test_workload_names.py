@@ -79,15 +79,15 @@ def _hosts(node: StorageNode) -> tuple[str, str]:
 def test_a_node_without_workload_names_is_reached_through_the_constant_services():
     api_host, rpc_host = _hosts(_tls_node())
 
-    assert api_host == "worker-1.simplyblock-storage-node-api.storage.svc.cluster.local:50001"
-    assert rpc_host == "worker-1.simplyblock-spdk-proxy.storage.svc.cluster.local"
+    assert api_host == "worker-1.simplyblock-storage-node-api.storage.svc:50001"
+    assert rpc_host == "worker-1.simplyblock-spdk-proxy.storage.svc"
 
 
 def test_a_node_is_reached_through_its_recorded_services_and_label_suffix():
     api_host, rpc_host = _hosts(_tls_node(**NAMES))
 
-    assert api_host == "worker-1-abc.sb-prod-node-api.storage.svc.cluster.local:50001"
-    assert rpc_host == "worker-1-abc.sb-prod-spdk-proxy.storage.svc.cluster.local"
+    assert api_host == "worker-1-abc.sb-prod-node-api.storage.svc:50001"
+    assert rpc_host == "worker-1-abc.sb-prod-spdk-proxy.storage.svc"
 
 
 def test_starting_spdk_sends_the_spdk_proxy_secret():
@@ -180,5 +180,5 @@ def test_a_long_node_label_with_a_suffix_stays_one_dns_label():
 
     label = "w" * 50 + "-" + hashlib.sha256(long.encode()).hexdigest()[:8] + "-abc"
     assert len(label) == 63
-    assert api_host == f"{label}.sb-prod-node-api.storage.svc.cluster.local:50001"
-    assert rpc_host == f"{label}.sb-prod-spdk-proxy.storage.svc.cluster.local"
+    assert api_host == f"{label}.sb-prod-node-api.storage.svc:50001"
+    assert rpc_host == f"{label}.sb-prod-spdk-proxy.storage.svc"

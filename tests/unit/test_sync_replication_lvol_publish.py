@@ -266,6 +266,20 @@ class TestListenerProbe:
         with pytest.raises(RuntimeError):
             ops.live_listener_nics(rpc, _lvol(fabric="tcp", nqn="nqn:1"), self._node(), 4420)
 
+    def test_a_pod_network_listener_is_matched_on_its_bind_address(self):
+        # On the pod network a listener binds listen_ip4, while clients still
+        # connect to ip4_address (the Service's address).
+        node = _node("p", SITE_A)
+        nic = _nic("10.96.0.7")
+        nic.listen_ip4 = "10.42.1.5"
+        node.data_nics = [nic]
+        rpc = MagicMock()
+        rpc.subsystem_get.return_value = {"listen_addresses": [
+            {"trtype": "TCP", "traddr": "10.42.1.5", "trsvcid": "4420"}]}
+        lvol = _lvol(fabric="tcp", nqn="nqn:1")
+        assert ops._lvol_listener_nics(lvol, node) == [("TCP", "10.42.1.5")]
+        assert ops.live_listener_nics(rpc, lvol, node, 4420) == [("TCP", "10.42.1.5")]
+
 
 class TestGroupsWithoutASweep:
     """The rule's inputs are read fresh under the site-rule lock (its
