@@ -84,3 +84,16 @@ def test_a_blocked_chain_backs_off():
     sr._suspend_for_retry(t, "replication chain of S is incomplete", backoff=True)
     assert t.status == JobSchedule.STATUS_SUSPENDED and t.retry == 1
     assert t.function_params["not_before"] >= int(time.time()) + sr._backoff_seconds(1) - 1
+
+
+def test_a_leaderless_target_keeps_the_finish_pending(monkeypatch):
+    """Both target members down is an outage, not a failure: the finish stays
+    pending (re-checked every pass) instead of taking the doubling retry
+    backoff that delayed the resume by 7 min on bf8 (2026-11-02, round 6)."""
+    t = _T()
+    t.function_params["remote_lvol_id"] = "LAND"
+    monkeypatch.setattr(sr.db, "get_lvol_by_id", lambda lid: SimpleNamespace(get_id=lambda: lid))
+    monkeypatch.setattr(sr, "_stable_target_leader", lambda lv: (None, "0 members report leadership"))
+    assert sr.process_snap_replicate_finish(t, SimpleNamespace(get_id=lambda: "S")) == sr.FINISH_PENDING
+    assert t.retry == 0 and "not_before" not in t.function_params
+    assert "leader" in t.function_params["pending_why"]
