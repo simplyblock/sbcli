@@ -2229,15 +2229,31 @@ class RPCClient:
                                name)
         return self._request("bdev_lvol_transfer", **params)
 
-    def bdev_lvol_merge_base(self, name):
+    def bdev_lvol_merge_base(self, name, priority_class=None):
         """After a partial transfer into the landing volume *name*: START
         filling every block the transfer did not write from the volume's base
         (its parent), before it is converted. Returns the job's state at once
         (``state`` none/running/done/failed, ``rc``, ``clusters``, ``ranges``,
         ``bytes``, ``ms``); idempotent. A failed job with ``rc`` ``-ESTALE``:
         the node no longer knows what arrived (it restarted), and the transfer
-        must be repeated into a fresh landing volume."""
-        return self._request("bdev_lvol_merge_base", lvol_name=name)
+        must be repeated into a fresh landing volume.
+
+        *priority_class* is the wire IO class of the merge's reads and writes
+        (the replication's, like the transfer's source reads); None leaves the
+        blobs' own classes. An SPDK older than the parameter refuses it as an
+        undecodable request: the merge is then started without it."""
+        if priority_class is None:
+            return self._request("bdev_lvol_merge_base", lvol_name=name)
+        try:
+            return self._request("bdev_lvol_merge_base", lvol_name=name,
+                                 priority_class=priority_class)
+        except RPCRemoteError as e:
+            if "decode" not in str(e):
+                raise
+            logger.warning("bdev_lvol_merge_base on %s:%s does not take priority_class "
+                           "(older SPDK): merging %s in the blobs' own classes",
+                           self.host, self.port, name)
+            return self._request("bdev_lvol_merge_base", lvol_name=name)
 
     def bdev_lvol_merge_base_stat(self, name):
         """State of the landing volume *name*'s merge job (see bdev_lvol_merge_base)."""
