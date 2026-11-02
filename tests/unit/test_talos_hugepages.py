@@ -401,7 +401,8 @@ class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
         self.core.read_namespaced_secret.side_effect = ApiException(status=404)
         data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
         self.assertFalse(data)
-        self.assertIn("Secret 'talos-api-access-talos-secrets' not found", error)
+        self.assertIn("Talos API access Secret not found in namespace 'simplyblock'", error)
+        self.assertIn("TALOS_API_SECRET setting, default 'talos-api-access-talos-secrets'", error)
         self.assertIn('os:admin', error)
         self.create_job.assert_not_called()
 
