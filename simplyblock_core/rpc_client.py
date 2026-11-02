@@ -996,7 +996,7 @@ class RPCClient:
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
-                            write_protection_v2=False):
+                            write_protection_v2=False, page_copy=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -1046,6 +1046,8 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
+        if page_copy:
+            params["page_copy"] = True
         return self._request("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):
@@ -1471,6 +1473,22 @@ class RPCClient:
         """Re-read the backing device's size (device grow pickup)."""
         return self._request("bdev_aio_rescan", name=name)
 
+    def alceml_bdev_backend_resize_begin(self, name, request_timeout=None):
+        """Put an alceml bdev into its resize state: new I/O is held, pending
+        I/O drains, and the backing bdev is closed. Answers once the backing
+        bdev is closed, so the timeout covers the drain."""
+        return self._request("alceml_bdev_backend_resize_begin",
+                             request_timeout=request_timeout, name=name)
+
+    def alceml_bdev_backend_resize_end(self, name, b_fail=False, cntr_path="", request_timeout=None):
+        """Leave the resize state. With ``b_fail`` False, alceml reopens its
+        backing bdev (``cntr_path``, or its own when empty), takes its new
+        size, and releases the held I/O. With ``b_fail`` True, alceml fails
+        all held and future I/O until it is destroyed."""
+        return self._request("alceml_bdev_backend_resize_end",
+                             request_timeout=request_timeout,
+                             name=name, b_fail=b_fail, cntr_path=cntr_path)
+
     def bdev_set_qd_sampling_period(self, name, period_us):
         """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
         queue_depth/io_time — the hung-IO watchdog's signal for AIO base
@@ -1565,7 +1583,7 @@ class RPCClient:
         return self._request("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                        relaxed_mode=False):
+                                        relaxed_mode=False, keep_placed=False):
         params = {
             "name": name,
         }
@@ -1577,6 +1595,10 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        # Page copy distribs only (older data planes reject the parameter): a balancing migration keeps
+        # columns that page copies placed on another online device with anti-affinity kept.
+        if keep_placed:
+            params["keep_placed"] = True
         return self._request("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):

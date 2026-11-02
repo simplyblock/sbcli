@@ -116,3 +116,23 @@ def route_fences(nodes, fence):
             return _FenceRoutingClient(_original(*args, **kwargs), _node, fence)
 
         node.rpc_client = _client
+
+
+def patch_fences(fence, client=None):
+    """Patch ``StorageNode.rpc_client`` so every node's fences go to
+    ``fence(node, port, block=..., is_reject=...)`` and every other RPC to
+    ``client``.
+
+    The class-level counterpart of ``route_fences``, for integration tests:
+    code under test reads its nodes back from FDB, so the instances a test
+    built never reach it and an instance-level wrapper is never called.
+    Returns the (unstarted) patcher.
+    """
+    from unittest.mock import patch
+
+    from simplyblock_core.models.storage_node import StorageNode
+
+    client = client if client is not None else MagicMock()
+    return patch.object(
+        StorageNode, "rpc_client",
+        lambda self, *args, **kwargs: _FenceRoutingClient(client, self, fence))

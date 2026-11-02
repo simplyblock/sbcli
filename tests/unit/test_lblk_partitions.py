@@ -212,12 +212,15 @@ class TestSplitPartitionForJournal(unittest.TestCase):
     PART = "nvme1n1p2"
 
     def _run(self, jm_bytes=2 * GIB, part_kwargs=None, pttype="gpt",
-             start=2048, size_sectors=8 * GIB // 512, sgdisk_rc=0):
+             start=2048, size_sectors=8 * GIB // 512, sgdisk_rc=0,
+             sector_size=512, signature=False):
         part = _inv(self.PART, dtype="part", parent_name=self.PARENT,
                     **(part_kwargs or {}))
         # post-split inventory contains the two new partitions
-        jm_sectors = -(-jm_bytes // 512 // 2048) * 2048
-        data_start = start + jm_sectors
+        # sysfs counts 512-byte units; sgdisk the disk's logical sectors.
+        align = 1024 * 1024 // sector_size
+        jm_sectors = -(-jm_bytes // sector_size // align) * align
+        data_start = (start * 512 // sector_size + jm_sectors) * sector_size // 512
         new_jm = _inv(self.PART, dtype="part", partuuid="NEW-JM",
                       parent_name=self.PARENT, serial="PJM")
         new_data = _inv("nvme1n1p9", dtype="part", partuuid="NEW-DATA",
@@ -233,6 +236,7 @@ class TestSplitPartitionForJournal(unittest.TestCase):
             f"/sys/block/{self.PARENT}/{self.PART}/start": str(start),
             f"/sys/block/{self.PARENT}/{self.PART}/size": str(size_sectors),
             f"/sys/block/{self.PARENT}/{self.PART}/start_after": "",
+            f"/sys/block/{self.PARENT}/queue/logical_block_size": str(sector_size),
         }
         # after the split, sysfs lists the two new partitions
         post_split_children = {
@@ -266,6 +270,7 @@ class TestSplitPartitionForJournal(unittest.TestCase):
                 patch.object(node_utils.shell_utils, "run_command",
                              side_effect=fake_run), \
                 patch.object(node_utils, "_read_sysfs", side_effect=fake_sysfs), \
+                patch.object(node_utils, "simplyblock_data_signature", return_value=signature), \
                 patch("os.listdir", return_value=[self.PART, "nvme1n1p9"]):
             result = node_utils.split_partition_for_journal(self.PART, jm_bytes)
         return result, commands
@@ -283,6 +288,31 @@ class TestSplitPartitionForJournal(unittest.TestCase):
         # data partition takes the first free number, starts 1MiB-aligned
         jm_sectors = -(-2 * GIB // 512 // 2048) * 2048
         self.assertIn(f"-n 0:{2048 + jm_sectors}:", sg[2])
+
+    def test_original_partuuid_kept_on_the_journal_partition(self):
+        # The selector the partition was chosen by (by-partuuid) must still
+        # answer after the split, so a re-configure finds the journal.
+        _, commands = self._run(part_kwargs={"partuuid": "ORIG-UUID"})
+        sg = [c for c in commands if c.startswith("sgdisk")]
+        self.assertIn("-u 2:ORIG-UUID", sg[1])
+        self.assertNotIn("-u", sg[2])
+
+    def test_4kn_geometry_in_logical_sectors(self):
+        # 4K-native disk: sysfs start 2048 (512-byte units) is logical sector
+        # 256, and 1 MiB is 256 logical sectors.
+        _, commands = self._run(sector_size=4096)
+        sg = [c for c in commands if c.startswith("sgdisk")]
+        jm_sectors = 2 * GIB // 4096
+        self.assertIn(f"-n 2:256:{256 + jm_sectors - 1} ", sg[1])
+        self.assertIn(f"-n 0:{256 + jm_sectors}:", sg[2])
+        end = 256 + 8 * GIB // 4096 - 1
+        self.assertIn(f":{end} ", sg[2])
+
+    def test_partition_with_simplyblock_data_refused(self):
+        for signature in (True, None):
+            with self.assertRaises(ValueError) as ctx:
+                self._run(signature=signature)
+            self.assertIn("simplyblock data", str(ctx.exception))
 
     def test_non_gpt_refused(self):
         with self.assertRaises(ValueError) as ctx:

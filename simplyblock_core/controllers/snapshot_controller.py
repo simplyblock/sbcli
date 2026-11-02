@@ -88,7 +88,12 @@ def _wait_for_node_sync_delete(node, timeout=None, poll=0.5):
     deadline = time.time() + timeout
     while node.lvol_sync_del():
         if time.time() >= deadline:
-            return False
+            # Last resort before failing the create: the lock may be left over
+            # from a pass that died between setting and clearing it. The reset
+            # removes it only when no sync-delete task is pending for the
+            # node's peers -- exactly when nothing would ever clear it.
+            node.lvol_del_sync_lock_reset()
+            return not node.lvol_sync_del()
         time.sleep(poll)
     return True
 

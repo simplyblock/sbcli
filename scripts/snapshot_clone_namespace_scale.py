@@ -537,8 +537,8 @@ class SnapshotCloneScaleRun:
         script_parts.extend([
             f"sudo mkdir -p {shlex.quote(mount_point)}",
             f'sudo mount "$dev" {shlex.quote(mount_point)}',
-            f"sudo chown {shlex.quote(self.user)}:{shlex.quote(self.user)} "
-            f"{shlex.quote(mount_point)}",
+            (f"sudo chown {shlex.quote(self.user)}:{shlex.quote(self.user)} "
+            f"{shlex.quote(mount_point)}"),
         ])
         script = "\n".join(script_parts) + "\n"
         self.client.run(f"bash -lc {shlex.quote(script)}", timeout=600,

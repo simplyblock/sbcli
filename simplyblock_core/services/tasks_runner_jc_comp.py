@@ -34,7 +34,7 @@ def process_task(task):
     if node.status != StorageNode.STATUS_ONLINE:
         raise TaskDefer(f"Node is {node.status}, retry task")
 
-    if tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id):
+    if tasks_controller.get_jc_comp_blocking_node_tasks(task.cluster_id, task.node_id):
         raise TaskDefer("Task found on same node")
 
     if any(n.status != StorageNode.STATUS_ONLINE

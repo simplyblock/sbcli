@@ -3,10 +3,17 @@ import threading
 import time
 import uuid
 
-from simplyblock_core import constants, distr_controller, storage_node_ops, utils
+from simplyblock_core import (
+    constants,
+    distr_controller,
+    jm_raid,
+    storage_node_ops,
+    utils,
+)
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
@@ -860,22 +867,17 @@ def restart_device(device_id, force=False):
             ret = rpc_client.bdev_get(jm_dev_part)
             if ret:
                 logger.info(f"JM part found: {jm_dev_part}")
-                if snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]:
-                    if snode.rpc_client().bdev_get(snode.jm_device.raid_bdev):
+                jm_down = snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]
+                if rpc_client.bdev_get(snode.jm_device.raid_bdev):
+                    # Re-add the leg whatever the JM status: removing a leg
+                    # while another one remains leaves the JM ONLINE.
+                    _readd_jm_raid_leg(snode, jm_dev_part, rpc_client)
+                    if jm_down:
                         logger.info("Raid found, setting jm device online")
-                        ret = snode.rpc_client().bdev_raid_get_bdevs()
-                        has_bdev = any(
-                            bdev["name"] == jm_dev_part
-                            for raid in ret
-                            for bdev in raid.get("base_bdevs_list", [])
-                        )
-                        if not has_bdev:
-                            logger.info(f"Adding to raid: {jm_dev_part}")
-                            snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
                         set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-                    else:
-                        logger.info("Raid not found, restarting jm device")
-                        restart_jm_device(snode.jm_device.get_id(), force=True)
+                elif jm_down:
+                    logger.info("Raid not found, restarting jm device")
+                    restart_jm_device(snode.jm_device.get_id(), force=True)
 
     return "Done"
 
@@ -1082,9 +1084,13 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     # was a SPDK-event-driven remove), but we pass it through for symmetry.
     device_set_state(device_id, NVMeDevice.STATUS_REMOVED, cause=cause)
 
-    if not snode.jm_device.raid_bdev:
-        remove_jm_device(snode.jm_device.get_id())
-    else:
+    if snode.jm_device and not snode.jm_device.raid_bdev:
+        # A JM on a dedicated device: tear it down only when it is that device
+        # that went away, not on the removal of any device of the node.
+        jm_base = snode.jm_device.nvme_bdev
+        if _on_controller(jm_base, device.nvme_controller) and not rpc_client.bdev_get(jm_base):
+            remove_jm_device(snode.jm_device.get_id())
+    elif snode.jm_device:
         _remove_jm_raid_leg_of_device(snode, device, rpc_client)
 
     return True
@@ -1103,11 +1109,17 @@ def _remove_jm_raid_leg_of_device(snode: StorageNode, device: NVMeDevice, rpc_cl
     """
     dev_to_remove = None
     for part in snode.jm_device.jm_nvme_bdev_list:
-        if part.startswith(device.nvme_controller):
+        if _on_controller(part, device.nvme_controller):
             dev_to_remove = part
             break
 
     if not dev_to_remove:
+        return
+
+    if len(snode.jm_device.jm_nvme_bdev_list) == 1:
+        # Single-drive JM: raid_bdev is the bare partition, not a raid.
+        if not rpc_client.bdev_get(dev_to_remove):
+            set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
         return
 
     raid_found = False
@@ -1126,6 +1138,66 @@ def _remove_jm_raid_leg_of_device(snode: StorageNode, device: NVMeDevice, rpc_cl
         set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 
+def _on_controller(bdev_name: str, nvme_controller: str) -> bool:
+    """True if ``bdev_name`` (``<ctrl>n<ns>[p<part>]``) belongs to ``nvme_controller``.
+
+    A bare prefix match is not enough: controller names drop every 0 of the
+    PCI address, so 0000:06:01.0 is nvme_61 and 0000:06:11.0 is nvme_611.
+    """
+    return bool(nvme_controller) and bdev_name.startswith(f"{nvme_controller}n")
+
+
+def _set_jm_leg_stale(db_controller: DBController, node_id: str, leg: str, stale: bool) -> None:
+    """Atomically add ``leg`` to, or drop it from, the JM's stale_jm_legs."""
+    def _mut(n: StorageNode) -> bool:
+        if not n.jm_device:
+            return False
+        legs = [x for x in n.jm_device.stale_jm_legs if x != leg]
+        if stale:
+            legs.append(leg)
+        if legs == n.jm_device.stale_jm_legs:
+            return False
+        n.jm_device.stale_jm_legs = legs
+        return True
+
+    db_controller.atomic_update(db_controller.get_storage_node_by_id(node_id), _mut)
+
+
+def _readd_jm_raid_leg(snode: StorageNode, member: str, rpc_client: RPCClient) -> None:
+    """Put the leg carrying ``member`` back into the JM raid1, which rebuilds it
+    from the surviving leg. The leg stays in stale_jm_legs until
+    clear_rebuilt_jm_legs() sees the rebuild finish."""
+    jm = snode.jm_device
+    leg = jm_raid.leg_of(member, jm.jm_leg_bdevs, jm.jm_leg_members)
+    raid = next((r for r in rpc_client.bdev_raid_get_bdevs() if r["name"] == jm.raid_bdev), None)
+    if raid is None:
+        return
+    if any(b.get("name") == leg for b in raid.get("base_bdevs_list", [])):
+        return
+    if not rpc_client.bdev_get(leg):
+        # A raid0 leg that lost a member is rebuilt from its members on node restart.
+        logger.warning("JM raid leg %s not found: it is re-created on node restart", leg)
+        return
+    _set_jm_leg_stale(DBController(), snode.get_id(), leg, True)
+    logger.info("Adding to raid: %s", leg)
+    rpc_client.bdev_raid_add_base_bdev(jm.raid_bdev, leg)
+
+
+def clear_rebuilt_jm_legs(snode: StorageNode, rpc_client: RPCClient) -> None:
+    """Drop from stale_jm_legs every leg whose raid1 rebuild has finished."""
+    jm = snode.jm_device
+    if not jm or not jm.stale_jm_legs:
+        return
+    raid = next((r for r in rpc_client.bdev_raid_get_bdevs() if r["name"] == jm.raid_bdev), None)
+    if raid is None:
+        return
+    db_controller = DBController()
+    for leg in jm.stale_jm_legs:
+        if jm_raid.leg_in_sync(raid, leg):
+            logger.info("JM raid leg %s rebuilt: no longer stale", leg)
+            _set_jm_leg_stale(db_controller, snode.get_id(), leg, False)
+
+
 def remove_from_jm_device(device_id, jm_bdev):
     db_controller = DBController()
 
@@ -1139,16 +1211,23 @@ def remove_from_jm_device(device_id, jm_bdev):
         rpc_client = snode.rpc_client()
 
         if snode.jm_device.raid_bdev:
-            logger.info("device part of raid1: only remove from raid")
+            jm = snode.jm_device
+            # Under RAID 0+1 the partition may sit inside a raid0 leg; the top
+            # raid1 can only drop that whole leg.
+            leg = jm_raid.leg_of(jm_bdev, jm.jm_leg_bdevs, jm.jm_leg_members)
+            logger.info("device part of raid1: only remove leg %s from raid", leg)
             try:
                 has_any = False
                 for raid_info in rpc_client.bdev_raid_get_bdevs():
-                    if raid_info["name"] == snode.jm_device.raid_bdev:
+                    if raid_info["name"] == jm.raid_bdev:
                         base_bdevs = raid_info.get("base_bdevs_list", [])
-                        if any(bdev["name"] and bdev["name"] != jm_bdev for bdev in base_bdevs):
+                        if any(bdev["name"] and bdev["name"] != leg for bdev in base_bdevs):
                             has_any = True
                 if has_any:
-                    rpc_client.bdev_raid_remove_base_bdev(jm_bdev)
+                    # Recorded before the removal: a crash in between must not
+                    # leave a leg that misses writes unrecorded.
+                    _set_jm_leg_stale(db_controller, snode.get_id(), leg, True)
+                    rpc_client.bdev_raid_remove_base_bdev(leg)
                     return True
                 else:
                     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
@@ -1404,10 +1483,13 @@ def add_device(device_id, add_migration_task=True):
         return False
     dev_order = storage_node_ops.get_next_cluster_device_order(db_controller, snode.cluster_id)
     device_obj.cluster_device_order = dev_order
+    placement = storage_node_ops.scaled_placement_size(db_controller, snode.cluster_id, device_obj.size)
+    device_obj.placement_size = placement
     logger.info("Setting device online")
     device_obj.status = NVMeDevice.STATUS_ONLINE
-    def _apply_online(d, o=dev_order):
+    def _apply_online(d, o=dev_order, p=placement):
         d.cluster_device_order = o
+        d.placement_size = p
         d.status = NVMeDevice.STATUS_ONLINE
     _atomic_device_set(db_controller, snode.get_id(), device_id, _apply_online)
     device_events.device_create(device_obj)
@@ -1701,6 +1783,10 @@ def new_device_from_failed(device_id):
     new_device.uuid = str(uuid.uuid4())
     new_device.status = NVMeDevice.STATUS_NEW
     new_device.cluster_device_order = -1
+    # A new device enters the cluster map with a weight of its own, on the
+    # scale of the cluster's (possibly grown) devices.
+    new_device.placement_size = storage_node_ops.scaled_placement_size(
+        db_controller, device_node.cluster_id, new_device.size)
     new_device.deleted = False
     new_device.io_error = False
     new_device.retries_exhausted = False
@@ -1921,3 +2007,308 @@ def set_device_health_assessment(node_id, device_id, assessment: dict):
     if fresh is None or not found:
         raise KeyError(f"device {device_id} not found on node {node_id}")
     return fresh
+
+
+# ---------------------------------------------------------------------------
+# Online growth of lblk devices (a LUN grown on its storage array).
+#
+# The base bdev of an lblk device is an SPDK AIO bdev over a kernel block
+# device, and alceml sits directly on it. alceml can swap its backing bdev
+# for a larger one without losing state: resize_begin holds new I/O, drains
+# pending I/O and closes the backing bdev; resize_end reopens it and takes
+# its new size, so the pages beyond the old end become allocatable. Layers
+# above alceml see a fixed virtual size and need no change.
+#
+# Growing a device does not change its cluster-map weight. The weight is
+# derived from NVMeDevice.placement_size, the size the device had when it was
+# placed, and distrib's map spec (message_format_rpcs__distrib__v5.txt,
+# weight_int) asks for weights never to change, because a change re-places
+# 50% or more of the data. Weights only matter relative to each other, so when
+# every data device grows by the same factor (the normal case: equal LUNs grown
+# together on the array), nothing has to change and nothing moves.
+#
+# After an uneven growth the frozen weights no longer match the capacities,
+# and the added capacity is not fully usable. grow_cluster_devices then sets
+# every weight to the device's current size, pushes the new map to all nodes,
+# and starts the cluster rebalance (rebalance_after_growth). That re-places a
+# large part of the data, in the background and within the migration share of
+# the QoS budget. Correctness does not depend on the static placement: distrib
+# finds data by its recorded location, including locations that were correct
+# under an earlier map (alg_remapped_ranges.hpp, get_location_latest, "STALE"),
+# which is the same mechanism a device addition relies on.
+#
+# A device that enters the cluster later gets a weight on the same scale as the
+# grown devices (storage_node_ops.scaled_placement_size), so a uniform growth
+# followed by an expansion does not overfill the new device.
+# ---------------------------------------------------------------------------
+
+#: Timeout for alceml_bdev_backend_resize_begin, which answers only after
+#: the pending I/O of the device has drained.
+RESIZE_RPC_TIMEOUT_SEC = 120
+#: Attempts to reopen the backing bdev before the device is given up.
+RESIZE_END_ATTEMPTS = 3
+
+
+def cluster_growth_uniformity(cluster_id):
+    """Whether all data devices of a cluster have grown by the same factor
+    relative to their placement size. Returns ``(uniform, min_ratio,
+    max_ratio)``; journal, new, and failed devices are ignored."""
+    return storage_node_ops.cluster_growth_ratios(DBController(), cluster_id)
+
+
+def _check_resizable(db_controller, dev, snode):
+    """Raise ValueError when ``dev`` cannot be grown online right now."""
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.device_mode != constants.DEVICE_MODE_LBLK or dev.bdev_type != "aio":
+        raise ValueError("Online resizing is only supported for Linux block devices (lblk device mode)")
+    if dev.status != NVMeDevice.STATUS_ONLINE:
+        raise ValueError(f"Device must be online, current status: {dev.status}")
+    if snode.status != StorageNode.STATUS_ONLINE:
+        raise ValueError(f"Storage node must be online, current status: {snode.status}")
+    if dev.is_partition:
+        raise ValueError("Partitions cannot be resized online")
+    if dev.testing_bdev or dev.hang_bdev:
+        raise ValueError("Device runs with a testing or hang bdev under alceml, remove it first")
+    if not dev.alceml_bdev or not dev.nvme_bdev:
+        raise ValueError("Device has no alceml or AIO bdev recorded")
+    if tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev.get_id()):
+        raise ValueError("A restart task is active for the device")
+
+
+def _reopen_after_resize(rpc_client, dev):
+    """Leave alceml's resize state with the backing bdev reopened. Returns
+    True on success. On persistent failure alceml is told to fail its I/O,
+    which hands the device to the regular failure handling."""
+    for attempt in range(1, RESIZE_END_ATTEMPTS + 1):
+        try:
+            rpc_client.alceml_bdev_backend_resize_end(
+                dev.alceml_bdev, b_fail=False, cntr_path="",
+                request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+            return True
+        except RPCException as e:
+            logger.error(f"alceml resize_end for {dev.alceml_bdev}, attempt {attempt}: {e}")
+            time.sleep(1)
+    try:
+        rpc_client.alceml_bdev_backend_resize_end(
+            dev.alceml_bdev, b_fail=True, cntr_path="",
+            request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+    except RPCException as e:
+        logger.error(f"alceml resize_end(b_fail) for {dev.alceml_bdev}: {e}")
+    return False
+
+
+def _resize_failed(device_id, dev, msg, set_unavailable):
+    if set_unavailable:
+        device_set_unavailable(device_id, cause=CAUSE_LOCAL_FAILURE)
+        msg += "; the backing bdev could not be reopened, the device was set unavailable"
+    else:
+        msg += "; the device is unchanged"
+    device_events.device_resize_failed(dev, f"Device growth failed: {msg}")
+    return ValueError(msg)
+
+
+def resize_device(device_id):
+    """Grow an lblk device online to the size its block device now has.
+
+    The kernel is made to re-read the size first (SCSI or NVMe rescan on the
+    storage node's host). A smaller size is refused. Returns a dict with
+    ``device_id``, ``old_size``, ``new_size``, ``placement_size``,
+    ``resized``, and the cluster's ``uniform`` growth flag with a
+    ``warning`` when it is not uniform. Raises ValueError on refusal or
+    failure; the message says whether the device is unchanged."""
+    db_controller = DBController()
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        raise ValueError(f"Device not found: {device_id}") from e
+    _check_resizable(db_controller, dev, snode)
+
+    path = dev.by_id_path or dev.device_path
+    if not path:
+        raise ValueError("No block device path known for the device")
+    result, err = snode.client(timeout=60, retry=1).rescan_block_device(path)
+    if err or not result:
+        raise ValueError(f"Rescan of {path} failed: {err}")
+    new_size = int(result["size"])
+    old_size = dev.size
+
+    if new_size < old_size:
+        raise ValueError(
+            f"The block device shrank from {old_size} to {new_size} bytes. Shrinking is not "
+            f"supported and destroys data: restore the LUN to at least {old_size} bytes")
+    if new_size == old_size:
+        uniform, _, _ = cluster_growth_uniformity(snode.cluster_id)
+        return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
+                "placement_size": dev.weight_size(), "resized": False, "uniform": uniform,
+                "warning": ""}
+
+    logger.info(f"Growing device {device_id} from {old_size} to {new_size} bytes")
+    rpc_client = snode.rpc_client()
+    try:
+        rpc_client.alceml_bdev_backend_resize_begin(
+            dev.alceml_bdev, request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+    except RPCException as e:
+        # A timeout may leave alceml in its resize state anyway: reopen.
+        reopened = _reopen_after_resize(rpc_client, dev)
+        raise _resize_failed(device_id, dev, f"alceml resize_begin failed: {e}", not reopened) from e
+
+    rescan_error = None
+    try:
+        rpc_client.bdev_aio_rescan(dev.nvme_bdev)
+    except RPCException as e:
+        rescan_error = e
+
+    if not _reopen_after_resize(rpc_client, dev):
+        raise _resize_failed(device_id, dev, "alceml resize_end failed", True)
+    if rescan_error is not None:
+        raise _resize_failed(device_id, dev, f"AIO rescan failed: {rescan_error}", False)
+
+    def _apply(d, n=new_size):
+        if d.placement_size <= 0:
+            d.placement_size = d.size
+        d.size = n
+    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
+    fresh = db_controller.get_storage_device_by_id(device_id)
+    device_events.device_resized(fresh, old_size, new_size)
+
+    uniform, lo, hi = cluster_growth_uniformity(snode.cluster_id)
+    warning = ""
+    if not uniform:
+        warning = (
+            f"The data devices of the cluster have grown unevenly (growth factors {lo:.2f} to {hi:.2f}). "
+            "Placement keeps filling every device in proportion to its original size, so the added "
+            "capacity is only fully usable once all data devices have grown by the same factor, or "
+            "after cluster grow-devices has updated the weights and rebalanced the cluster.")
+        logger.warning(warning)
+    return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
+            "placement_size": fresh.weight_size(), "resized": True, "uniform": uniform,
+            "warning": warning}
+
+
+#: Tasks that move data across the cluster map or change it. New weights are
+#: never pushed while one of them is open.
+_PLACEMENT_TASKS = (
+    JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG,
+    JobSchedule.FN_BALANCING_AFTER_NODE_RESTART, JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+    JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION, JobSchedule.FN_CLUSTER_EXPAND,
+    JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG,
+)
+
+
+def _reweight_blocker(db_controller, cluster_id):
+    """Why new weights cannot be pushed now, or "" when they can. The new map
+    must reach every node before any data moves: a migration that runs while
+    nodes disagree about placement can lose writes."""
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        return f"the cluster is {cluster.status}, not active"
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            return f"storage node {node.get_id()} is {node.status}"
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW,
+                              NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+                continue
+            if dev.status != NVMeDevice.STATUS_ONLINE:
+                return f"device {dev.get_id()} is {dev.status}"
+    for task in db_controller.get_job_tasks(cluster_id):
+        if (task.function_name in _PLACEMENT_TASKS and task.status != JobSchedule.STATUS_DONE
+                and not task.canceled):
+            return f"task {task.uuid} ({task.function_name}) is still open"
+    return ""
+
+
+def rebalance_after_growth(cluster_id):
+    """Set the cluster-map weight of every online data device to its current
+    size, push the new map to every node, and start the cluster rebalance.
+
+    Refused (nothing changed) unless the cluster is active, every node and
+    data device is online, and no migration or expansion is open. If a map
+    push fails, the new weights stay recorded with ``reweight_pending`` and
+    the rebalance is not started; the next call pushes again. Returns
+    ``{"weights_updated": bool, "started": bool, "reason": str}``:
+    ``weights_updated`` once every node runs on the new weights, ``started``
+    once the rebalance is queued, ``reason`` when either is missing."""
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    blocker = _reweight_blocker(db_controller, cluster_id)
+    if blocker:
+        if cluster.reweight_pending:
+            return _rebalance_outcome(False, False,
+                                      f"New weights recorded, cluster map not pushed yet: {blocker}")
+        return _rebalance_outcome(False, False, f"Weights not updated: {blocker}")
+
+    if not cluster.reweight_pending:
+        db_controller.atomic_update(cluster, lambda c: setattr(c, "reweight_pending", True))
+
+        def _apply(n):
+            for d in n.nvme_devices:
+                if d.status == NVMeDevice.STATUS_ONLINE:
+                    d.placement_size = d.size
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status != StorageNode.STATUS_REMOVED:
+                db_controller.atomic_update(node, _apply)
+        logger.info(f"Cluster {cluster_id}: device weights set to the current device sizes")
+
+    nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+             if n.status == StorageNode.STATUS_ONLINE]
+    failed = [n.get_id() for n in nodes if not distr_controller.send_cluster_map_to_node(n)]
+    if failed:
+        return _rebalance_outcome(
+            False, False, f"New weights recorded, but the cluster map push failed on {', '.join(failed)}; "
+                          "run cluster grow-devices again to retry")
+
+    db_controller.atomic_update(db_controller.get_cluster_by_id(cluster_id),
+                                lambda c: setattr(c, "reweight_pending", False))
+    # The same rebalance as POST /clusters/{id}/rebalance: one expansion
+    # migration per distrib, under a balancing master task.
+    queued = bool(nodes) and tasks_controller.add_device_mig_task_for_node(nodes[0].get_id())
+    device_events.devices_reweighted(cluster_id, queued)
+    if not queued:
+        return _rebalance_outcome(
+            True, False, "Weights updated, but no rebalance was queued (no volume store holds data, or a "
+                         "node removal is recorded); start it with the cluster rebalance API when needed")
+    return _rebalance_outcome(True, True, "")
+
+
+def _rebalance_outcome(weights_updated, started, reason):
+    return {"weights_updated": weights_updated, "started": started, "reason": reason}
+
+
+def grow_cluster_devices(cluster_id, rebalance=True):
+    """Grow every online lblk data device of a cluster to the size of its
+    block device, one device at a time. Devices whose size did not change
+    are left alone; a device that fails does not stop the others.
+
+    When the devices have grown unevenly and ``rebalance`` is set, the
+    weights are updated and the cluster is rebalanced (rebalance_after_growth),
+    unless a device failed to grow. Returns ``{"devices": [...], "errors":
+    {...}, "uniform": bool, "rebalance": {...} | None}`` (see
+    rebalance_after_growth for the rebalance dict);
+    ``uniform`` describes the growth before any weight change."""
+    db_controller = DBController()
+    results, errors = [], {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status != NVMeDevice.STATUS_ONLINE or dev.bdev_type != "aio":
+                continue
+            try:
+                results.append(resize_device(dev.get_id()))
+            except ValueError as e:
+                errors[dev.get_id()] = str(e)
+    uniform, _, _ = cluster_growth_uniformity(cluster_id)
+    outcome = None
+    pending = db_controller.get_cluster_by_id(cluster_id).reweight_pending
+    if rebalance and (not uniform or pending):
+        if errors and not pending:
+            outcome = _rebalance_outcome(
+                False, False, "Weights not updated: some devices failed to grow; fix them and run "
+                              "cluster grow-devices again")
+        else:
+            outcome = rebalance_after_growth(cluster_id)
+    return {"devices": results, "errors": errors, "uniform": uniform, "rebalance": outcome}

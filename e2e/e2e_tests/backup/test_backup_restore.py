@@ -164,7 +164,8 @@ class BackupTestBase(TestClusterBase):
         return k8s
 
     def _ensure_pool_and_sc(self, pool_name=None, retries=3,
-                            dhchap=False, allowed_nodes=None):
+                            dhchap=False, allowed_nodes=None,
+                            dedicated=False):
         """Create (or reuse) a storage pool and set up the StorageClass.
 
         In K8s mode, ``add_storage_pool`` may return a pre-existing pool with
@@ -187,12 +188,13 @@ class BackupTestBase(TestClusterBase):
             # K8s mode with DHCHAP/allowedNodes: use StoragePool CRD
             actual = self.sbcli_utils.add_storage_pool(
                 pool_name=target, dhchap=dhchap,
-                allowed_nodes=allowed_nodes)
+                allowed_nodes=allowed_nodes, dedicated=dedicated)
         else:
             for attempt in range(1, retries + 1):
                 try:
                     actual = self.sbcli_utils.add_storage_pool(
-                        pool_name=target, dhchap=dhchap)
+                        pool_name=target, dhchap=dhchap,
+                        dedicated=dedicated)
                     break
                 except (TimeoutError, Exception) as e:
                     last_err = e
@@ -465,7 +467,11 @@ class BackupTestBase(TestClusterBase):
             pvc_name = self._get_pvc_for_lvol(lvol_id)
             backups = k8s.list_storage_backups()
             for b in backups:
-                pvc_ref = b.get("spec", {}).get("pvcRef", {}).get("name", "")
+                # v1alpha2: spec.source.claimName, not spec.pvcRef.name.
+                # Reading the old path matched nothing, so this fell through
+                # to the `lvol_id in str(b)` substring test for every backup.
+                pvc_ref = (b.get("spec", {}).get("source", {})
+                           .get("claimName", ""))
                 if pvc_ref == pvc_name or lvol_id in str(b):
                     bname = b.get("metadata", {}).get("name", "")
                     if bname:
@@ -571,26 +577,100 @@ class BackupTestBase(TestClusterBase):
             k8s = self._ensure_k8s_utils()
             items = k8s.list_storage_backups()
             result = []
+            # v1alpha2 field paths. Every one of these moved, and reading
+            # the v1alpha1 places returned "" for all of them rather than
+            # failing: status.backupId was never a field at all (v1alpha1
+            # spelled it backupID), and spec.pvcRef and status.snapshot are
+            # v1alpha1 shapes the object no longer has. The entries came
+            # back with an id of the object name and every other column
+            # empty, which is what failed TestBackupBasicPositive,
+            # TestBackupCryptoLvol and TestBackupListFields on
+            # "Backup entry does not reference lvol_name".
+            #
+            #   status.backupID        -> status.backup.backupID
+            #   status.snapshotName    -> status.source.snapshotName
+            #   spec.pvcRef.name       -> spec.source.claimName
+            #                             (status.source.lvolName is the
+            #                              lvol itself, once resolved)
             for item in items:
                 meta = item.get("metadata", {})
                 spec = item.get("spec", {})
                 status = item.get("status", {})
+                st_backup = status.get("backup") or {}
+                st_source = status.get("source") or {}
+                backup_id = st_backup.get("backupID", "")
+                claim = (spec.get("source") or {}).get("claimName", "")
+                # The operator fills status.source once it has resolved the
+                # claim; until then the claim name is all there is, and it
+                # is the normalised lvol name, so either satisfies a test
+                # looking for the lvol.
+                lvol = st_source.get("lvolName") or claim
+
+                # Two things are deliberately NOT reported raw.
+                #
+                # id: the object name, not status.backup.backupID. Every
+                # producer in this suite hands back the CRD name -- it is
+                # what wait_storage_backup_done and get_resource_json take
+                # -- and seventeen sites compare an id against this list.
+                # Reporting the control-plane uuid here made TC-BCK-005
+                # look for 'bck-snap2-...' among three uuids. The uuid is
+                # still carried, under uuid, for the cases that want the
+                # control plane's own identity.
+                #
+                # status: the phase mapped into the vocabulary the
+                # assertions use. v1alpha2 has exactly four phases --
+                # Pending, Creating, Available, Failed -- and nothing in
+                # this file compares against any of them; five sites test
+                # for "done"/"complete"/"completed", which Available would
+                # never match, so a finished backup read as unfinished and
+                # the filters silently selected nothing. The raw phase stays
+                # available under phase.
+                phase = status.get("phase", "")
+                canonical = {"Available": "done", "Failed": "failed",
+                             "Creating": "creating", "Pending": "pending"}
+                name = meta.get("name", "")
                 result.append({
-                    "id": status.get("backupId", meta.get("name", "")),
-                    "ID": status.get("backupId", meta.get("name", "")),
-                    "uuid": status.get("backupId", ""),
-                    "name": meta.get("name", ""),
-                    "status": status.get("phase", ""),
-                    "Status": status.get("phase", ""),
-                    "Snapshot": status.get("snapshot", ""),
-                    "snapshot": status.get("snapshot", ""),
-                    "LVol": spec.get("pvcRef", {}).get("name", ""),
-                    "lvol": spec.get("pvcRef", {}).get("name", ""),
+                    "id": name,
+                    "ID": name,
+                    "uuid": backup_id,
+                    "name": name,
+                    "status": canonical.get(phase, phase.lower()),
+                    "Status": canonical.get(phase, phase.lower()),
+                    "phase": phase,
+                    "Snapshot": st_source.get("snapshotName", ""),
+                    "snapshot": st_source.get("snapshotName", ""),
+                    "LVol": lvol,
+                    "lvol": lvol,
+                    "claim": claim,
                 })
             return result
 
         out, _ = self._sbcli("-d backup list")
         return self._parse_table(out)
+
+    def _cp_backup_status_by_uuid(self) -> dict:
+        """Control-plane status for each backup, keyed by its uuid.
+
+        Merging is a control-plane state and has no Kubernetes counterpart:
+        StorageBackup.status.phase is one of Pending, Creating, Available or
+        Failed, and none of those can ever read "merging" or "merged". A
+        retention test that waits on the CR phase for a merge therefore waits
+        out its whole deadline on a cluster that is pruning correctly, which
+        is how TC-BCK-157 timed out. So the merge state is read where it
+        exists, and matched back to the CR entries by uuid.
+        """
+        try:
+            out, _ = self._sbcli("backup list")
+        except Exception as e:                                # noqa: BLE001
+            self.logger.warning(f"[backup] control-plane list failed: {e}")
+            return {}
+        states = {}
+        for row in self._parse_table(out):
+            uid = row.get("id") or row.get("ID") or row.get("uuid") or ""
+            status = str(row.get("status") or row.get("Status") or "").lower()
+            if uid:
+                states[uid] = status
+        return states
 
     def _wait_for_backup(self, backup_id: str, timeout: int = _BACKUP_COMPLETE_TIMEOUT) -> dict:
         """Poll until backup reaches 'done'/'complete'.
@@ -684,13 +764,20 @@ class BackupTestBase(TestClusterBase):
             pvc_size = restore_size or self.lvol_size
             if "Gi" not in pvc_size:
                 pvc_size = pvc_size.replace("G", "Gi")
+            # StorageBackupOps.spec.restore.targetPool is required by the CRD
+            # and has no default, so an omitted pool_name is not "restore
+            # wherever the backup came from" -- it is a refusal. 44 of the 48
+            # call sites here omit it, which failed 16 classes of the
+            # 2026-10-17 lane on a ValueError before anything was restored.
+            # The pool the test is working in is the right answer for all of
+            # them; a caller restoring into a second pool passes it.
             k8s.create_backup_restore(
                 name=restore_name,
                 backup_ref_name=backup_id,
                 pvc_name=pvc_name,
                 pvc_size=pvc_size,
                 cluster_name=self._cluster_name,
-                target_pool=pool_name,
+                target_pool=pool_name or self.pool_name,
             )
             self.created_backup_restores.append(restore_name)
             self.created_pvcs.append(pvc_name)
@@ -1041,8 +1128,12 @@ class BackupTestBase(TestClusterBase):
         """
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
+            # storagebackuppolicies, not backuppolicy. _add_policy creates a
+            # v1alpha2 StorageBackupPolicy, so listing the v1alpha1 kind
+            # returned an empty list for policies that existed -- which is
+            # what failed TC-BCK-021 with "not found in policy-list: []".
             out, _ = k8s._exec_kubectl(
-                f"kubectl -n {k8s.namespace} get backuppolicy -o json")
+                f"kubectl -n {k8s.namespace} get {k8s.SBPOLICY_KIND} -o json")
             import json
             try:
                 data = json.loads(out)
@@ -1052,14 +1143,21 @@ class BackupTestBase(TestClusterBase):
             for item in data.get("items", []):
                 meta = item.get("metadata", {})
                 spec = item.get("spec", {})
+                status = item.get("status", {})
+                # The CRD has no spec.name: a policy is named by its object.
+                # status.policyID is the control plane's own id for it, and
+                # callers match on either.
+                name = meta.get("name", "")
                 result.append({
-                    "id": meta.get("name", ""),
-                    "ID": meta.get("name", ""),
-                    "name": spec.get("name", meta.get("name", "")),
-                    "Name": spec.get("name", meta.get("name", "")),
+                    "id": name,
+                    "ID": name,
+                    "uuid": status.get("policyID", ""),
+                    "name": name,
+                    "Name": name,
                     "max_versions": spec.get("maxVersions", 0),
                     "max_age": spec.get("maxAge", ""),
                     "schedule": spec.get("schedule", ""),
+                    "phase": status.get("phase", ""),
                 })
             return result
 
@@ -3420,10 +3518,18 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             )
             self.ssh_obj.exec_command(node=ip, command=install_cmd)
             sleep_n_sec(5)
-            configure_cmd = (
-                f"{sbcli_cmd} --dev -d sn configure "
-                f"--max-subsys {max_subsys}"
-            )
+            # NOT --max-subsys. It is a cluster-level setting (`cluster
+            # create` / `add` / `update`), it is passed on the `cluster add`
+            # below, and `storage-node configure` rejects it outright on
+            # sbctl 19.2.35:
+            #
+            #   sbctl: error: unrecognized arguments: --max-subsys 50
+            #
+            # argparse fails the whole command, so /etc/simplyblock is never
+            # written and the `sn deploy` on the next line dies with "Config
+            # file not found!". SNodeAPI then never listens, add-node gets
+            # ECONNREFUSED on :5000, and the cluster never activates.
+            configure_cmd = f"{sbcli_cmd} --dev -d sn configure"
             self.ssh_obj.exec_command(node=ip, command=configure_cmd)
             deploy_cmd = f"{sbcli_cmd} sn deploy --ifname {ifname}"
             self.ssh_obj.exec_command(node=ip, command=deploy_cmd)
@@ -3439,6 +3545,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             f" --ha-type {ha_type}"
             f" --data-chunks-per-stripe {ndcs}"
             f" --parity-chunks-per-stripe {npcs}"
+            # See the configure command above: this is where --max-subsys
+            # belongs, and cluster B was not getting it at all.
+            f" --max-subsys {max_subsys}"
         )
         if extra_cluster_args:
             create_cmd += f" {extra_cluster_args}"
@@ -3656,10 +3765,13 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self.logger.info(f"Tearing down self-bootstrapped Cluster-2 ({self._cluster2_id})")
         mgmt_ip = self.mgmt_nodes[0]
         try:
-            # Deactivate + delete Cluster-2
+            # Quiesce + delete Cluster-2. `cluster deactivate` does not exist
+            # -- the verb is `suspend` -- so this was a silent no-op behind the
+            # `|| true` for as long as it has been here. Found by
+            # scripts/check_cli_usage.py.
             self.ssh_obj.exec_command(
                 node=mgmt_ip,
-                command=f"{self.base_cmd} cluster deactivate {self._cluster2_id} || true"
+                command=f"{self.base_cmd} cluster suspend {self._cluster2_id} || true"
             )
             sleep_n_sec(5)
             self.ssh_obj.exec_command(
@@ -3807,6 +3919,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 pvc_size="5Gi",
                 cluster_name=c2_cluster_name,
                 storage_class=c2_sc,
+                # Cluster-2's own pool: the restore lands on C2, so C1's pool
+                # is not a place it can be written.
+                target_pool=self._cluster2_pool_name,
             )
 
             # Wait for BackupRestore to reach Done (PVC auto-created)
@@ -4195,7 +4310,16 @@ class TestBackupConcurrentIO(BackupTestBase):
         # TC-BCK-102: wait for FIO to finish then wait for backup
         self.logger.info("TC-BCK-102: waiting for FIO + backup to complete")
         fio_thread.join()
-        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        # Docker only. _run_fio already validates this log on the docker path
+        # (it reads it over SSH from fio_node once FIO exits), so this is a
+        # second look there -- but on k8s FIO is a Job, nothing writes
+        # log_file, and fio_node is 0.0.0.0 because there are no client
+        # machines. Reading it then reports
+        #   "FIO log .../fio_concurrent_*.log on 0.0.0.0 is missing or empty"
+        # which is true and says nothing: the Job ran and was waited on
+        # inside _run_fio, where its success is already asserted.
+        if not self.k8s_test:
+            self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-102")
         self.logger.info(f"TC-BCK-102: backup {bk_id} complete after concurrent FIO ✓")
 
@@ -4488,7 +4612,9 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPoolRecreateRestore START ===")
         self.fio_node = self.fio_node[0]
-        self._ensure_pool_and_sc()
+        # A pool of its own: this case deletes the pool and builds it again,
+        # and a reused pool is the lab's, not ours to remove.
+        self._ensure_pool_and_sc(dedicated=True)
 
         # TC-BCK-117: create lvol + write data + backup
         self.logger.info("TC-BCK-117: create lvol + write data + backup")
@@ -4506,13 +4632,13 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = self._k8s_normalize_name(lvol_name)
-            # Delete StorageBackup CRD
-            for sb_name in list(self.created_storage_backups):
-                try:
-                    k8s.delete_storage_backup(sb_name)
-                    self.created_storage_backups.remove(sb_name)
-                except Exception as e:
-                    self.logger.warning(f"StorageBackup delete warning: {e}")
+            # The StorageBackup is deliberately KEPT. This case exists to show
+            # that the backup outlives the pool, and on k8s the object is the
+            # only handle a restore can name -- deleting it left TC-BCK-120
+            # pointing at nothing, so the StorageBackupOps was never
+            # reconciled and sat at an empty phase until it timed out. The
+            # docker branch below deletes the snapshot and the lvol and
+            # likewise leaves the backup alone. Teardown still removes it.
             # Delete VolumeSnapshot
             if snap_id in self.created_volume_snapshots:
                 try:
@@ -4554,7 +4680,7 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
         # always prepends "simplyblock-" to the pool_name).
         self.pool_name = "bck_test_pool"
         self.logger.info("TC-BCK-119: recreate storage pool")
-        self._ensure_pool_and_sc()
+        self._ensure_pool_and_sc(dedicated=True)
         self.logger.info(f"TC-BCK-119: pool recreated as '{self.pool_name}' ✓")
 
         # TC-BCK-120: restore backup into new pool
@@ -6025,11 +6151,19 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         # TC-BCK-157: verify only 1 backup retained
         # Phase 1: wait until we see at least one 'merging' or 'merged' entry
         #          (confirms the retention pruner has started working).
-        #          In K8s mode, the StorageBackup CRD status.phase reflects
-        #          merge status — check it the same way as Docker.
+        #          In K8s the CR phase cannot express a merge at all, so the
+        #          state is read from the control plane and matched by uuid.
         # Phase 2: wait until no 'merging'/'merged' entries remain for this
         #          lvol, then assert ≤ 1 active backup.
         _MERGING_STATUSES = {"merging", "merged"}
+
+        def _merge_state_of(entry, cp_states):
+            """The entry's merge state: the control plane's, if it has one."""
+            cp = cp_states.get(entry.get("uuid") or "")
+            if cp:
+                return cp
+            return str(entry.get("Status") or entry.get("status") or "").lower()
+
         self.logger.info("TC-BCK-157: Phase 1 — waiting for merging to start …")
         phase1_deadline = time.time() + 300  # up to 5 min for pruner to kick in
         saw_merging = False
@@ -6039,9 +6173,10 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
                 b for b in backups
                 if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
             ]
+            cp_states = self._cp_backup_status_by_uuid() if self.k8s_test else {}
             merging_entries = [
                 b for b in lvol_all
-                if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
+                if _merge_state_of(b, cp_states) in _MERGING_STATUSES
             ]
             if merging_entries:
                 self.logger.info(
@@ -6063,9 +6198,10 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
                 b for b in backups
                 if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
             ]
+            cp_states = self._cp_backup_status_by_uuid() if self.k8s_test else {}
             merging_entries = [
                 b for b in lvol_all
-                if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
+                if _merge_state_of(b, cp_states) in _MERGING_STATUSES
             ]
             lvol_backups = [b for b in lvol_all if b not in merging_entries]
             self.logger.info(
@@ -6408,8 +6544,19 @@ class TestBackupListFields(BackupTestBase):
         out, err = self._sbcli(f"backup list --cluster-id {self.cluster_id}")
         assert not (err and "error" in err.lower()), \
             f"backup list --cluster-id failed: {err}"
-        assert bk_id in (out or "") or snap_name in (out or "") or lvol_name in (out or ""), \
-            f"backup list --cluster-id should include our backup; out={out!r}"
+        # This asks the CONTROL PLANE, so it has to be asked in the control
+        # plane's own terms. On k8s the handle this suite carries is the
+        # StorageBackup object's name -- bck-snplfwrnbx0 -- which the
+        # control plane has never heard of; it knows the backup by the uuid
+        # the operator recorded, and it names the volume after the PV
+        # (pvc-<uuid>), not after the claim the test chose. Searching its
+        # output for either of ours failed on a backup the previous case
+        # had just validated.
+        wanted = [v for v in (entry.get("uuid"), bk_id, snap_name, lvol_name)
+                  if v]
+        assert any(v in (out or "") for v in wanted), (
+            f"backup list --cluster-id should include our backup. Looked "
+            f"for any of {wanted}; out={out!r}")
         self.logger.info("TC-BCK-175: --cluster-id filter PASSED")
 
         # TC-BCK-176: status is 'done' or 'complete'
@@ -6663,6 +6810,10 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
                 pvc_name=fake_pvc,
                 pvc_size=pvc_size,
                 cluster_name=self._cluster_name,
+                # A real pool, so the request reaches the operator and is
+                # refused for the reason under test -- the missing backup --
+                # rather than by our own targetPool pre-check.
+                target_pool=self.pool_name,
             )
             self.created_backup_restores.append(restore_name)
             sleep_n_sec(30)
@@ -6731,6 +6882,8 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
                 pvc_name=bad_pvc,
                 pvc_size=pvc_size,
                 cluster_name="nonexistent-cluster",
+                # Valid pool: the cluster name is what this case makes wrong.
+                target_pool=self.pool_name,
             )
             sleep_n_sec(30)
             try:

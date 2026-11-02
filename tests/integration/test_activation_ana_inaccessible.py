@@ -16,12 +16,13 @@ Two properties are verified:
      the secondary for every lvol, and every ANA write happens BEFORE the
      STATUS_ACTIVE transition.
 
-All FDB / RPC / SPDK dependencies are mocked.
+Property B runs against the real FDB; storage-node RPCs are mocked.
 """
 
 import unittest
 from unittest.mock import MagicMock, patch
 
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
@@ -131,19 +132,30 @@ def _cluster(status=Cluster.STATUS_SUSPENDED):
     c.nqn = "nqn.cluster"
     c.is_single_node = False
     c.enable_node_affinity = False
-    c.backup_config = None
     c.cluster_max_size = 1 << 40  # non-zero -> skip the max_size write block
     return c
 
 
-def _lvol(uuid, lvs_name="LVS_A"):
-    lv = MagicMock(spec=LVol)
+def _lvol(uuid, node_id, lvs_name="LVS_A"):
+    lv = LVol()
+    lv.uuid = uuid
+    lv.lvol_name = uuid
+    lv.node_id = node_id
     lv.status = LVol.STATUS_ONLINE
     lv.lvs_name = lvs_name
     lv.nqn = f"nqn.2023-02.io.simplyblock:lvol:{uuid}"
     lv.lvol_uuid = uuid
-    lv.get_id = MagicMock(return_value=uuid)
     return lv
+
+
+def _two_node_ring():
+    """A two-node HA cluster: each node owns an LVS and is the other's
+    secondary. An HA node without a secondary of its own is not a state
+    activation accepts — it assigns one."""
+    primary = _node("primary-1", primary_secondary="secondary-1")
+    secondary = _node("secondary-1", lvstore="LVS_B", primary_secondary="primary-1",
+                      mgmt_ip="10.0.0.2", rpc_port=8081)
+    return primary, secondary
 
 
 class TestClusterActivatePass4(unittest.TestCase):
@@ -161,36 +173,20 @@ class TestClusterActivatePass4(unittest.TestCase):
             node.remote_devices = [_remote_of(peer, dev)
                                    for dev in peer.nvme_devices]
 
-        db = MagicMock()
-        db.get_cluster_by_id.return_value = cluster
-        db.get_storage_nodes_by_cluster_id.return_value = [primary, secondary]
-        db.get_storage_node_by_id.side_effect = lambda nid: (
-            primary if nid == primary.get_id() else secondary)
-        db.get_cluster_capacity.return_value = [{"size_total": 1 << 40}]
-        db.get_qos.return_value = []
-        db.get_primary_storage_nodes_by_secondary_node_id.side_effect = \
-            lambda nid: [primary] if nid == secondary.get_id() else []
-        db.get_lvols_by_node_id.side_effect = \
-            lambda nid: lvols if nid == primary.get_id() else []
+        db = DBController()
+        for record in (cluster, primary, secondary, *lvols):
+            record.write_to_db(db.kv_store)
 
         def _ana(lvol, node, ana_state):
             events.append(("ana", node.get_id(), ana_state))
 
+        real_set_status = cluster_ops.set_cluster_status
+
         def _set_status(cid, status):
             events.append(("status", status))
-
-        for n in (primary, secondary):
-            n.write_to_db = MagicMock(return_value=True)
-            n.rpc_client = MagicMock()
-            n.recreate_hublvol = MagicMock(return_value=True)
-            n.create_secondary_hublvol = MagicMock(return_value=True)
-            n.connect_to_hublvol = MagicMock(return_value=True)
-            n.client = MagicMock()
-        cluster.is_qos_set = lambda: False
+            real_set_status(cid, status)
 
         patches = [
-            patch.object(cluster_ops, "db_controller", db),
-            patch.object(cluster_ops, "DBController", return_value=db),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", lambda *a, **k: None),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", lambda *a, **k: None),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task", lambda *a, **k: None),
@@ -201,17 +197,18 @@ class TestClusterActivatePass4(unittest.TestCase):
             patch.object(cluster_ops.storage_node_ops, "_set_lvol_ana_on_node", _ana),
             patch.object(cluster_ops.storage_node_ops, "get_next_physical_device_order",
                          lambda *a, **kw: 0),
-            patch.object(cluster_ops.storage_node_ops, "get_secondary_nodes",
-                         lambda *a, **kw: [secondary.get_id()]),
-            patch.object(cluster_ops.storage_node_ops, "get_secondary_nodes_2",
-                         lambda *a, **kw: []),
             patch.object(cluster_ops, "set_cluster_status", _set_status),
             # Only sleep. Replacing the whole module makes time.time() return
             # a MagicMock, so the activation path's `time.time() >= deadline`
             # comparisons raise TypeError instead of running.
             patch.object(cluster_ops.time, "sleep", MagicMock()),
-            patch.object(cluster_ops.qos_controller, "get_qos_weights_list",
-                         lambda *a, **kw: []),
+            # Storage nodes: the activation reads its nodes back from FDB, so
+            # the node-side calls are patched on the class, not the instances.
+            patch.object(StorageNode, "rpc_client", MagicMock()),
+            patch.object(StorageNode, "recreate_hublvol", return_value=True),
+            patch.object(StorageNode, "create_secondary_hublvol", return_value=True),
+            patch.object(StorageNode, "connect_to_hublvol", return_value=True),
+            patch.object(StorageNode, "client", MagicMock()),
         ]
         for p in patches:
             p.start()
@@ -221,10 +218,8 @@ class TestClusterActivatePass4(unittest.TestCase):
         return events
 
     def test_pass4_sets_ana_then_active(self):
-        primary = _node("primary-1", primary_secondary="secondary-1")
-        secondary = _node("secondary-1", lvstore="LVS_A", mgmt_ip="10.0.0.2",
-                          rpc_port=8081)
-        lvols = [_lvol("lv-1"), _lvol("lv-2")]
+        primary, secondary = _two_node_ring()
+        lvols = [_lvol("lv-1", "primary-1"), _lvol("lv-2", "primary-1")]
         events = self._run(_cluster(), primary, secondary, lvols)
 
         ana = [(e[1], e[2]) for e in events if e[0] == "ana"]
@@ -238,9 +233,8 @@ class TestClusterActivatePass4(unittest.TestCase):
             ["non_optimized", "non_optimized"])
 
     def test_active_is_set_after_all_ana_writes(self):
-        primary = _node("primary-1", primary_secondary="secondary-1")
-        secondary = _node("secondary-1", mgmt_ip="10.0.0.2", rpc_port=8081)
-        lvols = [_lvol("lv-1")]
+        primary, secondary = _two_node_ring()
+        lvols = [_lvol("lv-1", "primary-1")]
         events = self._run(_cluster(), primary, secondary, lvols)
 
         # The final ACTIVE transition must come after every ANA write.

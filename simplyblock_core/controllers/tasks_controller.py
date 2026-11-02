@@ -1060,6 +1060,24 @@ def get_active_node_tasks(cluster_id, node_id):
     return out
 
 
+# Data movement on a node that JC compression waits for: migration and
+# restart work, after which the journal stops growing and one compression
+# pass is effective. Not every active task: replication, backup and sync
+# tasks are always open on a node that replicates, and counting them kept
+# the resume from ever firing (bf7 2026-10-30: the 16:39 rebalancing
+# finished, no node's own journal was resumed, the JMs filled by 19:20).
+_JC_COMP_WAITS_FOR = (
+    JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_NODE_RESTART, JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_ADD,
+    JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG, JobSchedule.FN_CLUSTER_EXPAND,
+)
+
+
+def get_jc_comp_blocking_node_tasks(cluster_id, node_id):
+    return [t for t in get_active_node_tasks(cluster_id, node_id)
+            if t.function_name in _JC_COMP_WAITS_FOR]
+
+
 def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:

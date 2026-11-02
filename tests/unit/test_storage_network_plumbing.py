@@ -82,30 +82,20 @@ REPORT = {
 
 
 class TestWhatThePodReportsBecomesTheNode:
-    def test_the_rpc_address_is_the_management_interface_and_the_data_nics_are_the_data_interfaces(self):
+    def test_the_data_nics_are_the_data_interfaces(self):
         from simplyblock_core import storage_network
 
-        spdk_ip, nics = storage_network.from_report(REPORT)
+        nics = storage_network.from_report(REPORT)
 
-        assert spdk_ip == "10.0.0.5"
         assert [(n.if_name, n.ip4_address) for n in nics] == [("data0", "10.10.10.101"), ("data1", "10.20.0.5")]
         assert all(n.trtype == "TCP" and n.net_type == "attached" and n.uuid for n in nics)
 
     def test_without_data_interfaces_the_management_interface_carries_the_data(self):
         from simplyblock_core import storage_network
 
-        spdk_ip, nics = storage_network.from_report({"pod_ip": "10.42.1.5", "interfaces": [REPORT["interfaces"][0]]})
+        nics = storage_network.from_report({"pod_ip": "10.42.1.5", "interfaces": [REPORT["interfaces"][0]]})
 
-        assert spdk_ip == "10.0.0.5"
         assert [n.if_name for n in nics] == ["mgmt0"]
-
-    def test_without_a_management_interface_the_rpc_address_is_the_pods(self):
-        from simplyblock_core import storage_network
-
-        spdk_ip, nics = storage_network.from_report({"pod_ip": "10.42.1.5", "interfaces": [REPORT["interfaces"][1]]})
-
-        assert spdk_ip == "10.42.1.5"
-        assert [n.if_name for n in nics] == ["data0"]
 
     def test_a_report_with_no_interfaces_is_refused(self):
         from simplyblock_core import storage_network
@@ -114,31 +104,59 @@ class TestWhatThePodReportsBecomesTheNode:
             storage_network.from_report({"pod_ip": "10.42.1.5", "interfaces": []})
 
 
-class TestTheControlPlaneDialsThePodWhenItHasOne:
+class TestTheControlPlaneDialsTheSpdkProxyByName:
     def _node(self, **fields):
         from simplyblock_core.models.storage_node import StorageNode
 
         return StorageNode({"mgmt_ip": "192.168.1.9", "rpc_port": 8080, "rpc_username": "u",
-                            "rpc_password": "p", "hostname": "w1_8080", **fields})
+                            "rpc_password": "p", "hostname": "w1_8080", "cr_namespace": "storage",
+                            "namespace": "simplyblock", "cluster_id": "15260308-01ab", **fields})
 
-    def test_a_node_with_an_spdk_address_is_dialed_there_and_the_worker_address_stays_the_host(self):
-        node = self._node(spdk_ip="10.0.0.5")
-
+    def _dialed(self, node, tls="disabled"):
         with patch("simplyblock_core.models.storage_node.RPCClient") as client, \
                 patch("simplyblock_core.models.storage_node.Settings") as settings:
-            settings.return_value.tls_connect = "disabled"
+            settings.return_value.tls_connect = tls
             node.rpc_client()
+        return client.call_args.args[0]
 
-        assert client.call_args.args[0] == "10.0.0.5"
+    def test_a_node_on_attached_networks_is_dialed_by_its_name_in_the_proxy_service(self):
+        node = self._node(networks=NETWORKS)
+
+        assert self._dialed(node) == "w1.simplyblock-spdk-proxy.storage.svc"
         assert node.mgmt_ip == "192.168.1.9"
 
-    def test_a_node_without_one_is_dialed_at_its_management_address_as_before(self):
-        with patch("simplyblock_core.models.storage_node.RPCClient") as client, \
-                patch("simplyblock_core.models.storage_node.Settings") as settings:
-            settings.return_value.tls_connect = "disabled"
-            self._node().rpc_client()
+    def test_a_node_on_the_pod_network_is_dialed_by_its_own_service(self):
+        node = self._node(data_nics=[{"if_name": "eth0", "ip4_address": "10.103.252.64", "net_type": "pod"}])
 
-        assert client.call_args.args[0] == "192.168.1.9"
+        assert self._dialed(node) == "snode-spdk-svc-8080-152603.simplyblock.svc"
+
+    def test_tls_dials_the_proxy_service_name_on_every_network(self):
+        assert self._dialed(self._node(), tls="enabled") == "w1.simplyblock-spdk-proxy.storage.svc"
+
+    def test_a_node_on_the_host_network_is_dialed_at_its_management_address_as_before(self):
+        assert self._dialed(self._node()) == "192.168.1.9"
+
+    def test_the_k8s_node_name_field_decides_the_service_name(self):
+        node = self._node(hostname="something-else_8080", k8s_node_name="w1", networks=NETWORKS)
+
+        assert self._dialed(node) == "w1.simplyblock-spdk-proxy.storage.svc"
+
+    def test_a_record_without_the_field_falls_back_to_the_hostname(self):
+        node = self._node(hostname="w7_8080", networks=NETWORKS)
+
+        assert node.k8s_node_name == "" and self._dialed(node).startswith("w7.")
+
+    def test_a_node_has_no_spdk_ip(self):
+        from simplyblock_core.models.storage_node import StorageNode
+
+        assert not hasattr(StorageNode(), "spdk_ip")
+
+    def test_a_record_an_earlier_build_wrote_with_spdk_ip_still_loads(self):
+        from simplyblock_core.models.storage_node import StorageNode
+
+        node = StorageNode().from_dict({"uuid": "n1", "spdk_ip": "10.0.0.5", "hostname": "w1_8080", "rpc_port": 8080})
+
+        assert node.uuid == "n1" and node._k8s_node_label() == "w1"
 
 
 class TestARestartRefreshesTheNodeFromTheReport:
@@ -148,9 +166,8 @@ class TestARestartRefreshesTheNodeFromTheReport:
 
         known = [IFace({"uuid": "keep-me", "if_name": "data0", "ip4_address": "10.10.10.99",
                         "status": "Up", "net_type": "attached", "trtype": "TCP"})]
-        spdk_ip, nics = storage_network.from_report(REPORT, known)
+        nics = storage_network.from_report(REPORT, known)
 
-        assert spdk_ip == "10.0.0.5"
         by_name = {n.if_name: n for n in nics}
         assert by_name["data0"].uuid == "keep-me" and by_name["data0"].ip4_address == "10.10.10.101"
         assert by_name["data1"].uuid and by_name["data1"].uuid != "keep-me"
@@ -160,16 +177,16 @@ class TestANodeOnTheHostNetworkIsUnchanged:
     def test_it_has_no_pod_network_and_its_rpc_host_is_the_worker(self):
         from simplyblock_core.models.storage_node import StorageNode
 
-        node = StorageNode({"mgmt_ip": "192.168.1.9"})
+        with patch("simplyblock_core.models.storage_node.Settings") as settings:
+            settings.return_value.tls_connect = "disabled"
+            node = StorageNode({"mgmt_ip": "192.168.1.9"})
 
-        assert not node.on_pod_network and node.rpc_host == "192.168.1.9"
+            assert not node.on_pod_network and node.rpc_host == "192.168.1.9"
 
-    def test_with_networks_it_is_on_the_pod_network_and_its_rpc_host_is_the_pod(self):
+    def test_with_networks_it_is_on_the_pod_network(self):
         from simplyblock_core.models.storage_node import StorageNode
 
-        node = StorageNode({"mgmt_ip": "192.168.1.9", "spdk_ip": "10.0.0.5", "networks": NETWORKS})
-
-        assert node.on_pod_network and node.rpc_host == "10.0.0.5"
+        assert StorageNode({"mgmt_ip": "192.168.1.9", "networks": NETWORKS}).on_pod_network
 
 
 class TestTheWorkersAddressOfANodeOnAttachedNetworks:

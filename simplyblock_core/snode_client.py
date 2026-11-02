@@ -252,6 +252,14 @@ class SNodeClient:
         return self._request("POST", "wipe_block_device",
                              {"device_name": device_name})
 
+    def rescan_block_device(self, device_path):
+        """Re-read the size of a grown whole-disk block device (lblk).
+
+        Returns ``(result, error)``; ``result`` is
+        ``{"device", "size", "rescanned"}`` with ``size`` in bytes."""
+        return self._request("POST", "rescan_block_device",
+                             {"device_path": device_path})
+
     def device_smart(self, device_path):
         """Raw health log of a kernel block device on the node (lblk/AIO).
 

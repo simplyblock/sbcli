@@ -12,7 +12,7 @@ from tenacity import (
     wait_fixed,
 )
 
-from simplyblock_core.storage_network import MANAGEMENT_INTERFACE, NetworkAttachment
+from simplyblock_core.storage_network import NetworkAttachment
 
 NETWORK_STATUS = "k8s.v1.cni.cncf.io/network-status"
 #: What Kubernetes expands to the pod's own address in a container env value.
@@ -42,15 +42,10 @@ def device_resources(attachments: list[NetworkAttachment]) -> dict[str, int]:
 
 
 def server_ip(attachments: list[NetworkAttachment], pod_network: bool = False) -> str:
-    """The address the SPDK proxy binds. The management network's, when there is one,
-    and otherwise the pod's own, which only the pod knows and Kubernetes expands from
-    POD_IP. "" when the pod is on the host network and the control plane's own value stands."""
-    if not attachments:
-        return POD_IP_REFERENCE if pod_network else ""
-    for a in attachments:
-        if a.interface == MANAGEMENT_INTERFACE and a.ips:
-            return a.ips[0].split("/")[0]
-    return POD_IP_REFERENCE
+    """The address the SPDK proxy binds: the pod's own, which only the pod knows and
+    Kubernetes expands from POD_IP, and which the pod's Service name resolves to. "" when
+    the pod is on the host network and the control plane's own value stands."""
+    return POD_IP_REFERENCE if attachments or pod_network else ""
 
 
 def report(pod, attachments: list[NetworkAttachment]) -> dict | None:

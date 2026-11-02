@@ -97,6 +97,12 @@ from simplyblock_web import node_utils
 logger = utils.get_logger(__name__)
 
 
+# The node agent's spdk_process_kill waits up to 10 x 3 s for the SPDK pod to
+# terminate (simplyblock_web/api/internal/storage_node/kubernetes.py).
+KILL_AGENT_WAIT_SEC = 30
+KILL_CONNECT_TIMEOUT_SEC = 5
+
+
 def kill_client_kwargs(force=False):
     """SNodeClient kwargs for the spdk_process_kill RPC.
 
@@ -110,10 +116,20 @@ def kill_client_kwargs(force=False):
     connect_retry=0 makes a refused connection fail at once (SNodeClient's
     own documented rationale); read retries still cover a slow-but-alive
     agent. The graceful path keeps its patience.
+
+    The read timeout must outlast the agent's own wait: on Kubernetes the
+    kill deletes the SPDK pod and waits up to KILL_AGENT_WAIT_SEC for it to
+    terminate, which takes longer than 10 s. With a 10 s read timeout every
+    forced shutdown on bf8 (2026-11-02) failed with "Failed to kill SPDK"
+    although SPDK did stop: the shutdown returned before broadcasting the
+    devices unavailable, never set the node offline, and left it in_shutdown,
+    where a restart is refused. The connect timeout stays short, so a dead
+    agent still fails fast.
     """
+    timeout = (KILL_CONNECT_TIMEOUT_SEC, KILL_AGENT_WAIT_SEC + 15)
     if force:
-        return {"timeout": 10, "retry": 2, "connect_retry": 0}
-    return {"timeout": 10, "retry": 10}
+        return {"timeout": timeout, "retry": 2, "connect_retry": 0}
+    return {"timeout": timeout, "retry": 10}
 
 
 def ensure_spdk_stopped(client_factory, rpc_port, cluster_id):
@@ -1253,6 +1269,50 @@ def _repair_multipath_controller_locked(node, name, device, rpc_client, ret,
     return True
 
 
+#: Relative spread of size/placement_size across the data devices of a
+#: cluster that still counts as uniform growth of lblk devices.
+GROWTH_UNIFORM_TOLERANCE = 0.01
+
+
+def cluster_growth_ratios(db_controller, cluster_id):
+    """Growth of the data devices relative to their placement weight, as
+    ``(uniform, min_ratio, max_ratio)``. Journal, new, and failed devices are
+    ignored. A ratio above 1 means the device grew after it was placed (see
+    device_controller.resize_device)."""
+    ratios = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW,
+                              NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+                continue
+            if dev.cluster_device_order < 0:
+                continue
+            base = dev.weight_size()
+            ratios.append((dev.size / base) if base and base > 0 else 1.0)
+    if not ratios:
+        return True, 1.0, 1.0
+    lo, hi = min(ratios), max(ratios)
+    return (hi - lo) <= GROWTH_UNIFORM_TOLERANCE * lo, lo, hi
+
+
+def scaled_placement_size(db_controller, cluster_id, size):
+    """Placement size for a device that enters the cluster map now.
+
+    Weights only count relative to each other. After all data devices grew by
+    a common factor f, their weights still stand for their original sizes, so
+    a new device is weighted as size / f; weighting it by its full size would
+    give it f times its share of the data. Returns 0 (weight = size) when the
+    cluster has not grown, or has grown unevenly (then the next
+    grow-devices run sets every weight to its size anyway)."""
+    uniform, lo, hi = cluster_growth_ratios(db_controller, cluster_id)
+    factor = (lo + hi) / 2
+    if not uniform or factor <= 1.0 + GROWTH_UNIFORM_TOLERANCE or not size:
+        return 0
+    return int(size / factor)
+
+
 def get_next_cluster_device_order(db_controller, cluster_id):
     max_order = 0
     found = False
@@ -1430,8 +1490,12 @@ def _cluster_two_node_arbitrated(cluster_id, cluster=None, db=None) -> bool:
     return _remember_cluster_arbitration(cluster)
 
 
+# Restart: poll interval while the LVS leader reports an active journal compression (see recover lvstore).
+RESTART_JC_COMPRESSION_POLL_S = 5
+
+
 def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=None,
-                                      interval_s=2.0, sleep=None, clock=None, arbitrated=None):
+                                      interval_s=2.0, sleep=None, clock=None):
     """``jc_compression get_status`` on the LVS leader, retried while it fails.
 
     Campaign c2, F1: right after the returning node's SPDK is up, the leader
@@ -1441,10 +1505,11 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     transient, so it is retried for ``RESTART_JC_COMPRESSION_RETRY_S``; only a
     failure that outlasts that aborts the restart (the caller raises).
 
-    Two-node arbitration only: on every other cluster this is exactly the
-    previous single call, and a failure is re-raised at once (the restart
-    aborts immediately, as before). The arbitration flag is read only after a
-    failed first call, so the success path does no extra work.
+    All clusters. It was two-node arbitration only, and a regular cluster
+    aborted the restart on the first such answer -- seen there too once the
+    survivors' JMs finish a compression without the absent node (ultra page
+    copy PR), so the returning journal needs a longer re-level: 2026-10-29
+    page copy soak, 1+1, a graceful restart aborted twice before it got through.
 
     Bounded both ways, like _kill_spdk_until_dead: by the wall clock and by the
     number of rounds (timeout / interval), so a patched-out ``time.sleep``
@@ -1452,11 +1517,7 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
     """
     try:
         return leader.rpc_client().jc_compression_get_status(jm_vuid)
-    except Exception as e:                      # noqa: BLE001 - re-raised unless arbitrated
-        if arbitrated is None:
-            arbitrated = _cluster_two_node_arbitrated(leader.cluster_id)
-        if not arbitrated:
-            raise
+    except Exception as e:                      # noqa: BLE001 - retried, then re-raised
         logger.warning("jc_compression status on leader %s failed (%s); retrying "
                        "(journal re-level in progress?)", leader.get_id(), e)
     if timeout_s is None:
@@ -1543,6 +1604,28 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
             logger.error(f"Failed to create raid_jm_{node}")
             return False
 
+    # The raid has no superblock, so creating it with both legs neither resyncs
+    # nor tells a stale leg from a current one: a leg taken out of the raid
+    # while the JM kept writing would be read as current and the JM alceml
+    # fails to load (SFAM-2843). Drop such legs before the alceml reads, and
+    # re-add them (raid1 rebuilds them from the current leg) once it is up.
+    stale_legs: list[str] = []
+    if after_restart and jm_dev and plan["level"] != jm_raid.RAID_NONE:
+        top_legs = leg_bdevs or plan["members"]
+        stale_legs = [leg for leg in jm_dev.stale_jm_legs if leg in top_legs]
+        if len(stale_legs) >= len(top_legs):
+            logger.error("Every JM raid leg of %s is marked stale (%s): mounting them all",
+                         node[:8], stale_legs)
+            stale_legs = []
+        for leg in stale_legs:
+            logger.warning("JM raid leg %s is stale: removing it from %s before the JM alceml loads",
+                           leg, raid_bdev)
+            try:
+                rpc_client.bdev_raid_remove_base_bdev(leg)
+            except RPCRemoteError as e:
+                logger.error("Failed to remove stale JM raid leg %s: %s", leg, e)
+                return False
+
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
@@ -1607,6 +1690,14 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
 
     ret = rpc_client.bdev_get(raid_bdev)
 
+    for leg in stale_legs:
+        # Stays recorded as stale until the health check sees the rebuild done.
+        logger.info("Re-adding stale JM raid leg %s to %s", leg, raid_bdev)
+        try:
+            rpc_client.bdev_raid_add_base_bdev(raid_bdev, leg)
+        except RPCRemoteError as e:
+            logger.warning("Failed to re-add JM raid leg %s (JM runs degraded): %s", leg, e)
+
     return JMDevice({
         'uuid': alceml_id,
         'device_name': jm_bdev,
@@ -1616,6 +1707,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
         'raid_bdev': raid_bdev,
         'jm_leg_bdevs': leg_bdevs,
         'jm_leg_members': leg_members,
+        'stale_jm_legs': stale_legs,
         'alceml_bdev': alceml_name,
         'alceml_name': alceml_name,
         'jm_bdev': jm_bdev,
@@ -1936,6 +2028,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     for nvme in new_devices:
         if nvme.status == NVMeDevice.STATUS_ONLINE:
             if nvme.cluster_device_order < 0:
+                nvme.placement_size = scaled_placement_size(db_controller, snode.cluster_id, nvme.size)
                 nvme.cluster_device_order = dev_order
                 dev_order += 1
         device_events.device_create(nvme)
@@ -2000,6 +2093,7 @@ def _prepare_cluster_devices_jm_on_dev(snode: StorageNode, devices):
                 return False
             if nvme.status == NVMeDevice.STATUS_ONLINE:
                 if nvme.cluster_device_order < 0:
+                    nvme.placement_size = scaled_placement_size(db_controller, snode.cluster_id, nvme.size)
                     nvme.cluster_device_order = dev_order
                     dev_order += 1
                 device_events.device_create(nvme)
@@ -4286,7 +4380,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
 
         data_nics: list[IFace] = []
-        spdk_ip = ""
 
         active_tcp = False
         active_rdma = False
@@ -4296,7 +4389,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if networks or pod_network:
             # The host's NICs say nothing about the pod's interfaces; use the pod's report.
             try:
-                spdk_ip, data_nics = storage_network.from_report(results)
+                data_nics = storage_network.from_report(results)
             except (ValueError, KeyError, TypeError) as e:
                 _abort_started_spdk(snode_api, rpc_port, cluster_id,
                                     f"The SPDK pod reported no usable interfaces: {e}",
@@ -4360,11 +4453,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # so restart can re-resolve devices without the host config file.
         snode.lblk_devices = lblk_configured if lblk_mode else []
         snode.hostname = hostname
+        snode.k8s_node_name = node_info['hostname']
         snode.host_nqn = subsystem_nqn
         snode.subsystem = subsystem_nqn
         snode.data_nics = data_nics
         snode.networks = list(networks or [])
-        snode.spdk_ip = spdk_ip
         snode.mgmt_ip = mgmt_ip
         snode.primary_ip = mgmt_ip
         snode.rpc_port = rpc_port
@@ -4675,6 +4768,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 for dev in snode.nvme_devices:
                     dev.physical_label = snode.physical_label
                     if dev.status == NVMeDevice.STATUS_ONLINE:
+                        dev.placement_size = scaled_placement_size(db_controller, snode.cluster_id, dev.size)
                         dev.cluster_device_order = dev_order
                         dev_order += 1
 
@@ -8616,6 +8710,7 @@ def _restart_storage_node_impl(
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
         snode.hostname = node_info['hostname']
+        snode.k8s_node_name = node_info['hostname']
         evict_cached_session(old_rpc_host, old_rpc_port)
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
@@ -8830,6 +8925,9 @@ def _restart_storage_node_impl(
                         logger.error(e)
                     snode.ssd_pcie.append(new_ssd)
 
+        if not lblk_mode:
+            _rebind_own_devices_to_spdk(snode, snode_api, node_info)
+
         fdb_connection = cluster.db_connection
         if lvol_changed:
             # Keyword args: the positional order here silently paired
@@ -8868,7 +8966,7 @@ def _restart_storage_node_impl(
             pod_network=snode.pod_network, published_ports=storage_network.published_ports(snode))
         if snode.on_pod_network:
             # A recreated pod can hold other addresses.
-            snode.spdk_ip, snode.data_nics = storage_network.from_report(results, snode.data_nics)
+            snode.data_nics = storage_network.from_report(results, snode.data_nics)
 
     except Exception as e:
         logger.error(e)
@@ -10646,10 +10744,11 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
         return True
     else:
-        # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
+        # Minimum 5 vCPUs: the smallest cluster vCPU budget (4) plus one for the
+        # system, as add_node requires. RAM 4GB min. Plus 0.2% of the storage.
         total_cores = os.cpu_count() or 0
-        if total_cores < 6:
-            raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
+        if total_cores < 5:
+            raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 5 cores required.")
 
         if lblk_selection is None:
             # load vfio_pci and uio_pci_generic (nvme mode only — lblk keeps
@@ -11102,6 +11201,61 @@ def _set_restart_phase(snode: StorageNode, lvs_name, phase, db_controller):
     elif old_phase == StorageNode.RESTART_PHASE_POST_UNBLOCK and phase == "":
         drain_restart_queue(node_id, lvs_name)
 
+
+def _rebind_own_devices_to_spdk(snode, snode_api, node_info):
+    """Bind the node's own NVMe devices back to the SPDK driver before SPDK
+    starts.
+
+    A shutdown hands them to the kernel nvme driver (shutdown step 5), and
+    SPDK's setup.sh will not take them back: a device carrying a partition
+    table counts as in use (scripts/common.sh block_in_use), and ours carry
+    the JM and data partitions. Node add binds explicitly; restart relied on
+    setup.sh, so every restart after a shutdown failed with "No NVMe devices
+    was found!" (bf7 2026-10-30: e0ad4fa0 and 5055ad5c, shut down by the
+    suspend drain, stayed offline for hours).
+    """
+    kernel_bound = set((node_info or {}).get("nvme_pcie_list") or [])
+    own = list(snode.ssd_pcie or [])
+    for dev in snode.nvme_devices:
+        if dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own:
+            own.append(dev.pcie_address)
+    for pci in own:
+        if pci not in kernel_bound:
+            continue
+        logger.info("Binding %s back to SPDK on %s (left on the kernel driver by a shutdown)",
+                    pci, snode.get_id())
+        try:
+            snode_api.bind_device_to_spdk(pci)
+        except Exception as e:
+            logger.error("Failed to bind %s to SPDK on %s: %s", pci, snode.get_id(), e)
+
+
+def resume_jc_compression(node, jm_vuid):
+    """Resume JC compression for ``jm_vuid`` on ``node``, falling back to a
+    retry task when the RPC fails.
+
+    A JC context starts with auto-compression suspended (ultra 38fb5595), so
+    every SPDK start leaves each journal it hosts uncompressed until the
+    control plane resumes it. With distrib page copy every first write after
+    a snapshot appends a page-copy record, so a node whose own journal is
+    never resumed fills its JM partition and aborts (bf7 2026-10-30: the
+    13 GiB JM filled within ~3h of the 16:38 restart, 19:20 JM full -> JCERR
+    -> abort cascade -> cluster suspended).
+    """
+    # Release-upgrade guard (remove with the jc_compression_upgrade plugin):
+    # resumes are held until `cluster upgrade-complete`.
+    if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(node.cluster_id)):
+        logger.info("JC compression resume held: cluster upgrade in progress")
+        return False
+    try:
+        if node.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=False):
+            return True
+    except Exception as e:
+        logger.warning("JC compression resume for jm_vuid %s on %s failed: %s",
+                       jm_vuid, node.get_id(), e)
+    logger.info("Failed to resume JC compression adding task...")
+    tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=jm_vuid)
+    return False
 
 
 def _set_lvstore_status_atomic(node_id, value, db_controller):
@@ -13899,15 +14053,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         if current_leader:
             try:
                 jc_compression_is_active = _jc_compression_status_with_retry(current_leader, lvs_jm_vuid)
-                retries = 10
+                # Polled every RESTART_JC_COMPRESSION_POLL_S, for at most 10 minutes as before. A compression
+                # interrupted by this node's outage finishes on the survivors once their JMs drop this node's
+                # dead reader (ultra page copy PR), seconds after the kill; polling once a minute added up to a
+                # minute to every such restart. (Before that ultra fix it could not finish until this node was
+                # back: the restart waited the full 10 minutes, 2026-10-29 page copy soak.)
+                poll_s = RESTART_JC_COMPRESSION_POLL_S
+                retries = int(600 // poll_s)
                 while jc_compression_is_active:
                     if retries <= 0:
                         logger.warning("Timeout waiting for JC compression task to finish on leader %s",
                                        current_leader.get_id())
                         break
                     retries -= 1
-                    logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in 60 seconds")
-                    time.sleep(60)
+                    logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in {poll_s} seconds")
+                    time.sleep(poll_s)
                     # Poll the SAME jm_vuid as the first read above — the LVS
                     # being recovered (lvs_jm_vuid). Was previously
                     # current_leader.jm_vuid, which is the leader-node's own
@@ -14206,7 +14366,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         # (2026-08-31: unblock landed at 13:33:29.13, one second after the
         # client had already failed IO at 13:33:28). Killing our own SPDK
         # can wait; a fenced healthy peer cannot.
-        for peer in blocked_peers:
+        #
+        # Iterate over a copy: _unblock_peer_port removes the peer from
+        # blocked_peers, and a loop over the live list skips every second
+        # entry. The leader is appended after the non-leaders, so it was the
+        # one left fenced (EKS bed 2026-10-30: the acting leader's client port
+        # went to reject mode, clients failed over to the tertiary, which
+        # took the JM write lock, and the two writers' JC aborted both nodes).
+        for peer in list(blocked_peers):  # noqa: PERF101
             _unblock_peer_port(peer)
         _persist_deferred_node_fields()
         _release_hub_locks()
@@ -15055,6 +15222,12 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         _set_restart_phase(snode, lvs_name, "", db_controller)
 
         _set_lvstore_status_atomic(lvs_node.get_id(), "ready", db_controller)
+
+        # The leader's JC context for this LVS is new (SPDK restarted, or the
+        # takeover created it) and starts with compression suspended. Nothing
+        # else resumes it until a migration on the node finishes, which under
+        # write load with page copy is hours -- the JM fills first.
+        resume_jc_compression(snode, lvs_jm_vuid)
 
         # reset snapshot delete status (only for own primary LVS)
         if not is_takeover:
@@ -15940,6 +16113,10 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # same flag without having to re-fetch the cluster setting.
         if cluster.shared_placement:
             distrib_params["shared_placement"] = True
+        # Page copy (snapshot copy-on-write in the distrib): fixed at cluster
+        # creation, persisted per stack entry for the same reason.
+        if cluster.page_copy:
+            distrib_params["page_copy"] = True
         # Failure-domain placement is activated implicitly via the per-node
         # failure_domain id (>= 0) in the distrib cluster map sent by
         # distr_send_cluster_map / distr_add_nodes (see get_distr_cluster_map);

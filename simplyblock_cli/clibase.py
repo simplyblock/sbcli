@@ -210,6 +210,9 @@ class CLIWrapperBase:
                 "with each other, but not with --pci-allowed or --pci-blocked), or --lblk with "
                 "its --blk-* selectors."
             )
+        lblk_journal_device = getattr(args, 'lblk_journal_device', False)
+        if lblk_journal_device and not lblk:
+            self.parser.error("--lblk-journal-device requires --lblk")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -222,6 +225,7 @@ class CLIWrapperBase:
                 "names": [str(x) for x in blk_names.split(',')] if blk_names else None,
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
+                "journal_device": bool(lblk_journal_device),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
@@ -443,6 +447,20 @@ class CLIWrapperBase:
 
     def storage_node__restart_device(self, sub_command, args):
         return device_controller.restart_device(args.device_id, args.force)
+
+    def storage_node__resize_device(self, sub_command, args):
+        try:
+            result = device_controller.resize_device(args.device_id)
+        except ValueError as e:
+            print(e)
+            return False
+        if not result["resized"]:
+            return f"Device size unchanged: {utils.humanbytes(result['new_size'])}"
+        out = (f"Device grown from {utils.humanbytes(result['old_size'])} "
+               f"to {utils.humanbytes(result['new_size'])}")
+        if result["warning"]:
+            out += f"\nWarning: {result['warning']}"
+        return out
 
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
@@ -747,6 +765,27 @@ class CLIWrapperBase:
         cluster_name = args.name
         cluster_ops.change_cluster_name(cluster_id, cluster_name)
         return True
+
+    def cluster__grow_devices(self, sub_command, args):
+        result = device_controller.grow_cluster_devices(
+            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
+        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+                 for r in result["devices"] if r["resized"]]
+        lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
+        rebalance = result.get("rebalance")
+        if rebalance and rebalance["started"]:
+            lines.append("The devices have grown unevenly: device weights set to the new sizes, "
+                         "cluster rebalancing started.")
+        elif rebalance and rebalance["weights_updated"]:
+            lines.append(f"The devices have grown unevenly: device weights set to the new sizes. "
+                         f"{rebalance['reason']}")
+        elif rebalance:
+            lines.append(f"Warning: the devices have grown unevenly. {rebalance['reason']}")
+        elif not result["uniform"]:
+            lines.append("Warning: the data devices of the cluster have grown unevenly; the added capacity is "
+                         "only fully usable once all of them have grown by the same factor, or after "
+                         "grow-devices without --no-rebalance has updated the weights.")
+        return "\n".join(lines) or "No device has grown"
 
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
@@ -1854,6 +1893,7 @@ class CLIWrapperBase:
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            page_copy=getattr(args, 'page_copy', False),
         )
 
     def cluster_create(self, args):
@@ -1927,6 +1967,7 @@ class CLIWrapperBase:
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
             cluster_vip=cluster_vip,
+            page_copy=getattr(args, 'page_copy', False),
         )
 
     def query_yes_no(self, question, default="yes"):

@@ -6,16 +6,26 @@
 # ]
 # ///
 import os
-import time
+import sys as _sys
 
 import paramiko
+
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import time
+
+from utils import ssh_auth  # noqa: E402
 
 # SSH Configuration
 BASTION_IP = os.getenv("BASTION_IP")
 if os.environ.get("KEY_PATH", None):
     KEY_PATH=os.environ.get("KEY_PATH")
 else:
-    KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
+    # KEY_PATH first: the pipelines write the lab key to a path of their own
+    # choosing and export it, and simplyblock-us-east-2.pem is no longer a
+    # credential -- infra strips it from the nodes' authorized_keys, so the
+    # old default resolves to a file that exists and does not authenticate.
+    KEY_PATH = os.environ.get("KEY_PATH") or os.path.expanduser(
+        f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
 USER = os.getenv("SSH_USER", "root")
 
 # Node Lists
@@ -34,23 +44,25 @@ def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5):
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            if not os.path.exists(KEY_PATH):
-                raise FileNotFoundError(f"SSH private key not found at {KEY_PATH}")
-
-            private_key = paramiko.Ed25519Key(filename=KEY_PATH)
+            # No pre-flight key check: ssh_auth tries every candidate and
+            # reports what it tried. Demanding one named file here would
+            # fail before the chain that exists to survive its absence.
 
             if bastion_ip:
                 bastion = paramiko.SSHClient()
                 bastion.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                bastion.connect(hostname=bastion_ip, username=USER, pkey=private_key, timeout=30)
+                used = ssh_auth.connect(bastion, bastion_ip, USER, timeout=30)
+                print(f"[ssh] bastion {bastion_ip}: {used}")
 
                 transport = bastion.get_transport()
                 channel = transport.open_channel("direct-tcpip", (target_ip, 22), ("localhost", 0))
 
-                ssh.connect(target_ip, username=USER, sock=channel, pkey=private_key, timeout=30)
+                used = ssh_auth.connect(ssh, target_ip, USER, sock=channel, timeout=30)
+                print(f"[ssh] {target_ip} via bastion: {used}")
                 return ssh
             else:
-                ssh.connect(target_ip, username=USER, pkey=private_key, timeout=30)
+                used = ssh_auth.connect(ssh, target_ip, USER, timeout=30)
+                print(f"[ssh] {target_ip}: {used}")
                 return ssh
 
         except Exception as e:

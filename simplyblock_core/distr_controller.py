@@ -304,7 +304,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         for i, dev in enumerate(snode.nvme_devices):
             if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW]:
                 continue
-            dev_w_gib = utils.convert_size(dev.size, 'GiB') or 1
+            dev_w_gib = utils.convert_size(dev.weight_size(), 'GiB') or 1
             name = None
             dev_status = dev.status
             if snode.get_id() == target_node.get_id():
@@ -559,7 +559,7 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
     except KeyError:
         logger.exception("Node not found")
         return False
-    dev_w_gib = utils.convert_size(device.size, 'GiB') or 1
+    dev_w_gib = utils.convert_size(device.weight_size(), 'GiB') or 1
     if target_node.status == StorageNode.STATUS_ONLINE:
         rpc_client = target_node.rpc_client(timeout=3)
 

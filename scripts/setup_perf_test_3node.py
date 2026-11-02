@@ -331,8 +331,8 @@ def main():
     # --- Phase 2a: Create cluster (FTT 1+1) ---
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
-        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
-        f" --data-chunks-per-stripe {NDCS} --parity-chunks-per-stripe {NPCS}"
+        (f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
+        f" --data-chunks-per-stripe {NDCS} --parity-chunks-per-stripe {NPCS}")
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 

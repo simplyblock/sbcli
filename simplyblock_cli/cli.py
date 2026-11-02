@@ -60,6 +60,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__device_hang(subparser)
         self.init_storage_node__get_device(subparser)
         self.init_storage_node__restart_device(subparser)
+        self.init_storage_node__resize_device(subparser)
         self.init_storage_node__add_device(subparser)
         self.init_storage_node__remove_device(subparser)
         self.init_storage_node__set_failed_device(subparser)
@@ -107,11 +108,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--device-model', help='NVMe SSD model string, example: --model PM1628. Can be used alone to filter by model, or combined with --size-range to further filter by size.', type=str, default='', dest='device_model', required=False)
         subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.', type=str, default='', dest='size_range', required=False)
         subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
-        subcommand.add_argument('--lblk', help='Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition.', dest='lblk', action='store_true')
+        subcommand.add_argument('--lblk', help='Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Each storage node gets its journal from its own devices: its smallest selected partition is split in two, or its smallest whole disk is partitioned, into a journal partition (--jm-percent of the node\'s capacity) and a data partition. A disk that carries simplyblock data is never partitioned; a node on such disks keeps a dedicated journal device. Use --lblk-journal-device for a dedicated journal device on whole disks. Minimum 2 partitions or SSDs per node, or a single whole disk.', dest='lblk', action='store_true')
         subcommand.add_argument('--blk-names', help='Comma separated list of block devices to use (requires --lblk). Each entry is a persistent /dev/disk name, such as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 or /dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba. A kernel name (sdb) or kernel path (/dev/sdb) is refused: it states a position in this boot\'s enumeration order, and it would name another disk after a reboot that probes the controllers in another order. The path is taken as given: the node records it, and add-node and every restart open the device by that path alone, never by serial or kernel name. A path that no longer exists is a missing device. Use --blk-serials for a device udev published no persistent name for. Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
         subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block devices to exclude (requires --lblk), spelled the way --blk-names takes them. All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
         subcommand.add_argument('--blk-serials', help='Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk).', type=str, default='', dest='blk_serials', required=False)
-        subcommand.add_argument('--jm-percent', help='Journal size in percent of the node\'s total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`.', type=int, default=3, dest='jm_percent', required=False)
+        subcommand.add_argument('--lblk-journal-device', help='With --lblk and whole disks: dedicate each node\'s smallest disk to the journal instead of partitioning it into a journal partition and a data partition (the default). Needs at least two disks per node. Partition selections always carry their journal in a split partition.', dest='lblk_journal_device', action='store_true')
+        subcommand.add_argument('--jm-percent', help='Journal size in percent of the node\'s total selected capacity when the journal is carved from a selected partition or disk (requires --lblk, not with --lblk-journal-device). Default: `3`.', type=int, default=3, dest='jm_percent', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format.', dest='force', action='store_true')
         subcommand.add_argument('--enable-inline-checksum', help='When formatting (with --force), prefer an LBAF that supports >=8 bytes of NVMe metadata per block, so alceml can run inline checksum validation in md-on-device mode. Drives with no md-capable LBAF still format to plain 4K and will use the fallback layout.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices. Subsystem count and the vCPU budget are cluster-level settings.', dest='calculate_hp_only', action='store_true')
@@ -252,6 +254,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
         subcommand.add_argument('--force', help='Force restart.', dest='force', action='store_true')
 
+    def init_storage_node__resize_device(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'resize-device', 'Grows a Linux block device (lblk) online to the size of its block device.')
+        subcommand.add_argument('device_id', help='The storage device id.', type=str)
+
     def init_storage_node__add_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-device', 'Adds a new storage device.')
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
@@ -374,6 +380,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__list(subparser)
         self.init_cluster__status(subparser)
         self.init_cluster__complete_expand(subparser)
+        self.init_cluster__grow_devices(subparser)
         self.init_cluster__show(subparser)
         self.init_cluster__get(subparser)
         if self.developer_mode:
@@ -462,6 +469,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at add-node.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
+        subcommand.add_argument('--enable-page-copy', help='Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.', dest='page_copy', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -506,6 +514,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
+        subcommand.add_argument('--enable-page-copy', help='Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.', dest='page_copy', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -542,6 +551,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__complete_expand(self, subparser):
         subcommand = self.add_sub_command(subparser, 'complete-expand', 'Create lvstore on newly added nodes to the cluster.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__grow_devices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows every Linux block device (lblk) of the cluster online to the size of its block device.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--no-rebalance', help='Keep the device weights after an uneven growth and do not rebalance the cluster.', default=False, dest='no_rebalance', action='store_true')
 
     def init_cluster__show(self, subparser):
         subcommand = self.add_sub_command(subparser, 'show', 'Shows a cluster\'s statistics.')
@@ -1549,6 +1563,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_node__get_device(sub_command, args)
                 elif sub_command in ['restart-device']:
                     ret = self.storage_node__restart_device(sub_command, args)
+                elif sub_command in ['resize-device']:
+                    ret = self.storage_node__resize_device(sub_command, args)
                 elif sub_command in ['add-device']:
                     ret = self.storage_node__add_device(sub_command, args)
                 elif sub_command in ['remove-device']:
@@ -1663,6 +1679,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__status(sub_command, args)
                 elif sub_command in ['complete-expand']:
                     ret = self.cluster__complete_expand(sub_command, args)
+                elif sub_command in ['grow-devices']:
+                    ret = self.cluster__grow_devices(sub_command, args)
                 elif sub_command in ['show']:
                     ret = self.cluster__show(sub_command, args)
                 elif sub_command in ['get']:
