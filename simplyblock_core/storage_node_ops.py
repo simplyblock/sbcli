@@ -97,6 +97,12 @@ from simplyblock_web import node_utils
 logger = utils.get_logger(__name__)
 
 
+# The node agent's spdk_process_kill waits up to 10 x 3 s for the SPDK pod to
+# terminate (simplyblock_web/api/internal/storage_node/kubernetes.py).
+KILL_AGENT_WAIT_SEC = 30
+KILL_CONNECT_TIMEOUT_SEC = 5
+
+
 def kill_client_kwargs(force=False):
     """SNodeClient kwargs for the spdk_process_kill RPC.
 
@@ -110,10 +116,20 @@ def kill_client_kwargs(force=False):
     connect_retry=0 makes a refused connection fail at once (SNodeClient's
     own documented rationale); read retries still cover a slow-but-alive
     agent. The graceful path keeps its patience.
+
+    The read timeout must outlast the agent's own wait: on Kubernetes the
+    kill deletes the SPDK pod and waits up to KILL_AGENT_WAIT_SEC for it to
+    terminate, which takes longer than 10 s. With a 10 s read timeout every
+    forced shutdown on bf8 (2026-11-02) failed with "Failed to kill SPDK"
+    although SPDK did stop: the shutdown returned before broadcasting the
+    devices unavailable, never set the node offline, and left it in_shutdown,
+    where a restart is refused. The connect timeout stays short, so a dead
+    agent still fails fast.
     """
+    timeout = (KILL_CONNECT_TIMEOUT_SEC, KILL_AGENT_WAIT_SEC + 15)
     if force:
-        return {"timeout": 10, "retry": 2, "connect_retry": 0}
-    return {"timeout": 10, "retry": 10}
+        return {"timeout": timeout, "retry": 2, "connect_retry": 0}
+    return {"timeout": timeout, "retry": 10}
 
 
 def ensure_spdk_stopped(client_factory, rpc_port, cluster_id):
