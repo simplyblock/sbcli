@@ -44,12 +44,56 @@ def test_the_intent_is_written_before_the_spdk_create():
     assert creates and all(inner.lineno <= c.lineno <= end for c in creates)
 
 
-def test_a_failed_or_raising_create_drops_the_intent():
+def test_a_failed_or_raising_create_settles_the_intent():
     src = _add_src()
     tail = src[src.index("failed = _create_in_spdk()") - 40:]
     tail = tail[:tail.index("snap.status = SnapShot.STATUS_ONLINE")]
-    assert tail.count("_drop_snapshot_intent(snap)") == 2
+    assert tail.count("_settle_failed_intent(snap, lvol)") == 2
+    assert "_drop_snapshot_intent(snap)" not in tail
     assert "except BaseException" in tail and "raise" in tail
+
+
+class _Member:
+    def __init__(self, nid, held=None, err=None):
+        self.nid, self.held, self.err = nid, held, err
+
+    def rpc_client(self, **kw):
+        def bdev_get(name):
+            if self.err:
+                raise self.err
+            return self.held
+        return SimpleNamespace(bdev_get=bdev_get)
+
+
+@pytest.fixture
+def settle(monkeypatch):
+    st: dict[str, Any] = {"members": {}}
+    monkeypatch.setattr(sc.db_controller, "get_storage_node_by_id", lambda nid: st["members"][nid])
+    return st
+
+
+def _settle_case(settle, members):
+    settle["members"] = {m.nid: m for m in members}
+    snap = _Snap()
+    lvol = SimpleNamespace(nodes=[m.nid for m in members], node_id=members[0].nid)
+    return sc._settle_failed_intent(snap, lvol), snap
+
+
+def test_a_failed_create_with_no_blob_anywhere_drops_the_intent(settle):
+    dropped, snap = _settle_case(settle, [_Member("P"), _Member("S"), _Member("T")])
+    assert dropped and snap.removed
+
+
+def test_a_blob_left_on_the_primary_keeps_the_intent(settle):
+    # bf9 SNAP_160: the rollback's delete was refused on a primary that had lost leadership
+    dropped, snap = _settle_case(settle, [_Member("P", held={"name": "LVS_16/SNAP_2027"}),
+                                          _Member("S"), _Member("T")])
+    assert not dropped and not snap.removed
+
+
+def test_an_unreachable_member_keeps_the_intent(settle):
+    dropped, snap = _settle_case(settle, [_Member("P"), _Member("S", err=RuntimeError("timeout"))])
+    assert not dropped and not snap.removed
 
 
 def test_success_completes_the_same_record():

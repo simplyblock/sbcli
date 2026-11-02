@@ -658,6 +658,33 @@ def _drop_snapshot_intent(snap):
         logger.error("Could not remove snapshot intent record %s: %s", snap.get_id(), e)
 
 
+def _settle_failed_intent(snap, lvol):
+    """A create failed or raised: drop the intent only when no member of the
+    volume's lvstore holds the snapshot bdev. If one still holds it, or a
+    member cannot answer, the record stays in_creation and
+    reap_snapshot_intents rolls the bdev back later.
+
+    bf9 (2026-11-02): SNAP_160 was created on the LVS_7 primary, its replica
+    registration failed, and the rollback's delete was refused ("Deleting
+    async lvol on non-leader lvs": the primary had just lost leadership).
+    Dropping the intent anyway left a blob with no record, and the volume's
+    replication was blocked for good."""
+    for nid in (lvol.nodes or [lvol.node_id]):
+        try:
+            node = db_controller.get_storage_node_by_id(nid)
+            held = node.rpc_client(timeout=5, retry=1).bdev_get(snap.snap_bdev)
+        except Exception as e:
+            logger.error("Snapshot intent %s (%s): cannot confirm it is absent on %s (%s); "
+                         "keeping the record for the reaper", snap.get_id(), snap.snap_bdev, nid, e)
+            return False
+        if held:
+            logger.error("Snapshot intent %s: %s is still on %s after the failed create; "
+                         "keeping the record for the reaper", snap.get_id(), snap.snap_bdev, nid)
+            return False
+    _drop_snapshot_intent(snap)
+    return True
+
+
 _intent_reap_attempts: dict[str, float] = {}
 
 
@@ -1039,10 +1066,10 @@ def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
     try:
         failed = _create_in_spdk()
     except BaseException:
-        _drop_snapshot_intent(snap)
+        _settle_failed_intent(snap, lvol)
         raise
     if failed:
-        _drop_snapshot_intent(snap)
+        _settle_failed_intent(snap, lvol)
         return failed
 
     snap.snap_uuid = snap_uuid
