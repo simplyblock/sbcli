@@ -1,0 +1,54 @@
+{# Remove the kubelet's CPU-manager checkpoint on a Talos worker, right before
+   the machine-config patch that changes its CPU-manager settings
+   (storage_talos_hugepages_job.yaml.j2, step kubelet-config).
+
+   The kubelet refuses to start over a checkpoint written under another
+   policy ("configured policy differs from state checkpoint policy ... delete
+   the CPU manager checkpoint file before restarting Kubelet") or whose
+   assignments overlap the new reserved set. The vanilla CPU-topology Job
+   removes the file before it restarts the kubelet; Talos has no host shell,
+   so this is a privileged pod with the kubelet directory mounted instead.
+   The kubelet rebuilds the state from the pods it finds at its next start;
+   the SPDK pod is down while this runs. #}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ TALOS_JOBNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      serviceAccountName: simplyblock-storage-node-sa
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      volumes:
+        - name: kubelet
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+      containers:
+        - name: reset-cpu-manager-state
+          image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -f /var/lib/kubelet/cpu_manager_state ]; then
+                echo "removing cpu_manager_state: $(cat /var/lib/kubelet/cpu_manager_state)"
+                rm -f /var/lib/kubelet/cpu_manager_state
+              else
+                echo "no cpu_manager_state to remove"
+              fi
