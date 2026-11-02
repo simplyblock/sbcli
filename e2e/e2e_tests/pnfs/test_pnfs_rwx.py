@@ -86,6 +86,13 @@ class _PnfsBase(TestClusterBase):
                 f.write(self.docker_logs_path)
         self.logger.info("Logs Path: %s", self.docker_logs_path)
 
+        # cleanup_logs() in the base class iterates both of these. They
+        # default to None, so leaving them unset turned B-01's result into
+        # "TypeError: 'NoneType' object is not iterable" raised from the
+        # cleanup path, which buried whatever the test had actually done.
+        self.client_machines = []
+        self.fio_node = []
+
         self.runner_k8s_log = RunnerK8sLog(
             log_dir=self.docker_logs_path, test_name=self.test_name)
         self.runner_k8s_log.start_logging()
@@ -289,6 +296,44 @@ class _PnfsBase(TestClusterBase):
             f"required anti-affinity spread this usually means there are "
             f"fewer schedulable workers than pods.")
 
+    def _wait_pods_running(self, pods, timeout=600):
+        """Block until every pod's container is actually up.
+
+        ``get_job_pod_name`` returns as soon as the pod OBJECT exists, about
+        a second after the Job is created and long before the image is
+        pulled and the RWX volume is mounted. Run 41428476500 slept a fixed
+        45s after that and exec'd into containers that did not exist yet --
+        every probe failed, and the suite reported it as "not an NFS mount".
+        """
+        deadline = time.time() + timeout
+        pending = list(pods)
+        while pending and time.time() < deadline:
+            still = []
+            for pod in pending:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pod {pod} -n {self.k8s_utils.namespace} "
+                    f"-o custom-columns=PHASE:.status.phase,"
+                    f"READY:.status.containerStatuses[*].ready "
+                    f"--no-headers --ignore-not-found", supress_logs=True)
+                parts = (out or "").split()
+                phase = parts[0] if parts else ""
+                ready = parts[1] if len(parts) > 1 else ""
+                if phase == "Running" and "true" in ready.lower():
+                    continue
+                if phase == "Succeeded":
+                    raise PnfsEvidenceError(
+                        f"{pod} reached Succeeded before it could be probed; "
+                        f"the workload is too short to observe. Raise the "
+                        f"runtime, or probe from the node instead.")
+                still.append(pod)
+            pending = still
+            if pending:
+                sleep_n_sec(5)
+        if pending:
+            raise PnfsEvidenceError(
+                f"pod(s) {pending} never reached Running within {timeout}s")
+        self.logger.info("[pnfs] %d pod(s) running and ready", len(pods))
+
     def _assert_one_pod_per_node(self, pods, context=""):
         placement = {p: self._pod_node(p) for p in pods}
         nodes = [n for n in placement.values() if n]
@@ -411,8 +456,9 @@ class PnfsLayoutProofK8s(_PnfsBase):
         jobs = self._start_shared_load("pnfs-b03-fio", configs)
         pods = self._pods_of(jobs)
         self._assert_one_pod_per_node(pods, "(B-03)")
+        self._wait_pods_running(pods)
 
-        sleep_n_sec(45)          # let the clients settle into the data path
+        sleep_n_sec(30)          # let the clients settle into the data path
         proven = assert_layouts_taken(
             self.k8s_utils, pods, mountpoint=self.MOUNT,
             logger=self.logger, context="(B-03)")

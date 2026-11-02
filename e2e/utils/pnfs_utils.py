@@ -24,6 +24,7 @@ the two must move together if the kernel's format changes.
 """
 import json
 import re
+import time
 
 #: Operations whose server-side count must stay at zero once a layout is held.
 #: If the client is doing READ/WRITE against the metadata server then it is
@@ -38,6 +39,16 @@ KNOWN_LAYOUT_TYPES = ("flexfiles", "filelayout", "blocklayout", "scsilayout")
 
 class PnfsEvidenceError(AssertionError):
     """A pNFS claim could not be proven, or was disproven."""
+
+
+class PnfsProbeError(PnfsEvidenceError):
+    """The evidence could not be collected at all.
+
+    Separate from its parent on purpose. "I looked and the mount is not
+    pNFS" is a finding about the product; "I could not look" is a finding
+    about the harness, and reporting the second as the first is how a test
+    invents a defect.
+    """
 
 
 # ── /proc/self/mountstats ────────────────────────────────────────────────
@@ -96,14 +107,39 @@ def parse_mountstats(text, mountpoint=None):
 
 
 def mountstats(k8s, pod_name, mountpoint="/spdkvol", namespace=None):
-    """Read and parse ``/proc/self/mountstats`` from inside *pod_name*."""
-    out, _err = k8s.exec_in_pod(
+    """Read and parse ``/proc/self/mountstats`` from inside *pod_name*.
+
+    Raises :class:`PnfsProbeError` when the read did not happen, which is a
+    different thing from reading it and finding no NFS mount. Run
+    41428476500 reported "``/spdkvol`` is not an NFS mount at all" for all
+    six pods, as a product finding, when the truth was
+
+        error: unable to upgrade connection: container not found
+        ("fio-benchmark")
+
+    -- the containers had not started yet. A test that cannot look must say
+    it could not look; saying the mount is wrong is worse than saying
+    nothing.
+    """
+    out, err = k8s.exec_in_pod(
         pod_name, "cat /proc/self/mountstats", namespace=namespace)
-    return parse_mountstats(out or "", mountpoint=mountpoint)
+    text = out or ""
+    if not text.strip():
+        raise PnfsProbeError(
+            f"could not read /proc/self/mountstats in {pod_name}: "
+            f"{(err or 'no output and no error').strip()[:300]}")
+    if "device " not in text:
+        # Something answered, but not mountstats -- an error on stdout, a
+        # truncated exec. Still a probe failure, not a verdict.
+        raise PnfsProbeError(
+            f"the mountstats read in {pod_name} returned something that is "
+            f"not mountstats: {text.strip()[:200]!r}")
+    return parse_mountstats(text, mountpoint=mountpoint)
 
 
 def assert_layouts_taken(k8s, pod_names, mountpoint="/spdkvol",
-                         namespace=None, logger=None, context=""):
+                         namespace=None, logger=None, context="",
+                         retries=10, delay=15):
     """B-03. Every pod holds a pNFS layout and drives no server-side IO.
 
     Three things have to be true at once, and each one alone is satisfiable
@@ -120,9 +156,28 @@ def assert_layouts_taken(k8s, pod_names, mountpoint="/spdkvol",
     because one pod falling back while five succeed is the interesting case
     and a first-failure abort would hide it.
     """
-    failures, proven = [], {}
+    failures, proven, unreadable = [], {}, []
     for pod in pod_names:
-        st = mountstats(k8s, pod, mountpoint=mountpoint, namespace=namespace)
+        # A container that has not started yet is the normal case for the
+        # first few seconds of a Job, so a probe failure is retried rather
+        # than reported. Only a probe that never succeeds is reported, and
+        # it is reported as a probe failure.
+        st, last = None, None
+        for attempt in range(max(1, retries)):
+            try:
+                st = mountstats(k8s, pod, mountpoint=mountpoint,
+                                namespace=namespace)
+                break
+            except PnfsProbeError as exc:
+                last = exc
+                if logger and attempt == 0:
+                    logger.info("[pnfs] %s not readable yet, retrying: %s",
+                                pod, str(exc)[:120])
+                if attempt + 1 < max(1, retries):
+                    time.sleep(delay)
+        if st is None and last is not None:
+            unreadable.append(f"{pod}: {last}")
+            continue
         if st is None:
             failures.append(f"{pod}: {mountpoint} is not an NFS mount at all")
             continue
@@ -148,6 +203,12 @@ def assert_layouts_taken(k8s, pod_names, mountpoint="/spdkvol",
                 logger.info(
                     "[pnfs] %s: layout=%s LAYOUTGET=%d, no server-side "
                     "READ/WRITE %s", pod, lt, lg, context)
+    if unreadable:
+        raise PnfsProbeError(
+            f"the pNFS evidence could not be collected {context}, so this "
+            f"says nothing about the product either way. Fix the probe, do "
+            f"not read this as a layout failure:\n  "
+            + "\n  ".join(unreadable))
     if failures:
         raise PnfsEvidenceError(
             f"pNFS layouts were not proven {context}. The mount serves data "
