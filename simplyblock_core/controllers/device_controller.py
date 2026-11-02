@@ -10,7 +10,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException, RPCRemoteError
+from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
@@ -1090,7 +1090,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     return True
 
 
-def _remove_jm_raid_leg_of_device(snode, device, rpc_client):
+def _remove_jm_raid_leg_of_device(snode: StorageNode, device: NVMeDevice, rpc_client: RPCClient) -> None:
     """Take the removed device's JM partition out of the JM raid -- but only
     when that partition is physically gone.
 
