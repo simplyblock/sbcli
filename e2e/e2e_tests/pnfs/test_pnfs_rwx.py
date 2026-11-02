@@ -15,7 +15,9 @@ Class names end in ``K8s`` on purpose: pNFS has no Docker variant, and the
 platform filter in ``e2e.py`` keys on that suffix, so ``--testname pnfs`` on
 a Docker cluster reports these as skipped instead of failing obscurely.
 """
+import os
 import time
+from datetime import UTC, datetime
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
@@ -27,6 +29,7 @@ from utils.pnfs_utils import (
     assert_layouts_taken,
     nvme_ns_counters,
 )
+from utils.ssh_utils import RunnerK8sLog
 
 
 class _PnfsBase(TestClusterBase):
@@ -57,6 +60,37 @@ class _PnfsBase(TestClusterBase):
 
     def setup(self):
         self.logger.info("Inside %s.setup()", type(self).__name__)
+
+        # The run's log directory, and the file the workflow reads to learn
+        # it. TestClusterBase.setup() does this, but no k8s-native test
+        # calls it -- the base setup reaches for SSH to worker nodes that
+        # a k8s-native run does not have. Skipping it without doing this
+        # much by hand is why run 41428476500 reported
+        #   Logs Path:
+        #   E2E Run Dir: ``
+        #   Graylog: /graylog_collected/
+        # and left no run folder on the share at all: RUN_DIR_FILE was
+        # never written, so RUN_BASE_DIR was empty everywhere downstream
+        # and every per-test path in the summary came out blank.
+        self.test_start_time_utc = datetime.now(UTC)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.docker_logs_path = os.path.join(
+            self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
+        os.makedirs(self.docker_logs_path, exist_ok=True)
+
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+        self.logger.info("Logs Path: %s", self.docker_logs_path)
+
+        self.runner_k8s_log = RunnerK8sLog(
+            log_dir=self.docker_logs_path, test_name=self.test_name)
+        self.runner_k8s_log.start_logging()
+        self.runner_k8s_log.monitor_pod_logs()
+
         retry = 30
         while retry > 0:
             try:
