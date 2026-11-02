@@ -2122,7 +2122,14 @@ def _merge_landing(task, remote_lv, remote_snode):
         # forever instead of being transferred again (bed 2026-10-26).
         st = rpc.bdev_lvol_merge_base_stat(remote_lv.top_bdev) or {}
         if st.get("state") not in ("running", "done") and st.get("rc") != _SPDK_ESTALE:
-            st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev)
+            # The merge is part of the replication: it runs in the
+            # replication class like the transfer's source reads, not in
+            # Default beside client IO and the journal (bf10 2026-11-02: a
+            # target merging 5-8 GB per cycle in Default had its journal
+            # heartbeats time out and its lvstore demoted).
+            merge_class = (constants.QOS_REPLICATION_WIRE_CLASS
+                           if _replication_class_on(remote_snode.cluster_id) else None)
+            st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev, priority_class=merge_class)
         deadline = time.time() + constants.REPL_MERGE_INLINE_WAIT_SEC
         while (st or {}).get("state") == "running" and time.time() < deadline:
             time.sleep(constants.REPL_MERGE_POLL_SEC)
