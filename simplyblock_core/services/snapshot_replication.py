@@ -674,12 +674,14 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
     if verdict == "blocked":
+        # Back off: a blocked chain (a blob without a snapshot record, an
+        # ancestor mid-deletion) does not heal in a minute, and the chain walk
+        # costs seconds of the serial runner every pass. Retried at runner
+        # speed it took ~19 % of the runner on bf8 (2026-11-02) and held every
+        # other volume's migration above the cutover gate.
         msg = f"replication chain of {snapshot.get_id()} is incomplete: {why}; retrying"
-        logger.error(msg)
         task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        _suspend_for_retry(task, msg, backoff=True, level=logging.ERROR)
         return
 
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
