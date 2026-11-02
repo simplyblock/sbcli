@@ -2301,12 +2301,20 @@ class K8sUtils:
 
     def create_pvc(self, name: str, size: str, storage_class: str,
                    namespace: str | None = None, node_id: str | None = None,
-                   volume_mode: str | None = None):
+                   volume_mode: str | None = None,
+                   access_modes: list | None = None):
         """Create a PersistentVolumeClaim (provisions an lvol via CSI).
 
         Args:
             node_id: If provided, adds ``simplybk/host-id`` annotation to pin
                      the PVC to a specific storage node.
+            access_modes: defaults to ``["ReadWriteOnce"]``, which is what
+                     every caller before the pNFS suite relied on when this
+                     was hardcoded. ``["ReadWriteMany"]`` is the pNFS case:
+                     one claim mounted by a pod on every worker at once.
+                     Only meaningful against a StorageClass whose fstype is
+                     ``pnfs`` -- RWX on a block fstype provisions, then
+                     corrupts, because two nodes mount one XFS.
             volume_mode: ``"Block"`` for a raw device with no filesystem,
                      consumed through ``volumeDevices``. Omitted means the
                      cluster default, which is Filesystem. spdkcsi supports
@@ -2321,6 +2329,8 @@ class K8sUtils:
                 f"    simplybk/host-id: {node_id}\n"
             )
         mode = f"  volumeMode: {volume_mode}\n" if volume_mode else ""
+        modes = access_modes or ["ReadWriteOnce"]
+        modes_yaml = "".join(f"  - {m}\n" for m in modes)
         yaml_content = (
             f"apiVersion: v1\n"
             f"kind: PersistentVolumeClaim\n"
@@ -2330,7 +2340,7 @@ class K8sUtils:
             f"{annotations}"
             f"spec:\n"
             f"  accessModes:\n"
-            f"  - ReadWriteOnce\n"
+            f"{modes_yaml}"
             f"{mode}"
             f"  resources:\n"
             f"    requests:\n"
@@ -2339,7 +2349,8 @@ class K8sUtils:
         )
         self.logger.info(
             f"[K8sUtils] Creating PVC '{name}' size={size} "
-            f"mode={volume_mode or 'Filesystem'} node={node_id or 'auto'}")
+            f"mode={volume_mode or 'Filesystem'} access={','.join(modes)} "
+            f"node={node_id or 'auto'}")
         self.apply_yaml(yaml_content, namespace=ns)
 
     #: Every spelling of the pin, because the operator normalises between
@@ -3085,6 +3096,120 @@ class K8sUtils:
             f"[K8sUtils] Creating FIO Job '{job_name}' on PVC '{pvc_name}'"
         )
         self.apply_yaml(yaml_content, namespace=ns)
+
+    #: Label carrying the claim a shared FIO pod is mounting. Per-volume on
+    #: purpose: create_fio_job's anti-affinity keys on the global
+    #: ``app: fio-benchmark``, which would spread these pods against every
+    #: other FIO pod in the namespace instead of only against each other.
+    SHARED_CLAIM_LABEL = "pnfs.simplyblock.io/claim"
+
+    def create_shared_fio_jobs(self, base_name: str, pvc_name: str,
+                               configs: list, namespace: str | None = None,
+                               image: str = "dockerpinata/fio:2.1",
+                               backoff_limit: int = 0,
+                               required_spread: bool = True) -> list:
+        """One FIO Job per entry in *configs*, all mounting the same claim.
+
+        This is the pNFS topology and it is not what :meth:`create_fio_job`
+        produces. Two differences, both load-bearing:
+
+        **Required, not preferred, anti-affinity.** One pod per worker is the
+        whole point of a shared claim -- six pods that the scheduler packed
+        onto two nodes prove nothing about a distributed filesystem.
+        ``preferred`` lets that happen silently under pressure, so the spread
+        is ``required`` and a pod that cannot be placed stays Pending where it
+        is visible. Pass ``required_spread=False`` for the deliberate
+        over-subscription case (B-12, thirty pods on six nodes), where more
+        pods than nodes makes a required rule unsatisfiable by construction.
+
+        **Per-pod file paths.** *configs* is one complete FIO config per pod,
+        and the caller is responsible for giving each one its own filenames
+        and log paths. On a shared claim every pod sees the same filesystem,
+        so a config keyed on the PVC name -- which is what the single-job
+        helpers do -- has six writers interleaving into one file, and md5
+        verification stops meaning anything.
+
+        Returns the list of Job names, in the order of *configs*.
+        """
+        ns = namespace or self.namespace
+        label = self.SHARED_CLAIM_LABEL
+        scope = ("requiredDuringSchedulingIgnoredDuringExecution:\n"
+                 "          - labelSelector:\n"
+                 "              matchLabels:\n"
+                 f"                {label}: {pvc_name}\n"
+                 "            topologyKey: kubernetes.io/hostname\n"
+                 ) if required_spread else (
+                 "preferredDuringSchedulingIgnoredDuringExecution:\n"
+                 "          - weight: 100\n"
+                 "            podAffinityTerm:\n"
+                 "              labelSelector:\n"
+                 "                matchLabels:\n"
+                 f"                  {label}: {pvc_name}\n"
+                 "              topologyKey: kubernetes.io/hostname\n")
+
+        job_names = []
+        for i, cfg in enumerate(configs):
+            job_name = f"{base_name}-{i}"
+            cm_name = f"{base_name}-cfg-{i}"
+            indented = "\n".join(
+                f"      {ln}" for ln in cfg.strip().splitlines())
+            yaml_content = (
+                f"apiVersion: v1\n"
+                f"kind: ConfigMap\n"
+                f"metadata:\n"
+                f"  name: {cm_name}\n"
+                f"  namespace: {ns}\n"
+                f"data:\n"
+                f"  fio.cfg: |\n"
+                f"{indented}\n"
+                f"---\n"
+                f"apiVersion: batch/v1\n"
+                f"kind: Job\n"
+                f"metadata:\n"
+                f"  name: {job_name}\n"
+                f"  namespace: {ns}\n"
+                f"  labels:\n"
+                f"    {label}: {pvc_name}\n"
+                f"spec:\n"
+                f"  backoffLimit: {backoff_limit}\n"
+                f"  template:\n"
+                f"    metadata:\n"
+                f"      labels:\n"
+                f"        app: fio-benchmark\n"
+                f"        {label}: {pvc_name}\n"
+                f"        pnfs-pod-index: \"{i}\"\n"
+                f"    spec:\n"
+                f"      affinity:\n"
+                f"        podAntiAffinity:\n"
+                f"          {scope}"
+                f"      containers:\n"
+                f"      - name: fio-benchmark\n"
+                f"        image: {image}\n"
+                f"        imagePullPolicy: IfNotPresent\n"
+                f"        command: [\"fio\", \"--eta=always\", "
+                f"\"--status-interval=5\", \"/fio/fio.cfg\"]\n"
+                f"        volumeMounts:\n"
+                f"        - mountPath: /spdkvol\n"
+                f"          name: benchmark-volume\n"
+                f"        - mountPath: /fio\n"
+                f"          name: fio-config\n"
+                f"      volumes:\n"
+                f"      - name: benchmark-volume\n"
+                f"        persistentVolumeClaim:\n"
+                f"          claimName: {pvc_name}\n"
+                f"      - name: fio-config\n"
+                f"        configMap:\n"
+                f"          name: {cm_name}\n"
+                f"      restartPolicy: Never\n"
+            )
+            self.apply_yaml(yaml_content, namespace=ns)
+            job_names.append(job_name)
+
+        self.logger.info(
+            f"[K8sUtils] Created {len(job_names)} shared FIO job(s) on RWX "
+            f"claim '{pvc_name}' "
+            f"({'required' if required_spread else 'preferred'} spread)")
+        return job_names
 
     def wait_job_complete(self, job_name: str, timeout: int = 600,
                           namespace: str | None = None) -> str:

@@ -31,6 +31,7 @@ from __init__ import (
     get_migration_stress_tests,
     get_migration_tests,
     get_parity_tests,
+    get_pnfs_tests,
     get_replication_load_tests,
     get_replication_stress_tests,
     get_replication_tests,
@@ -222,6 +223,11 @@ def main():
         # "Did it pass" is not the question these answer.
         "migration-load": get_migration_load_tests,
         "replication-load": get_replication_load_tests,
+        # pNFS RWX. k8s only, and gated: the group refuses to run on a
+        # cluster with no metadata server rather than quietly testing
+        # plain NFS. Runs on the existing k8s-native-e2e lane with
+        # testname=pnfs; no new workflow.
+        "pnfs": get_pnfs_tests,
         "parity": get_parity_tests,
         "e2e-all": get_e2e_all_tests,
     }

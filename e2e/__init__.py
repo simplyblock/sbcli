@@ -116,6 +116,12 @@ from e2e_tests.migration.test_migration_topology import (
 )
 from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
+from e2e_tests.pnfs.test_pnfs_rwx import (
+    PnfsCrossClientReadK8s,
+    PnfsDeviceProofK8s,
+    PnfsLayoutProofK8s,
+    PnfsSharedWriteVerifyK8s,
+)
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
 from e2e_tests.replication.test_replication_consistency import (
     ConsistencyGroupGeneration,
@@ -805,6 +811,10 @@ ALL_TESTS = [
     MigrationConcurrencyCurve,
     ReplicationCycleTimeBySize,
     ReplicationDemoteDowntimeBySize,
+    PnfsSharedWriteVerifyK8s,
+    PnfsLayoutProofK8s,
+    PnfsCrossClientReadK8s,
+    PnfsDeviceProofK8s,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -1462,6 +1472,27 @@ def get_lblk_tests():
         LblkDeviceFaultK8s,
         LblkJournalRecoveryDocker,
         LblkJournalRecoveryK8s,
+    ]
+
+
+def get_pnfs_tests():
+    """pNFS RWX, Track B -- the shared filesystem on a healthy cluster.
+
+    Ordered as a gate, not alphabetically. B-01 proves a ReadWriteMany
+    claim can be provisioned and mounted everywhere at once; B-03 proves
+    those mounts are doing pNFS rather than plain NFS. If either fails,
+    the two below it are measuring something that is not the feature,
+    so they run after and their failures read as consequences.
+
+    Every class ends in K8s: pNFS has no Docker variant, so the platform
+    filter drops the whole group on a Docker cluster rather than running
+    it against something that cannot serve it.
+    """
+    return [
+        PnfsSharedWriteVerifyK8s,    # B-01  the baseline
+        PnfsLayoutProofK8s,          # B-03  gates everything
+        PnfsCrossClientReadK8s,      # B-02  the data crossed the wire
+        PnfsDeviceProofK8s,          # B-04  and reached the devices
     ]
 
 
