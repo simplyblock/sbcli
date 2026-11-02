@@ -166,6 +166,12 @@ jobs:
           # "HEAD is now at ...". The run then failed in an unrelated step.
           sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"             || echo "::warning::chown of the workspace failed"
 
+          # Several runners share this volume and the chown above can leave
+          # ownership git does not like. Without this, every git command
+          # below exits 128 with "detected dubious ownership" -- which is
+          # one of the ways the status check used to kill the step.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
           if [ -d "$GITHUB_WORKSPACE/.git" ]; then
             git -C "$GITHUB_WORKSPACE" reset --hard               || echo "::warning::git reset --hard failed"
             git -C "$GITHUB_WORKSPACE" clean -ffdx               || echo "::warning::git clean -ffdx failed"
@@ -176,10 +182,23 @@ jobs:
             # and STILL EXITS 0, leaving HEAD on the new ref with files from it
             # never written. Wipe instead and let checkout clone fresh -- the
             # fetch is --depth=1, so this costs seconds.
-            dirty="$(git -C "$GITHUB_WORKSPACE" status --porcelain 2>/dev/null)"
+            #
+            # git status is allowed to FAIL here, and a failure means wipe.
+            # The step runs under `bash -e`, so the previous
+            #   dirty="$(git ... 2>/dev/null)"
+            # ended the whole step the moment git exited non-zero, with the
+            # reason sent to /dev/null and nothing in the log but
+            #   ##[error]Process completed with exit code 128
+            # That is run 41436834695, and it is the same mistake this step
+            # was written to fix one line higher up: a discarded stderr.
+            if ! dirty="$(git -C "$GITHUB_WORKSPACE" status --porcelain 2>&1)"; then
+              echo "::warning::git status failed in the workspace; treating it as unusable"
+              printf '%s\n' "${dirty}" | head -5
+              dirty="git-status-failed"
+            fi
             if [ -n "${dirty}" ]; then
               echo "::warning::workspace still dirty after reset; wiping it"
-              echo "${dirty}" | head -20
+              printf '%s\n' "${dirty}" | head -20
               sudo rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* || true
             fi
           fi
