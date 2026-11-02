@@ -83,9 +83,14 @@ class TestSingleNodeOutage(TestClusterBase):
             self.lvol_name, mount_path=self.mount_path
         )
 
+        # A log file has to be asked for: run_fio_test only redirects when
+        # given one, so without it fio ran into a tmux session and wrote
+        # nothing, and the validation below read the ClientLogs directory.
+        fio_log = f"{self.log_path}/fio_run_1.log"
         fio_handle = self._run_fio_dual(
             lvol_name=self.lvol_name,
             mount_path=mount if not self.k8s_test else None,
+            log_path=fio_log if not self.k8s_test else None,
             name="fio_run_1",
             runtime=300,
             time_based=True,
@@ -201,7 +206,7 @@ class TestSingleNodeOutage(TestClusterBase):
             if isinstance(fio_handle, threading.Thread):
                 fio_handle.join()
 
-        self._validate_fio_dual(fio_handle, log_path=self.log_path)
+        self._validate_fio_dual(fio_handle, log_path=fio_log)
         self._cleanup_fio_k8s(fio_handle)
 
         self.logger.info("Taking snapshot 2")

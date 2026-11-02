@@ -316,7 +316,12 @@ class TestDeviceNodeRestart(TestClusterBase):
         """
         Fetches lvol details from the API and stores the journal mapping.
         """
-        sn_details = self.sbcli_utils.get_storage_node_details(storage_node_id=self.lvol_sn_node)[0]
+        _sn = self.sbcli_utils.get_storage_node_details(
+            storage_node_id=self.lvol_sn_node)
+        if not _sn:
+            raise RuntimeError(
+                f"No storage node details for {self.lvol_sn_node}")
+        sn_details = _sn[0]
         self.logger.info(f"Storage node details: {sn_details} ")
         jm_names = sn_details["lvstore_stack"][0]["params"]["jm_names"]
         print(f"JM_NAMES:{jm_names}")
