@@ -114,13 +114,16 @@ def test_a_destination_in_another_cluster_is_accepted(db):
         "LV1", replication_cluster_id=TGT, replication_pool_id="P_TGT_B", mode="migration") is None
 
 
-def test_an_encrypted_volume_may_still_replicate_for_failover(db):
-    """Only a move deletes the source, and with it the only key; fail-over
-    replication keeps the source and is not refused here."""
+def test_an_encrypted_volume_does_not_replicate_for_failover_either(db):
+    """Fail-over keeps the source, but the key still never reaches the target:
+    its clone of the replicated snapshot has no key to build a crypto layer
+    with, so the copy is unreadable either way."""
     db(_lvol(crypto="crypto_LV1"))
 
-    assert lvol_controller.replication_start_error(
-        "LV1", replication_cluster_id=TGT, mode="failover") is None
+    error = lvol_controller.replication_start_error(
+        "LV1", replication_cluster_id=TGT, mode="failover")
+
+    assert error is not None and "encrypted" in error
 
 
 def test_the_requested_pool_receives_the_copies(db):
