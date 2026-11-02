@@ -92,6 +92,11 @@ from e2e_tests.migration.test_migration_happy import (
     MigrationRoundTrip,
     MigrationWithSnapshots,
 )
+from e2e_tests.migration.test_migration_live import (
+    MigrationLiveBystanders,
+    MigrationLiveGroup,
+    MigrationLiveSingle,
+)
 from e2e_tests.migration.test_migration_negative import (
     MigrationNegativeCapacity,
     MigrationNegativeTargets,
@@ -769,6 +774,9 @@ ALL_TESTS = [
     ReplicationSurvivesOperatorUpgrade,
     ReplicationAnnotationToCsiAddonsMigration,
     MigrationSmoke,
+    MigrationLiveSingle,
+    MigrationLiveBystanders,
+    MigrationLiveGroup,
     MigrationHappyPath,
     MigrationRoundTrip,
     MigrationWithSnapshots,
@@ -1345,6 +1353,13 @@ def get_migration_tests():
         # full run of this lane spent nine hours proving nothing because a
         # CLI flag did not exist; this is the guard against repeating that.
         MigrationSmoke,                  # MIG-S-001
+        # MIG-L: live migration -- the only kind anyone performs, and
+        # the only cases that measure the cutover gap. Before MIG-H
+        # because an idle-volume pass says nothing about a loaded one,
+        # and after MIG-S because they cost more than the smoke test.
+        MigrationLiveSingle,             # MIG-L-001
+        MigrationLiveBystanders,         # MIG-L-002
+        MigrationLiveGroup,              # MIG-L-003
         # MIG-H: if a plain migration does not work, nothing below matters.
         MigrationHappyPath,              # MIG-H-001..004
         MigrationRoundTrip,              # MIG-H-005/006

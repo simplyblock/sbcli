@@ -41,21 +41,25 @@ class MigrationHappyPath(MigrationTestBase):
         self.logger.info("[MIG-H-001] %s: %s -> %s", vol, src, tgt)
 
         # ── MIG-H-001 migrate under load ─────────────────────────────────
-        handle = self._run_fio_dual(vol, runtime=600, rw="randrw", bs="16K",
-                                    iodepth=8, numjobs=1, size="512M",
-                                    verify="md5", verify_fatal=True,
-                                    name="mighappy")
-        sleep_n_sec(15)          # let IO actually be in flight
+        # load_across, not a bare _run_fio_dual: the pair this used to
+        # call does not assert. _wait_fio_dual only WARNS when a k8s Job
+        # did not succeed, and _validate_fio_dual is a no-op on docker
+        # unless the caller passes log_path, which this one did not -- so
+        # MIG-H-003 could log "PASS: IO survived the cutover" on a run
+        # where fio had failed outright. load_across raises instead, and
+        # logs the measured worst stall whether it passes or not.
+        with self.load_across([vol], context="(MIG-H-001/003)",
+                              runtime=600):
+            mid, status, phase = self.full_migration(
+                vol_id, tgt,
+                what="MIG-H-001 no-overlap migration under load")
 
-        mid, status, phase = self.full_migration(
-            vol_id, tgt, what="MIG-H-001 no-overlap migration under load")
+            # MIG-H-002 placement and the database agree
+            self.assert_placed_on(vol_id, tgt,
+                                  "after the migration (MIG-H-002)")
 
-        # ── MIG-H-002 placement and the database agree ───────────────────
-        self.assert_placed_on(vol_id, tgt, "after the migration (MIG-H-002)")
-
-        # ── MIG-H-003 IO never broke ─────────────────────────────────────
-        self._wait_fio_dual([handle], timeout=900)
-        self._validate_fio_dual(handle)
+        # MIG-H-003 IO never broke -- asserted on the way out of the block
+        # above, including the worst stall across the cutover.
         self.logger.info("[MIG-H-003] PASS: IO survived the cutover")
         self.watch_io(vol, context="(MIG-H-003, post-cutover)")
         self.verify(vol, sums, "after migrating (MIG-H-003)")

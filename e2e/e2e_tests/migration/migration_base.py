@@ -87,6 +87,7 @@ CLI vs API, which matters for what a test can address:
 * the API is keyed by the subsystem NQN and decides batch by itself -- if
   the subsystem allows more than one namespace it migrates the whole group
 """
+import contextlib
 import json
 import os
 import random
@@ -97,6 +98,7 @@ from typing import ClassVar
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.ana_monitor import AnaWatcher
 from utils.common_utils import cli_failed, sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
 
 
 class MigrationPreconditionError(Exception):
@@ -2000,6 +2002,238 @@ class MigrationTestBase(TestClusterBase):
         """Both post-migration invariants, for callers that want the pair."""
         self.assert_no_migration_artefacts([src, tgt], context)
         self.assert_snapshots_on_current_lvstore(vol_id, tgt, context)
+
+    # ── live migration: load that straddles the operation ──────────────────
+    #
+    # watch_io() below runs fio AFTER the operation. These run it ACROSS the
+    # operation, which is what "live migration" means and what the original
+    # scripts did ("fio from before the migration to five minutes after").
+    #
+    # They also assert, which the plain helpers do not. _wait_fio_dual only
+    # WARNS when a k8s Job did not succeed, and _validate_fio_dual is a no-op
+    # on docker unless the caller passes log_path -- which the migration tests
+    # did not. So "PASS: IO survived the cutover" could print on a run where
+    # fio had failed. assert_io_unbroken() closes that.
+
+    #: Seconds of IO before the operation starts, so it is genuinely in flight
+    #: rather than fio still laying out its files.
+    LIVE_SETTLE_SEC = 15
+    #: Default fio runtime for a live-load block. Must outlast the operation;
+    #: the block fails loudly if fio exits first (see assert_io_unbroken).
+    LIVE_RUNTIME_SEC = int(os.environ.get("MIG_LIVE_RUNTIME", 900))
+    #: Volumes per node to load, matching how the feature is exercised by hand.
+    LIVE_VOLS_PER_NODE = int(os.environ.get("MIG_LIVE_VOLS_PER_NODE", 2))
+    @staticmethod
+    def _fio_duration_ms(value):
+        """An fio duration literal in ms. Bare numbers are usec, as fio reads them.
+
+        FIO_MAX_LATENCY is a literal passed straight to fio ("40s"), not a
+        number, so it cannot simply be multiplied.
+        """
+        text = str(value).strip().lower()
+        for suffix, scale in (("ms", 1.0), ("us", 1e-3), ("s", 1000.0)):
+            if text.endswith(suffix):
+                return float(text[: -len(suffix)] or 0) * scale
+        return float(text) * 1e-3          # fio's default unit is microseconds
+
+    #: Longest single-IO stall tolerated across a cutover, in ms.
+    #:
+    #: Defaults to the house ceiling so this never contradicts
+    #: utils.fio_defaults -- fio itself fails the job at FIO_MAX_LATENCY, and
+    #: asserting anything looser here would be theatre. A caller testing a
+    #: cutover specifically may pass something stricter; the measured value is
+    #: logged either way, because "IO paused for N ms" is the number worth
+    #: having in a bug report and the pass/fail alone does not carry it.
+    CUTOVER_MAX_STALL_MS = int(_fio_duration_ms.__func__(FIO_MAX_LATENCY))
+
+    _CLAT_RE = re.compile(
+        r"\b(?:c?lat)\s*\((nsec|usec|msec|sec)\)\s*:.*?\bmax=\s*([0-9.]+)",
+        re.IGNORECASE)
+    _UNIT_MS: ClassVar = {"nsec": 1e-6, "usec": 1e-3,
+                          "msec": 1.0, "sec": 1000.0}
+
+    def _fio_text_dual(self, handle, log_path=None):
+        """fio's own output for a handle, or "" when it cannot be read.
+
+        Deliberately best-effort: a missing log must not turn into a false
+        failure, so the callers treat "" as "nothing measured" and say so.
+        """
+        try:
+            if self.k8s_test:
+                if not isinstance(handle, str):
+                    return ""
+                k8s = self._ensure_k8s_utils()
+                pod = k8s.get_job_pod_name(handle)
+                return k8s.get_pod_logs(pod, tail=400) if pod else ""
+            if not log_path:
+                return ""
+            out, _ = self.ssh_obj.exec_command(
+                node=self.client_machines[0],
+                command=f"cat {log_path} 2>/dev/null || true",
+                supress_logs=True)
+            return out or ""
+        except Exception as exc:                       # noqa: BLE001
+            self.logger.warning("[MIG] could not read fio output: %s", exc)
+            return ""
+
+    def worst_stall_ms(self, text):
+        """Longest single IO in fio's output, in ms, or None if not stated.
+
+        fio's completion-latency max IS the cutover gap as the client saw it:
+        an IO issued before the cutover and completed after it carries the
+        whole pause. Reported in whatever unit fio chose, hence the scaling.
+        """
+        worst = None
+        for unit, value in self._CLAT_RE.findall(text or ""):
+            try:
+                ms = float(value) * self._UNIT_MS[unit.lower()]
+            except (ValueError, KeyError):
+                continue
+            worst = ms if worst is None else max(worst, ms)
+        return worst
+
+    def _wait_loads(self, loads, timeout):
+        """Wait for every load and return {name: status}.
+
+        Not _wait_fio_dual: that discards wait_job_complete's answer behind a
+        warning, and the status is exactly what tells us whether fio survived.
+        """
+        statuses = {}
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            for name, handle, _ in loads:
+                if not isinstance(handle, str):
+                    continue
+                try:
+                    statuses[name] = k8s.wait_job_complete(handle,
+                                                           timeout=timeout)
+                except Exception as exc:               # noqa: BLE001
+                    statuses[name] = f"wait failed: {exc}"
+        else:
+            try:
+                self._wait_fio_dual([h for _, h, _ in loads], timeout=timeout)
+            except Exception as exc:                   # noqa: BLE001
+                self.logger.warning("[MIG] waiting on live load: %s", exc)
+        return statuses
+
+    def assert_io_unbroken(self, loads, context="", max_stall_ms=None,
+                           statuses=None):
+        """Every load ran clean across the operation, and say how close it came.
+
+        Raises on: a fio Job that did not succeed, fio reporting an error or a
+        verify mismatch, or a stall over the ceiling. Logs the measured worst
+        stall in all cases, including when it passes.
+        """
+        ceiling = self.CUTOVER_MAX_STALL_MS if max_stall_ms is None else max_stall_ms
+        problems, measured = [], []
+        statuses = statuses or {}
+
+        for name, handle, log_path in loads:
+            status = statuses.get(name)
+            if status is not None and str(status).lower() != "succeeded":
+                problems.append(f"{name}: fio Job ended {status!r}")
+
+            text = self._fio_text_dual(handle, log_path)
+            if not text:
+                self.logger.warning(
+                    "[MIG] %s: no fio output to check %s -- the stall across "
+                    "this operation was NOT measured", name, context)
+                continue
+
+            low = text.lower()
+            for marker in ("verify failed", "io_u error", "bad magic header",
+                           "err= 5", "err=5"):
+                if marker in low:
+                    line = next((l.strip() for l in text.splitlines()
+                                 if marker in l.lower()), marker)
+                    problems.append(f"{name}: {line[:200]}")
+                    break
+
+            stall = self.worst_stall_ms(text)
+            if stall is None:
+                self.logger.warning(
+                    "[MIG] %s: fio output carries no latency max; stall not "
+                    "measured %s", name, context)
+                continue
+            measured.append((name, stall))
+            if stall > ceiling:
+                problems.append(
+                    f"{name}: IO stalled {stall:.0f}ms across the operation, "
+                    f"over the {ceiling}ms ceiling")
+
+        if measured:
+            worst_name, worst = max(measured, key=lambda x: x[1])
+            self.logger.info(
+                "[MIG] cutover stall %s: worst %.0fms on %s (ceiling %dms); "
+                "all: %s", context, worst, worst_name, ceiling,
+                ", ".join(f"{n}={v:.0f}ms" for n, v in measured))
+
+        if problems:
+            raise AssertionError(
+                f"[MIG] IO did not survive the operation {context}. A live "
+                f"migration that interrupts or corrupts client IO has failed "
+                f"even when the migration itself reports done:\n    "
+                + "\n    ".join(problems))
+
+    @contextlib.contextmanager
+    def load_across(self, names, context="", runtime=None, settle=None,
+                    max_stall_ms=None, **fio):
+        """Run verified fio on every name for the duration of the block.
+
+        Starts fio, waits for it to be in flight, yields, then waits for every
+        job and asserts it ran clean. md5 with verify_fatal is the default
+        because a cutover that silently returns the wrong bytes is the failure
+        this exists to catch, and without verify the k8s job checks nothing.
+        """
+        runtime = self.LIVE_RUNTIME_SEC if runtime is None else runtime
+        settle = self.LIVE_SETTLE_SEC if settle is None else settle
+        names = [n for n in (names or []) if n]
+        opts = dict(rw="randrw", bs="16K", iodepth=8, numjobs=1, size="512M",
+                    verify="md5", verify_fatal=True)
+        opts.update(fio)
+
+        loads = []
+        for n in names:
+            fio_name = f"miglive_{n}"[:40]
+            log_path = (None if self.k8s_test
+                        else f"{self.log_path}/{fio_name}.log")
+            handle = self._run_fio_dual(n, runtime=runtime, name=fio_name,
+                                        log_path=log_path, **opts)
+            loads.append((n, handle, log_path))
+        self.logger.info("[MIG] live load on %d volume(s) %s: %s",
+                         len(loads), context, ", ".join(names))
+
+        if loads and settle:
+            sleep_n_sec(settle)
+
+        body_failed = False
+        try:
+            yield loads
+        except BaseException:
+            body_failed = True
+            raise
+        finally:
+            # Always collect, even when the body raised: a migration that
+            # failed AND broke IO is two findings, and the second is the one
+            # that says whether clients were harmed. But when the body already
+            # failed, REPORT the IO result rather than raising it -- raising
+            # from here would replace the migration's own failure, which is
+            # the more useful of the two.
+            statuses = self._wait_loads(loads, timeout=runtime + 600)
+
+            if body_failed:
+                try:
+                    self.assert_io_unbroken(loads, context=context,
+                                            max_stall_ms=max_stall_ms,
+                                            statuses=statuses)
+                except AssertionError as io_exc:
+                    self.logger.error("[MIG] and IO was harmed too: %s", io_exc)
+            else:
+                # No exception in flight, so raising here is the block's own
+                # verdict rather than a replacement for someone else's.
+                self.assert_io_unbroken(loads, context=context,
+                                        max_stall_ms=max_stall_ms,
+                                        statuses=statuses)
 
     def watch_io(self, name, seconds=None, context=""):
         """Keep IO running past the operation and confirm it stayed clean.
