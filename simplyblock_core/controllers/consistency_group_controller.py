@@ -1069,6 +1069,11 @@ def _precheck_members(group):
     the healthy members for a snapshot one unhealthy member had already doomed,
     and it produces a precise error rather than a mid-sequence RPC failure.
     """
+    if getattr(group, "subsystem_move", None):
+        # The members' namespaces are changing subsystem: a freeze now could
+        # land between a namespace leaving its source and reaching the target.
+        return None, ("consistency group snapshot refused — a subsystem move "
+                      f"({group.subsystem_move.get('id', '')}) is active on the group")
     members = []
     offline = []
     off_store = []

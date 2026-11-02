@@ -1760,6 +1760,16 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 f"{active_mig.uuid}. Retry after the migration completes."
             )
 
+        # A subsystem a consistency-group subsystem move holds is changing
+        # shape on every node: a namespace added now would miss the move's
+        # nsid assignment and the source/target switch at commit.
+        if lvol.nqn in _moving_nqns_on_node(lvol.node_id):
+            return False, (
+                f"Cannot attach lvol {lvol.uuid} to subsystem {lvol.nqn}: "
+                f"a consistency-group subsystem move holds it. Retry after the "
+                f"move completes."
+            )
+
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
         return _fail_after_bdev(lvol, rpc_client, msg, is_primary=is_primary)
@@ -7096,3 +7106,9 @@ def resolve_effective_ha_type(ha_type, host_node):
     if ha_type == "ha" and not host_node.secondary_node_id:
         return "single"
     return ha_type
+
+
+def _moving_nqns_on_node(node_id):
+    """Subsystems an active consistency-group subsystem move holds on the
+    node (its sources and its target)."""
+    return DBController().subsystem_move_reservations(node_id)[0]

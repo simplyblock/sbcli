@@ -158,6 +158,16 @@ class ConsistencyGroup(BaseModel):
     # target node and one entry per subsystem of the migration scope,
     # {"nqn", "kind": "single"|"batch", "id"}; {} when none is active.
     migration: dict = default_factory(dict)
+    # The active subsystem move (design-cg-live-subsystem-flip.md §9): the
+    # target subsystem, the absolute deadline the move call honors, which
+    # side the namespaces are exported by ("source" | "target"), and one
+    # entry per moving volume {lvol_id, source_nqn, source_nsid, ns_uuid,
+    # nguid, target_nsid}. {} when none is active. Its subsystems are held in
+    # the node's ns_slot_moving reservation for as long as it is set.
+    subsystem_move: dict = default_factory(dict)
+    # {id, outcome} of the move cleared last, so a commit or rollback retried
+    # after the record was cleared answers the same instead of a 404.
+    last_subsystem_move: dict = default_factory(dict)
     status: str = "active"
 
     def get_id(self):
