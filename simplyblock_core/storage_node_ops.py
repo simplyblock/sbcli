@@ -50,6 +50,7 @@ from simplyblock_core.controllers import (
     health_controller,
     lvol_controller,
     migration_controller,
+    port_release_budget,
     qos_controller,
     snapshot_controller,
     storage_events,
@@ -9293,6 +9294,9 @@ def _restart_storage_node_impl(
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
         logger.info("Cluster is not ready yet")
+        # A restart reopens this node's LVS ports by design; those releases
+        # must not count against the fence-release budget (review of #1580).
+        port_release_budget.forget_node(db_controller, snode)
         logger.info("Setting node status to Online")
         if not set_node_status(node_id, StorageNode.STATUS_ONLINE, caused_by="restart"):
             # FSM rejected the final flip — typically because a racing
@@ -9441,6 +9445,9 @@ def _restart_storage_node_impl(
             logger.info(f"Starting migration task for node {snode.get_id()}")
             tasks_controller.add_device_mig_task_for_node(snode.get_id())
 
+        # A restart reopens this node's LVS ports by design; those releases
+        # must not count against the fence-release budget (review of #1580).
+        port_release_budget.forget_node(db_controller, snode)
         logger.info("Setting node status to Online")
         if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart"):
             # See twin call site above (single-leader restart path) for

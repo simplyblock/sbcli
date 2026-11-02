@@ -976,26 +976,31 @@ def exec_port_allow_task(task):
     if port_number and port_number not in lvs_ports:
         lvs_ports.append(port_number)
     logger.info(f"Allow LVS ports {lvs_ports} on node {node.get_id()}")
-    # Release budget (models/fence_release.py): a port this control plane
-    # already reopened FENCE_RELEASE_BUDGET times inside the window is being
-    # re-fenced by SPDK on every IO. Skip it, reopen the others, and abort the
-    # task if the skipped port is the one it was created for -- the health
-    # check schedules a fresh task once the window has rolled past.
+    # Release budget (models/fence_release.py): a port whose lvstore this
+    # control plane already reopened FENCE_RELEASE_BUDGET times inside the
+    # window is being re-fenced by SPDK on every IO. Skip it and reopen the
+    # others -- but never abort here: the ANA promotion and the device
+    # re-admit below are the last steps of the node's recovery and must run
+    # whatever happened to one port (review of #1580). The budget exempts the
+    # lvstore's preferred path and is reset by a restart, so a healthy node
+    # coming back is not what gets skipped.
     looping = [p for p in lvs_ports if port_release_budget.exhausted(db, node, p)]
     for p in lvs_ports:
         if p in looping:
             logger.warning(
-                "Port %s on %s was released %d times in the last %ds and SPDK fenced "
-                "it again each time; leaving it blocked",
+                "Port %s on %s: its lvstore's paths were released %d times in the last "
+                "%ds and SPDK fenced them again each time; leaving it blocked",
                 p, node.get_id(), constants.FENCE_RELEASE_BUDGET, constants.FENCE_RELEASE_WINDOW_SEC)
             continue
         node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)
         port_release_budget.record_release(db, node, p)
         tcp_ports_events.port_allowed(node, p)
+    left_blocked = ""
     if port_number in looping:
-        raise TaskAbort(
-            f"port {port_number} released {constants.FENCE_RELEASE_BUDGET} times in "
-            f"{constants.FENCE_RELEASE_WINDOW_SEC}s and fenced again each time; left blocked (fence loop)")
+        left_blocked = (
+            f" (port {port_number} left blocked: its lvstore's paths were released "
+            f"{constants.FENCE_RELEASE_BUDGET} times in {constants.FENCE_RELEASE_WINDOW_SEC}s "
+            f"and fenced again each time -- fence loop)")
 
     # Deferred ANA failover, AFTER the port release: a secondary recovering
     # while its primary is OFFLINE returns with non-optimized listeners
@@ -1062,7 +1067,7 @@ def exec_port_allow_task(task):
     except Exception as e:
         logger.error(f"Device re-admit after port allow failed: {e}")
 
-    set_result(task, f"Port {port_number} allowed on node")
+    set_result(task, f"Port {port_number} allowed on node{left_blocked}")
 
 
 SPEC = RunnerSpec(
