@@ -1220,3 +1220,8 @@ TWO_NODE_STORAGE_FENCED_CONDITION = "StorageFenced"
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60
+
+# A snapshot record still in_creation after this long belongs to a create
+# whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
+# Far above any create (lock waits included).
+SNAPSHOT_INTENT_REAP_SEC = 600
