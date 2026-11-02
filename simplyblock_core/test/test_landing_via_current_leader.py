@@ -43,14 +43,16 @@ def test_internal_ha_volume_may_go_through_another_member(peers, status):
     assert lc._may_create_via_current_leader(_node(status), "ha", True, True)
 
 
-def test_one_online_peer_is_enough(peers):
+def test_the_secondary_must_be_online_even_if_the_tertiary_is(peers):
+    # Target primary AND secondary down: replication stops, RPO grows (the
+    # tertiary alone does not take a landing volume).
     peers["SEC"] = StorageNode.STATUS_OFFLINE
-    assert lc._may_create_via_current_leader(_node(StorageNode.STATUS_OFFLINE), "ha", True, True)
-
-
-def test_no_online_peer_no_create(peers):
-    peers["SEC"] = peers["TER"] = StorageNode.STATUS_OFFLINE
     assert not lc._may_create_via_current_leader(_node(StorageNode.STATUS_OFFLINE), "ha", True, True)
+
+
+def test_secondary_online_tertiary_down_is_enough(peers):
+    peers["TER"] = StorageNode.STATUS_OFFLINE
+    assert lc._may_create_via_current_leader(_node(StorageNode.STATUS_OFFLINE), "ha", True, True)
 
 
 @pytest.mark.parametrize("ha_type,internal,via", [

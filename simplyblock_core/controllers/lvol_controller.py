@@ -705,9 +705,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     """Create a volume (single or HA) on the cluster.
 
     via_current_leader: create the volume on the host node's lvstore even when
-    the host node (the lvstore's primary) is not online, through whichever
-    member leads that lvstore now; the host's registration is deferred until
-    it is back (the HA path's durable register task). Only for internal
+    the host node (the lvstore's primary) is not online, through the
+    lvstore's secondary, which leads it then; the host's registration is
+    deferred until it is back (the HA path's durable register task). Not
+    with the secondary down as well: such a target stops taking replication
+    and its RPO grows until one of the two is back. Only for internal
     volumes pinned to one lvstore -- a replication landing volume must land on
     the lvstore that holds the copies it is chained onto, so a target primary
     outage otherwise stopped every replication cycle into it (bf8 2026-11-02,
@@ -1760,17 +1762,16 @@ def _may_create_via_current_leader(host_node, ha_type, internal, via_current_lea
                             StorageNode.STATUS_REMOVED):
         # A restart owns the lvstore's state; a removed node has no lvstore.
         return False
-    db_controller = DBController()
-    for peer_id in (host_node.secondary_node_id, host_node.tertiary_node_id):
-        if not peer_id:
-            continue
-        try:
-            peer = db_controller.get_storage_node_by_id(peer_id)
-        except KeyError:
-            continue
-        if peer.status == StorageNode.STATUS_ONLINE:
-            return True
-    return False
+    # Only the secondary: a target that has lost primary AND secondary does
+    # not take replication (it stops and its RPO grows until one of them is
+    # back), so the tertiary alone never receives a landing volume.
+    if not host_node.secondary_node_id:
+        return False
+    try:
+        peer = DBController().get_storage_node_by_id(host_node.secondary_node_id)
+    except KeyError:
+        return False
+    return peer.status == StorageNode.STATUS_ONLINE
 
 
 def _lvol_secondary_index(lvol, node):
