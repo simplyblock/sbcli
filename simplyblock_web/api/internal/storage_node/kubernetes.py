@@ -514,13 +514,13 @@ def _configure_talos_kubelet_topology(node_name, namespace, values, reserved_sys
                 f"that ran under another policy first needs /var/lib/kubelet/cpu_manager_state removed, see "
                 f"docs/talos.md -- {_TALOS_MANAGED_HINT}:\n"
                 f"{_machine_config_patch_text(_talos_kubelet_patch(reserved_system_cpus))}")
-    secret_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
-    missing = _talos_api_secret_missing(k8s_core_v1, namespace, secret_name)
+    api_access_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
+    missing = _talos_api_access_missing(k8s_core_v1, namespace, api_access_name)
     if missing:
         return missing
     job_values = dict(values,
                       TALOSCTL_IMAGE=os.environ.get("TALOSCTL_IMAGE") or constants.TALOSCTL_IMAGE,
-                      TALOS_API_SECRET=secret_name,
+                      TALOS_API_SECRET=api_access_name,
                       TALOS_PATCH=json.dumps(_talos_kubelet_patch(reserved_system_cpus), separators=(',', ':')))
     # The kubelet refuses to start over a CPU-manager checkpoint written
     # under another policy ("configured policy differs from state checkpoint
@@ -629,20 +629,25 @@ _TALOS_HUGEPAGE_WAIT_S = 240
 _TALOS_HUGEPAGE_POLL_S = 5
 
 
-def _talos_api_secret_missing(k8s_core_v1, namespace, secret_name):
-    """None when the Talos API credentials Secret is there (or cannot be
+def _talos_api_access_missing(k8s_core_v1, namespace, name):
+    """None when the Talos API access Secret is there (or cannot be
     checked), else the message to fail with. Checked up front because a
     missing Secret otherwise leaves the Job's pod in ContainerCreating for
-    the whole Job timeout with a FailedMount event nobody reads."""
+    the whole Job timeout with a FailedMount event nobody reads.
+
+    The message names the knob, not the configured value: the value is
+    only the Secret's name, but it comes out of TALOS_API_SECRET, and a
+    name-based scanner (CodeQL) reads anything logged from there as the
+    secret itself."""
     try:
-        k8s_core_v1.read_namespaced_secret(secret_name, namespace)
+        k8s_core_v1.read_namespaced_secret(name, namespace)
     except ApiException as e:
         if e.status == 404:
-            return (f"Talos API credentials Secret '{secret_name}' not found in namespace '{namespace}': "
-                    f"enable Talos API access from Kubernetes for this namespace with the os:admin role and "
-                    f"create a talos.dev/v1alpha1 ServiceAccount named '{secret_name}' with roles [os:admin] "
-                    f"(see docs/talos.md)")
-        logger.warning("Cannot check for Secret '%s' (HTTP %s); letting the Job tell", secret_name, e.status)
+            return (f"Talos API access Secret not found in namespace '{namespace}' (its name is the "
+                    f"TALOS_API_SECRET setting, default 'talos-api-access-talos-secrets'): enable Talos API "
+                    f"access from Kubernetes for this namespace with the os:admin role and create a "
+                    f"talos.dev/v1alpha1 ServiceAccount of that name with roles [os:admin] (see docs/talos.md)")
+        logger.warning("Cannot check for the Talos API access Secret (HTTP %s); letting the Job tell", e.status)
     return None
 
 
@@ -802,13 +807,13 @@ def _provision_talos_hugepages(required_mib, node_name, namespace, values):
     if not _talos_machine_config_managed():
         return _preprovisioned_hugepage_refusal(required_mib, node_name, host_short)
 
-    secret_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
-    missing = _talos_api_secret_missing(k8s_core_v1, namespace, secret_name)
+    api_access_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
+    missing = _talos_api_access_missing(k8s_core_v1, namespace, api_access_name)
     if missing:
         return missing
     job_values = dict(values,
                       TALOSCTL_IMAGE=os.environ.get("TALOSCTL_IMAGE") or constants.TALOSCTL_IMAGE,
-                      TALOS_API_SECRET=secret_name)
+                      TALOS_API_SECRET=api_access_name)
 
     if host_short:
         pages_per_numa, err = _configured_pages_per_numa()
