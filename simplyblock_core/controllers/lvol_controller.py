@@ -700,7 +700,19 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
-                replication_policy=None, consistency_group=None, internal=False):
+                replication_policy=None, consistency_group=None, internal=False,
+                via_current_leader=False):
+    """Create a volume (single or HA) on the cluster.
+
+    via_current_leader: create the volume on the host node's lvstore even when
+    the host node (the lvstore's primary) is not online, through whichever
+    member leads that lvstore now; the host's registration is deferred until
+    it is back (the HA path's durable register task). Only for internal
+    volumes pinned to one lvstore -- a replication landing volume must land on
+    the lvstore that holds the copies it is chained onto, so a target primary
+    outage otherwise stopped every replication cycle into it (bf8 2026-11-02,
+    "Error creating remote lvol" for 21 min). Requires ha_type "ha".
+    """
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     if max_namespace_per_subsys is None:
@@ -910,9 +922,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # return False, "Number of active cluster devices are less than 8"
 
     if host_node and host_node.status != StorageNode.STATUS_ONLINE:
-        mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
-        logger.error(mgs)
-        return False, mgs
+        if not _may_create_via_current_leader(host_node, ha_type, internal, via_current_leader):
+            mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
+            logger.error(mgs)
+            return False, mgs
+        logger.info("Host node %s of %s is %s: creating internal volume %s through the "
+                    "lvstore's current leader; the host registers it when it is back",
+                    host_node.get_id(), host_node.lvstore, host_node.status, name)
 
     if host_node and host_node.lvstore_status == "in_creation":
         mgs = f"Storage node LVStore is being recreated (restart in progress). ID: {host_node.get_id()}"
@@ -1733,6 +1749,28 @@ def _lvol_path_index(lvol, node) -> int:
         "%s to avoid colliding with an assigned path",
         node_id, lvol.get_id(), nodes, lvol_min_cntlid(fallback))
     return fallback
+
+
+def _may_create_via_current_leader(host_node, ha_type, internal, via_current_leader):
+    """Whether add_lvol_ha may create on a not-online host's lvstore through
+    another member (see add_lvol_ha's via_current_leader)."""
+    if not (via_current_leader and internal and ha_type == "ha"):
+        return False
+    if host_node.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_CREATION,
+                            StorageNode.STATUS_REMOVED):
+        # A restart owns the lvstore's state; a removed node has no lvstore.
+        return False
+    db_controller = DBController()
+    for peer_id in (host_node.secondary_node_id, host_node.tertiary_node_id):
+        if not peer_id:
+            continue
+        try:
+            peer = db_controller.get_storage_node_by_id(peer_id)
+        except KeyError:
+            continue
+        if peer.status == StorageNode.STATUS_ONLINE:
+            return True
+    return False
 
 
 def _lvol_secondary_index(lvol, node):
