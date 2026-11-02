@@ -271,8 +271,8 @@ STATIC_KUBELET = json.dumps({"kubeletconfig": {
 DEFAULT_KUBELET = json.dumps({"kubeletconfig": {"cpuManagerPolicy": "none"}})
 
 
-class TestSpdkProcessStartOnTalos(unittest.TestCase):
-    """The handler under TALOS_CLUSTER=true. The host pool is what
+class _TalosHandlerCase(unittest.TestCase):
+    """Harness for the handler on a Talos host. The host pool is what
     ``get_huge_memory`` returns on each call; the kubelet's view is what
     ``read_node`` returns on each call."""
 
@@ -333,6 +333,21 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
         with patch.dict(os.environ, env or self.env, clear=True), \
                 patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=lambda: next(host_iter)):
             return k8s_node.spdk_process_start(_body(spdk_mem=spdk_mem))
+
+    def _topology_env(self, **extra):
+        env = dict(self.env, CPU_TOPOLOGY_ENABLED='true', SKIP_KUBELET_CONFIGURATION='false', RESERVED_SYSTEM_CPUS='0,1')
+        env.update(extra)
+        return env
+
+
+class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
+    """The handler with the machine config managed (TALOS_MACHINE_CONFIG=
+    managed): a short pool or an unconfigured kubelet is patched through
+    the Talos API."""
+
+    def setUp(self):
+        super().setUp()
+        self.env = dict(self.env, TALOS_MACHINE_CONFIG='managed')
 
     def test_short_pool_is_patched_then_the_kubelet_restarted_then_the_add_proceeds(self):
         """Host pool short, kubelet at zero: the patch Job runs, the agent
@@ -457,11 +472,6 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
 
     # --- kubelet CPU topology through the Talos API ---
 
-    def _topology_env(self, **extra):
-        env = dict(self.env, CPU_TOPOLOGY_ENABLED='true', SKIP_KUBELET_CONFIGURATION='false', RESERVED_SYSTEM_CPUS='0,1')
-        env.update(extra)
-        return env
-
     def test_kubelet_topology_is_patched_when_the_kubelet_lacks_it(self):
         """configz says cpuManagerPolicy none: the kubelet-config Job runs
         with the four keys, the node comes back Ready, configz then says
@@ -545,6 +555,89 @@ class TestSpdkProcessStartOnTalos(unittest.TestCase):
         self.assertIn('strict-cpu-reservation', error)
         self.assertEqual(self._talos_jobs(), [])
         self.core.create_namespaced_pod.assert_not_called()
+
+
+class TestSpdkProcessStartOnPreprovisionedTalos(_TalosHandlerCase):
+    """The handler under the default mode (TALOS_MACHINE_CONFIG unset, i.e.
+    preprovisioned): the node checks the pool and the kubelet settings and
+    never touches the Talos API. A shortfall fails the add with the patch
+    the operator has to apply; nothing is created and the credentials
+    Secret is never looked for."""
+
+    def _nothing_applied(self):
+        self.create_job.assert_not_called()
+        self.core.read_namespaced_secret.assert_not_called()
+
+    def test_short_pool_is_refused_with_the_sysfs_patch_to_apply(self):
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn('pre-provisioned', error)
+        self.assertIn("'talosctl -n <node ip> patch mc -p @patch.yaml'", error)
+        self.assertIn('service kubelet restart', error)
+        self.assertIn('talosMachineConfig: Managed', error)
+        pages = k8s_node._hugepages_per_numa([{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}])[0]
+        self.assertIn(f"devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '{pages}'", error)
+        self.assertIn('host provides 2048 MiB of huge pages but the SPDK pod requests', error)
+        self._nothing_applied()
+
+    def test_the_patch_in_the_refusal_is_the_one_managed_mode_would_apply(self):
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        patch_text = error.split(':\n', 1)[1]
+        self.assertEqual(
+            yaml.safe_load(patch_text),
+            k8s_node._talos_sysfs_patch(k8s_node._hugepages_per_numa(
+                [{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}])))
+
+    def test_kubelet_lagging_the_host_is_refused_with_a_restart_hint(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn('the kubelet advertises less', error)
+        self.assertIn("'talosctl -n <node ip> service kubelet restart'", error)
+        self.assertNotIn('patch mc', error)
+        self._nothing_applied()
+
+    def test_pool_and_kubelet_sufficient_proceeds_without_any_credentials(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.core.read_namespaced_secret.assert_not_called()
+
+    def test_unconfigured_node_is_refused_before_sizing(self):
+        k8s_node.core_utils.load_config.return_value = {"nodes": []}
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertIn('sbcli sn configure', error)
+        self._nothing_applied()
+
+    def test_kubelet_lacking_the_topology_is_refused_with_the_extra_config_patch(self):
+        self.core.connect_get_node_proxy_with_path.return_value = DEFAULT_KUBELET
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                  env=self._topology_env(RESERVED_SYSTEM_CPUS='0-3'))
+        self.assertFalse(data)
+        self.assertIn('does not run with the CPU topology settings', error)
+        self.assertIn('cpu_manager_state', error)
+        self.assertEqual(yaml.safe_load(error.split(':\n', 1)[1]), k8s_node._talos_kubelet_patch('0-3'))
+        # The init Job (baseline capture) has run by then; nothing Talos-side has.
+        self.assertEqual(self._talos_jobs(), [])
+        self.core.read_namespaced_secret.assert_not_called()
+
+    def test_kubelet_already_configured_proceeds(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+
+    def test_an_unknown_mode_is_preprovisioned(self):
+        with self.assertLogs(k8s_node.logger, level='WARNING') as logs:
+            data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'],
+                                      env=dict(self.env, TALOS_MACHINE_CONFIG='yes please'))
+        self.assertIn('pre-provisioned', error)
+        self.assertTrue(any("TALOS_MACHINE_CONFIG='yes please' is not one of" in m for m in logs.output), logs.output)
+        self._nothing_applied()
+
+    def test_managed_is_read_case_insensitively(self):
+        data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'],
+                                  env=dict(self.env, TALOS_MACHINE_CONFIG=' Managed '))
+        self.assertIsNone(error, error)
+        self.assertEqual(len(self._talos_jobs()), 2)
 
 
 class TestApplyConfigSizingUnchanged(unittest.TestCase):
