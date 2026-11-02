@@ -246,7 +246,8 @@ def test_finish_waits_while_target_leadership_is_unsettled():
     with patch.object(sr, "db", db), \
             patch.object(sr, "_stable_target_leader", return_value=(None, "leadership moving")), \
             patch.object(sr, "_resolve_chain_target") as chain:
-        assert sr.process_snap_replicate_finish(task, MagicMock()) is False
+        # Pending, not failed: no retry backoff while the target has no leader.
+        assert sr.process_snap_replicate_finish(task, MagicMock()) == sr.FINISH_PENDING
     chain.assert_not_called()
 
 

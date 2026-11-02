@@ -1226,3 +1226,8 @@ RESTART_JC_COMPRESSION_RETRY_S = 60
 # this far apart -- so a slow or recovering old leader cannot become a second
 # writer (storage_node_ops._leadership_proven_free).
 LEADERSHIP_SAFETY_WINDOW_SEC = 10
+
+# A snapshot record still in_creation after this long belongs to a create
+# whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
+# Far above any create (lock waits included).
+SNAPSHOT_INTENT_REAP_SEC = 600
