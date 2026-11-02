@@ -15,12 +15,12 @@ Class names end in ``K8s`` on purpose: pNFS has no Docker variant, and the
 platform filter in ``e2e.py`` keys on that suffix, so ``--testname pnfs`` on
 a Docker cluster reports these as skipped instead of failing obscurely.
 """
-import json
 import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from utils.k8s_utils import K8sUtils
 from utils.pnfs_utils import (
     PnfsEvidenceError,
     assert_devices_moved,
@@ -47,6 +47,7 @@ class _PnfsBase(TestClusterBase):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.k8s_test = True
+        self.k8s_utils = None
         self.sc_name = "sb-pnfs-sc"
         self.claim = None
         self.jobs = []
@@ -70,6 +71,14 @@ class _PnfsBase(TestClusterBase):
                 self.logger.info("Retrying base APIs (%s)", exc)
                 sleep_n_sec(10)
 
+        # The base class does not build this; every k8s-native test makes
+        # its own once the management node is known. Run 41422123643 failed
+        # four cases on AttributeError here before the gate below could say
+        # anything useful about the cluster.
+        mgmt_node = self.mgmt_nodes[0] if self.mgmt_nodes else ""
+        self.k8s_utils = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=mgmt_node)
+        self.logger.info("[pnfs] K8sUtils ready for mgmt_node=%r", mgmt_node)
+
         self.assert_pnfs_cluster()
         self.workers = self._worker_names()[:self.MAX_PODS]
         if len(self.workers) < 2:
@@ -79,15 +88,27 @@ class _PnfsBase(TestClusterBase):
         self.logger.info("[pnfs] %d worker(s) in play: %s",
                          len(self.workers), ", ".join(self.workers))
 
+    #: The DaemonSet's own nodeSelector. A node without it runs no MDS, so
+    #: a cluster with none of them cannot serve a layout however healthy the
+    #: rest of it looks.
+    KVM_LABEL = "storage.simplyblock.io/kvm-capable=true"
+
     def assert_pnfs_cluster(self):
         """F-8. Refuse the run unless the cluster can actually serve pNFS.
 
-        Mirrors ``assert_lblk_cluster``. Three independent things, each of
-        which fails silently rather than loudly if it is missing: the CRD
-        has to exist, a metadata server has to be configured on the cluster,
-        and the mds-proxy DaemonSet has to be Ready. Without the gate, a
-        missing MDS gives a claim that provisions as ordinary NFS and a
-        suite that passes while testing the wrong product.
+        Mirrors ``assert_lblk_cluster``: a suite that quietly runs as plain
+        NFS is the worst outcome available, so the preconditions are asserted
+        rather than discovered from a confusing failure three cases later.
+
+        **This deliberately does not check ``spec.pnfs.mds``.** The plan said
+        to, following the design document, and the operator deployed on this
+        lab has no such field -- ``storageclusters.storage.simplyblock.io``
+        carries no ``pnfs`` property in either v1alpha1 or v1alpha2, and
+        ``ClusterDeploymentConfig`` has no NFS keys at all. The metadata
+        server is not configured by us: ``NFSExport.status`` carries
+        ``mdsNodeIP`` and ``mdsPodName``, so the operator selects one from
+        the mds-proxy DaemonSet when it assembles the export. What we can
+        assert is that there is something for it to select.
         """
         problems = []
 
@@ -101,19 +122,15 @@ class _PnfsBase(TestClusterBase):
 
         ns = self.k8s_utils.namespace
         out, _ = self.k8s_utils._exec_kubectl(
-            f"kubectl get storagecluster -n {ns} -o json", supress_logs=True)
-        mds = None
-        try:
-            for item in json.loads(out or "{}").get("items", []):
-                mds = ((item.get("spec") or {}).get("pnfs") or {}).get("mds")
-                if mds:
-                    break
-        except ValueError:
-            pass
-        if not mds:
+            f"kubectl get nodes -l {self.KVM_LABEL} "
+            f"-o custom-columns=NAME:.metadata.name --no-headers "
+            f"--ignore-not-found", supress_logs=True)
+        kvm_nodes = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+        if not kvm_nodes:
             problems.append(
-                "no StorageCluster carries spec.pnfs.mds, so a pNFS claim "
-                "would come back as plain NFS with no metadata server")
+                f"no node carries {self.KVM_LABEL}, so the mds-proxy "
+                f"DaemonSet has nowhere to run and no metadata server exists "
+                f"for the operator to put in NFSExport.status.mdsNodeIP")
 
         out, _ = self.k8s_utils._exec_kubectl(
             f"kubectl get daemonset -n {ns} "
@@ -121,12 +138,12 @@ class _PnfsBase(TestClusterBase):
             f"READY:.status.numberReady,WANT:.status.desiredNumberScheduled "
             f"--no-headers", supress_logs=True)
         mds_rows = [ln.split() for ln in (out or "").splitlines()
-                    if "mds" in ln.split()[0]] if out else []
+                    if ln.split() and "mds" in ln.split()[0]]
         if not mds_rows:
             problems.append("no mds-proxy DaemonSet is deployed")
         else:
             for row in mds_rows:
-                if len(row) >= 3 and row[1] != row[2]:
+                if len(row) >= 3 and (row[1] != row[2] or row[2] in ("0", "<none>")):
                     problems.append(
                         f"DaemonSet {row[0]} is {row[1]}/{row[2]} Ready")
 
@@ -135,8 +152,10 @@ class _PnfsBase(TestClusterBase):
                 "this cluster is not set up for pNFS, and running anyway "
                 "would test plain NFS without saying so:\n  "
                 + "\n  ".join(problems))
-        self.logger.info("[pnfs] cluster gate passed: CRD present, "
-                         "spec.pnfs.mds=%s, mds-proxy Ready", mds)
+        self.logger.info(
+            "[pnfs] cluster gate passed: NFSExport CRD present, %d "
+            "kvm-capable node(s), mds-proxy Ready (%s)",
+            len(kvm_nodes), ", ".join("/".join(r) for r in mds_rows))
 
     # ── cluster shape ────────────────────────────────────────────────────
 
@@ -266,7 +285,8 @@ class _PnfsBase(TestClusterBase):
 
     # ── teardown ─────────────────────────────────────────────────────────
 
-    def teardown(self):
+    def teardown(self, delete_lvols=True, close_ssh=True,
+                 skip_k8s_cleanup=False):
         """F-10. Drain the pods before the claim.
 
         An RWX claim has N pods. Deleting the claim while any of them still
@@ -275,6 +295,12 @@ class _PnfsBase(TestClusterBase):
         with it.
         """
         self.logger.info("Inside %s.teardown()", type(self).__name__)
+        if self.k8s_utils is None:
+            # setup() failed before it got this far; there is nothing of ours
+            # on the cluster to drain and the base teardown still has to run.
+            super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
+                             skip_k8s_cleanup=skip_k8s_cleanup)
+            return
         for j in self.jobs:
             try:
                 self.k8s_utils.delete_resource("job", j)
@@ -289,7 +315,8 @@ class _PnfsBase(TestClusterBase):
             except Exception as exc:                      # noqa: BLE001
                 self.logger.warning("[pnfs] could not delete claim %s: %s",
                                     self.claim, exc)
-        super().teardown()
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
+                         skip_k8s_cleanup=skip_k8s_cleanup)
 
     def _wait_pods_gone(self, timeout=300):
         label = self.k8s_utils.SHARED_CLAIM_LABEL
