@@ -2292,35 +2292,64 @@ jobs:
           else:
               lines.append("_(test counts not found in log)_")
           # --- Per-test results ---
-          test_log_paths = []
+          #
+          # The verdict line is "<ClassName> PASSED CASE." and the class name is
+          # whatever the class is called. This used to insist on
+          #     re.search(r'Test[A-Za-z0-9_]+', clean)
+          # which quietly dropped every class not named Test*, the whole pnfs group
+          # (PnfsLayoutProofK8s and friends) among them. Run 41437507378 reported
+          # "Passed: 1/4" and then listed no test at all, so the one line saying
+          # WHICH case failed was missing from a notification whose entire job is to
+          # say that.
+          #
+          # Paths were gathered separately and printed in log order, which
+          # repeated every one of them -- the runner logs "Logs Path:" twice
+          # per test. Pairing each path to its verdict removes the duplicate
+          # and answers the question people actually open Slack with: where
+          # do I look for the one that failed. Pairing is by folder name,
+          # which the harness derives from the class name in snake_case.
+          def _snake(camel):
+              s = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', camel)
+              return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s).lower()
+
+          test_results, test_log_paths = [], []
           if os.path.isfile(out_log):
-              ansi_re = re.compile(r'\x1b\[[0-9;]*m')
-              test_results = []
-              for raw_line in content.splitlines():
-                  cl = ansi_re.sub('', raw_line)
-                  if 'Logs Path:' in cl:
-                      p = cl.split('Logs Path:')[-1].strip()
-                      if p:
+              ansi = re.compile(r'\x1b\[[0-9;]*m')
+              seen_paths = set()
+              for line in content.splitlines():
+                  clean = ansi.sub('', line)
+                  if 'Logs Path:' in clean:
+                      p = clean.split('Logs Path:')[-1].strip()
+                      if p and p not in seen_paths:
+                          seen_paths.add(p)
                           test_log_paths.append(p)
-                  if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', cl):
-                      continue
-                  m = re.search(r'Test[A-Za-z0-9_]+', cl)
-                  if not m:
-                      continue
-                  name = m.group(0)
-                  if   'PASSED CASE'  in cl: test_results.append(('PASSED',  name))
-                  elif 'FAILED CASE'  in cl: test_results.append(('FAILED',  name))
-                  elif 'SKIPPED CASE' in cl: test_results.append(('SKIPPED', name))
-              if test_results:
-                  lines.append("")
-                  lines.append("*Test Results:*")
-                  icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
-                  for st, nm in test_results:
-                      lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+                  m = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s+(PASSED|FAILED|SKIPPED) CASE', clean)
+                  if m:
+                      test_results.append((m.group(2), m.group(1)))
+
+          def _dir_for(name):
+              pre = _snake(name) + '-'
+              return next((p for p in test_log_paths
+                           if os.path.basename(p.rstrip('/')).startswith(pre)), None)
+
+          if test_results:
+              lines.append("")
+              lines.append("*Test Results:*")
+              icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:',
+                       'SKIPPED': ':fast_forward:'}
+              for st, nm in test_results:
+                  lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+                  hit = _dir_for(nm)
+                  if hit:
+                      lines.append(f"       :open_file_folder: `{hit}`")
 
           lines += [""]
-          if test_log_paths:
-              for tlp in test_log_paths:
+          # A folder we could not pair to a verdict is still printed, so a
+          # test that died before reporting one does not vanish from here.
+          paired = {os.path.basename(_dir_for(nm).rstrip('/'))
+                    for _st, nm in test_results if _dir_for(nm)}
+          for tlp in test_log_paths:
+              if os.path.basename(tlp.rstrip('/')) not in paired:
                   lines.append(f":open_file_folder: *Test Logs:* `{tlp}`")
           lines += [
               f":file_folder: *E2E Run Dir:* `{log_dir}`",

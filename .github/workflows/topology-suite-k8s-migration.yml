@@ -428,6 +428,6 @@ jobs:
               try:
                   urllib.request.urlopen(req, timeout=15)
                   print("Slack notification sent via webhook (no thread support).")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
           PYEOF

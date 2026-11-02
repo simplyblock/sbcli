@@ -1166,19 +1166,22 @@ jobs:
           pass_pct = (passed * 100 // total) if total > 0 else 0
 
           # --- Per-test results ---
+          #
+          # The verdict line is "<ClassName> PASSED CASE." and the class name is
+          # whatever the class is called. This used to insist on
+          #     re.search(r'Test[A-Za-z0-9_]+', clean)
+          # which quietly dropped every class not named Test*, the whole pnfs group
+          # (PnfsLayoutProofK8s and friends) among them. Run 41437507378 reported
+          # "Passed: 1/4" and then listed no test at all, so the one line saying
+          # WHICH case failed was missing from a notification whose entire job is to
+          # say that.
           ansi = re.compile(r'\x1b\[[0-9;]*m')
           test_results = []  # list of (status, name)
           for line in content.splitlines():
               clean = ansi.sub('', line)
-              if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
-                  continue
-              m = re.search(r'Test[A-Za-z0-9_]+', clean)
-              if not m:
-                  continue
-              name = m.group(0)
-              if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
-              elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
-              elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+              m = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\s+(PASSED|FAILED|SKIPPED) CASE', clean)
+              if m:
+                  test_results.append((m.group(2), m.group(1)))
 
           # --- Failure reason ---
           failure_reason = ""
