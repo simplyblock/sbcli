@@ -1815,7 +1815,13 @@ def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
             "resolved (%s); refusing to finalize an unchained snapshot",
             prev_snap.get_id(), remote_copy_uuid, e)
         return None, None, False
-    if _snap_obj.lvol.node_id != remote_snode.get_id():
+    # Any member of the copy's lvstore can chain onto it: the bdev is the
+    # lvstore's, the same on primary, secondary and tertiary. Comparing with
+    # the node the copy was created on refused every chain while the target
+    # primary was down and its secondary led (bf8 2026-11-02, R4 tgt-mid):
+    # each cycle fell back to a full transfer and then failed to finish.
+    members = list(getattr(_snap_obj.lvol, "nodes", None) or [_snap_obj.lvol.node_id])
+    if remote_snode.get_id() not in members:
         logger.error(
             "Predecessor remote copy %s lives on node %s but the new snapshot "
             "is on %s; cannot chain across lvstores",

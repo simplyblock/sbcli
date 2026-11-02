@@ -56,3 +56,48 @@ def test_a_transfer_failure_keeps_backing_off_by_retry():
     sr._suspend_for_retry(t, "transfer failed at offset 0, retrying", backoff=True)
     assert t.retry == 4
     assert abs(_delay(t) - sr._backoff_seconds(4)) <= 1
+
+
+# --- chaining onto the predecessor's copy while another member leads -------
+
+class _Lvol:
+    def __init__(self, node_id, nodes):
+        self.node_id, self.nodes = node_id, nodes
+
+
+class _Snap:
+    def __init__(self, uuid, lvol):
+        self._id, self.lvol, self.snap_bdev = uuid, lvol, f"LVS_16/SNAP_{uuid}"
+        self.target_replicated_snap_uuid = "COPY"
+        self.source_replicated_snap_uuid = ""
+
+    def get_id(self):
+        return self._id
+
+
+class _Node:
+    def __init__(self, nid):
+        self._id = nid
+
+    def get_id(self):
+        return self._id
+
+
+@pytest.fixture
+def chain(monkeypatch):
+    copy = _Snap("COPY", _Lvol("PRIMARY", ["PRIMARY", "SECONDARY", "TERTIARY"]))
+    prev = _Snap("PREV", None)
+    monkeypatch.setattr(sr, "_previous_replicated_snapshot", lambda snap, to_src: prev)
+    monkeypatch.setattr(sr.db, "get_snapshot_by_id", lambda uid: copy)
+    return copy
+
+
+@pytest.mark.parametrize("leader", ["PRIMARY", "SECONDARY", "TERTIARY"])
+def test_any_member_of_the_copys_lvstore_can_chain(chain, leader):
+    target, prev_db, ok = sr._resolve_chain_target(object(), False, _Node(leader))
+    assert ok and target == {"snap_bdev": chain.snap_bdev} and prev_db is chain
+
+
+def test_a_node_outside_the_lvstore_still_cannot(chain):
+    target, prev_db, ok = sr._resolve_chain_target(object(), False, _Node("OTHER"))
+    assert (target, prev_db, ok) == (None, None, False)
