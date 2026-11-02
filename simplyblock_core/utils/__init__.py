@@ -1430,7 +1430,8 @@ def addNvmeDevices(rpc_client, snode, devs):
             # Node-add cold path: full dump is fine, the node carries no lvols yet.
             bdevs = rpc_client.bdev_list()
             for bdev in bdevs:
-                if bdev['name'].startswith(nvme_controller):
+                # <ctrl>n...: nvme_61 must not pick up nvme_611's bdevs.
+                if bdev['name'].startswith(f"{nvme_controller}n"):
                     nvme_bdevs.append(bdev['name'])
         else:
             pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
