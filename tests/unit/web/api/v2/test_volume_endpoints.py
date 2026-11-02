@@ -190,12 +190,34 @@ class TestConnectVolume:
         assert response.json() == details
         lvol_controller.connect_lvol.assert_called_once_with(VOLUME_ID, host_nqn=None)
 
-    def test_error_returns_404(self, client, volume, lvol_controller):
-        lvol_controller.connect_lvol.return_value = (None, 'volume offline')
+    def test_a_volume_gone_underneath_returns_404(self, client, volume, lvol_controller):
+        lvol_controller.connect_lvol.return_value = (None, 'Failed to find volume')
 
         response = client.get(f'{BASE}/{VOLUME_ID}/connect')
 
         assert response.status_code == 404
+
+    def test_a_host_not_on_the_allowed_list_is_403_not_404(self, client, volume, lvol_controller):
+        """The volume exists; the requester is not allowed. Answered as 404, the
+        CSI driver read it as a deleted volume and pods on an unregistered node
+        hung with "the control plane did not answer" (live 2026-10-20)."""
+        volume.allowed_hosts = [{'nqn': 'nqn.2014-08.io.simplyblock:uuid:worker-0'}]
+
+        response = client.get(f'{BASE}/{VOLUME_ID}/connect',
+                              params={'host_nqn': 'nqn.2014-08.io.simplyblock:uuid:worker-4'})
+
+        assert response.status_code == 403
+        assert 'not found in allowed hosts' in response.json()['detail']
+        lvol_controller.connect_lvol.assert_not_called()
+
+    def test_a_missing_host_nqn_on_a_restricted_volume_is_400(self, client, volume, lvol_controller):
+        volume.allowed_hosts = [{'nqn': 'nqn.2014-08.io.simplyblock:uuid:worker-0'}]
+
+        response = client.get(f'{BASE}/{VOLUME_ID}/connect')
+
+        assert response.status_code == 400
+        assert 'host-nqn is required' in response.json()['detail']
+        lvol_controller.connect_lvol.assert_not_called()
 
 
 class TestVolumeStats:
