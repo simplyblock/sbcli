@@ -8,8 +8,9 @@ migrate and when they are allowed to start.
 """
 from datetime import UTC, datetime
 
-from simplyblock_core import db_controller, utils
+from simplyblock_core import db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import activation_gate, tasks_controller
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services.task_runner_base import (
@@ -94,6 +95,87 @@ def require_node(task):
         return db.get_storage_node_by_id(task.node_id)
     except KeyError:
         raise TaskAbort(f"Node not found: {task.node_id}")
+
+
+def place_on_role_node(task, snode):
+    """Make sure that a sync-replication migration task that has not started
+    is on the node that must run it.
+
+    That node is the primary of the LVS's active triplet
+    (tasks_controller.migration_role_node). A promote can change it after
+    the task was queued. When this function returns, ``task`` is on the
+    right node, and the runner continues on ``snode`` (the task's node) in
+    the same way as on a cluster without sync replication.
+
+    - A task on another node is moved to the right node and deferred. The
+      next runner pass checks it against the new node's start conditions.
+    - While the LVS is being moved, the task is deferred and stays where it is.
+    - When the primary is departing, a re-balance or new-device task is
+      skipped (it ends DONE). A failed-device task waits while every member of
+      the active triplet is departing.
+    - A started task stays on its node, and the runner polls it there.
+
+    A sync-replication task holds the LVS name and its owner (``lvs_name``,
+    ``lvs_owner``). A task on a sync-replication node without them is
+    aborted. All other tasks are not changed.
+    """
+    params = task.function_params
+    distr_name = params.get("distr_name")
+    if "lvs_owner" not in params:
+        if storage_node_ops._sync_site(snode):
+            raise TaskAbort(f"{task.function_name} of {distr_name} on {task.node_id} has no lvs_owner: "
+                            f"a sync-replication migration task must name its LVS owner")
+        return
+    if migration_started(task):
+        return
+
+    lvs_name = params["lvs_name"]
+    try:
+        owner = db.get_storage_node_by_id(params["lvs_owner"])
+    except KeyError:
+        raise TaskAbort(f"Owner {params['lvs_owner']} of {lvs_name} not found")
+    try:
+        placement = tasks_controller.migration_role_node(owner, task.function_name)
+    except KeyError as e:
+        raise TaskAbort(str(e))
+
+    if placement.reason == tasks_controller.PLACEMENT_MOVING:
+        raise TaskDefer(f"{lvs_name} (owner {owner.get_id()}) is being moved ({owner.lvs_active_site}); "
+                        f"placing {task.function_name} of {distr_name} once the move settles")
+    if placement.node is None:
+        members = storage_node_ops.lvs_active_triplet(owner).node_ids
+        if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
+            raise TaskDefer(f"every member of the active triplet of {lvs_name} ({', '.join(members)}) "
+                            f"is departing; waiting")
+        raise TaskAbort(f"skipped: primary {members[0]} of {lvs_name} is departing")
+
+    target_id = placement.node.get_id()
+    if target_id == task.node_id:
+        return
+    if move_unstarted_task(task, target_id):
+        raise TaskDefer(f"moved {task.function_name} of {distr_name} ({lvs_name}) from {task.node_id} "
+                        f"to {target_id}, the primary of its active triplet")
+    raise TaskDefer(f"{task.function_name} of {distr_name} ({lvs_name}) changed on {task.node_id} "
+                    f"while being moved to {target_id}")
+
+
+def move_unstarted_task(task, node_id):
+    """Move ``task`` to ``node_id`` in one atomic update. The move happens only
+    if the stored task is still open, not started, and on ``task.node_id``.
+    Return True if the task moved."""
+    old_node_id = task.node_id
+    won = {"ok": False}
+
+    def _mutate(fresh):
+        won["ok"] = False
+        if (fresh.status == JobSchedule.STATUS_DONE or fresh.canceled
+                or migration_started(fresh) or fresh.node_id != old_node_id):
+            return False
+        fresh.node_id = node_id
+        won["ok"] = True
+        return True
+
+    return db.atomic_update(task, _mutate) is not None and won["ok"]
 
 
 def nodes_settled(cluster_id, primaries_only=False):
@@ -247,7 +329,9 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
 
 
 def no_sibling_migration(task):
-    """Eligibility: one migration at a time per node.
+    """Eligibility: only one migration of a distr runs at a time on a node.
+    For a sync-replication task, only one runs at a time on all nodes
+    together (tasks_controller.mig_scope_node).
 
     Only gates a task that has not started yet — once its own migration is
     running it is itself the sibling everything else waits on.
@@ -255,7 +339,8 @@ def no_sibling_migration(task):
     if migration_started(task):
         return True
     return not tasks_controller.get_active_node_mig_task(
-        task.cluster_id, task.node_id, task.function_params.get("distr_name"))
+        task.cluster_id, tasks_controller.mig_scope_node(task.node_id, task.function_params),
+        task.function_params.get("distr_name"))
 
 
 def allow_all_migration_errors(cluster_id, statuses):

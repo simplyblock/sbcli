@@ -1,8 +1,9 @@
 """Pure rule of the position of a node in the ACTIVE triplet of an LVS
 (storage_node_ops.active_position): primary / secondary / tertiary of the
 triplet that leads it, inactive in the other one, moving while the leadership
-is being moved. The nodes of that triplet read from the real database
-(active_triplet_nodes) are in
+is being moved. Also the ids of the active triplet in slot order
+(active_triplet_ids). The tests that read the nodes of that triplet from the
+real database (active_triplet_nodes) are in
 tests/integration/test_sync_replication_active_triplet.py.
 """
 import enum
@@ -90,3 +91,27 @@ class TestActivePosition:
         assert {p.name for p in ops.ActivePosition} == {
             "PRIMARY", "SECONDARY", "TERTIARY", "INACTIVE", "MOVING"}
         assert not any(isinstance(p, str) or isinstance(p.value, str) for p in ops.ActivePosition)
+
+
+class TestActiveTripletIds:
+
+    @pytest.mark.parametrize("active_site", ["", "site-a"])
+    def test_led_from_home(self, active_site):
+        assert ops.active_triplet_ids(_owner(lvs_active_site=active_site)) == HOME
+
+    def test_led_from_the_other_site(self):
+        assert ops.active_triplet_ids(_owner(lvs_active_site="site-b")) == REMOTE
+
+    def test_empty_slots_keep_their_place(self):
+        owner = _owner(lvs_active_site="site-b", remote_primary_node_id="", remote_tertiary_node_id="")
+        assert ops.active_triplet_ids(owner) == ("", "rs", "")
+
+    def test_an_empty_remote_triplet(self):
+        owner = _owner(lvs_active_site="site-b", remote_primary_node_id="", remote_secondary_node_id="",
+                       remote_tertiary_node_id="")
+        assert ops.active_triplet_ids(owner) == ("", "", "")
+
+    @pytest.mark.parametrize("marker", ["moving:site-b", "moving:site-a"])
+    def test_a_move_in_flight_has_no_active_triplet(self, marker):
+        with pytest.raises(ValueError, match="no active triplet"):
+            ops.active_triplet_ids(_owner(lvs_active_site=marker))

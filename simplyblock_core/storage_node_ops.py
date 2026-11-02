@@ -17575,24 +17575,36 @@ def active_position(owner: StorageNode, node_id: str) -> ActivePosition:
     return _TRIPLET_POSITIONS[triplet.index(node_id)]
 
 
-def active_triplet_nodes(
-        owner: StorageNode, db_controller) -> tuple[StorageNode | None, StorageNode | None, StorageNode | None]:
-    """The ``(primary, secondary, tertiary)`` nodes of the ACTIVE triplet of
-    ``owner``'s LVS (lvs_active_triplet), read from the database; None for an
-    empty slot (FTT1 has no tertiary). ``owner`` itself is not re-read.
+def active_triplet_ids(owner: StorageNode) -> tuple[str, str, str]:
+    """Return the node ids of the ACTIVE triplet of ``owner``'s LVS
+    (lvs_active_triplet) as ``(primary, secondary, tertiary)``. An empty slot
+    is "". FTT1 has no tertiary. This reads nothing from the database.
 
     Raises:
-        ValueError: a move is in flight - no triplet is the active one.
-        KeyError: a slot names a node that does not exist.
+        ValueError: the LVS is being moved, so no triplet is active.
     """
     active = lvs_active_triplet(owner)
     if active.moving_to:
         raise ValueError(
             f"LVS {owner.lvstore}: no active triplet while it is being moved to {active.moving_to}")
     # node_ids drops the empty slots; the triplet of its first member keeps them.
-    ids = lvs_triplet_of(owner, active.node_ids[0]) if active.node_ids else ("", "", "")
+    return lvs_triplet_of(owner, active.node_ids[0]) if active.node_ids else ("", "", "")
+
+
+def active_triplet_nodes(
+        owner: StorageNode, db_controller) -> tuple[StorageNode | None, StorageNode | None, StorageNode | None]:
+    """Return the nodes of the ACTIVE triplet of ``owner``'s LVS
+    (active_triplet_ids) as ``(primary, secondary, tertiary)``, read from the
+    database. An empty slot is None. FTT1 has no tertiary. ``owner`` itself
+    is not read again.
+
+    Raises:
+        ValueError: the LVS is being moved, so no triplet is active.
+        KeyError: a slot names a node that does not exist.
+    """
     primary, secondary, tertiary = (
-        db_controller.get_storage_node_by_id(node_id) if node_id else None for node_id in ids)
+        db_controller.get_storage_node_by_id(node_id) if node_id else None
+        for node_id in active_triplet_ids(owner))
     return primary, secondary, tertiary
 
 

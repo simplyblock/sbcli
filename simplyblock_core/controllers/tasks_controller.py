@@ -6,8 +6,9 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from typing import NamedTuple
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import (
     activation_gate,
     device_controller,
@@ -318,18 +319,26 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
 
+    if function_name == JobSchedule.FN_FAILED_DEV_MIG and mig_scope_node(node_id, function_params) is None:
+        task_id = get_failed_device_mig_task(cluster_id, device_id, function_params['distr_name'])
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
     if function_name == JobSchedule.FN_NODE_RESTART:
         task_id = _validate_new_task_node_restart(cluster_id, node_id)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
     elif function_name == JobSchedule.FN_NEW_DEV_MIG:
-        task_id = get_new_device_mig_task(cluster_id, node_id, function_params['distr_name'])
+        task_id = get_new_device_mig_task(cluster_id, mig_scope_node(node_id, function_params),
+                                          function_params['distr_name'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
     elif function_name == JobSchedule.FN_DEV_MIG:
-        task_id = get_device_mig_task(cluster_id, node_id, device_id, function_params['distr_name'])
+        task_id = get_device_mig_task(cluster_id, mig_scope_node(node_id, function_params), device_id,
+                                      function_params['distr_name'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -418,6 +427,119 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     return task_obj.uuid
 
 
+#: Why migration_role_node returned no node to run the migrations.
+PLACEMENT_MOVING = "moving"
+PLACEMENT_DEPARTING = "departing"
+
+
+class MigrationPlacement(NamedTuple):
+    """The node that runs the migrations of an LVS (migration_role_node)."""
+    node: StorageNode | None
+    #: Why ``node`` is None: PLACEMENT_MOVING or PLACEMENT_DEPARTING; "" with a node.
+    reason: str = ""
+
+
+def migration_role_node(owner: StorageNode, function_name: str) -> MigrationPlacement:
+    """Return the node that runs ``function_name`` for the distribs of
+    ``owner``'s LVS on a sync-replication cluster. ``function_name`` is one of
+    the device-migration tasks.
+
+    On a cluster without sync replication, a migration of a distrib runs on
+    the owner, which is the primary of the LVS's triplet. It never runs on a
+    secondary or tertiary. On a sync-replication cluster, the primary of the
+    active triplet (storage_node_ops.lvs_active_triplet) takes the owner's
+    place. This holds on either site. The passive triplet runs no migrations.
+    The active triplet comes from ``owner.lvs_active_site``, and only a
+    promote changes that field.
+
+    - While the leadership is being moved (``moving:<site>``), no triplet is
+      active. The result has no node and the reason PLACEMENT_MOVING.
+    - A departing primary runs no migrations. A cluster without sync
+      replication treats a departing owner the same way. The result has no
+      node and the reason PLACEMENT_DEPARTING.
+    - Failed-device migrations are the exception. While the primary is in
+      ``pending_removal``, they stay on it and wait, because a migration runs
+      only on an ONLINE node. When the removal sets a status in
+      REMOVAL_SHUT_DOWN_STATUSES, they go to the secondary of the active
+      triplet, or to the tertiary if the secondary is also departing
+      (migration_task_common.place_on_role_node moves existing tasks).
+
+    Callers use this only on a sync-replication cluster. The secondary and
+    the tertiary are read only for the failed-device exception.
+
+    Raises:
+        KeyError: the active triplet has no primary, or a node that this
+            function reads does not exist.
+    """
+    if owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):
+        return MigrationPlacement(None, PLACEMENT_MOVING)
+    primary_id, *member_ids = storage_node_ops.active_triplet_ids(owner)
+    if not primary_id:
+        raise KeyError(f"LVS {owner.lvstore} ({owner.get_id()}) has no primary in its active triplet")
+    primary = db.get_storage_node_by_id(primary_id)
+    if primary.status not in StorageNode.DEPARTING_STATUSES:
+        return MigrationPlacement(primary)
+    if function_name != JobSchedule.FN_FAILED_DEV_MIG:
+        return MigrationPlacement(None, PLACEMENT_DEPARTING)
+    if primary.status not in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        return MigrationPlacement(primary)
+    for member_id in member_ids:
+        if not member_id:
+            continue
+        member = db.get_storage_node_by_id(member_id)
+        if member.status not in StorageNode.DEPARTING_STATUSES:
+            return MigrationPlacement(member)
+    return MigrationPlacement(None, PLACEMENT_DEPARTING)
+
+
+def _sync_mig_node(owner: StorageNode, function_name: str) -> str | None:
+    """Return the id of the node that gets the ``function_name`` tasks of
+    ``owner``'s distribs on a sync-replication cluster.
+
+    This is the node that migration_role_node returns. While the LVS is being
+    moved, it is the owner, and the runner moves the tasks after the move
+    ends. The result is None when no node may run the tasks, or when the
+    active triplet cannot be resolved. The callers queue tasks for every
+    owner in one loop, so a broken triplet skips only its own owner."""
+    try:
+        placement = migration_role_node(owner, function_name)
+    except KeyError as e:
+        logger.warning(f"Not queueing {function_name} for {owner.lvstore} (owner {owner.get_id()}): "
+                       f"its active triplet cannot be resolved: {e}")
+        return None
+    if placement.node is not None:
+        return placement.node.get_id()
+    if placement.reason == PLACEMENT_MOVING:
+        return owner.get_id()
+    logger.info(f"Not queueing {function_name} for {owner.lvstore}: the primary of its active triplet "
+                f"(owner {owner.get_id()}) is departing")
+    return None
+
+
+def _sync_mig_params(owner: StorageNode, distr_name: str) -> dict:
+    """Return the parameters of a migration task for ``owner``'s distrib on a
+    sync-replication cluster. They hold the LVS name and the owner id, so
+    the task keeps them when it moves to another node."""
+    return {'distr_name': distr_name, 'lvs_name': owner.lvstore, 'lvs_owner': owner.get_id()}
+
+
+def _sync_distribs(owner: StorageNode) -> list[str]:
+    return [bdev['name'] for bdev in owner.lvstore_stack if bdev['type'] == "bdev_distr"]
+
+
+def mig_scope_node(node_id, function_params):
+    """Return the node that limits the duplicate check and the "one
+    migration at a time" check of a device-migration task.
+
+    For most tasks this is the task's own node. For a sync-replication task
+    (it has ``lvs_owner``), the result is None, which means all nodes. After
+    a promote, the tasks of one distrib can be on two nodes: a started task
+    stays on its node, and the other tasks move to the new primary. Checking
+    all nodes keeps one open task per distrib, and lets only one of them run
+    at a time."""
+    return None if "lvs_owner" in (function_params or {}) else node_id
+
+
 def add_device_mig_task_for_node(node_id):
     sub_tasks = []
     node = db.get_storage_node_by_id(node_id)
@@ -473,6 +595,18 @@ def add_device_mig_task_for_node(node_id):
         # present but no longer returning, inside the gap. The sibling queuing
         # functions above read the same set for the same reason.
         if node.status in StorageNode.DEPARTING_STATUSES:
+            continue
+
+        if storage_node_ops._sync_site(node):
+            distribs = _sync_distribs(node)
+            target_id = _sync_mig_node(node, JobSchedule.FN_DEV_MIG) if distribs else None
+            if target_id:
+                for distr_name in distribs:
+                    task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, target_id, distr_name, max_retry=-1,
+                                        function_params=_sync_mig_params(node, distr_name),
+                                        send_to_cluster_log=False)
+                    if task_id:
+                        sub_tasks.append(task_id)
             continue
 
         for bdev in node.lvstore_stack:
@@ -774,13 +908,18 @@ def cancel_node_tasks(cluster_id, node_id, function_names):
 
     Returns how many tasks this call canceled.
     """
+    def _flag_if_still_on_node(fresh: JobSchedule) -> bool:
+        # A sync-replication migration task can move to another node after the
+        # scan. Cancel it only if the stored task is still on this node.
+        return fresh.node_id == node_id and _flag_canceled_if_pending(fresh)
+
     canceled = 0
     for task in db.get_job_tasks(cluster_id):
         if task.node_id != node_id or task.function_name not in function_names:
             continue
         if task.status == JobSchedule.STATUS_DONE or task.canceled:
             continue
-        if _cancel_atomically(task, _flag_canceled_if_pending) is None:
+        if _cancel_atomically(task, _flag_if_still_on_node) is None:
             continue
         canceled += 1
         logger.info(f"Canceled task {task.get_id()} ({task.function_name}) on node {node_id}")
@@ -915,10 +1054,12 @@ def get_active_dev_restart_task(cluster_id, device_id):
 
 
 def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
+    """A running device-migration family task on ``node_id`` (any node when
+    None), of ``distr_name`` when given."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
-                                  JobSchedule.FN_NEW_DEV_MIG] and task.node_id == node_id:
+                                  JobSchedule.FN_NEW_DEV_MIG] and (node_id is None or task.node_id == node_id):
             if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
                 if distr_name:
                     if "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
@@ -948,6 +1089,16 @@ def add_device_failed_mig_task(device_id):
         #
         # The departing node's distribs still have to be migrated; the block
         # below queues them onto its secondary or tertiary, which can run them.
+        #
+        # On a sync-replication cluster, migration_role_node picks the node for
+        # each owner. It is the primary of the LVS's active triplet. When the
+        # removal has shut that primary down, it is the secondary, or the
+        # tertiary if the secondary is also departing. A primary in
+        # pending_removal keeps its tasks. They wait until the removal sets a
+        # shut-down status, and then the runner moves them.
+        if storage_node_ops._sync_site(node):
+            _add_sync_mig_tasks(JobSchedule.FN_FAILED_DEV_MIG, node, device)
+            continue
         if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
@@ -957,6 +1108,8 @@ def add_device_failed_mig_task(device_id):
 
     # add device migration tasks for device host distribs on other nodes (secondary) in case the host is in removal process
     device_node = db.get_storage_node_by_id(device.node_id)
+    if storage_node_ops._sync_site(device_node):
+        return True
     if device_node.status in StorageNode.DEPARTING_STATUSES and device_node.status != StorageNode.STATUS_REMOVED:
         secondary_node = db.get_storage_node_by_id(device_node.secondary_node_id)
         if secondary_node and secondary_node.status not in StorageNode.DEPARTING_STATUSES:
@@ -979,6 +1132,11 @@ def add_new_device_mig_task(device_id):
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
         # Same reason as add_device_failed_mig_task: a departing node cannot
         # run the task, so queueing it strands work nothing will ever do.
+        # On a sync-replication cluster, migration_role_node checks whether
+        # the primary of the LVS's active triplet is departing.
+        if storage_node_ops._sync_site(node):
+            _add_sync_mig_tasks(JobSchedule.FN_NEW_DEV_MIG, node, device)
+            continue
         if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
@@ -986,6 +1144,18 @@ def add_new_device_mig_task(device_id):
                 _add_task(JobSchedule.FN_NEW_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
                           max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
+
+
+def _add_sync_mig_tasks(function_name, owner, device):
+    """Queue the ``function_name`` task of ``device`` for each distrib of
+    ``owner``'s LVS on a sync-replication cluster (_sync_mig_node)."""
+    distribs = _sync_distribs(owner)
+    target_id = _sync_mig_node(owner, function_name) if distribs else None
+    if not target_id:
+        return
+    for distr_name in distribs:
+        _add_task(function_name, device.cluster_id, target_id, device.get_id(),
+                  max_retry=-1, function_params=_sync_mig_params(owner, distr_name))
 
 
 def add_node_add_task(cluster_id, function_params):
@@ -1115,9 +1285,11 @@ def get_active_node_tasks(cluster_id, node_id):
 
 
 def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
+    """The open new-device migration of ``distr_name`` on ``node_id``; on any
+    node when ``node_id`` is None."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node_id:
+        if task.function_name == JobSchedule.FN_NEW_DEV_MIG and node_id in (None, task.node_id):
             if dev_id:
                 if task.device_id != dev_id:
                     continue
@@ -1128,9 +1300,11 @@ def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
 
 
 def get_device_mig_task(cluster_id, node_id, device_id, distr_name):
+    """The open device migration of ``distr_name`` on ``node_id``; on any
+    node when ``node_id`` is None."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id:
+        if task.function_name == JobSchedule.FN_DEV_MIG and node_id in (None, task.node_id):
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid
@@ -1146,10 +1320,14 @@ def get_new_device_mig_task_for_device(cluster_id):
     return False
 
 
-def get_failed_device_mig_task(cluster_id, device_id):
+def get_failed_device_mig_task(cluster_id, device_id, distr_name=None):
+    """An open failed-device migration of ``device_id`` on any node; of the
+    distrib ``distr_name`` only, when given."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_FAILED_DEV_MIG and task.device_id == device_id:
+            if distr_name and task.function_params.get("distr_name") != distr_name:
+                continue
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False

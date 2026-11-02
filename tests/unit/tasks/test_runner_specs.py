@@ -522,9 +522,11 @@ def test_cluster_expand_aborts_without_a_node(cluster_expand):
 @pytest.fixture
 def mig(monkeypatch):
     import simplyblock_core.services.migration_task_common as common
+    from simplyblock_core.controllers import tasks_controller
     monkeypatch.setattr(common, "db", MagicMock())
     monkeypatch.setattr(common, "tasks_controller", MagicMock())
     common.tasks_controller.get_active_node_mig_task.return_value = False
+    common.tasks_controller.mig_scope_node = tasks_controller.mig_scope_node
     return common
 
 
@@ -610,6 +612,18 @@ def test_recovery_gate_defers_on_a_first_outage(mig):
 def test_sibling_gate_blocks_a_task_that_has_not_started(mig):
     mig.tasks_controller.get_active_node_mig_task.return_value = "other-task"
     assert mig.no_sibling_migration(_task(distr_name="distr-1")) is False
+
+
+@pytest.mark.parametrize("params, scope", [
+    ({"distr_name": "distr-1"}, "node-1"),
+    ({"distr_name": "distr-1", "lvs_name": "LVS_1", "lvs_owner": "owner-1"}, None),
+])
+def test_sibling_gate_scans_the_node_or_any_node_for_a_sync_task(mig, params, scope):
+    """A migration of the same distrib can still run on the old primary after
+    a promote. So a sync-replication task checks for a running migration on
+    all nodes. Every other task checks only its own node."""
+    assert mig.no_sibling_migration(_task(**params)) is True
+    mig.tasks_controller.get_active_node_mig_task.assert_called_once_with("cl-1", scope, "distr-1")
 
 
 def test_sibling_gate_releases_a_task_already_migrating(mig):

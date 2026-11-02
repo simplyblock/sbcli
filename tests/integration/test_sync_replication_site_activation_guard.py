@@ -360,6 +360,19 @@ DEVICE_MIGRATIONS = {
 }
 
 
+def _device_migration_task(db, cluster, function_name, node):
+    """Write a ``function_name`` task for ``node``'s own LVS on ``node``, with
+    the parameters that task creation uses. On a sync-replication cluster the
+    task holds the LVS name and the owner. On a cluster without sync
+    replication, the node gets no site."""
+    if cluster.sync_replication:
+        params = {"distr_name": "distrib_31", "lvs_name": node.lvstore, "lvs_owner": node.get_id()}
+    else:
+        _update(db, node, site="")
+        params = {"distr_name": "distrib_31"}
+    return _task(db, cluster, function_name, node.get_id(), params)
+
+
 class TestMigrations:
 
     @pytest.mark.parametrize("kind", DEVICE_MIGRATIONS)
@@ -370,7 +383,7 @@ class TestMigrations:
         first pass after the activation."""
         runner, function_name = DEVICE_MIGRATIONS[kind]
         cluster, a, b = _activating(db, window)
-        task = _task(db, cluster, function_name, b[1].get_id())
+        task = _device_migration_task(db, cluster, function_name, b[1])
         with patch.object(tasks_controller, "get_active_cluster_expand_task", side_effect=_Passed):
             fresh = drive(runner.SPEC, task)
         assert (fresh.status, fresh.function_result, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, HELD, 0)
@@ -381,7 +394,7 @@ class TestMigrations:
     def test_a_device_migration_runs_without_a_flag(self, db, rpcs, case, kind):
         runner, function_name = DEVICE_MIGRATIONS[kind]
         cluster, a, b = _not_activating(db, case)
-        task = _task(db, cluster, function_name, b[1].get_id())
+        task = _device_migration_task(db, cluster, function_name, b[1])
         with patch.object(tasks_controller, "get_active_cluster_expand_task", side_effect=_Passed):
             with pytest.raises(_Passed):
                 drive(runner.SPEC, task)

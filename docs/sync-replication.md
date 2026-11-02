@@ -92,6 +92,31 @@ promote, the site record and the site activation flag), `simplyblock_core/servic
   closed by ANA. It never takes the leadership: not at a restart, and not when the whole active triplet
   is down. Only a promote makes it the active one.
 - While a move is in flight (`moving:*`) no member of either triplet is rebuilt as a leader.
+- **The primary of the active triplet runs the migrations of the LVS.** This holds on either site.
+  The passive triplet runs no migrations. On a cluster without sync replication, the migrations run on
+  the LVS's owner, which is the primary of its only triplet.
+  - Three kinds of migration are queued on the primary of the active triplet and run there: the
+    re-balance after a node restart (device migration), the failed-device migration and the new-device
+    migration.
+  - The re-balance starts only when that primary leads the LVS. The failed-device and new-device
+    migrations start without a leadership check. Both rules are the same as on a cluster without sync
+    replication.
+  - A promote can change the primary of the active triplet. A migration task that has not started then
+    moves to the new primary. A task that has started stays on its node, and the runner polls it there
+    until the migration ends (see [Known limitations](#8-known-limitations)).
+  - While the LVS is being moved (`moving:*`), a migration task that has not started waits until the
+    move ends.
+  - A primary that is being removed (departing) runs no re-balance and no new-device migration. These
+    tasks are skipped. A cluster without sync replication skips them for a departing owner in the same
+    way.
+  - The failed-device migrations of a departing primary stay on it while its status is
+    `pending_removal`. They wait there, because a migration runs only on an online node. When the
+    removal sets a shut-down status (`migrating_devices` or later), the tasks move to the secondary of
+    the active triplet. If the secondary is also departing, they move to the tertiary.
+  - The catch-up (see Resync in [Flows](#6-flows-for-the-operator)) also starts on this primary, and only
+    when the primary leads the LVS. During an in-site failover, a secondary or tertiary leads the LVS,
+    and the catch-up waits. If the leader changes while a catch-up runs, the run counts as not converged
+    and is started again under the same rule.
 - **Between a promote and the first client IO on the new site nobody leads the LVS.** A promote hands
   the LVS off without granting the leadership (see [Promote](#promote)); the primary of the new active
   triplet takes it itself when the first IO arrives. Until then every instance reports "not leading".
@@ -617,6 +642,11 @@ that was not reloaded. Issue IO on a volume itself before resizing it.
   The tertiary of an active remote triplet is rebuilt in that case too;
 - a member of the passive triplet and every member while the LVS is being moved come back as
   non-leaders;
+- a restart queues a re-balance for each LVS. It runs on the primary of the LVS's active triplet,
+  also when the other site leads the LVS. It follows the same start rules as on a cluster without sync
+  replication: it waits for the cluster's recovery while a node is unavailable, and it starts when that
+  primary leads the LVS. The passive triplet does not run it (see
+  [The active and the passive triplet](#the-active-and-the-passive-triplet));
 - a node of a recorded site (any record state) comes back `ONLINE` **without lvstores**, as every node
   of a cluster that serves nothing does: its devices, its own journal (JM) and its links to the peers
   are brought up, no LVS instance is built. The site activation builds them once the site is back (see
@@ -703,8 +733,9 @@ switchover in reverse (demote on B, promote on A). `POST .../failback` is not pa
 
 **Resync, both directions**: a zone desync event (either zone: the home site's zone 0 or the replica
 zone) schedules one `FN_SYNC_RESYNC` task per LVS. It waits while a site is lost or the lagging zone's
-devices are not online, then starts the catch-up on the leader of the active triplet and polls it; a
-non-converging run is re-run with backoff (30 s doubling, at most 600 s) and raises one alert after 5
+devices are not online. It also waits until the primary of the active triplet leads the LVS; while a
+secondary or tertiary leads, it keeps waiting. Then it starts the catch-up on that primary and polls it.
+A non-converging run is re-run with backoff (30 s doubling, at most 600 s) and raises one alert after 5
 such runs. It also waits while nobody leads the LVS (after a promote, until the first client IO): the
 runner never makes a leader. A site return schedules the catch-up of every LVS.
 
@@ -766,6 +797,14 @@ replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) f
   cluster-wide suspend drain): a node whose RPC recovers while its SPDK keeps running stays
   `SCHEDULABLE`, and the site stays `draining` with its restarts paused, until the node is restarted
   or shut down by hand.
+- A promote does not stop a device migration that is already running (a re-balance after a restart, a
+  failed-device or a new-device migration). There is no RPC that stops a running migration on the data
+  plane. The migration keeps running on the old primary until it ends, and its task is polled there.
+  Only a migration task that has not started moves to the new primary. No other migration of the same
+  distrib starts while the task on the old primary is running.
+- During an in-site failover of the active triplet, its secondary or tertiary leads the LVS. The
+  catch-up of the LVS then waits until the primary leads again. The reason is that the catch-up uses
+  the same RPC as the re-balance, and the re-balance runs only on the primary.
 - Reads after a promote go to zone 0 while the home site is alive (local-zone reads are deferred).
 - Rejected on a sync cluster: lvol migration (single and batch), manual volume suspend / resume, the
   v1 `lvol/connect` (use the v2 connect), enabling two-node arbitration (v2 `PUT /clusters/{id}` with

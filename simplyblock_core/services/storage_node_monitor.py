@@ -95,7 +95,11 @@ def is_new_migrated_node(cluster_id, node, tasks=None):
     if dev_lst:
         tasks = tasks if tasks is not None else db.get_job_tasks(cluster_id)
         for task in tasks:
-            if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
+            # A sync-replication task (it has lvs_owner) runs on the primary of
+            # the LVS's active triplet, which can be another node. Its device
+            # and distr show that it migrates data of this node.
+            if task.function_name == JobSchedule.FN_NEW_DEV_MIG and (
+                    "lvs_owner" in task.function_params or task.node_id == node.get_id()):
                 if task.device_id not in dev_lst:
                     continue
                 if task.status != JobSchedule.STATUS_DONE and task.canceled is False:

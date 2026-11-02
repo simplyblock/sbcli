@@ -461,23 +461,33 @@ class TestDeviceMigration:
 
     @pytest.mark.parametrize("case", [*RECORDED, "suspended"])
     def test_migration_on_an_empty_node_waits(self, db, rpcs, case):
-        """The restart of a0 queues a migration task per distrib of every node
-        (tasks_controller.add_device_mig_task_for_node). a0's own tasks wait on
-        an empty a0 - the leadership probe finds no lvstore - pass after pass,
-        as every task waits on main's SUSPENDED cluster ("suspended": no
-        record, no sync replication): no migration RPC, never done, retried
-        without limit, a0 ONLINE."""
+        """The restart of a0 queues a migration task for each distrib of every
+        node (tasks_controller.add_device_mig_task_for_node). Each task goes to
+        the primary of its LVS's active triplet. Site A leads LVS_1 and LVS_2,
+        so a0 gets the tasks of both.
+
+        In the "suspended" case, the cluster is SUSPENDED and has no sync
+        replication. The nodes have no sites, so a0 gets only the tasks of its
+        own LVS_1.
+
+        In every case a0 is empty, and the leadership check finds no lvstore.
+        The tasks wait on every runner pass: no migration RPC is sent, no task
+        ends, the retries have no limit, and a0 stays ONLINE."""
         if case == "suspended":
             cluster, a, b = _layout(db, "", status=Cluster.STATUS_SUSPENDED, sync=False)
+            a = [_update(db, n, site="") for n in a]
+            b = [_update(db, n, site="") for n in b]
+            distribs = ["distrib_11", "distrib_12"]
         else:
             cluster, a, b = _layout(db, case)
+            distribs = ["distrib_11", "distrib_12", "distrib_21", "distrib_22"]
         _settled(db, (*a, *b))
         _empty(rpcs, a)
         rpcs.lead(b[1])
         assert tasks_controller.add_device_mig_task_for_node(a[0].get_id())
 
         own = _migration_tasks(db, cluster, a[0])
-        assert len(own) == 2
+        assert sorted(t.function_params["distr_name"] for t in own) == distribs
         for _ in range(3):
             for task in own:
                 assert drive(tasks_runner_migration.SPEC, task).status == JobSchedule.STATUS_SUSPENDED

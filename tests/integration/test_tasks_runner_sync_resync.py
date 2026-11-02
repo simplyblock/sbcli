@@ -1,10 +1,12 @@
-"""The sync-replication resync runner against the real FoundationDB: a zone
-desync recorded through the real event path queues the LVS's catch-up; the
-runner starts it on the leader of the active triplet once the lagging zone is
-up, polls it, finishes when every distrib completed without error and the
-leader reports ``synced`` (resolving the zone events), and otherwise re-runs
-it with backoff - never while the site is lost, the zone is down or the
-leadership is moving. The runner is driven through the shared task driver:
+"""The sync-replication resync runner against the real FoundationDB. A zone
+desync recorded through the real event path queues the LVS's catch-up. The
+runner waits until the lagging zone is up and the primary of the active
+triplet leads the LVS; while a secondary or tertiary leads, it waits. Then it
+starts the catch-up on that primary and polls it. It finishes when every
+distrib has completed without error and the leader reports ``synced``; the
+runner then resolves the zone events. Otherwise it runs the catch-up again with backoff,
+but never while the site is lost, the zone is down or the leadership is
+moving. The runner is driven through the shared task driver:
 ``task_driver.drive`` for one pass, or one driver held across dispatches where
 its in-memory backoff is the subject. Storage nodes (RPC) are mocked; the
 database never is. The pure rules are in
@@ -197,17 +199,17 @@ class TestConvergence:
         for node in (*a[1:], *b):
             rpcs[node.get_id()].distr_migration_expansion_start.assert_not_called()
 
-    def test_a_remote_led_lvs_catches_up_on_the_remote_leader(self, db, rpcs, clock):
+    def test_a_remote_led_lvs_catches_up_on_the_remote_primary(self, db, rpcs, clock):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
-        rpcs.lead(b[1])
-        catchup = _Catchup(rpcs[b[1].get_id()])
-        _desync(b[1], status="primary_zone_unavailable")
+        rpcs.lead(b[0])
+        catchup = _Catchup(rpcs[b[0].get_id()])
+        _desync(b[0], status="primary_zone_unavailable")
         task = _task(db, cluster)
         _pass(task)
         catchup.complete()
         assert _pass(task).status == JobSchedule.STATUS_DONE
         assert catchup.starts() == DISTRIBS
-        for node in a:
+        for node in (*a, *b[1:]):
             rpcs[node.get_id()].distr_migration_expansion_start.assert_not_called()
 
     def test_a_catch_up_already_in_progress_is_adopted(self, db, rpcs, clock):
@@ -427,6 +429,12 @@ class TestRerun:
         failed = _pass(task)
         assert failed.retry == 1
         assert "leadership moved" in failed.function_result
+        # the re-run follows the start rule: not on the acting secondary
+        waiting = _pass(task)
+        assert (waiting.status, waiting.retry) == (JobSchedule.STATUS_SUSPENDED, 1)
+        assert f"led by the acting {a[1].get_id()}" in waiting.function_result
+        assert catchup.starts() == DISTRIBS
+        rpcs[a[1].get_id()].distr_migration_expansion_start.assert_not_called()
 
     def test_one_alert_after_n_non_converging_runs(self, db, rpcs, clock, alerts):
         with patch.object(runner.constants, "SYNC_RESYNC_ALERT_RUNS", 3):
@@ -564,6 +572,49 @@ class TestWaits:
         with patch.object(runner.storage_node_ops, "find_leader_with_failover",
                           return_value=(None, [])):
             self._assert_waiting(db, rpcs, task, a, b, "no leader")
+
+    # The lagging zone is on the other site, not on the site of the acting
+    # leader. So the lagging-zone check passes, and the task waits only
+    # because the primary does not lead the LVS.
+    @pytest.mark.parametrize("active_site, desync", [
+        ("", "secondary_zone_unavailable"), (SITE_B, "primary_zone_unavailable")])
+    @pytest.mark.parametrize("acting", [1, 2], ids=["secondary", "tertiary"])
+    def test_an_acting_member_is_waited_for(self, db, rpcs, clock, active_site, desync, acting):
+        cluster, a, b, _ = _layout(db, active_site=active_site)
+        triplet = b if active_site else a
+        primary, member = triplet[0], triplet[acting]
+        stack._update(db, primary, status=StorageNode.STATUS_OFFLINE)
+        rpcs.lead(member)
+        _desync(member, status=desync)
+        task = _task(db, cluster)
+        self._assert_waiting(
+            db, rpcs, task, a, b,
+            f"LVS_1 is led by the acting {member.get_id()}, not the primary {primary.get_id()} "
+            f"of its active triplet")
+
+        # the primary is back and leads: the catch-up starts on it
+        stack._update(db, primary, status=StorageNode.STATUS_ONLINE)
+        rpcs[member.get_id()].get_lvstore.return_value = {"lvs leadership": False}
+        rpcs.lead(primary)
+        ttl_cache.leader_cache.invalidate()
+        catchup = _Catchup(rpcs[primary.get_id()])
+        started = _pass(task)
+        assert started.status == JobSchedule.STATUS_RUNNING
+        assert started.function_params["resync"]["leader_id"] == primary.get_id()
+        assert catchup.starts() == DISTRIBS
+        for node in (*a, *b):
+            if node.get_id() != primary.get_id():
+                rpcs[node.get_id()].distr_migration_expansion_start.assert_not_called()
+
+    def test_an_active_triplet_without_a_primary_waits(self, db, rpcs, clock):
+        cluster, a, b, owner = _layout(db, active_site=SITE_B)
+        stack._update(db, owner, remote_primary_node_id="")
+        rpcs.lead(b[1])
+        _desync(b[1], status="primary_zone_unavailable")
+        task = _task(db, cluster)
+        self._assert_waiting(
+            db, rpcs, task, a, b,
+            f"LVS_1 is led by the acting {b[1].get_id()}, not the primary (none) of its active triplet")
 
     def test_a_leaderless_lvs_waits_without_a_grant(self, db, rpcs, env, clock):
         # the real lookup: led from site B, nobody leads (as between a promote

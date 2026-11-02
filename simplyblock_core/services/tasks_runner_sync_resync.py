@@ -4,10 +4,17 @@ A zone desync of an LVS (a ``*_zone_unavailable`` event, recorded by the distr
 event collector) leaves one zone behind; the data plane does not catch it up
 on its own. This runner does, once the lagging zone is back: it starts the
 catch-up (``distr_migration_expansion_start``, which on a sync distrib also
-runs the zone sync) for every distrib of the LVS on the leader of its active
-triplet, polls ``distr_migration_status`` and, when every distrib completed
-without error and the leader reports ``synced``, resolves the LVS's zone
-events and finishes.
+runs the zone sync) for every distrib of the LVS. It starts the catch-up on
+the primary of the LVS's active triplet, and only when that primary leads the
+LVS. Then it polls ``distr_migration_status``. When every distrib has
+completed without error and the leader reports ``synced``, it resolves the
+LVS's zone events and the task finishes.
+
+The catch-up uses the same RPC as the re-balance. A re-balance runs only on
+the primary of a triplet, as on a cluster without sync replication (the
+migration runners put it there). During an in-site failover, a secondary or
+tertiary leads the active triplet. The catch-up then does not start: it
+waits until the primary leads again.
 
 Any other outcome - an error bit (11: started while the zone was lost, 8
 SHUTDOWN: the zone got lost during it, IO / destination errors), a lost
@@ -121,6 +128,14 @@ def _run_failed(task, owner, reason) -> NoReturn:
 
 def _other_site(owner, nodes):
     return next((n.site for n in nodes if n.site and n.site != owner.site), "")
+
+
+def _active_primary_id(owner) -> str:
+    """Return the id of the primary of the active triplet of ``owner``'s LVS,
+    or "" if the primary slot is empty. lvs_active_triplet leaves out empty
+    slots, so the slots are read with lvs_triplet_of from its first member."""
+    active = storage_node_ops.lvs_active_triplet(owner)
+    return storage_node_ops.lvs_triplet_of(owner, active.node_ids[0])[0] if active.node_ids else ""
 
 
 def _migration_status(rpc, name):
@@ -237,6 +252,10 @@ def process_task(task):
         raise TaskDefer(f"no leader of {lvs_name} in its active triplet, waiting")
     rpc = leader.rpc_client(timeout=5, retry=2)
     if not resync:
+        primary_id = _active_primary_id(owner)
+        if leader.get_id() != primary_id:
+            raise TaskDefer(f"{lvs_name} is led by the acting {leader.get_id()}, not the primary "
+                            f"{primary_id or '(none)'} of its active triplet; waiting")
         distribs = [bdev["name"] for bdev in owner.lvstore_stack or []
                     if bdev.get("type") == "bdev_distr"]
         _start(task, cluster, owner, leader, rpc, distribs)
