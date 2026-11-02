@@ -83,5 +83,6 @@ def test_replication_asks_for_it_for_landing_volumes():
     assert calls
     for c in calls:
         kw = {k.arg: k.value for k in c.keywords}
-        assert isinstance(kw.get("via_current_leader"), ast.Constant) and kw["via_current_leader"].value is True
-        assert isinstance(kw.get("internal"), ast.Constant) and kw["internal"].value is True
+        for name in ("via_current_leader", "internal"):
+            node = kw.get(name)
+            assert isinstance(node, ast.Constant) and node.value is True, name
