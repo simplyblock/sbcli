@@ -1225,3 +1225,8 @@ RESTART_JC_COMPRESSION_RETRY_S = 60
 # whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
 # Far above any create (lock waits included).
 SNAPSHOT_INTENT_REAP_SEC = 600
+# Before the control plane makes any node leader of an lvstore, every other
+# member must be proven non-leader (its RPC) or dead (its node agent) -- twice,
+# this far apart -- so a slow or recovering old leader cannot become a second
+# writer (storage_node_ops._leadership_proven_free).
+LEADERSHIP_SAFETY_WINDOW_SEC = 10
