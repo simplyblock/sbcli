@@ -11525,6 +11525,55 @@ def _taker_jm_quorum_ok(taker):
     return True
 
 
+def _member_proven_non_leader(node, lvs_name):
+    """``(True, why)`` when *node* demonstrably does not lead *lvs_name*: its
+    own RPC answers non-leader, or its SPDK process is confirmed gone by its
+    node agent. A member that cannot be asked either way is a POSSIBLE
+    leader: ``(False, why)``."""
+    from simplyblock_core.controllers.lvol_controller import is_node_leader
+    try:
+        if is_node_leader(node, lvs_name):
+            return False, f"{node.get_id()[:8]} reports leadership"
+        return True, f"{node.get_id()[:8]} reports non-leader"
+    except Exception as e:                                  # noqa: BLE001
+        rpc_err = e
+    try:
+        up = node.client(timeout=5, retry=1).spdk_process_is_up(node.rpc_port, node.cluster_id)
+        is_up = up[0] if isinstance(up, (list, tuple)) else bool(up)
+    except Exception as e:                                  # noqa: BLE001
+        return False, (f"{node.get_id()[:8]} unknown: RPC failed ({rpc_err}) and its "
+                       f"node agent could not confirm SPDK is gone ({e})")
+    if is_up:
+        return False, (f"{node.get_id()[:8]} unknown: RPC failed ({rpc_err}) but its "
+                       f"SPDK process is still running")
+    return True, f"{node.get_id()[:8]} SPDK process confirmed gone"
+
+
+def _leadership_proven_free(all_nodes, lvs_name, taker):
+    """Whether *taker* may become leader of *lvs_name*: every other member is
+    proven non-leader (RPC) or dead (node agent), and still is after
+    LEADERSHIP_SAFETY_WINDOW_SEC -- so a member that is merely slow, or about
+    to regain leadership, cannot end up a second writer.
+
+    bf8 (2026-11-02, LVS_10): a forced shutdown leaves the old primary's SPDK
+    running ~10 s after its management RPC stops answering. The failover
+    treated "RPC fails" as "not leader", promoted the secondary, and both led
+    the lvstore for 12 s (JM write-lock conflict); a landing volume created on
+    the new leader ended with invalid metadata and the lvstore could no longer
+    be loaded on the primary."""
+    others = [n for n in all_nodes if n.get_id() != taker.get_id()]
+    for attempt in (0, 1):
+        if attempt:
+            time.sleep(constants.LEADERSHIP_SAFETY_WINDOW_SEC)
+        for node in others:
+            ok, why = _member_proven_non_leader(node, lvs_name)
+            if not ok:
+                logger.error("Refusing to make %s leader of %s: %s",
+                             taker.get_id()[:8], lvs_name, why)
+                return False
+    return True
+
+
 def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     """Recovery for a leaderless-but-healthy LVS.
 
@@ -11602,6 +11651,8 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
                        "to it", lvs_name)
         return None
     if not _taker_jm_quorum_ok(taker):
+        return None
+    if not _leadership_proven_free(all_nodes, lvs_name, taker):
         return None
     logger.warning(
         "LVS %s still leaderless after hublvol repair and no handoff task is "
@@ -11974,8 +12025,16 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
                 return nl, new_non_leaders
         return None, []
 
-    # Leader fabric healthy but RPC failing — force leadership change
-    # Need at least one non-leader with healthy fabric
+    # Leader fabric healthy but RPC failing. This used to FORCE a handoff: a
+    # best-effort "drop leadership" signal to the old leader, then accepting
+    # the new node as soon as IT reported leadership -- without ever proving
+    # the old leader had let go. A leader whose management RPC fails can be
+    # very much alive (a forced shutdown keeps SPDK running ~10 s after its
+    # API stops answering): bf8 2026-11-02, LVS_10 had two leaders for 12 s
+    # and its metadata was corrupted. Leadership now moves only after every
+    # other member is proven non-leader or dead for a safety window, and then
+    # through the guarded leaderless recovery (metadata reload before grant),
+    # never by signal.
     failover_target = None
     for nl in non_leaders:
         if _is_fabric_connected(nl) and _is_node_rpc_responsive(nl, lvs_name):
@@ -11987,40 +12046,20 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
                      leader.get_id())
         return None, []
 
-    # Force leadership change via fabric signal: send bdev_lvol_set_lvs_signal
-    # FROM failover_target through the fabric TO the leader (whose mgmt is down
-    # but data plane is healthy). The signal tells the leader's SPDK to drop
-    # leadership for this LVS.
+    if not _leadership_proven_free(all_nodes, lvs_name, failover_target):
+        return None, []
     try:
-        rpc = failover_target.rpc_client(timeout=5, retry=2)
-        rpc.bdev_lvol_set_lvs_signal(lvs_name)
-        time.sleep(2)
-        logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to leader %s via fabric",
-                    lvs_name, failover_target.get_id(), leader.get_id())
-    except Exception as e:
-        logger.error("Failed to send fabric signal for leadership change: %s", e)
+        if is_node_leader(failover_target, lvs_name):
+            # promoted itself meanwhile (JM-driven): accept, nothing to force
+            new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
+            leader_cache.put(cache_key, failover_target.get_id())
+            return failover_target, new_non_leaders
+    except Exception:
+        pass
+    recovered = _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, failover_target)
+    if recovered is None:
         return None, []
-
-    # Verify the forced leadership change actually took effect before routing.
-    # The signal is best-effort: if the old leader was merely slow (not down)
-    # and reclaims leadership, failover_target never becomes leader and routing
-    # to it would land the operation on a non-leader. Confirm with a short
-    # retry; reject if leadership did not settle on failover_target.
-    leadership_confirmed = False
-    for _ in range(3):
-        try:
-            if is_node_leader(failover_target, lvs_name):
-                leadership_confirmed = True
-                break
-        except Exception:
-            pass
-        time.sleep(1)
-    if not leadership_confirmed:
-        logger.error("Forced leadership change to %s for %s did not take effect — "
-                     "refusing to route to a non-leader",
-                     failover_target.get_id(), lvs_name)
-        return None, []
-
+    failover_target = recovered
     new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
     leader_cache.put(cache_key, failover_target.get_id())
     return failover_target, new_non_leaders

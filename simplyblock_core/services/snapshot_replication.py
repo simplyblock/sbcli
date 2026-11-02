@@ -865,16 +865,12 @@ def process_snap_replicate_start(task, snapshot):
     # outage, and a move in progress must not get the transfer (see
     # _stable_target_leader). Checked before every transfer, so a move in the
     # idle window between two runs is followed too.
+    # Replication only ever connects to an EXISTING, settled leader; it never
+    # claims, grants or forces leadership on the target (bf8 2026-11-02: a
+    # recovery run from here, during a forced shutdown of the target primary,
+    # left LVS_10 with two leaders and corrupted metadata). A leaderless
+    # target is waited out: the transfer stays suspended and the RPO grows.
     remote_lv_node, lead_why = _stable_target_leader(remote_lv)
-    if remote_lv_node is None and not _leaders_of(remote_lv):
-        # Leadership does not come back on its own: SPDK drops it on a
-        # failed write and the control plane grants it only on restart,
-        # activation or its leaderless-LVS recovery -- which nothing ran
-        # while this task waited (2026-10-02, LVS_1 on site A leaderless
-        # for 20 minutes, every convert refused). Run that recovery now, then
-        # require the recovered leadership to be settled like any other.
-        if _recover_target_leader(remote_lv) is not None:
-            remote_lv_node, lead_why = _stable_target_leader(remote_lv)
     if remote_lv_node is None:
         # Waiting, not failing: the target's leadership is not this transfer's
         # fault, and counting it let a leaderless window kill the task.
@@ -1117,30 +1113,6 @@ def _receiving_leader_node(remote_lv):
     the recorded node; nothing moves leadership back on its own.
     """
     return _lvs_leader_among(remote_lv.nodes, remote_lv.node_id, remote_lv.lvs_name)
-
-
-def _recover_target_leader(remote_lv):
-    """The control plane's leaderless-LVS recovery for the target lvstore;
-    the node that leads afterwards, or None."""
-    from simplyblock_core import storage_node_ops
-    nodes = []
-    for node_id in (getattr(remote_lv, "nodes", None) or [remote_lv.node_id]):
-        try:
-            nodes.append(db.get_storage_node_by_id(node_id))
-        except KeyError:
-            continue
-    try:
-        leader = storage_node_ops.find_leader_with_failover(nodes, remote_lv.lvs_name)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Leaderless-LVS recovery of %s failed: %s", remote_lv.lvs_name, e)
-        return None
-    if isinstance(leader, tuple):
-        leader = leader[0]
-    if not leader:
-        return None
-    logger.info("Leadership of %s recovered on %s for the transfer", remote_lv.lvs_name,
-                leader.get_id())
-    return _receiving_leader_node(remote_lv)
 
 
 def _secondary_lacks_bdev(node, bdev_name):
