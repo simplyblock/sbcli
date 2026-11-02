@@ -136,7 +136,7 @@ def plan_reconfigure(legs: list[list], *, failed=None, added=None) -> dict:
     return {"rebuild": sorted(rebuild), "legs": new}
 
 
-def leg_of(member: str, leg_bdevs: list[str], leg_members: list) -> str:
+def leg_of(member: str, leg_bdevs: list[str], leg_members: list[list[str]]) -> str:
     """The top-raid1 base bdev that carries ``member``.
 
     Under RAID 0+1 with more than two drives a member partition sits inside a

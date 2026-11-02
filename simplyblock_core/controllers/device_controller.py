@@ -16,7 +16,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException, RPCRemoteError
+from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
@@ -1115,7 +1115,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     return True
 
 
-def _on_controller(bdev_name, nvme_controller):
+def _on_controller(bdev_name: str, nvme_controller: str) -> bool:
     """True if ``bdev_name`` (``<ctrl>n<ns>[p<part>]``) belongs to ``nvme_controller``.
 
     A bare prefix match is not enough: controller names drop every 0 of the
@@ -1124,9 +1124,9 @@ def _on_controller(bdev_name, nvme_controller):
     return bool(nvme_controller) and bdev_name.startswith(f"{nvme_controller}n")
 
 
-def _set_jm_leg_stale(db_controller, node_id, leg, stale):
+def _set_jm_leg_stale(db_controller: DBController, node_id: str, leg: str, stale: bool) -> None:
     """Atomically add ``leg`` to, or drop it from, the JM's stale_jm_legs."""
-    def _mut(n):
+    def _mut(n: StorageNode) -> bool:
         if not n.jm_device:
             return False
         legs = [x for x in n.jm_device.stale_jm_legs if x != leg]
@@ -1140,7 +1140,7 @@ def _set_jm_leg_stale(db_controller, node_id, leg, stale):
     db_controller.atomic_update(db_controller.get_storage_node_by_id(node_id), _mut)
 
 
-def _readd_jm_raid_leg(snode, member, rpc_client):
+def _readd_jm_raid_leg(snode: StorageNode, member: str, rpc_client: RPCClient) -> None:
     """Put the leg carrying ``member`` back into the JM raid1, which rebuilds it
     from the surviving leg. The leg stays in stale_jm_legs until
     clear_rebuilt_jm_legs() sees the rebuild finish."""
@@ -1160,7 +1160,7 @@ def _readd_jm_raid_leg(snode, member, rpc_client):
     rpc_client.bdev_raid_add_base_bdev(jm.raid_bdev, leg)
 
 
-def clear_rebuilt_jm_legs(snode, rpc_client):
+def clear_rebuilt_jm_legs(snode: StorageNode, rpc_client: RPCClient) -> None:
     """Drop from stale_jm_legs every leg whose raid1 rebuild has finished."""
     jm = snode.jm_device
     if not jm or not jm.stale_jm_legs:
