@@ -1,3 +1,4 @@
+import pytest
 """Behavioural tests for the node shutdown/restart recovery paths.
 
 Both regressions were found on 2026-08-27 when FoundationDB filled the mgmt
@@ -65,6 +66,18 @@ def test_force_kill_backoff_is_seconds_not_minutes():
     # the observed failure: ~486s of backoff before --force gave up
     assert graceful_wait > 400
     assert forced_wait <= 10, f"--force would still block {forced_wait}s"
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_kill_read_timeout_outlasts_the_agents_pod_wait(force):
+    """bf8 2026-11-02: on Kubernetes the agent deletes the SPDK pod and waits
+    up to 30 s for it to go; a 10 s read timeout made every --force shutdown
+    fail ("Failed to kill SPDK") although SPDK stopped, skipping the
+    device-unavailable broadcast and leaving the node in_shutdown."""
+    from simplyblock_core.storage_node_ops import KILL_AGENT_WAIT_SEC
+    connect, read = kill_client_kwargs(force=force)["timeout"]
+    assert read > KILL_AGENT_WAIT_SEC
+    assert connect <= 5  # a dead agent still fails fast
 
 
 def test_graceful_kill_keeps_its_patience():
