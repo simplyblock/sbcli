@@ -674,12 +674,14 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
     if verdict == "blocked":
+        # Back off: a blocked chain (a blob without a snapshot record, an
+        # ancestor mid-deletion) does not heal in a minute, and the chain walk
+        # costs seconds of the serial runner every pass. Retried at runner
+        # speed it took ~19 % of the runner on bf8 (2026-11-02) and held every
+        # other volume's migration above the cutover gate.
         msg = f"replication chain of {snapshot.get_id()} is incomplete: {why}; retrying"
-        logger.error(msg)
         task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        _suspend_for_retry(task, msg, backoff=True, level=logging.ERROR)
         return
 
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
@@ -2194,10 +2196,19 @@ def process_snap_replicate_finish(task, snapshot):
     # resending.
     remote_snode, lead_why = _stable_target_leader(remote_lv)
     if remote_snode is None:
+        # Pending, not failed: the target is down (both members of its
+        # lvstore, or a leadership move in progress), and that is not the
+        # transfer's fault. Returned as a failure it took the retry backoff,
+        # which doubles per attempt: on bf8 (2026-11-02, round 6, both target
+        # members down 10 min) the attempts were 80, 74, 127, 244 and 501 s
+        # apart, so the finish resumed 7 min after the target was back. The
+        # check is cheap (one get_lvstore per member); every pass repeats it.
         logger.warning("Replication task %s: not finishing %s yet -- target "
                        "leadership not established (%s)", task.uuid,
                        snapshot.get_id(), lead_why)
-        return False
+        task.function_params["pending_why"] = (
+            f"waiting for the target lvstore to have a leader ({lead_why})")
+        return FINISH_PENDING
     if task.function_params.get("target_node_id") not in (None, remote_snode.get_id()):
         logger.warning("Replication task %s: target leadership moved %s -> %s "
                        "after the transfer; finishing on the new leader",
