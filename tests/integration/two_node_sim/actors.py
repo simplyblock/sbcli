@@ -28,7 +28,17 @@ import logging
 
 from simplyblock_core import constants
 
-from .simnode import FENCED, HOLDING, SOLO, SimNode
+from .simnode import (
+    CAP_APPENDER_LOCK_SKIPS_PEER_JM,
+    CAP_ISOLATE_MARKS_UNAVAILABLE,
+    CAP_READER_RESETS_PEER_JM_READ,
+    CAP_READER_SKIPS_DEAD_PEER_JM,
+    CAP_STOPLIST_PEER_DEVICES,
+    FENCED,
+    HOLDING,
+    SOLO,
+    SimNode,
+)
 
 logger = logging.getLogger("two_node_sim")
 
@@ -40,9 +50,21 @@ FAST_IO_FAIL_S = 8.0
 #: depth every slot pins to the frozen node and no write reaches the newly
 #: optimized path (the bed measured 2-3 s, not KATO, in 02b).
 DEPTH = 256
-CLIENT_KATO_S = float(constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO)
+#: A host detects a frozen node's path only through its NVMe keep-alive (the
+#: TCP connection stays open): per controller, 1-2 KATO intervals after the
+#: last answered keep-alive. Calibrated on bed run c8/02c: 7.1 s with KATO 4
+#: (campaign c8, F20). The KATO itself is ``world.client_kato_s``.
+CLIENT_DETECT_FACTOR = 7.1 / 4.0
 #: keep-alive of the node-to-node NVMe controllers (hublvol, remote JM)
 HUBLVOL_KATO_S = float(constants.KATO) / 1000.0
+#: IO timeout of the node-to-node NVMe controllers (journal, hublvol): a request
+#: on a frozen peer completes with an error only after it (campaign c8, F21)
+NVME_TIMEOUT_S = float(constants.NVME_TIMEOUT_US) / 1e6
+#: A node that aborts on wake from a freeze closes its TCP connections about
+#: 1.1 s later; until then IO to its data devices neither completes nor fails
+#: (bed run c9/02a: abort at +4.00 s, sn1's connections closed at +5.11 s, when
+#: 192 data IOs stuck on its remote_alceml devices failed; campaign c9, F23).
+DEVICE_TEARDOWN_S = 1.1
 
 
 class ControlPlane:
@@ -356,7 +378,7 @@ def zero_run(per_sec: dict, first: int, last: int) -> int:
 
 
 class Client:
-    """NVMe/TCP multipath client writing to every volume (KATO 4, fast_io_fail 8)."""
+    """NVMe/TCP multipath client writing to every volume (two-node KATO, fast_io_fail 8)."""
 
     def __init__(self, world):
         self.world = world
@@ -370,6 +392,7 @@ class Client:
         self.io_errors: dict = {}
         self.acks_by: dict = {}          # (lvs, node) -> last ack time
         self.failed_path: dict = {}      # (vol, node uuid) -> path down until (KATO)
+        self.reported: set = set()       # violations reported once per episode (F23)
         self.measuring = False
         self.after_fence_acks = 0
 
@@ -424,6 +447,48 @@ class Client:
             out.append((0 if st == "optimized" else 1, -changed, n.name, n))
         return [x[3] for x in sorted(out, key=lambda x: x[:3])]
 
+    def _peer_devices_release(self, peer: SimNode):
+        """When IO stuck on a frozen peer's data devices completes: when its
+        connections close after its abort on wake (DEVICE_TEARDOWN_S later), or
+        when it wakes without aborting. None if nothing is stuck on them."""
+        if peer.proc == "frozen":
+            release = peer.frozen_until
+            if peer.arbitration and peer.frozen_until - peer.frozen_since > peer.lease_ttl_ms / 1000.0:
+                release += DEVICE_TEARDOWN_S         # it will abort on wake
+            return release
+        if peer.proc == "dead" and peer.died_after_freeze:
+            return peer.died_at + DEVICE_TEARDOWN_S
+        return None
+
+    def _stuck_on_peer_devices(self, node: SimNode, peer: SimNode, lvs) -> bool:
+        """Campaign c9, F23: the survivor's writes after its solo grant still
+        wait on the frozen peer's data devices (each stripe has a chunk there).
+        Modelled as the bed showed it (c9/02a, PROVEN): the leader that was
+        writing when the peer froze has data IO in flight to the peer's devices;
+        it hangs while the peer is frozen and until its connections close after
+        its abort on wake. A node that took the LVS over after the freeze is not
+        modelled as stuck: on the bed (c9/02b) such a takeover served IO before
+        the frozen primary aborted. Only the LVS of the bed's fio target (vol1)
+        is modelled: the bed measured no other volume, and 02b (sn2 frozen, sn1
+        keeps leading LVS_1) passed there. The F23 fix
+        (``CAP_STOPLIST_PEER_DEVICES``) isolates the peer's devices at the grant."""
+        if CAP_STOPLIST_PEER_DEVICES in node.caps:
+            return False
+        if lvs.name != self.world.vols["vol1"].lvs_name:
+            return False
+        if not peer.frozen_since or lvs.leader_since > peer.frozen_since:
+            return False
+        now = self.world.vt.time()
+        release = self._peer_devices_release(peer)
+        if release is None or now >= release:
+            return False
+        key = ("F23", node.uuid, lvs.name, peer.frozen_since)
+        if key not in self.reported:
+            self.reported.add(key)
+            self.world.violate("F23: %s's writes of %s wait on %s's data devices after the grant "
+                               "(until +%.1f s)" % (node.name, lvs.name, peer.name, release - self.world.t0))
+        return True
+
     def _serve(self, node: SimNode, lvs_name: str, depth=0):
         """'ack', 'wait' or 'error' for one write arriving at ``node``."""
         w = self.world
@@ -440,10 +505,14 @@ class Client:
             if w.vt.time() < lvs.takeover_until:
                 return "wait"                        # lvstore update after the takeover
             lvs.takeover_until = 0.0
+            if not lvs.leader:
+                lvs.leader_since = w.vt.time()
             lvs.leader = True
             lvs.redirect_stopped = False
             w.on_leader(node, lvs, "IO takeover")
         if lvs.leader:
+            if lv.state == SOLO and self._stuck_on_peer_devices(node, peer, lvs):
+                return "wait"
             if lv.state == SOLO:
                 w.note_ack(node, lvs_name, replicated=False)
                 return "ack"
@@ -470,10 +539,68 @@ class Client:
             return "error"
         # IO-triggered takeover: lvstore update, 73 ms on new_md_journal
         # (4.05 s on master's md-journal, campaign c3 F7)
-        delay = 4.05 if "slow_takeover" in node.bugs else w.takeover_s
-        if delay > 1.0:
+        if "slow_takeover" in node.bugs:
+            delay = 4.05
             # campaign c3, F7: the takeover held client IO for 4 s
             w.violate("%s: lvstore takeover of %s takes %.2f s (> 1 s)" % (node.name, lvs_name, delay))
+        elif peer.proc == "frozen" and not (CAP_READER_SKIPS_DEAD_PEER_JM in node.caps and lv.state == SOLO):
+            # campaign c8, F21: the takeover's JC reader restart picks the frozen
+            # peer's JM (its connection is still up) and waits for the NVMe IO
+            # timeout of the SPDK-to-SPDK controllers (NVME_TIMEOUT_US, 8 s) before
+            # it moves on. ultra's F21 fix skips that JM once the LVS is solo.
+            delay = max(w.takeover_s, NVME_TIMEOUT_S)
+            w.violate("F21: %s's takeover reader of %s waits %.1f s on the frozen peer's JM"
+                      % (node.name, lvs_name, delay))
+        else:
+            delay = w.takeover_s
+        # The takeover's lvstore update reads the metadata (super block) through
+        # distrib, and every stripe has a chunk on the peer's data devices.
+        # Only while the peer is still frozen: after its abort the hublvol redirect
+        # itself fails only once the connections close (DEVICE_TEARDOWN_S), so a
+        # takeover then finds the devices torn down (bed 02b: 3 s).
+        release = self._peer_devices_release(peer) if peer.proc == "frozen" else None
+        now = w.vt.time()
+        if release is not None and now < release:
+            if CAP_STOPLIST_PEER_DEVICES not in node.caps:
+                # campaign c9/c10 02c, F23: the read waits on the frozen peer's
+                # devices until its connections close after its abort on wake
+                delay = max(delay, release - now)
+                w.violate("F23: %s's takeover metadata read of %s waits on %s's data devices "
+                          "(until +%.1f s)" % (node.name, lvs_name, peer.name, release - w.t0))
+            elif CAP_ISOLATE_MARKS_UNAVAILABLE not in node.caps and lv.state == SOLO:
+                # campaign c11 02c, F24: #219 only closed the isolated devices; the
+                # device status still read online, the follower's takeover read took
+                # the normal-read path to a closed device, failed, and the lvstore
+                # update on failover aborted the survivor
+                w.violate("F24: %s's takeover read of %s failed on %s's isolated (closed) "
+                          "device; the survivor aborted" % (node.name, lvs_name, peer.name))
+                node.abort("F24 takeover read on a closed peer device")
+                return "error"
+            elif CAP_APPENDER_LOCK_SKIPS_PEER_JM not in node.caps and lv.state == SOLO:
+                # campaign c12 02c, F25: the new leader re-locks the appender on
+                # every JM and waits for all lock requests; the one on the frozen
+                # peer's JM neither completes nor fails until the peer aborts on
+                # wake (the process exit fails it at once: bed "Update lvolstore
+                # done" at the abort's millisecond). The takeover's first write,
+                # and with it the LVS's client IO, waits until then.
+                if peer.frozen_until > now:
+                    delay = max(delay, peer.frozen_until - now)
+                    w.violate("F25: %s's takeover of %s waits for its append lock on %s's JM "
+                              "(until +%.1f s)" % (node.name, lvs_name, peer.name, peer.frozen_until - w.t0))
+        if (peer.proc == "frozen" and lv.state == SOLO and CAP_READER_SKIPS_DEAD_PEER_JM in node.caps
+                and "reader_read_inflight_on_peer_jm" in w.conditions
+                and CAP_READER_RESETS_PEER_JM_READ not in node.caps):
+            # campaign c12b 02c-r1, F26: the survivor's JC reader had a history read
+            # in flight on the peer's JM when the peer froze. F21 only keeps that JM
+            # from being chosen again; the read itself neither completes nor fails
+            # until the NVMe IO timeout or the peer's abort on wake, and the
+            # takeover's reader restart waits for it.
+            now = w.vt.time()
+            done = min(peer.frozen_since + NVME_TIMEOUT_S, peer.frozen_until)
+            if done > now:
+                delay = max(delay, done - now)
+                w.violate("F26: %s's takeover of %s waits for a history read in flight on %s's JM "
+                          "(until +%.1f s)" % (node.name, lvs_name, peer.name, done - w.t0))
         lvs.takeover_until = w.vt.time() + delay
         w.log("%s: takes over %s on new IO (%.0f ms)" % (node.name, lvs_name, delay * 1000))
         return "wait"
@@ -481,7 +608,8 @@ class Client:
     def tick(self):
         """Every 50 ms: one new write per volume (queue depth ``DEPTH``), and
         every pending write tries its path. A write on a path whose SPDK is
-        frozen stays there until the keep-alive declares the path dead (KATO),
+        frozen stays there until that controller's keep-alive declares the path
+        dead (``CLIENT_DETECT_FACTOR`` x KATO after the freeze, F20),
         then it is retried elsewhere; a write that cannot complete within
         fast_io_fail is an IO error. The stall is the longest gap without any
         completion, as fio's IOPS log shows it on the bed."""
@@ -496,7 +624,8 @@ class Client:
             for io in list(queue):
                 if io["path"] is not None:
                     n = io["path"]
-                    if n.proc == "frozen" and now - io["issued"] < CLIENT_KATO_S:
+                    detect_at = n.frozen_since + w.client_kato_s * CLIENT_DETECT_FACTOR
+                    if n.proc == "frozen" and now < detect_at:
                         continue                     # stuck on the frozen controller
                     if n.proc == "frozen":
                         self.failed_path[(vname, n.uuid)] = now + 1.0

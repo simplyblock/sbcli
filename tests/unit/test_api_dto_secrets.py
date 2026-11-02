@@ -97,6 +97,10 @@ def _build_cluster_dto():
         max_fault_tolerance=1,
         backup_enabled=False,
         capacity=_build_capacity(),
+        snode_api_service="simplyblock-storage-node-api",
+        spdk_proxy_service="simplyblock-spdk-proxy",
+        spdk_proxy_tls_secret="simplyblock-spdk-proxy-tls",
+        node_label_suffix="",
     )
 
 

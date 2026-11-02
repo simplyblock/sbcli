@@ -25,6 +25,7 @@ from simplyblock_core.storage_node_ops import _fence_rpc_bounds
 BUDGET = constants.FENCE_RPC_TIMEOUT_SEC
 RETRY = constants.FENCE_RPC_RETRY
 EXAMINE = constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC
+SET_LEADER = constants.FENCE_SET_LEADER_TIMEOUT_SEC
 
 
 class TestFenceHeldIsNeverRelaxed:
@@ -33,9 +34,10 @@ class TestFenceHeldIsNeverRelaxed:
         assert _fence_rpc_bounds(True, 0.1, removal_in_progress=removal) == (BUDGET, RETRY)
 
     @pytest.mark.parametrize("removal", [False, True])
-    def test_explicit_budget_is_honoured(self, removal):
-        assert _fence_rpc_bounds(True, 0.1, budget=EXAMINE,
-                                 removal_in_progress=removal) == (EXAMINE, RETRY)
+    @pytest.mark.parametrize("budget", [EXAMINE, SET_LEADER])
+    def test_explicit_budget_is_honoured(self, removal, budget):
+        assert _fence_rpc_bounds(True, 0.1, budget=budget,
+                                 removal_in_progress=removal) == (budget, RETRY)
 
     def test_budget_is_clamped_to_the_time_left(self):
         """A 6s call started 5s into a 7.5s fence may only run 2.5s."""

@@ -97,7 +97,7 @@ def test_registration_sites_use_the_wire_identity():
 
     for func in (storage_node_ops.add_lvol_thread,
                  lvol_controller.recreate_lvol_on_node,
-                 migration_controller.create_migration):
+                 migration_controller._create_migration_impl):
         src = inspect.getsource(func)
         assert "get_ns_uuid()" in src, \
             f"{func.__name__} must register/verify by the wire identity"

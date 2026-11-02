@@ -248,16 +248,39 @@ class TestStartStopTrigger:
         assert args == (VOLUME_ID,)
         assert kwargs == {
             'replication_cluster_id': TARGET_CLUSTER_ID,
+            'replication_pool_id': None,
             'mode': 'migration',
             'interval_min': 15,
         }
+
+    def test_start_passes_the_destination_pool(self, client, db, volume, lvol_controller):
+        response = client.post(REPLICATION_URL + 'start', json={
+            'replication_cluster_id': TARGET_CLUSTER_ID,
+            'replication_pool_id': POOL_ID,
+            'mode': 'migration',
+        })
+
+        assert response.status_code == 204
+        assert lvol_controller.replication_start.call_args.kwargs['replication_pool_id'] == POOL_ID
+
+    def test_a_refused_destination_is_400_with_the_reason(self, client, db, volume, lvol_controller):
+        lvol_controller.replication_start_error.return_value = 'cluster X is the volume\'s own cluster'
+
+        response = client.post(REPLICATION_URL + 'start', json={
+            'replication_cluster_id': TARGET_CLUSTER_ID, 'mode': 'migration',
+        })
+
+        assert response.status_code == 400
+        assert 'own cluster' in response.json()['detail']
+        lvol_controller.replication_start.assert_not_called()
 
     def test_start_without_body_uses_cluster_default(self, client, db, volume, lvol_controller):
         response = client.post(REPLICATION_URL + 'start')
 
         assert response.status_code == 204
         assert lvol_controller.replication_start.call_args.kwargs == {
-            'replication_cluster_id': None, 'mode': None, 'interval_min': None,
+            'replication_cluster_id': None, 'replication_pool_id': None,
+            'mode': None, 'interval_min': None,
         }
 
     def test_unknown_mode_rejected(self, client, db, volume, lvol_controller):
@@ -444,6 +467,20 @@ class TestCutover:
         assert response.content == b''
         assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/tasks/{TASK_ID}/')
         lvol_controller.replication_commit.assert_called_once_with(VOLUME_ID, delete_source=False)
+
+    def test_a_second_commit_is_409_naming_the_task(self, client, db, volume, lvol_controller):
+        """A cutover already queued, running, or finished is reported as a
+        conflict naming its task, so a caller resending the commit learns the
+        task it is waiting on."""
+        lvol_controller.replication_commit.return_value = {
+            'cutover_task_queued': False, 'conflict': True, 'task_id': TASK_ID,
+        }
+
+        response = client.post(REPLICATION_URL + 'commit')
+
+        assert response.status_code == 409
+        assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/tasks/{TASK_ID}/')
+        assert response.json()['task_id'] == TASK_ID
 
     def test_unqueued_cutover_is_an_error(self, client, db, volume, lvol_controller):
         lvol_controller.replication_commit.return_value = False

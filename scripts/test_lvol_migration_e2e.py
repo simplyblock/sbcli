@@ -211,8 +211,8 @@ def main():
             "sudo dnf install git python3-pip nvme-cli -y",
             "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
             "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-            f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
-            " --upgrade --force --ignore-installed requests",
+            (f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
+            " --upgrade --force --ignore-installed requests"),
         ]
         setup_ips = [mgmt_ip] + sn_ips
         with ThreadPoolExecutor(max_workers=len(setup_ips)) as pool:
@@ -224,8 +224,8 @@ def main():
         # ====== PHASE 3: Create cluster (ndcs=1, npcs=1) ======
         print("\n=== PHASE 3: Creating cluster ===")
         ssh_exec(mgmt_ip, [
-            "sudo /usr/local/bin/sbctl cluster create"
-            " --data-chunks-per-stripe 1 --parity-chunks-per-stripe 1"
+            ("sudo /usr/local/bin/sbctl cluster create"
+            " --data-chunks-per-stripe 1 --parity-chunks-per-stripe 1")
         ], check=True)
 
         cluster_list = ssh_exec(mgmt_ip,
@@ -268,9 +268,9 @@ def main():
             for attempt in range(5):
                 try:
                     ssh_exec(mgmt_ip, [
-                        f"sudo /usr/local/bin/sbctl sn add-node {cluster_uuid}"
+                        (f"sudo /usr/local/bin/sbctl sn add-node {cluster_uuid}"
                         f" {priv_ip}:5000 {IFACE}"
-                        f" --data-nics eth0"
+                        f" --data-nics eth0")
                     ], check=True)
                     break
                 except RuntimeError:
@@ -430,11 +430,11 @@ def main():
 
     # Start fio via systemd-run so it fully detaches from the SSH session
     ssh_exec(client_ip, [
-        "sudo systemd-run --unit=fio-migtest --remain-after-exit"
+        ("sudo systemd-run --unit=fio-migtest --remain-after-exit"
         " fio --name=lvol_migration_test --directory=/mnt/migtest --direct=1"
         " --rw=randrw --bs=4K --size=1G --numjobs=4 --iodepth=16 --ioengine=libaio"
         " --time_based --runtime=3600 --group_reporting"
-        " --output=/tmp/fio_output.log"
+        " --output=/tmp/fio_output.log")
     ])
     time.sleep(8)
 

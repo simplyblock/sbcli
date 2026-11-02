@@ -1,5 +1,6 @@
 import errno
 import hashlib
+import http.client
 import json
 import threading
 from collections import OrderedDict
@@ -189,6 +190,21 @@ class RPCRemoteError(RPCException):
         self.data = data
 
 
+def request_reached_remote(err: BaseException) -> bool:
+    """True when a failed RPC provably reached SPDK: it answered with an
+    error, answered garbage, or was still working when the read timed out.
+    False for "never connected" / "dropped before any response", where the
+    request may never have been executed.
+
+    Callers that probe a transfer's state after a raise need this: a
+    ``transfer_state`` of "No process" means "finished and cleaned up" only
+    if the final step actually ran.
+    """
+    if isinstance(err, (RPCRemoteError, RPCProtocolError)):
+        return True
+    return isinstance(err, RPCConnectionError) and isinstance(err.__cause__, ReadTimeout)
+
+
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
 
 
@@ -208,6 +224,32 @@ JC_REMOVE_JM_STILL_IN_USE = -22
 #: 2026-09-02 on spdk R26.3: replacing the JM out of every vuid on a node also
 #: drops it from JC, so the follow-up release finds nothing left to do.
 JC_REMOVE_JM_NOT_USED = -13
+
+
+#: Socket-level failures meaning the peer dropped the connection before
+#: sending any part of a response (stale keep-alive socket). RemoteDisconnected
+#: is a ConnectionResetError subclass; listed for clarity.
+_DROPPED_BEFORE_RESPONSE = (http.client.RemoteDisconnected, ConnectionResetError,
+                            BrokenPipeError, ConnectionAbortedError)
+
+
+def _is_dropped_before_response(exc: BaseException) -> bool:
+    """True when a requests ``ConnectionError`` was caused by the peer
+    dropping the connection before replying. requests wraps the urllib3
+    ``ProtocolError('Connection aborted.', <OSError>)`` in ``args``, so walk
+    args as well as the cause/context chain."""
+    seen = set()
+    stack: list = [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, _DROPPED_BEFORE_RESPONSE):
+            return True
+        stack.extend(a for a in getattr(e, "args", ()) if isinstance(a, BaseException))
+        stack.extend((e.__cause__, e.__context__))
+    return False
 
 
 def _build_session(host, port, username, password: SecretStr, retry: int,
@@ -343,9 +385,7 @@ class RPCClient:
         # param of the same name landing in **kwargs.
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            response = self.session.post(
-                self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
-                headers={"X-RPC-Timeout": str(effective_timeout)})
+            response = self._post_with_stale_retry(method, wire_payload, effective_timeout)
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
@@ -369,6 +409,46 @@ class RPCClient:
 
         return data['result']
 
+    def _post_with_stale_retry(self, method, wire_payload, effective_timeout):
+        """POST once; on a connection that died before ANY response byte
+        came back, rebuild the session and POST exactly once more.
+
+        urllib3 never resends a POST after the request was written (see
+        DEFAULT_ALLOWED_METHODS), and pooled keep-alive connections outlive
+        the peer: a restarted SPDK/proxy, or a network outage that swallowed
+        the FIN, leaves sockets in the pool that look open until the next
+        write is answered with RST. That RPC then fails although SPDK never
+        saw it (SFAM-2834: bdev_alceml_create during a node restart).
+
+        Only "dropped with no response" is retried (RemoteDisconnected,
+        reset, broken pipe, aborted). A read timeout is NOT: there the
+        request is known to have been delivered and may be executing.
+        The whole pooled session for this host is evicted first, because
+        every other idle socket in it is very likely just as dead.
+        """
+        for attempt in (1, 2):
+            try:
+                return self.session.post(
+                    self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
+                    headers={"X-RPC-Timeout": str(effective_timeout)})
+            except ConnectionError as e:
+                if attempt == 2 or not _is_dropped_before_response(e):
+                    raise
+                logger.warning(
+                    "RPC %s to %s:%s: connection dropped before any response (%s); "
+                    "retrying once on a fresh connection", method, self.host, self.port, e)
+                self._refresh_session()
+        raise AssertionError("unreachable")
+
+    def _refresh_session(self):
+        _session_pool.evict(self.host, self.port)
+        self.session = _session_pool.get(
+            self.host, self.port, self.username, self.password, self.retry, Settings())
+
+    def net_check(self, ifname: str, ip: str) -> bool:
+        """Whether the interface has carrier and the address answers a ping sent out of
+        it, in the SPDK pod's network namespace."""
+        return self._request("sbcli_net_check", ifname=ifname, ip=ip)
 
     def get_version(self):
         return self._request("spdk_get_version")
@@ -441,6 +521,10 @@ class RPCClient:
 
     def subsystem_remove_host(self, nqn, host):
         return self._request("nvmf_subsystem_remove_host", nqn=nqn, host=host)
+
+    def subsystem_allow_any_host(self, nqn, allow_any_host):
+        return self._request("nvmf_subsystem_allow_any_host", nqn=nqn,
+                             allow_any_host=bool(allow_any_host))
 
     def transport_list(self, trtype=None):
         kwargs = {"trtype": trtype} if trtype else {}
@@ -912,7 +996,7 @@ class RPCClient:
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
-                            write_protection_v2=False):
+                            write_protection_v2=False, page_copy=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -962,6 +1046,8 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
+        if page_copy:
+            params["page_copy"] = True
         return self._request("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):
@@ -1387,6 +1473,22 @@ class RPCClient:
         """Re-read the backing device's size (device grow pickup)."""
         return self._request("bdev_aio_rescan", name=name)
 
+    def alceml_bdev_backend_resize_begin(self, name, request_timeout=None):
+        """Put an alceml bdev into its resize state: new I/O is held, pending
+        I/O drains, and the backing bdev is closed. Answers once the backing
+        bdev is closed, so the timeout covers the drain."""
+        return self._request("alceml_bdev_backend_resize_begin",
+                             request_timeout=request_timeout, name=name)
+
+    def alceml_bdev_backend_resize_end(self, name, b_fail=False, cntr_path="", request_timeout=None):
+        """Leave the resize state. With ``b_fail`` False, alceml reopens its
+        backing bdev (``cntr_path``, or its own when empty), takes its new
+        size, and releases the held I/O. With ``b_fail`` True, alceml fails
+        all held and future I/O until it is destroyed."""
+        return self._request("alceml_bdev_backend_resize_end",
+                             request_timeout=request_timeout,
+                             name=name, b_fail=b_fail, cntr_path=cntr_path)
+
     def bdev_set_qd_sampling_period(self, name, period_us):
         """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
         queue_depth/io_time — the hung-IO watchdog's signal for AIO base
@@ -1481,7 +1583,7 @@ class RPCClient:
         return self._request("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                        relaxed_mode=False):
+                                        relaxed_mode=False, keep_placed=False):
         params = {
             "name": name,
         }
@@ -1493,6 +1595,10 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        # Page copy distribs only (older data planes reject the parameter): a balancing migration keeps
+        # columns that page copies placed on another online device with anti-affinity kept.
+        if keep_placed:
+            params["keep_placed"] = True
         return self._request("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -1650,6 +1756,14 @@ class RPCClient:
         if priority_class:
             params["lvol_priority_class"] = priority_class
         return self._request("bdev_lvol_register", **params)
+
+    def bdev_lvol_set_priority_class(self, lvol_name, priority_class):
+        """Set the in-memory IO service class of an lvol/snapshot blob.
+
+        Not persisted by SPDK: lost on restart/re-register.
+        """
+        return self._request("bdev_lvol_set_priority_class",
+                             lvol_name=lvol_name, lvol_priority_class=priority_class)
 
     def nvmf_subsystem_get_controllers(self, nqn):
         return self._request("nvmf_subsystem_get_controllers", nqn=nqn)
@@ -1997,6 +2111,19 @@ class RPCClient:
         return self._request("jc_compression", jm_vuid=jm_vuid)
 
     def nvmf_port_block(self, port, is_reject=False):
+        """Fence ``port``: SPDK stops serving client connections on it.
+
+        Callers fencing a peer's client listener build this client with a
+        short budget, e.g. ``node.rpc_client(timeout=0.5, retry=1)``.
+        ``timeout`` is per HTTP attempt and the client retries ``retry``
+        times with backoff, so the wall clock is roughly (retry+1) x timeout
+        plus backoff. While the port is blocked the peer cannot answer
+        keep-alives, and the client KATO is 4s: a fence window longer than
+        that is an outage. On 2026-08-31 a failing block on a rebooting peer
+        with a (5s, 2) budget took 12s, left a healthy survivor fenced, and
+        the client lost its last path at 4.1s. A healthy peer answers in
+        ~11ms, so 0.5s is ~45x the observed latency.
+        """
         params = {"port": port}
         if is_reject:
             params["reject"] = is_reject
@@ -2005,8 +2132,18 @@ class RPCClient:
     def nvmf_port_unblock(self, port):
         return self._request("nvmf_port_unblock", port=port)
 
-    def nvmf_get_blocked_ports(self):
-        return self._request("nvmf_get_blocked_ports")
+    def nvmf_get_blocked_ports(self) -> set[int]:
+        """Ports currently fenced on this SPDK.
+
+        The RPC returns ``{"blocked_ports": [{"port": N, ...}, ...]}``. Test
+        membership against the projected set, never against the raw reply:
+        ``port in reply`` tested the dict's keys and read every fenced port as
+        open (2026-09-11, k8s rapid failover)."""
+        blocked = self._request("nvmf_get_blocked_ports")
+        if not blocked:
+            return set()
+        entries = blocked.get("blocked_ports", []) if isinstance(blocked, dict) else []
+        return {int(e.get("port", -1)) for e in entries}
 
     def bdev_raid_get_bdevs(self):
         return self._request("bdev_raid_get_bdevs", category="online")
@@ -2031,7 +2168,7 @@ class RPCClient:
         return self._request("bdev_lvol_set_migration_flag", lvol_name=name)
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
-                           allow_partial=False):
+                           allow_partial=False, priority_class=0, partial_base=0):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -2050,9 +2187,17 @@ class RPCClient:
         What it does NOT excuse is the destination's starting content: a partial
         transfer only ships the delta, so everything outside the delta must
         already be on the destination. Pass it only when the landing volume is a
-        clone of the destination's copy of the PREVIOUS snapshot. Passing it for
-        a transfer into a fresh empty volume would silently drop every cluster
-        the delta does not cover.
+        clone of the destination's copy of the PREVIOUS snapshot, and pass that
+        snapshot's SOURCE blob id as *partial_base*: the fork sends a delta only
+        if the snapshot's dirty generation started at exactly that blob, and
+        without a base it sends everything. Passing it for a transfer into a
+        fresh empty volume would silently drop every cluster the delta does not
+        cover.
+
+        *priority_class* is the IO class the transfer reads its source in,
+        without changing the source's own class (0 = the source's own). An SPDK
+        older than the parameter refuses the whole request, so it is retried
+        once without it, which reads in the source's class as before.
         """
         params = {
             "lvol_name": name,
@@ -2062,14 +2207,46 @@ class RPCClient:
             "gateway": bdev_name,
             "operation": operation,
         }
-        # The delta path is DISABLED (PR #1276, commit 52e75afb2): the SPDK
-        # fork's fragment write path corrupts partial transfers, so
-        # allow_partial is never emitted and every transfer is a full one,
-        # regardless of what the caller requests. Re-enable the emission once
-        # the fork is fixed.
-        # if allow_partial:
-        #     params["allow_partial"] = True
+        # A delta needs both: the request and the base it applies on top of.
+        # An SPDK older than partial_base refuses the whole request (it was
+        # disabled in 52e75afb2 while the fork's destination side corrupted
+        # partial transfers), so it is retried without the delta, then without
+        # the class: each step back sends more, never less.
+        attempts = []
+        if allow_partial and partial_base:
+            attempts.append(dict(params, allow_partial=True, partial_base=int(partial_base),
+                                 **({"priority_class": priority_class} if priority_class else {})))
+        if priority_class:
+            attempts.append(dict(params, priority_class=priority_class))
+        for extra in attempts:
+            try:
+                return self._request("bdev_lvol_transfer", **extra)
+            except RPCRemoteError as e:
+                if "decode" not in str(e):
+                    raise
+                logger.warning("bdev_lvol_transfer: SPDK does not take %s; retrying %s without it",
+                               ", ".join(k for k in ("partial_base", "priority_class") if k in extra),
+                               name)
         return self._request("bdev_lvol_transfer", **params)
+
+    def bdev_lvol_merge_base(self, name):
+        """After a partial transfer into the landing volume *name*: START
+        filling every block the transfer did not write from the volume's base
+        (its parent), before it is converted. Returns the job's state at once
+        (``state`` none/running/done/failed, ``rc``, ``clusters``, ``ranges``,
+        ``bytes``, ``ms``); idempotent. A failed job with ``rc`` ``-ESTALE``:
+        the node no longer knows what arrived (it restarted), and the transfer
+        must be repeated into a fresh landing volume."""
+        return self._request("bdev_lvol_merge_base", lvol_name=name)
+
+    def bdev_lvol_merge_base_stat(self, name):
+        """State of the landing volume *name*'s merge job (see bdev_lvol_merge_base)."""
+        return self._request("bdev_lvol_merge_base_stat", lvol_name=name)
+
+    def bdev_lvol_dirty_bitmap_info(self, name):
+        """The dirty-tracking state of *name*'s blob and the lvstore's count of
+        writes executed locally while not leading (replication_delta.py)."""
+        return self._request("bdev_lvol_dirty_bitmap_info", lvol_name=name)
 
     def bdev_lvol_transfer_stat(self, name: str):
         """

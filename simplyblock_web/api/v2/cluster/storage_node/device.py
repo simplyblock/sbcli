@@ -4,6 +4,7 @@ from typing import Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core.controllers import device_controller
@@ -12,7 +13,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 
 from ... import util
 from ..._dependencies import Cluster, Device, StorageNode
-from ..._dtos import DeviceDTO, DeviceHealthInfoDTO
+from ..._dtos import DeviceDTO, DeviceHealthAssessmentDTO, DeviceHealthInfoDTO
 from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 
 api = APIRouter()
@@ -133,6 +134,35 @@ def replace(
     )
 
 
+class DeviceResizeDTO(BaseModel):
+    device_id: str
+    old_size: int
+    new_size: int
+    placement_size: int
+    resized: bool
+    uniform: bool
+    warning: str = ""
+
+
+@instance_api.post('/resize', name='clusters:storage_nodes:devices:resize',
+                   response_model=DeviceResizeDTO,
+                   responses={409: {"description": "The device cannot be grown"}})
+def resize(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceResizeDTO:
+    """Grow an lblk device online to the size its block device now has.
+
+    The storage node's host re-reads the size of the block device (for
+    example, a LUN grown on its storage array) and the device takes it over
+    without interrupting I/O. Shrinking is refused. The placement weight of
+    the device stays at its original size, so the added capacity is only
+    fully usable once all data devices of the cluster have grown by the same
+    factor; `uniform` and `warning` report it.
+    """
+    try:
+        return DeviceResizeDTO(**device_controller.resize_device(device.get_id()))
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
 @instance_api.post('/restart', name='clusters:storage_nodes:devices:restart', status_code=204, responses={204: {"content": None}})
 def restart(cluster: Cluster, storage_node: StorageNode, device: Device, force: bool = False) -> Response:
     if not device_controller.restart_device(device.get_id(), force):
@@ -173,10 +203,36 @@ def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Respon
 
 @instance_api.get('/health-info', name='clusters:storage_nodes:devices:get-device-health-info')
 def health_info(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceHealthInfoDTO:
+    """The device's health log (NVMe SMART / ATA SMART).
+
+    A device that exposes no health log answers 200 with `supported=false`;
+    a storage node that cannot be reached is an error.
+    """
     ret = device_controller.get_device_health_info(device.get_id())
     if not ret:
         raise ValueError('Failed to get device health info')
     return DeviceHealthInfoDTO.from_model(device, ret)
+
+
+@instance_api.put('/health-assessment', name='clusters:storage_nodes:devices:set-health-assessment',
+                  status_code=204, responses={204: {"content": None}})
+def set_health_assessment(
+        cluster: Cluster, storage_node: StorageNode, device: Device,
+        body: DeviceHealthAssessmentDTO,
+) -> Response:
+    """Record an externally computed health assessment (performance + SMART).
+
+    Stored on the device as sent; it raises the `device_slow` /
+    `device_unhealthy` alerts while `reported_at + valid_seconds` has not
+    passed.
+    """
+    try:
+        device_controller.set_device_health_assessment(
+            storage_node.get_id(), device.get_id(), body.model_dump(mode='json'))
+    except KeyError as e:
+        # Removed between the lookup and the write.
+        raise HTTPException(404, f'Device {device.get_id()} not found') from e
+    return Response(status_code=204)
 
 
 api.include_router(instance_api)

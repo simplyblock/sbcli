@@ -31,6 +31,15 @@ def main():
                         backup_policy.evaluate_schedule(lvol)
                     except Exception as e:
                         logger.error(f"Error evaluating schedule for lvol {lvol.get_id()}: {e}")
+
+                # Consistency-group backups are policy-driven in the control plane
+                # too: a group attached to a policy is backed up as one unit on its
+                # schedule, and its generations are pruned per the policy.
+                for group in db.get_consistency_groups(cl.get_id()):
+                    try:
+                        backup_policy.evaluate_group_backups(group)
+                    except Exception as e:
+                        logger.error(f"Error applying the backup policy of group {group.get_id()}: {e}")
             except Exception as e:
                 logger.error(f"Error processing cluster {cl.get_id()}: {e}")
 

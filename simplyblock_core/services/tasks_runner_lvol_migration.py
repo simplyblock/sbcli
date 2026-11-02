@@ -101,6 +101,7 @@ from simplyblock_core.controllers import (
     cg_colocation,
     migration_controller,
     migration_events,
+    qos_controller,
     snapshot_controller,
     tasks_controller,
     tasks_events,
@@ -125,6 +126,7 @@ from simplyblock_core.rpc_client import (
     RPCErrorCode,
     RPCException,
     RPCRemoteError,
+    request_reached_remote,
 )
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.utils import convert_size
@@ -665,8 +667,15 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
         ]
         if not ips:
             ips = [ip] if ip else []
+        # 'ip'/'ips' are what peers connect to; 'listen_ips' is what the node's
+        # target binds, which differs on the pod network (IFace.listen_address).
+        listen_ips = [
+            nic.listen_address
+            for nic in (node.data_nics or [])
+            if nic.ip4_address and nic.trtype and nic.trtype.lower() == fabric
+        ] or list(ips)
         return {
-            'node': node, 'rpc': rpc, 'ip': ip, 'ips': ips, 'trtype': trtype,
+            'node': node, 'rpc': rpc, 'ip': ip, 'ips': ips, 'listen_ips': listen_ips, 'trtype': trtype,
             'port': node.get_lvol_subsys_port(lvstore),
             'node_id': node.get_id(),
         }
@@ -766,7 +775,7 @@ def _ensure_nvmf_state_on_node(migration, lvol, nqn, path, label, owns_subsystem
             max_namespaces=lvol.max_namespace_per_subsys)
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, path['node'], rpc)
-        for _ip in path['ips']:
+        for _ip in path['listen_ips']:
             rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
                                  ana_state="inaccessible")
         ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
@@ -787,7 +796,7 @@ def _ensure_nvmf_state_on_node(migration, lvol, nqn, path, label, owns_subsystem
         (ls.get('address', {}).get('traddr'), str(ls.get('address', {}).get('trsvcid')))
         for ls in listeners
     }
-    for _ip in path['ips']:
+    for _ip in path['listen_ips']:
         if (_ip, str(path['port'])) not in listener_addrs:
             logger.warning(
                 f"_ensure_nvmf_state_on_node: listener {_ip}:{path['port']} "
@@ -984,7 +993,10 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     snap_lvol = snap.lvol
     _ndcs = snap_lvol.ndcs if snap_lvol else 0
     _npcs = snap_lvol.npcs if snap_lvol else 0
-    _priority_class = snap_lvol.lvol_priority_class if snap_lvol else 0
+    # wire value (see qos_controller.wire_priority_class); the primary create
+    # below passes none, so the peers' registration is all that carries it
+    _priority_class = (qos_controller.wire_priority_class(
+        tgt_node.cluster_id, snap_lvol.lvol_priority_class) if snap_lvol else 0)
     # Step 1: create target lvol on primary, or reuse if already owned by this migration.
     # Pre-cleanup skips deletion of owned bdevs so we can reuse them here on retry
     # rather than paying the create cost again.
@@ -2070,7 +2082,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
             f"{reason}; reverting SRC secondary/tertiary to non_optimized: "
             f"lvol={lvol.uuid}")
         for p in src_replica_paths:
-            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+            _flip_all(p['rpc'], p['listen_ips'], p['port'], p['trtype'],
                       "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
 
     # --- Crash recovery: Done handler was interrupted mid-run ---
@@ -2252,7 +2264,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
                 f"[IO-FREEZE] {_now_ms()} setting SRC secondary/tertiary "
                 f"inaccessible pre-final-migration: lvol={lvol.uuid}")
             for p in src_replica_paths:
-                _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                _flip_all(p['rpc'], p['listen_ips'], p['port'], p['trtype'],
                           "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
 
         # Step 5: start final migration — synchronous: blocks until SPDK completes
@@ -2261,21 +2273,34 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
             f"[IO-FREEZE] {_now_ms()} bdev_lvol_final_migration starting: "
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
         try:
-            ret = src_rpc.bdev_lvol_transfer_final_step(
-                src_lvol_composite, tgt_map_id, tgt_snap_composite,
-                constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
+            try:
+                ret = src_rpc.bdev_lvol_transfer_final_step(
+                    src_lvol_composite, tgt_map_id, tgt_snap_composite,
+                    constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
+            except RPCException as e:
+                # Read timeout or SPDK error (e.g. "File exists" = already in
+                # progress): SPDK may have completed the migration while the
+                # RPC failed. _request raises on every failure, so this is
+                # where transfer_stat must be consulted -- a falsy-ret check
+                # alone never sees it, and reverting a migration that already
+                # moved IO to the target serves stale reads off the source
+                # replicas and, once retries run out, deletes the target
+                # (SFAM-2834). "No process" proves completion only if the
+                # final step reached SPDK at all.
+                logger.warning(f"bdev_lvol_transfer_final_step raised for {src_lvol_composite}: {e}")
+                ret = None
+                reached = request_reached_remote(e)
+            else:
+                reached = True
             if not ret:
-                # Falsy, not just None: a malformed-but-200 body (a target
-                # restart mid-RPC) already raises RPCProtocolError, caught
-                # below -- this covers a well-formed but empty/falsy result.
-                # Connection timeout or SPDK error (e.g. "File exists" = already in
-                # progress). SPDK may have completed the migration while the RPC
-                # connection dropped. Check transfer_stat before treating this as
-                # a hard failure. This call can itself raise (source still
-                # unreachable) — kept inside this same try so that case is
-                # reverted below like any other failure of this attempt.
+                # Falsy, not just None: a well-formed but empty/falsy result.
+                # This call can itself raise (source still unreachable) —
+                # kept inside this same try so that case is reverted below
+                # like any other failure of this attempt.
                 stat = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
                 state = (stat or {}).get('transfer_state') if stat is not None else None
+                if state == 'No process' and not reached:
+                    state = None
             else:
                 # The RPC can return normally (no exception) while still reporting
                 # transfer failure — transfer_state is one of "No process" |
@@ -2390,7 +2415,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         # Step 1 (no-overlap): TGT primary must be confirmed optimized before
         # making SRC inaccessible — otherwise clients lose all I/O paths.
         primary_tgt = tgt_paths[0]
-        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['listen_ips'], primary_tgt['port'],
                                    primary_tgt['trtype'], "optimized",
                                    f"TGT-{primary_tgt['node_id'][:8]}"):
             return False, False, (
@@ -2399,12 +2424,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
 
         # Secondary TGT paths best-effort — clients survive without them
         for tgt in tgt_paths[1:]:
-            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
+            _flip_all(tgt['rpc'], tgt['listen_ips'], tgt['port'], tgt['trtype'],
                       "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
         # Step 3 (no-overlap): all SRC paths → inaccessible
         for src in src_paths:
-            _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+            _flip_all(src['rpc'], src['listen_ips'], src['port'], src['trtype'],
                       "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
         # Step 1: first non-overlap TGT → optimized. Must succeed before
@@ -2412,7 +2437,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         non_overlap_tgt = next(
             (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
         if non_overlap_tgt:
-            if not _flip_all_required(non_overlap_tgt['rpc'], non_overlap_tgt['ips'],
+            if not _flip_all_required(non_overlap_tgt['rpc'], non_overlap_tgt['listen_ips'],
                                        non_overlap_tgt['port'], non_overlap_tgt['trtype'],
                                        "optimized", f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
                 return False, False, (
@@ -2422,13 +2447,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         # Step 2: overlap SRC paths → inaccessible at SRC port
         for src in src_paths:
             if src['node_id'] in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                _flip_all(src['rpc'], src['listen_ips'], src['port'], src['trtype'],
                           "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
 
         # Step 3: non-overlap SRC paths → inaccessible
         for src in src_paths:
             if src['node_id'] not in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                _flip_all(src['rpc'], src['listen_ips'], src['port'], src['trtype'],
                           "inaccessible", f"SRC-{src['node_id'][:8]}")
 
         # Step 4: namespace swap on overlap TGT paths (SRC bdev → tgt_ns_bdev).
@@ -2442,13 +2467,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         # Step 5: all TGT paths → correct ANA state at TGT port.
         # Primary required; secondaries best-effort.
         primary_tgt = tgt_paths[0]
-        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['listen_ips'], primary_tgt['port'],
                                    primary_tgt['trtype'], "optimized",
                                    f"TGT-{primary_tgt['node_id'][:8]}"):
             return False, False, (
                 "ANA flip: TGT primary→optimized (step 5) failed after retries")
         for tgt in tgt_paths[1:]:
-            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
+            _flip_all(tgt['rpc'], tgt['listen_ips'], tgt['port'], tgt['trtype'],
                       "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
     # Step 6: overlap TGT paths → remove old SRC listener if port changed
@@ -2456,7 +2481,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         if tgt['node_id'] in overlap_ids:
             old_port = src_port_by_id.get(tgt['node_id'])
             if old_port and old_port != tgt['port']:
-                for _ip in tgt['ips']:
+                for _ip in tgt['listen_ips']:
                     try:
                         tgt['rpc'].listeners_del(nqn, tgt['trtype'], _ip, old_port)
                         logger.info(
@@ -4334,9 +4359,12 @@ def _attempt_migration_retry(task, migration):
             max_retries=migration.max_retries,
             deadline_seconds=migration.deadline_seconds,
             retry_on_failure=True)
-    except (ValueError, PreconditionError, MigrationConflictError) as e:
+    except (ValueError, PreconditionError, MigrationConflictError, RPCException) as e:
         # Preconditions still not met -- pace the next recheck the same way
-        # instead of retrying create_migration on every runner tick.
+        # instead of retrying create_migration on every runner tick. An RPC
+        # failure (create_lvol on the target, ...) raises rather than
+        # returning False, and must be paced the same way: it used to escape
+        # main() and crash-loop the runner on this same task.
         task.function_params['retry_on_failure_next_attempt_at'] = now + constants.LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC
         task.function_result = f"retry_on_failure: preconditions not met yet: {e}"
         task.status = JobSchedule.STATUS_SUSPENDED
@@ -4436,7 +4464,12 @@ def main():
                         logger.info(f"LVol-migration task {task.uuid} owned by another runner host; skipping")
                         continue
                     with tasks_controller.task_lease_heartbeat(task):
-                        task_runner(task)
+                        try:
+                            task_runner(task)
+                        except Exception:
+                            # One task's unexpected raise must not take the
+                            # runner (and every other migration) down.
+                            logger.exception(f"LVol-migration task {task.uuid} raised")
 
         time.sleep(3)
 

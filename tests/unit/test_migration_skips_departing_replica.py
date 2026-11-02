@@ -72,7 +72,7 @@ class TestOneRuleForBothSides(unittest.TestCase):
             self.assertNotIn("DEPARTING_STATUSES:", body.split('"""')[-1], fn.__name__)
         for fn in (mc._target_replica_for_registration,):
             self.assertIn("replica_is_departing(", inspect.getsource(fn))
-        self.assertIn("if replica_is_departing(node):", inspect.getsource(mc.create_migration))
+        self.assertIn("if replica_is_departing(node):", inspect.getsource(mc._create_migration_impl))
 
 
 class TestRegistrationSkipsADepartingReplica(unittest.TestCase):
@@ -125,7 +125,7 @@ class TestTheFilterIsWiredIn(unittest.TestCase):
 
     def test_create_migration_filters_both_replicas(self):
         import inspect
-        src = inspect.getsource(mc.create_migration)
+        src = inspect.getsource(mc._create_migration_impl)
         self.assertIn("_usable_replica", src)
         self.assertIn("replica_is_departing(node)", src)  # the one shared rule
         self.assertIn("tgt_sec_node = _usable_replica(tgt_sec_node)", src)
@@ -135,7 +135,7 @@ class TestTheFilterIsWiredIn(unittest.TestCase):
         """Order matters: tgt_entries opens an rpc_client per replica, so a
         departing node must be gone before that list is assembled."""
         import inspect
-        src = inspect.getsource(mc.create_migration)
+        src = inspect.getsource(mc._create_migration_impl)
         self.assertLess(src.index("tgt_ter_node = _usable_replica(tgt_ter_node)"),
                         src.index("tgt_entries = ["))
 

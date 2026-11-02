@@ -698,15 +698,20 @@ Hosts connect over NVMe/TCP native multipath (iopolicy `numa`) with:
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| `--keep-alive-tmo` | 4 s | a silent path must be detected within the hold window (`hold_ms` 2500 < KATO) |
-| `--fast_io_fail_tmo` | 8 s | more than KATO + `hold_ms`: held IO is answered before the kernel fails it |
+| `--keep-alive-tmo` | 2 s | a frozen node keeps its TCP connections open, so its path is detected dead only by the keep-alive, 1-2 KATO after the last answer (campaign c8, F20: 7.1 s with KATO 4); KATO 2 bounds it to 2-4 s. A holding node keeps answering keep-alives, so its held paths are not affected |
+| `--fast_io_fail_tmo` | 8 s | more than KATO + `hold_ms` (2 + 2.5 s): held IO is answered before the kernel fails it |
 | `--ctrl-loss-tmo` | 3600 s | a fenced path is retried, not dropped |
 | `--reconnect-delay` | 2 s | |
 
 The CP generates these connect parameters for clusters with `two_node_arbitration`
-(`utils/nvme.py`; other clusters keep keep-alive 8 s). Even so, a silent path loss stalls IO for
-KATO plus up to one keep-alive interval (about 5 s measured) before multipath fails over; no
-setting brings that below KATO.
+(`utils/nvme.py`; other clusters keep keep-alive 8 s). A silent path loss still stalls IO for
+KATO plus up to one keep-alive interval before multipath fails over (2-4 s with KATO 2); no
+setting brings that below KATO. The client-path stall criterion of the campaign is KATO + 1 s =
+3 s. KATO 2 was chosen over 4 in campaign c8 (F20). Open gap: the CSI driver's
+`ConnectViaNVMe` (simplyblock-operator `csi-driver/internal/initiator/initiator.go`) passes only
+`-l`, `-c` and `-i` and its `LvolConnectResp` has no keep-alive or fast_io_fail field, so
+Kubernetes hosts run the kernel defaults instead of these values until the driver forwards
+`keep_alive_tmo` (`-k`) and `fast_io_fail_tmo` (`-F`).
 
 ## 10. Defaults
 

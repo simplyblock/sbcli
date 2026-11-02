@@ -139,17 +139,13 @@ def patched_rpc_router():
     :class:`ClusterSim` the test should populate."""
     from tests.integration.expansion_sim._rpc_sim import (
         ClusterSim,
-        FirewallClientSim,
         RpcRouter,
-        install_firewall_stub,
         install_rpc_router,
-        restore_firewall_stub,
         restore_rpc_router,
     )
 
     cluster_sim = ClusterSim()
     RpcRouter.set_active_cluster(cluster_sim)
-    FirewallClientSim.set_active_cluster(cluster_sim)
 
     # Modules that do `from simplyblock_core.rpc_client import RPCClient`.
     # Enumerated by `grep -l RPCClient simplyblock_core/**/*.py`. Excludes
@@ -169,17 +165,10 @@ def patched_rpc_router():
         "simplyblock_core.controllers.backup.device",
     ]
     saved_rpc = install_rpc_router(target_modules)
-    saved_fw = install_firewall_stub([
-        "simplyblock_core.storage_node_ops",
-        "simplyblock_core.controllers.lvol_controller",
-        "simplyblock_core.controllers.health_controller",
-    ])
     try:
         yield cluster_sim
     finally:
-        restore_firewall_stub(saved_fw)
         restore_rpc_router(saved_rpc)
-        FirewallClientSim.set_active_cluster(None)
         RpcRouter.set_active_cluster(None)
 
 

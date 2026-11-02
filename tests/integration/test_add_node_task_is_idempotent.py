@@ -36,7 +36,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 
 CLUSTER = "c1"
-NODE_ADDR = "worker-5.storage-node-api.simplyblock.svc.cluster.local:5000"
+NODE_ADDR = "worker-5.storage-node-api.simplyblock.svc:5000"
 
 
 @pytest.fixture()

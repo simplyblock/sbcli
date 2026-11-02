@@ -1,4 +1,3 @@
-import json
 import logging
 import threading
 import time
@@ -8,6 +7,7 @@ from simplyblock_core import constants, distr_controller, storage_node_ops, util
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
@@ -412,8 +412,16 @@ def probe_device_stack(device_obj, snode, rpc_client=None):
         subsys: list = []
 
         def _get_subsys():
-            subsys.extend(rpc_client.subsystem_get(device_obj.nvmf_nqn) or [])
-            return subsys
+            # subsystem_get returns the one subsystem as a dict (None when
+            # absent). Extending a list with that dict appended its KEYS, so
+            # the entry read below was a string, listener and namespace always
+            # looked missing, and no repair could ever complete (bf5
+            # 2026-10-29: device b09c1063 looped "still missing after repair:
+            # listener, namespace" with both in place).
+            entry = rpc_client.subsystem_get(device_obj.nvmf_nqn)
+            if entry:
+                subsys.append(entry)
+            return entry
 
         _safe("subsystem", _get_subsys)
         if subsys:
@@ -472,6 +480,18 @@ def device_repair(device_id, force=False):
     present, missing = probe_device_stack(device_obj, snode, rpc_client)
     logger.info("Device %s repair probe: present=%s missing=%s",
                 device_id, present, missing)
+
+    if not missing and device_obj.status == NVMeDevice.STATUS_REMOVED:
+        # REMOVED is local: SPDK unregistered the bdev (e.g. an alceml stuck-IO
+        # shutdown). An intact stack means an earlier attempt already rebuilt
+        # it, so the only step left is the one that attempt never reached.
+        # Without this the device stayed removed with a whole stack (bf5
+        # 2026-10-29, device b09c1063).
+        logger.info("Device %s is removed but its local stack is intact; "
+                    "setting online", device_id)
+        device_set_io_error(device_id, False)
+        device_set_online(device_id, cause=CAUSE_DEVICE_RESTART, connect_peers=True)
+        return True
 
     if not missing:
         # Intact locally. The unavailability is remote (consensus) and a
@@ -676,7 +696,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
                 device_obj.nvmf_ip = iface.ip4_address
                 break
     else:
@@ -1365,10 +1385,13 @@ def add_device(device_id, add_migration_task=True):
         return False
     dev_order = storage_node_ops.get_next_cluster_device_order(db_controller, snode.cluster_id)
     device_obj.cluster_device_order = dev_order
+    placement = storage_node_ops.scaled_placement_size(db_controller, snode.cluster_id, device_obj.size)
+    device_obj.placement_size = placement
     logger.info("Setting device online")
     device_obj.status = NVMeDevice.STATUS_ONLINE
-    def _apply_online(d, o=dev_order):
+    def _apply_online(d, o=dev_order, p=placement):
         d.cluster_device_order = o
+        d.placement_size = p
         d.status = NVMeDevice.STATUS_ONLINE
     _atomic_device_set(db_controller, snode.get_id(), device_id, _apply_online)
     device_events.device_create(device_obj)
@@ -1577,7 +1600,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     if iface.ip4_address:
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                         try:
-                            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+                            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
                         except RPCException as e:
                             logger.warning("Failed to create listener for %s on IP %s: %s",
                                            subsystem_nqn, iface.ip4_address, e)
@@ -1662,6 +1685,10 @@ def new_device_from_failed(device_id):
     new_device.uuid = str(uuid.uuid4())
     new_device.status = NVMeDevice.STATUS_NEW
     new_device.cluster_device_order = -1
+    # A new device enters the cluster map with a weight of its own, on the
+    # scale of the cluster's (possibly grown) devices.
+    new_device.placement_size = storage_node_ops.scaled_placement_size(
+        db_controller, device_node.cluster_id, new_device.size)
     new_device.deleted = False
     new_device.io_error = False
     new_device.retries_exhausted = False
@@ -1682,25 +1709,508 @@ def new_device_from_failed(device_id):
     return new_device.get_id()
 
 
-def get_device_health_info(device_id):
+#: Health-log fields, under the names SPDK's
+#: ``bdev_nvme_get_controller_health_info`` uses. The host-side readers (nvme-cli,
+#: smartctl) are mapped onto these where they report the same quantity, so a
+#: consumer reads one shape whatever the device is attached through.
+HEALTH_INFO_FIELDS = (
+    "model_number", "serial_number", "firmware_revision", "traddr",
+    "critical_warning", "temperature_celsius", "available_spare_percentage",
+    "available_spare_threshold_percentage", "percentage_used",
+    "data_units_read", "data_units_written", "host_read_commands",
+    "host_write_commands", "controller_busy_time", "power_cycles",
+    "power_on_hours", "unsafe_shutdowns", "media_errors", "num_err_log_entries",
+    "warning_temperature_time_minutes",
+    "critical_composite_temperature_time_minutes",
+)
+
+HEALTH_SOURCE_SPDK = "spdk"
+HEALTH_SOURCE_NVME_CLI = "nvme-cli"
+HEALTH_SOURCE_SMARTCTL = "smartctl"
+
+# NVMe health-log field (SPDK name) -> the name nvme-cli's `smart-log -o json`
+# gives it. Temperature is handled separately: NVMe reports it in Kelvin.
+_NVME_CLI_KEYS = {
+    "critical_warning": "critical_warning",
+    "available_spare_percentage": "avail_spare",
+    "available_spare_threshold_percentage": "spare_thresh",
+    "percentage_used": "percent_used",
+    "data_units_read": "data_units_read",
+    "data_units_written": "data_units_written",
+    "host_read_commands": "host_read_commands",
+    "host_write_commands": "host_write_commands",
+    "controller_busy_time": "controller_busy_time",
+    "power_cycles": "power_cycles",
+    "power_on_hours": "power_on_hours",
+    "unsafe_shutdowns": "unsafe_shutdowns",
+    "media_errors": "media_errors",
+    "num_err_log_entries": "num_err_log_entries",
+    "warning_temperature_time_minutes": "warning_temp_time",
+    "critical_composite_temperature_time_minutes": "critical_comp_time",
+}
+# The same log as smartctl's `nvme_smart_health_information_log` names it.
+_SMARTCTL_NVME_KEYS = dict(
+    _NVME_CLI_KEYS,
+    available_spare_percentage="available_spare",
+    available_spare_threshold_percentage="available_spare_threshold",
+    percentage_used="percentage_used",
+    host_read_commands="host_reads",
+    host_write_commands="host_writes",
+)
+
+#: ATA SMART attribute ids: Reallocated_Sector_Ct and Current_Pending_Sector.
+_ATA_REALLOCATED_SECTORS = 5
+_ATA_PENDING_SECTORS = 197
+
+#: Kelvin offset of the NVMe composite temperature.
+_KELVIN_OFFSET = 273
+
+
+def _as_int(value):
+    """An integer health-log value, or None when the tool did not give one.
+
+    Newer nvme-cli releases wrap some fields as ``{"value": n, ...}`` and print
+    128-bit counters as decimal strings; both are accepted.
+    """
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        digits = value.replace(",", "").strip()
+        if digits.isdigit():
+            return int(digits)
+    return None
+
+
+def _empty_health_info(device, supported, source):
+    info: dict = {field: None for field in HEALTH_INFO_FIELDS}
+    # Identity is known from the device record whatever the source says.
+    info["model_number"] = device.model_id or None
+    info["serial_number"] = device.serial_number or None
+    info.update({
+        "supported": supported,
+        "source": source,
+        "smart_passed": None,
+        "reallocated_sectors": None,
+        "pending_sectors": None,
+    })
+    return info
+
+
+def _map_nvme_log(info, log, keys):
+    for field, key in keys.items():
+        info[field] = _as_int(log.get(key))
+    kelvin = _as_int(log.get("temperature"))
+    if kelvin is not None:
+        info["temperature_celsius"] = kelvin - _KELVIN_OFFSET
+
+
+def _map_smartctl(info, data):
+    info["model_number"] = data.get("model_name") or info["model_number"]
+    info["serial_number"] = data.get("serial_number") or info["serial_number"]
+    info["firmware_revision"] = data.get("firmware_version") or None
+
+    nvme_log = data.get("nvme_smart_health_information_log")
+    if isinstance(nvme_log, dict):
+        # An NVMe device read through smartctl: its verdict is
+        # critical_warning, as for every other NVMe source, so smart_passed
+        # stays None.
+        _map_nvme_log(info, nvme_log, _SMARTCTL_NVME_KEYS)
+        return
+
+    passed = (data.get("smart_status") or {}).get("passed")
+    info["smart_passed"] = passed if isinstance(passed, bool) else None
+    info["temperature_celsius"] = _as_int((data.get("temperature") or {}).get("current"))
+    info["power_on_hours"] = _as_int((data.get("power_on_time") or {}).get("hours"))
+    info["power_cycles"] = _as_int(data.get("power_cycle_count"))
+    for attr in (data.get("ata_smart_attributes") or {}).get("table") or []:
+        raw = _as_int((attr.get("raw") or {}).get("value"))
+        if attr.get("id") == _ATA_REALLOCATED_SECTORS:
+            info["reallocated_sectors"] = raw
+        elif attr.get("id") == _ATA_PENDING_SECTORS:
+            info["pending_sectors"] = raw
+
+
+def map_host_smart(device, result):
+    """Map the storage node agent's ``device_smart`` result onto the SPDK
+    health-info shape (see ``HEALTH_INFO_FIELDS``)."""
+    if not result or not result.get("supported"):
+        return _empty_health_info(device, False, "")
+    source = result.get("source") or ""
+    data = result.get("data") or {}
+    info = _empty_health_info(device, True, source)
+    if source == HEALTH_SOURCE_NVME_CLI:
+        _map_nvme_log(info, data, _NVME_CLI_KEYS)
+    elif source == HEALTH_SOURCE_SMARTCTL:
+        _map_smartctl(info, data)
+    else:
+        raise ValueError(f"unknown health-log source {source!r} from storage node")
+    return info
+
+
+def get_device_health_info(device_id) -> dict:
+    """The device's health log, in one shape for every attachment type.
+
+    SPDK-attached NVMe devices are read with
+    ``bdev_nvme_get_controller_health_info``. AIO (lblk) devices are invisible
+    to that RPC, so the storage node agent reads them from the host instead
+    (nvme-cli for kernel NVMe namespaces, smartctl otherwise). A device that
+    has no health log at all is ``supported: False`` -- a property of the
+    device, not an error. An unreachable node or agent raises.
+
+    Raises KeyError for an unknown device or node.
+    """
     db_controller = DBController()
-    try:
-        device = db_controller.get_storage_device_by_id(device_id)
-        snode = db_controller.get_storage_node_by_id(device.node_id)
-    except KeyError as e:
-        logger.error(e)
-        return False
+    device = db_controller.get_storage_device_by_id(device_id)
+    snode = db_controller.get_storage_node_by_id(device.node_id)
 
     if device.bdev_type == "aio":
-        # SMART is not reachable through SPDK for AIO bdevs; host-side
-        # smartctl via the node agent is a possible follow-up.
-        return json.dumps({
-            "bdev_type": "aio",
-            "device_path": device.device_path,
-            "smart": None,
-            "message": "SMART data is not available through SPDK for AIO devices",
-        }, indent=2)
+        path = device.device_path or device.by_id_path
+        if not path:
+            return _empty_health_info(device, False, "")
+        result, error = snode.client(timeout=30, retry=1).device_smart(path)
+        if error:
+            raise ValueError(f"storage node failed to read the health log of {path}: {error}")
+        return map_host_smart(device, result)
 
     rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)
-    return json.dumps(ret, indent=2)
+    if not isinstance(ret, dict):
+        raise ValueError(
+            f"no health info for controller {device.nvme_controller}: {ret!r}")
+    info = _empty_health_info(device, True, HEALTH_SOURCE_SPDK)
+    info.update(ret)
+    return info
+
+
+def set_device_health_assessment(node_id, device_id, assessment: dict):
+    """Store an externally computed health assessment on the device, verbatim.
+
+    Devices live inside their node's record, so the write goes through
+    ``atomic_update`` on the node (``_atomic_device_set``) and touches only
+    this device's ``health_assessment``: an assessment arriving every few
+    minutes must never clobber a concurrent status change.
+
+    Raises KeyError when the node or the device on it does not exist.
+    """
+    db_controller = DBController()
+    found = []
+
+    def _apply(dev):
+        # Replayed on write conflict: record the find, mutate, nothing else.
+        found.append(True)
+        dev.health_assessment = dict(assessment)
+        return True
+
+    fresh = _atomic_device_set(db_controller, node_id, device_id, _apply)
+    if fresh is None or not found:
+        raise KeyError(f"device {device_id} not found on node {node_id}")
+    return fresh
+
+
+# ---------------------------------------------------------------------------
+# Online growth of lblk devices (a LUN grown on its storage array).
+#
+# The base bdev of an lblk device is an SPDK AIO bdev over a kernel block
+# device, and alceml sits directly on it. alceml can swap its backing bdev
+# for a larger one without losing state: resize_begin holds new I/O, drains
+# pending I/O and closes the backing bdev; resize_end reopens it and takes
+# its new size, so the pages beyond the old end become allocatable. Layers
+# above alceml see a fixed virtual size and need no change.
+#
+# Growing a device does not change its cluster-map weight. The weight is
+# derived from NVMeDevice.placement_size, the size the device had when it was
+# placed, and distrib's map spec (message_format_rpcs__distrib__v5.txt,
+# weight_int) asks for weights never to change, because a change re-places
+# 50% or more of the data. Weights only matter relative to each other, so when
+# every data device grows by the same factor (the normal case: equal LUNs grown
+# together on the array), nothing has to change and nothing moves.
+#
+# After an uneven growth the frozen weights no longer match the capacities,
+# and the added capacity is not fully usable. grow_cluster_devices then sets
+# every weight to the device's current size, pushes the new map to all nodes,
+# and starts the cluster rebalance (rebalance_after_growth). That re-places a
+# large part of the data, in the background and within the migration share of
+# the QoS budget. Correctness does not depend on the static placement: distrib
+# finds data by its recorded location, including locations that were correct
+# under an earlier map (alg_remapped_ranges.hpp, get_location_latest, "STALE"),
+# which is the same mechanism a device addition relies on.
+#
+# A device that enters the cluster later gets a weight on the same scale as the
+# grown devices (storage_node_ops.scaled_placement_size), so a uniform growth
+# followed by an expansion does not overfill the new device.
+# ---------------------------------------------------------------------------
+
+#: Timeout for alceml_bdev_backend_resize_begin, which answers only after
+#: the pending I/O of the device has drained.
+RESIZE_RPC_TIMEOUT_SEC = 120
+#: Attempts to reopen the backing bdev before the device is given up.
+RESIZE_END_ATTEMPTS = 3
+
+
+def cluster_growth_uniformity(cluster_id):
+    """Whether all data devices of a cluster have grown by the same factor
+    relative to their placement size. Returns ``(uniform, min_ratio,
+    max_ratio)``; journal, new, and failed devices are ignored."""
+    return storage_node_ops.cluster_growth_ratios(DBController(), cluster_id)
+
+
+def _check_resizable(db_controller, dev, snode):
+    """Raise ValueError when ``dev`` cannot be grown online right now."""
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.device_mode != constants.DEVICE_MODE_LBLK or dev.bdev_type != "aio":
+        raise ValueError("Online resizing is only supported for Linux block devices (lblk device mode)")
+    if dev.status != NVMeDevice.STATUS_ONLINE:
+        raise ValueError(f"Device must be online, current status: {dev.status}")
+    if snode.status != StorageNode.STATUS_ONLINE:
+        raise ValueError(f"Storage node must be online, current status: {snode.status}")
+    if dev.is_partition:
+        raise ValueError("Partitions cannot be resized online")
+    if dev.testing_bdev or dev.hang_bdev:
+        raise ValueError("Device runs with a testing or hang bdev under alceml, remove it first")
+    if not dev.alceml_bdev or not dev.nvme_bdev:
+        raise ValueError("Device has no alceml or AIO bdev recorded")
+    if tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev.get_id()):
+        raise ValueError("A restart task is active for the device")
+
+
+def _reopen_after_resize(rpc_client, dev):
+    """Leave alceml's resize state with the backing bdev reopened. Returns
+    True on success. On persistent failure alceml is told to fail its I/O,
+    which hands the device to the regular failure handling."""
+    for attempt in range(1, RESIZE_END_ATTEMPTS + 1):
+        try:
+            rpc_client.alceml_bdev_backend_resize_end(
+                dev.alceml_bdev, b_fail=False, cntr_path="",
+                request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+            return True
+        except RPCException as e:
+            logger.error(f"alceml resize_end for {dev.alceml_bdev}, attempt {attempt}: {e}")
+            time.sleep(1)
+    try:
+        rpc_client.alceml_bdev_backend_resize_end(
+            dev.alceml_bdev, b_fail=True, cntr_path="",
+            request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+    except RPCException as e:
+        logger.error(f"alceml resize_end(b_fail) for {dev.alceml_bdev}: {e}")
+    return False
+
+
+def _resize_failed(device_id, dev, msg, set_unavailable):
+    if set_unavailable:
+        device_set_unavailable(device_id, cause=CAUSE_LOCAL_FAILURE)
+        msg += "; the backing bdev could not be reopened, the device was set unavailable"
+    else:
+        msg += "; the device is unchanged"
+    device_events.device_resize_failed(dev, f"Device growth failed: {msg}")
+    return ValueError(msg)
+
+
+def resize_device(device_id):
+    """Grow an lblk device online to the size its block device now has.
+
+    The kernel is made to re-read the size first (SCSI or NVMe rescan on the
+    storage node's host). A smaller size is refused. Returns a dict with
+    ``device_id``, ``old_size``, ``new_size``, ``placement_size``,
+    ``resized``, and the cluster's ``uniform`` growth flag with a
+    ``warning`` when it is not uniform. Raises ValueError on refusal or
+    failure; the message says whether the device is unchanged."""
+    db_controller = DBController()
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        raise ValueError(f"Device not found: {device_id}") from e
+    _check_resizable(db_controller, dev, snode)
+
+    path = dev.by_id_path or dev.device_path
+    if not path:
+        raise ValueError("No block device path known for the device")
+    result, err = snode.client(timeout=60, retry=1).rescan_block_device(path)
+    if err or not result:
+        raise ValueError(f"Rescan of {path} failed: {err}")
+    new_size = int(result["size"])
+    old_size = dev.size
+
+    if new_size < old_size:
+        raise ValueError(
+            f"The block device shrank from {old_size} to {new_size} bytes. Shrinking is not "
+            f"supported and destroys data: restore the LUN to at least {old_size} bytes")
+    if new_size == old_size:
+        uniform, _, _ = cluster_growth_uniformity(snode.cluster_id)
+        return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
+                "placement_size": dev.weight_size(), "resized": False, "uniform": uniform,
+                "warning": ""}
+
+    logger.info(f"Growing device {device_id} from {old_size} to {new_size} bytes")
+    rpc_client = snode.rpc_client()
+    try:
+        rpc_client.alceml_bdev_backend_resize_begin(
+            dev.alceml_bdev, request_timeout=RESIZE_RPC_TIMEOUT_SEC)
+    except RPCException as e:
+        # A timeout may leave alceml in its resize state anyway: reopen.
+        reopened = _reopen_after_resize(rpc_client, dev)
+        raise _resize_failed(device_id, dev, f"alceml resize_begin failed: {e}", not reopened) from e
+
+    rescan_error = None
+    try:
+        rpc_client.bdev_aio_rescan(dev.nvme_bdev)
+    except RPCException as e:
+        rescan_error = e
+
+    if not _reopen_after_resize(rpc_client, dev):
+        raise _resize_failed(device_id, dev, "alceml resize_end failed", True)
+    if rescan_error is not None:
+        raise _resize_failed(device_id, dev, f"AIO rescan failed: {rescan_error}", False)
+
+    def _apply(d, n=new_size):
+        if d.placement_size <= 0:
+            d.placement_size = d.size
+        d.size = n
+    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
+    fresh = db_controller.get_storage_device_by_id(device_id)
+    device_events.device_resized(fresh, old_size, new_size)
+
+    uniform, lo, hi = cluster_growth_uniformity(snode.cluster_id)
+    warning = ""
+    if not uniform:
+        warning = (
+            f"The data devices of the cluster have grown unevenly (growth factors {lo:.2f} to {hi:.2f}). "
+            "Placement keeps filling every device in proportion to its original size, so the added "
+            "capacity is only fully usable once all data devices have grown by the same factor, or "
+            "after cluster grow-devices has updated the weights and rebalanced the cluster.")
+        logger.warning(warning)
+    return {"device_id": device_id, "old_size": old_size, "new_size": new_size,
+            "placement_size": fresh.weight_size(), "resized": True, "uniform": uniform,
+            "warning": warning}
+
+
+#: Tasks that move data across the cluster map or change it. New weights are
+#: never pushed while one of them is open.
+_PLACEMENT_TASKS = (
+    JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG,
+    JobSchedule.FN_BALANCING_AFTER_NODE_RESTART, JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+    JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION, JobSchedule.FN_CLUSTER_EXPAND,
+    JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG,
+)
+
+
+def _reweight_blocker(db_controller, cluster_id):
+    """Why new weights cannot be pushed now, or "" when they can. The new map
+    must reach every node before any data moves: a migration that runs while
+    nodes disagree about placement can lose writes."""
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        return f"the cluster is {cluster.status}, not active"
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            return f"storage node {node.get_id()} is {node.status}"
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW,
+                              NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+                continue
+            if dev.status != NVMeDevice.STATUS_ONLINE:
+                return f"device {dev.get_id()} is {dev.status}"
+    for task in db_controller.get_job_tasks(cluster_id):
+        if (task.function_name in _PLACEMENT_TASKS and task.status != JobSchedule.STATUS_DONE
+                and not task.canceled):
+            return f"task {task.uuid} ({task.function_name}) is still open"
+    return ""
+
+
+def rebalance_after_growth(cluster_id):
+    """Set the cluster-map weight of every online data device to its current
+    size, push the new map to every node, and start the cluster rebalance.
+
+    Refused (nothing changed) unless the cluster is active, every node and
+    data device is online, and no migration or expansion is open. If a map
+    push fails, the new weights stay recorded with ``reweight_pending`` and
+    the rebalance is not started; the next call pushes again. Returns
+    ``{"weights_updated": bool, "started": bool, "reason": str}``:
+    ``weights_updated`` once every node runs on the new weights, ``started``
+    once the rebalance is queued, ``reason`` when either is missing."""
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    blocker = _reweight_blocker(db_controller, cluster_id)
+    if blocker:
+        if cluster.reweight_pending:
+            return _rebalance_outcome(False, False,
+                                      f"New weights recorded, cluster map not pushed yet: {blocker}")
+        return _rebalance_outcome(False, False, f"Weights not updated: {blocker}")
+
+    if not cluster.reweight_pending:
+        db_controller.atomic_update(cluster, lambda c: setattr(c, "reweight_pending", True))
+
+        def _apply(n):
+            for d in n.nvme_devices:
+                if d.status == NVMeDevice.STATUS_ONLINE:
+                    d.placement_size = d.size
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status != StorageNode.STATUS_REMOVED:
+                db_controller.atomic_update(node, _apply)
+        logger.info(f"Cluster {cluster_id}: device weights set to the current device sizes")
+
+    nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+             if n.status == StorageNode.STATUS_ONLINE]
+    failed = [n.get_id() for n in nodes if not distr_controller.send_cluster_map_to_node(n)]
+    if failed:
+        return _rebalance_outcome(
+            False, False, f"New weights recorded, but the cluster map push failed on {', '.join(failed)}; "
+                          "run cluster grow-devices again to retry")
+
+    db_controller.atomic_update(db_controller.get_cluster_by_id(cluster_id),
+                                lambda c: setattr(c, "reweight_pending", False))
+    # The same rebalance as POST /clusters/{id}/rebalance: one expansion
+    # migration per distrib, under a balancing master task.
+    queued = bool(nodes) and tasks_controller.add_device_mig_task_for_node(nodes[0].get_id())
+    device_events.devices_reweighted(cluster_id, queued)
+    if not queued:
+        return _rebalance_outcome(
+            True, False, "Weights updated, but no rebalance was queued (no volume store holds data, or a "
+                         "node removal is recorded); start it with the cluster rebalance API when needed")
+    return _rebalance_outcome(True, True, "")
+
+
+def _rebalance_outcome(weights_updated, started, reason):
+    return {"weights_updated": weights_updated, "started": started, "reason": reason}
+
+
+def grow_cluster_devices(cluster_id, rebalance=True):
+    """Grow every online lblk data device of a cluster to the size of its
+    block device, one device at a time. Devices whose size did not change
+    are left alone; a device that fails does not stop the others.
+
+    When the devices have grown unevenly and ``rebalance`` is set, the
+    weights are updated and the cluster is rebalanced (rebalance_after_growth),
+    unless a device failed to grow. Returns ``{"devices": [...], "errors":
+    {...}, "uniform": bool, "rebalance": {...} | None}`` (see
+    rebalance_after_growth for the rebalance dict);
+    ``uniform`` describes the growth before any weight change."""
+    db_controller = DBController()
+    results, errors = [], {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.is_secondary_node:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status != NVMeDevice.STATUS_ONLINE or dev.bdev_type != "aio":
+                continue
+            try:
+                results.append(resize_device(dev.get_id()))
+            except ValueError as e:
+                errors[dev.get_id()] = str(e)
+    uniform, _, _ = cluster_growth_uniformity(cluster_id)
+    outcome = None
+    pending = db_controller.get_cluster_by_id(cluster_id).reweight_pending
+    if rebalance and (not uniform or pending):
+        if errors and not pending:
+            outcome = _rebalance_outcome(
+                False, False, "Weights not updated: some devices failed to grow; fix them and run "
+                              "cluster grow-devices again")
+        else:
+            outcome = rebalance_after_growth(cluster_id)
+    return {"devices": results, "errors": errors, "uniform": uniform, "rebalance": outcome}

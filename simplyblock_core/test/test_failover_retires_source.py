@@ -264,3 +264,78 @@ def test_repair_refuses_retired_sources(monkeypatch):
     ok, err = ops.repair_lvol_registration_on_non_leader(lvol, _node(), 0)
     assert ok is False
     assert "retired source" in err
+
+
+def _stack_spy(bucket):
+    """A _create_bdev_stack stand-in that records each is_primary it is called
+    with and reports success."""
+    def _stack(lv, snode, is_primary=True):
+        bucket.append(is_primary)
+        return True, ""
+    return _stack
+
+
+def _repair_lvol(monkeypatch, ops):
+    lvol = _lvol()
+    lvol.status = LVol.STATUS_ONLINE
+    lvol.from_source = True
+    lvol.lvs_name = "LVS_1"
+    lvol.lvol_bdev = "LVOL_97"
+    lvol.top_bdev = "LVS_1/LVOL_97"
+    lvol.allowed_hosts = []
+    monkeypatch.setattr(ops, "get_restart_phase", lambda *a: "")
+    db = MagicMock()
+    db.get_lvol_by_id.return_value = lvol
+    monkeypatch.setattr(ops, "DBController", lambda: db)
+    return lvol
+
+
+def test_repair_creates_the_replica_bdev_when_missing(monkeypatch):
+    """Regression: 2026-10-10-non-leader-register-without-bdev (finding #30).
+
+    A non-leader that was only RPC-unresponsive while fabric-connected
+    (FTT-tolerated during a create, not restarting) never re-activates, so an
+    lvol created in that window has no bdev there. The deferred register then
+    loops forever on nvmf_subsystem_add_ns -> No such device, wedging that
+    volume's replication for the rest of the run. The repair must register the
+    replica blob (bdev_lvol_register, is_primary=False -- the leader's blobid,
+    not a fresh blob) before the fabric registration, not just add the
+    namespace."""
+    from simplyblock_core import storage_node_ops as ops
+
+    lvol = _repair_lvol(monkeypatch, ops)
+    node = _node()
+    rpc = node.rpc_client.return_value
+    rpc.subsystem_get.return_value = {"nqn": lvol.nqn}      # subsystem present
+    rpc.bdev_get.return_value = None                        # bdev MISSING here
+
+    created: list = []
+    monkeypatch.setattr(lc, "_create_bdev_stack",
+                        _stack_spy(created))
+    monkeypatch.setattr(ops, "add_lvol_thread", lambda lv, snode, **kw: (True, "registered"))
+
+    ok, err = ops.repair_lvol_registration_on_non_leader(lvol, node, 1)
+    assert ok is True, err
+    assert created == [False], \
+        "repair must register the replica bdev (is_primary=False) when it is missing"
+
+
+def test_repair_does_not_recreate_a_present_bdev(monkeypatch):
+    """The create-if-missing guard must not re-create a bdev that is already
+    there (the restart/activation case): only register it on the fabric."""
+    from simplyblock_core import storage_node_ops as ops
+
+    lvol = _repair_lvol(monkeypatch, ops)
+    node = _node()
+    rpc = node.rpc_client.return_value
+    rpc.subsystem_get.return_value = {"nqn": lvol.nqn}
+    rpc.bdev_get.return_value = {"name": lvol.top_bdev}     # bdev already present
+
+    created: list = []
+    monkeypatch.setattr(lc, "_create_bdev_stack",
+                        _stack_spy(created))
+    monkeypatch.setattr(ops, "add_lvol_thread", lambda lv, snode, **kw: (True, "registered"))
+
+    ok, err = ops.repair_lvol_registration_on_non_leader(lvol, node, 1)
+    assert ok is True, err
+    assert created == [], "a present bdev must not be re-created"

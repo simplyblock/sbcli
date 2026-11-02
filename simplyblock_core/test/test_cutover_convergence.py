@@ -420,7 +420,7 @@ class TestRoundOneIsMeasured(unittest.TestCase):
         import inspect
 
         from simplyblock_core.controllers import lvol_controller as lc
-        src = inspect.getsource(lc.replication_commit)
+        src = inspect.getsource(lc.replication_commit) + inspect.getsource(lc._commit_locked)
         self.assertIn('"shrink_round": 0', src)
         self.assertNotIn('"shrink_snap_id"', src)
 

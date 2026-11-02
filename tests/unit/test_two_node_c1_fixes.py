@@ -340,6 +340,24 @@ def test_keep_alive_for_arbitrated_clusters(arbitrated, expected):
     assert entry.keep_alive_tmo == expected
     assert f"--keep-alive-tmo={expected}" in entry.connect
     if arbitrated:
-        assert expected == 4
-        assert entry.fast_io_fail_tmo == 8 and entry.ctrl_loss_tmo == 3600
-        assert entry.reconnect_delay == 2
+        # campaign c8, F20: a frozen node's path is detected only by the keep-alive
+        assert expected == 2
+        # held IO must be answered before the kernel fails it: fast_io_fail > KATO + hold
+        assert entry.fast_io_fail_tmo > expected + constants.TWO_NODE_HOLD_MS / 1000.0
+    else:
+        # regular clusters keep their keep-alive (shared path unchanged)
+        assert expected == 8
+    assert entry.fast_io_fail_tmo == 8 and entry.ctrl_loss_tmo == 3600
+    assert entry.reconnect_delay == 2
+
+
+@pytest.mark.parametrize("arbitrated", [True, False])
+def test_connect_entry_tells_the_csi_driver_it_is_two_node(arbitrated):
+    """docs/design/two-node-kubernetes-fencing.md: the CSI driver forwards the
+    keep-alive and fast_io_fail values only for two-node clusters, so every
+    other cluster's hosts keep their current connect settings."""
+    entry = build_nvme_connect_entry(transport="tcp", ip="10.0.0.1", port=4420, nqn="nqn.x",
+                                     ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+                                     cluster=_Cluster(arbitrated), host_entry=None, host_nqn=None)
+    assert entry.two_node is arbitrated
+    assert entry.model_dump(by_alias=True)["two-node"] is arbitrated

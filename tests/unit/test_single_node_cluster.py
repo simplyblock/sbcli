@@ -172,7 +172,7 @@ class TestNoParityClusterStatus(unittest.TestCase):
     on affected_nodes == 0, i.e. while perfectly healthy. Live 1-node
     cluster 2026-08-14 sat in DEGRADED with every device online."""
 
-    def _status(self, nodes, ndcs, npcs):
+    def _status(self, nodes, ndcs, npcs, migration_ft_impact=None):
         from simplyblock_core.services import storage_node_monitor as mod
         cluster = MagicMock(spec=Cluster)
         cluster.uuid = "cluster-1"
@@ -183,6 +183,7 @@ class TestNoParityClusterStatus(unittest.TestCase):
         cluster.strict_node_anti_affinity = False
         cluster.enable_failure_domain = False
         cluster.suspend_drain_complete = False
+        cluster.migration_ft_impact = migration_ft_impact or {}
         cluster.get_id = MagicMock(return_value="cluster-1")
         with patch.object(mod, "db") as mock_db:
             mock_db.get_cluster_by_id.return_value = cluster
@@ -228,6 +229,14 @@ class TestNoParityClusterStatus(unittest.TestCase):
         nodes = [self._mock_node("node-1"), self._mock_node("node-2")]
         self.assertEqual(self._status(nodes, ndcs=1, npcs=0),
                          Cluster.STATUS_ACTIVE)
+
+    def test_migration_ft_impact_keeps_healthy_cluster_degraded(self):
+        """Migrations that ended with errors with every node online left pages
+        without full fault tolerance: DEGRADED, not ACTIVE."""
+        nodes = [self._mock_node("node-1"), self._mock_node("node-2")]
+        impact = {"node-1/distr-1": {"error": 10, "ft_impacted_pages": 3, "time": ""}}
+        self.assertEqual(self._status(nodes, ndcs=1, npcs=1, migration_ft_impact=impact),
+                         Cluster.STATUS_DEGRADED)
 
     def test_no_parity_with_a_failed_device_is_not_active(self):
         # k=0 tolerates nothing: an affected node must still leave ACTIVE.

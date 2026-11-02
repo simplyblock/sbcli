@@ -820,6 +820,30 @@ def _lineage_origin(lvol_id, reps):
     return origin, cluster
 
 
+def _is_superseded_failed_over_source(lvol_id, reps):
+    """True when *lvol_id* is the SOURCE of a failed-over relationship: a former
+    primary whose writes already moved to the peer's clone after an unplanned
+    failover.
+
+    Its volume still exists -- a re-protect deletes it only once the demote
+    completes, unlike a relocate, which deletes the demoted members up front -- so
+    it is still an open member of its group. But it no longer holds the group's
+    live data, so resolve_group must not let it keep the group marked active (#33):
+    counting it names the retired group for the window before deletion, and the
+    driver resolves a re-protect resync to the group's active end, so that resync
+    lands on the retired group instead of the live peer.
+
+    The discriminator is the relationship state, the same one
+    consistency_group_controller._members_are_superseded_source keys on for the
+    demote; *reps* is db.get_lvol_replication_objects()."""
+    for rep in reps:
+        if (rep.state == LVolReplication.STATE_FAILED_OVER
+                and rep.source_lvol is not None
+                and rep.source_lvol.get_id() == lvol_id):
+            return True
+    return False
+
+
 def resolve_group(group):
     """Where the data of consistency group *group* lives NOW, keyed the way
     PersistentVolumes keep it.
@@ -859,9 +883,17 @@ def resolve_group(group):
                 and v.status != LVol.STATUS_IN_DELETION]
 
     own, peer_own = open_members(group), open_members(peer)
-    active = group if own else (peer if peer_own else None)
-
     reps = db.get_lvol_replication_objects()
+    # The active group is the one holding LIVE data. A superseded failed-over
+    # source is still an open member until the demote deletes it, but its data has
+    # moved to the peer's clone, so it must not count toward "active" -- otherwise
+    # a re-protected old primary names itself active for the window before its
+    # members are deleted, and the driver's resync resolves to the retired group
+    # (#33). The full open sets still seed the member lineages below.
+    own_live = [v for v in own if not _is_superseded_failed_over_source(v.get_id(), reps)]
+    peer_live = [v for v in peer_own if not _is_superseded_failed_over_source(v.get_id(), reps)]
+    active = group if own_live else (peer if peer_live else None)
+
     candidates = {v.get_id(): v for v in own + peer_own}
     for rep in reps:
         for side in (rep.source_lvol, rep.target_lvol):
@@ -972,7 +1004,8 @@ def _failback_group(group, policy, peer=None):
                      "members to clone home", group.group_name, peer.group_name)
         return []
     try:
-        seq, pinned = _resolve_group_failback_generation(peer, peer_members)
+        seq, pinned = _resolve_group_failback_generation(
+            peer, peer_members, home_cluster_id=group.cluster_id)
     except ReplicationConfigError as e:
         logger.error("Fail-back of consistency group %s refused: %s",
                      group.group_name, e)
@@ -1004,7 +1037,7 @@ def _resolve_active_peer_group(group, policy):
     return db.get_consistency_group_by_name(peer_cluster_id, group.group_name)
 
 
-def _resolve_group_failback_generation(peer_group, peer_members):
+def _resolve_group_failback_generation(peer_group, peer_members, home_cluster_id=""):
     """The newest generation of *peer_group* every member has replicated home --
     the demote cut the peer shipped for fail-back.
 
@@ -1016,8 +1049,14 @@ def _resolve_group_failback_generation(peer_group, peer_members):
     fail-back's members are the failed-over targets, all settled, and all are what
     we clone home. Raises ReplicationConfigError when no generation is fully
     replicated home for every member yet (the demote cut is still shipping).
+
+    A copy counts only when it is ON *home_cluster_id* (when given): a copy
+    recorded elsewhere -- on the peer's own cluster, when its replication was
+    aimed at itself (#34) -- is not shipped home, however complete its task, and
+    cloning from it fails on the home node with "No such device".
     """
     member_ids = {m.get_id() for m in peer_members}
+    off_home = 0
     replicated = {
         task.function_params.get("snapshot_id")
         for task in db.get_job_tasks(peer_group.cluster_id)
@@ -1041,6 +1080,10 @@ def _resolve_group_failback_generation(peer_group, peer_members):
         if (target_copy.status == SnapShot.STATUS_IN_DELETION
                 or getattr(target_copy, "deleted", False)):
             continue
+        copy_cluster = getattr(target_copy, "cluster_id", "")
+        if home_cluster_id and copy_cluster and copy_cluster != home_cluster_id:
+            off_home += 1
+            continue
         by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
 
     for seq in sorted(by_seq, reverse=True):
@@ -1052,6 +1095,10 @@ def _resolve_group_failback_generation(peer_group, peer_members):
         best = max(by_seq)
         absent = sorted(member_ids - set(by_seq[best]))
         missing = f"; generation {best} lacks {', '.join(absent)}"
+    if off_home:
+        missing += (f"; {off_home} replicated cop{'y is' if off_home == 1 else 'ies are'} "
+                    f"not on the home cluster {home_cluster_id} -- the peer's replication "
+                    "is not aimed home (#34)")
     raise ReplicationConfigError(
         f"No generation of consistency group {peer_group.group_name} is fully "
         f"replicated home for all {len(member_ids)} member(s); the demote cut "

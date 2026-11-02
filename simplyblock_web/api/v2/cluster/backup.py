@@ -233,6 +233,13 @@ def _validate_attachment_target(target_type: str, target_id: str, cluster: Clust
             raise HTTPException(404, f'Pool {target_id} not found')
     elif target_type == "lvol":
         _lookup_lvol_in_cluster(target_id, cluster)
+    elif target_type == "consistency_group":
+        try:
+            group = db.get_consistency_group_by_id(target_id)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        if group.cluster_id != cluster.get_id():
+            raise HTTPException(404, f'ConsistencyGroup {target_id} not found')
 
 
 @policy_api.delete('/{policy_id}', name='clusters:backup-policies:delete', status_code=204, responses={204: {"content": None}})

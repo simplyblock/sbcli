@@ -29,6 +29,9 @@ def note_planned_loss(node, reason: str, db=None) -> bool:
         # Strict checks: a mocked or legacy record must never look arbitrated.
         if getattr(cluster, "two_node_arbitration", False) is not True:
             return False
+        # Mode pacemaker: no arbiter grants on the marker (kubernetes-fencing contract, 4.2).
+        if getattr(cluster, "two_node_fencing_authority", "witness") == "pacemaker":
+            return False
         from simplyblock_core.models.arbitration import ClusterArbitration
         rec = db.get_cluster_arbitration(node.cluster_id)
         if not isinstance(rec, ClusterArbitration):

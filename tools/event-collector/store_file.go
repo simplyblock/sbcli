@@ -47,7 +47,7 @@ func (f *FileStore) ArbitratedClusters() ([]Cluster, error) {
 	}
 	var out []Cluster
 	for _, c := range t.Clusters {
-		if c.TwoNodeArbitration {
+		if c.Arbitrated() {
 			out = append(out, c)
 		}
 	}

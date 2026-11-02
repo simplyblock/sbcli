@@ -6,6 +6,7 @@ from simplyblock_core import (
     cluster_ops,
     constants,
     db_controller,
+    storage_network,
     storage_node_ops,
     utils,
 )
@@ -474,6 +475,12 @@ def _status_verdict(cluster, snodes, affected_physical_nodes, online_nodes,
     elif (affected_nodes > k or online_devices < (n + k) or (
             online_nodes < (n + k) and cluster.strict_node_anti_affinity)):
         return Cluster.STATUS_SUSPENDED
+    elif cluster.migration_ft_impact:
+        # Migrations that ended with errors with every node online left pages
+        # without full fault tolerance (see Cluster.migration_ft_impact).
+        logger.warning("Cluster %s degraded: migrations left pages without full fault tolerance: %s",
+                       cluster.get_id(), cluster.migration_ft_impact)
+        return Cluster.STATUS_DEGRADED
     else:
         return Cluster.STATUS_ACTIVE
 
@@ -1592,7 +1599,7 @@ def node_port_check_fun(snode):
         data_results = []
         for data_nic in snode.data_nics:
             if data_nic.ip4_address:
-                data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
+                data_ping_check = health_controller._check_ping_from_node(data_nic.listen_address, ifname=data_nic.if_name, node=snode)
                 logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
                 data_results.append(data_ping_check)
 
@@ -1869,8 +1876,7 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
             "nothing released it. Unblocking.",
             port, snode.get_id(), held, snode.status, owner.lvstore)
         try:
-            from simplyblock_core.utils import port_block
-            port_block.set_port(snode, port, block=False, timeout=5, retry=1)
+            snode.rpc_client(timeout=5, retry=1).nvmf_port_unblock(port)
             _blocked_port_since.pop(key, None)
         except Exception as e:
             logger.error("Failed to unblock stale port %s on %s: %s",
@@ -1987,8 +1993,15 @@ _lvstore_in_creation_first_seen: dict = {}
 _restart_task_defer_first_seen: dict = {}
 
 
+#: How often the monitor re-publishes a pod-network node's Service ports: a safety net
+#: for a publish that failed where the ports changed, not the main path.
+PORT_PUBLISH_INTERVAL_SEC = 60
+
+
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
+    if snode.status == StorageNode.STATUS_ONLINE:
+        storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
 
     # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
     # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
@@ -2181,12 +2194,12 @@ def check_node(snode):
 
     # 4- check node rpc interface
     node_rpc_check, node_rpc_check_1 = health_controller.check_node_rpc(snode, timeout=20, retry=1)
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+    logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}")
 
     #if RPC times out, we dont know if its due to node becoming unavailable or spdk hanging
     #so we try it twice. If all other checks pass again, but only this one fails: it's the spdk process
     if not node_rpc_check:
-        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
+        logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
         # A hung RPC channel on a live SPDK recovers by nothing else: the
         # process is up, SNodeAPI answers, ping passes, so every other check
         # says healthy. Abort it once the hang outlives RPC_HANG_ABORT_SEC.
@@ -2209,7 +2222,7 @@ def check_node(snode):
 
     decrement()
     if not node_rpc_check or not node_rpc_check_1:
-        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:FAILED")
+        logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}:FAILED")
         set_node_schedulable(snode)
         return False
 

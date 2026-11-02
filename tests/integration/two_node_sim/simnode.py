@@ -41,9 +41,40 @@ NORMAL, HOLDING, SOLO, FENCED = "normal", "holding", "solo", "fenced"
 #: * ``grant_stops_redirect`` -- F19, SPDK #81 + ultra #215: every solo grant
 #:   releases the LVS, and the release stops a non-leader's hublvol redirect to
 #:   the lost peer, so the next IO takes the LVS over at once.
+#: * ``reader_skips_dead_peer_jm`` -- F21, ultra (stacked on #215): on a solo LVS
+#:   the takeover's JC reader does not use the peer's JM that the HA layer knows
+#:   to be dead, instead of waiting for the 8 s NVMe IO timeout on a frozen peer.
+#: * ``stoplist_peer_devices_on_grant`` -- F23, ultra (stacked on #217): a solo
+#:   grant isolates the lost peer's data devices on the survivor (aborts their
+#:   outstanding IO, closes them), so the survivor's writes no longer wait on a
+#:   frozen peer's devices until it aborts on wake and its connections close.
 CAP_ANA_RESTORE_ALL = "ana_restore_all_groups"
 CAP_GRANT_STOPS_REDIRECT = "grant_stops_redirect"
-ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT})
+CAP_READER_SKIPS_DEAD_PEER_JM = "reader_skips_dead_peer_jm"
+#: * ``isolate_marks_devices_unavailable`` -- F24, ultra #219 (c11 follow-up): the
+#:   isolation marks the peer's devices unavailable for every IO path before it
+#:   resets them, so a follower's takeover read of the lvstore metadata goes
+#:   degraded to the survivor's own copies. Without it (#219 as run in c11) the
+#:   devices were only closed, still read as online, and the takeover read failed:
+#:   the survivor aborted.
+#: * ``appender_lock_skips_peer_jm`` -- F25, ultra #219 (c12 follow-up): a solo
+#:   LVS's new leader does not wait for its append-lock request on the frozen
+#:   peer's JM. Without it (#219 as run in c12) the takeover's first write, and
+#:   with it all client IO of the LVS, waited until the frozen peer aborted on
+#:   wake and the lock request failed (bed c12/02c: 6-8 s stall, 0 IO errors).
+CAP_STOPLIST_PEER_DEVICES = "stoplist_peer_devices_on_grant"
+CAP_ISOLATE_MARKS_UNAVAILABLE = "isolate_marks_devices_unavailable"
+#: * ``reader_resets_peer_jm_read`` -- F26, ultra #219 (c12b follow-up): a solo
+#:   LVS whose JC reader has a history read in flight on the dead peer's JM resets
+#:   that JM's bdev once, so the read fails at once and the reader restarts on the
+#:   local JM. Without it (#219 as run in c12b) the read neither completed nor
+#:   failed until the 8 s NVMe IO timeout or the peer's abort on wake, and the
+#:   takeover's reader restart waited for it (bed c12b/02c-r1: 7 s stall).
+CAP_APPENDER_LOCK_SKIPS_PEER_JM = "appender_lock_skips_peer_jm"
+CAP_READER_RESETS_PEER_JM_READ = "reader_resets_peer_jm_read"
+ALL_CAPS = frozenset({CAP_ANA_RESTORE_ALL, CAP_GRANT_STOPS_REDIRECT, CAP_READER_SKIPS_DEAD_PEER_JM,
+                      CAP_STOPLIST_PEER_DEVICES, CAP_ISOLATE_MARKS_UNAVAILABLE,
+                      CAP_APPENDER_LOCK_SKIPS_PEER_JM, CAP_READER_RESETS_PEER_JM_READ})
 DEPLOYED_CAPS: frozenset = frozenset()
 
 
@@ -74,6 +105,7 @@ class Lvstore:
     fence_port_owned: bool = False
     takeover_until: float = 0.0
     redirect_stopped: bool = False   # F19: hublvol redirect stopped by a grant
+    leader_since: float = 0.0        # F23: when this node last became the LVS's leader
     ana_restore_pending: bool = False
     ana_saved: dict = field(default_factory=dict)
 
@@ -101,6 +133,10 @@ class SimNode:
         self.proc = "up"
         self.frozen_until = 0.0
         self.frozen_since = 0.0
+        # F23: when SPDK last died, and whether that was its abort on wake from a
+        # freeze (its TCP connections then close about 1 s later, not at once)
+        self.died_at = 0.0
+        self.died_after_freeze = False
         self.started_at = 0.0
         self.aborts: list[tuple[float, str]] = []
         self.shutting_down = False       # planned stop in progress (CP flow)
@@ -110,6 +146,9 @@ class SimNode:
         self.devices: dict[str, bool] = {}    # alceml bdev -> present
         self.blocked: dict[int, str] = {}     # port -> owner tag
         self.ana: dict[tuple, str] = {}       # (port, grp) -> state
+        # nvmf host access (kubernetes-fencing contract, section 3.2):
+        # nqn -> {"allow_any_host": bool, "hosts": [host nqns]}
+        self.subsystems: dict[str, dict] = {}
         self._reset_ha()
 
     # ---- lifecycle ------------------------------------------------------------
@@ -141,7 +180,10 @@ class SimNode:
         if self.proc in ("dead", "down"):
             return
         self.world.log(f"{self.name}: SPDK abort ({why})")
-        self.aborts.append((self.world.vt.time(), why))
+        now = self.world.vt.time()
+        self.aborts.append((now, why))
+        self.died_at = now
+        self.died_after_freeze = bool(self.frozen_until) and 0.0 <= now - self.frozen_until < 0.5
         self.proc = "dead"
         for lvs in self.lvstores.values():
             lvs.leader = False
@@ -166,6 +208,14 @@ class SimNode:
         for d in self.devices:
             self.devices[d] = True
         self.blocked = {}
+        # the restart flow recreates every subsystem as the volume defines it
+        # (any host, listing the hosts the volumes authorize)
+        stale = self.world.stale_host_lists
+        from .world import client_host
+        for nqn, sub in self.subsystems.items():
+            sub["allow_any_host"] = True
+            sub["hosts"] = [client_host(n.name) for n in self.world.nodes] \
+                if stale and ":lvol:" in nqn else []
 
     # ---- events -----------------------------------------------------------------
 
@@ -506,6 +556,8 @@ class SimNode:
         if lvs is None:
             self._err(errno.ENODEV)
         if lvs_leadership:
+            if not lvs.leader:
+                lvs.leader_since = self.world.vt.time()
             lvs.leader = True
             lvs.takeover_blocked = False
             lvs.redirect_stopped = False
@@ -556,3 +608,42 @@ class SimNode:
                 self._err(errno.ENODEV)
             return [{"name": name}]
         self._err(errno.ENODEV)
+
+    # ---- nvmf host access (kubernetes-fencing contract, section 3.2) -----------------
+
+    def admits(self, nqn: str, host: str) -> bool:
+        sub = self.subsystems[nqn]
+        return sub["allow_any_host"] or host in sub["hosts"]
+
+    def _subsystem(self, nqn):
+        if nqn not in self.subsystems:
+            self._err(errno.ENODEV)
+        return self.subsystems[nqn]
+
+    def rpc_nvmf_get_subsystems(self, nqn=None, **_):
+        names = [nqn] if nqn else sorted(self.subsystems)
+        return [{"nqn": n, "allow_any_host": self._subsystem(n)["allow_any_host"],
+                 "hosts": [{"nqn": h} for h in self._subsystem(n)["hosts"]]} for n in names]
+
+    def rpc_nvmf_subsystem_get_controllers(self, nqn, **_):
+        self._subsystem(nqn)
+        return [{"hostnqn": h} for h in self.world.connected_hosts(self, nqn)]
+
+    def rpc_nvmf_subsystem_add_host(self, nqn, host, **_):
+        sub = self._subsystem(nqn)
+        if host in sub["hosts"]:
+            self._err(errno.EINVAL, "Internal error")
+        sub["hosts"].append(host)
+        return True
+
+    def rpc_nvmf_subsystem_remove_host(self, nqn, host, **_):
+        # SPDK: an unlisted host is an error and nothing is disconnected
+        sub = self._subsystem(nqn)
+        if host not in sub["hosts"]:
+            self._err(errno.ENOENT, "Internal error")
+        sub["hosts"].remove(host)
+        return True
+
+    def rpc_nvmf_subsystem_allow_any_host(self, nqn, allow_any_host, **_):
+        self._subsystem(nqn)["allow_any_host"] = bool(allow_any_host)
+        return True

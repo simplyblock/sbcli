@@ -408,6 +408,40 @@ def delete_pool(uuid):
     return True
 
 
+def force_delete_pool(pool_id) -> None:
+    """Delete a pool with every volume and snapshot in it, as part of bringing
+    its cluster down. The volumes are not deleted on their nodes one by one:
+    the lvstores go with the nodes, which the cluster's teardown kills next.
+    What has to happen here is what nothing else does: the keys. Every
+    encrypted volume's data-encryption key, including those of volumes
+    already deleted whose snapshots remain, and the pool's key-encryption
+    key, through the cluster's KMS while the cluster and its KMS
+    configuration still exist."""
+    db_controller = DBController()
+    pool = db_controller.get_pool_by_id(pool_id)
+    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+    lvols = db_controller.get_lvols_by_pool_id(pool_id)
+    snapshots = db_controller.get_snapshots_by_pool_id(pool_id)
+
+    encrypted = {lvol.get_id() for lvol in lvols if lvol.crypto_bdev}
+    encrypted |= {snap.lvol.get_id() for snap in snapshots if snap.lvol and snap.lvol.crypto_bdev}
+    with create_kms_connection(cluster) as kms:
+        for lvol_id in sorted(encrypted):
+            lvol_controller.delete_lvol_key(kms, cluster.get_id(), lvol_id)
+        try:
+            kms.delete_key_encryption_key(pool_kek_name(pool_id))
+        except KMSException:
+            logger.exception(f"Failed to delete the key of pool {pool_id}")
+
+    for snapshot in snapshots:
+        snapshot.remove(db_controller.kv_store)
+    for lvol in lvols:
+        lvol.remove(db_controller.kv_store)
+    pool_events.pool_remove(pool)
+    pool.remove(db_controller.kv_store)
+    logger.info(f"Force-deleted pool {pool_id} with {len(lvols)} volume(s) and {len(snapshots)} snapshot(s)")
+
+
 def list_pools(cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)

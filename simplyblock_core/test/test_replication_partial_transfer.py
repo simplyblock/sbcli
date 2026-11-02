@@ -86,6 +86,9 @@ class _FakeDB:
             raise KeyError(uuid)
         return self._nodes[uuid]
 
+    def get_job_tasks(self, cluster_id):
+        return []
+
 
 class _Task:
     def __init__(self, **params):
@@ -227,16 +230,19 @@ def test_decision_is_cached_for_the_same_landing_volume(monkeypatch):
     """A resumed transfer keeps the mode its first attempt used, without
     re-issuing add_clone."""
     cur, leader, sec = _eligible_setup(monkeypatch)
+    prev = sr.db.get_snapshot_by_id("SNAP_1")
+    prev.blobid = 0x51
+    prev.local_writes_before = cur.local_writes_after = {"N_SRC": [4, "t0"]}
     lv = _LandingLV("REP_LV_1")
     task = _Task()
 
-    assert sr._partial_transfer_decision(task, cur, False, lv, leader) is True
+    assert sr._partial_transfer_decision(task, cur, False, lv, leader, "N_SRC") == (True, 0x51)
     assert len(leader.add_clone_calls) == 1
 
     # second pass over the same landing volume: cached, nothing re-chained
     leader.add_clone_calls.clear()
     sec.add_clone_calls.clear()
-    assert sr._partial_transfer_decision(task, cur, False, lv, leader) is True
+    assert sr._partial_transfer_decision(task, cur, False, lv, leader, "N_SRC") == (True, 0x51)
     assert leader.add_clone_calls == []
     assert sec.add_clone_calls == []
 
@@ -257,9 +263,9 @@ def test_a_replaced_landing_volume_re_derives_and_never_inherits_partial(monkeyp
                  prechained_node_ids=["N_TGT", "N_TGT_SEC"])
 
     got = sr._partial_transfer_decision(
-        task, cur, False, _LandingLV("REP_LV_NEW"), leader)
+        task, cur, False, _LandingLV("REP_LV_NEW"), leader, "N_SRC")
 
-    assert got is False, "a replaced landing volume must not inherit partial"
+    assert got == (False, 0), "a replaced landing volume must not inherit partial"
     assert task.function_params["allow_partial"] is False
     assert task.function_params["allow_partial_landing"] == "REP_LV_NEW"
     # the stale chain record is discarded too

@@ -9,6 +9,7 @@ cluster of three or more) never reaches the check.
 """
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,6 +17,7 @@ from simplyblock_core import storage_node_ops as sno
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import tasks_runner_port_allow as pa
 from simplyblock_core.services.task_runner_base import TaskDefer
+from tests._mocks import route_fences
 
 
 class _RPC:
@@ -81,7 +83,7 @@ def _run(monkeypatch, remote_jms, keep):
     node = SimpleNamespace(
         status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.1", data_nics=[],
         cluster_id="CL", remote_devices=[], remote_jm_devices=[],
-        write_to_db=lambda: None)
+        write_to_db=lambda: None, rpc_client=lambda **_: MagicMock())
     monkeypatch.setattr(pa, "db", _DB(node))
     monkeypatch.setattr(pa.health_controller, "_check_node_ping", lambda ip: True)
     monkeypatch.setattr(sno, "_connect_to_remote_devs", lambda n, reattach=False: ["dev"])
@@ -109,8 +111,7 @@ def _run(monkeypatch, remote_jms, keep):
 def test_a_fenced_two_node_task_defers_before_any_unblock(monkeypatch):
     task, asked, _ = _run(monkeypatch, ["jm-peer"], "LVS 6 is fenced on the node")
     unblocked = []
-    monkeypatch.setattr(pa.port_block, "set_port",
-                        lambda *a, **k: unblocked.append((a, k)))
+    route_fences([pa.db.node], lambda *a, **k: unblocked.append((a, k)))
     with pytest.raises(TaskDefer, match="Client ports stay blocked: LVS 6 is fenced"):
         pa.exec_port_allow_task(task)
     assert len(asked) == 1 and unblocked == []
@@ -118,7 +119,6 @@ def test_a_fenced_two_node_task_defers_before_any_unblock(monkeypatch):
 
 def test_two_remote_jms_never_reach_the_gate(monkeypatch):
     task, asked, past = _run(monkeypatch, ["jm-a", "jm-b"], "LVS 6 is fenced on the node")
-    monkeypatch.setattr(pa.port_block, "set_port", lambda *a, **k: None)
     try:
         pa.exec_port_allow_task(task)
     except (TaskDefer, past, Exception):
@@ -128,7 +128,6 @@ def test_two_remote_jms_never_reach_the_gate(monkeypatch):
 
 def test_an_unfenced_two_node_task_passes_the_gate(monkeypatch):
     task, asked, past = _run(monkeypatch, ["jm-peer"], "")
-    monkeypatch.setattr(pa.port_block, "set_port", lambda *a, **k: None)
     try:
         pa.exec_port_allow_task(task)
     except TaskDefer as e:

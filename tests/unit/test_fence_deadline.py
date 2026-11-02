@@ -39,6 +39,18 @@ class TestBudgets:
     def test_single_call_budgets_fit_the_deadline(self):
         assert constants.FENCE_RPC_TIMEOUT_SEC <= constants.FENCE_DEADLINE_SEC
         assert constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC <= constants.FENCE_DEADLINE_SEC
+        assert constants.FENCE_SET_LEADER_TIMEOUT_SEC <= constants.FENCE_DEADLINE_SEC
+
+    def test_set_leader_budget_absorbs_the_run_63_latency(self):
+        """2026-10-14 run 63: the leader set on a survivor holding an orphaned
+        replica took 669ms and aborted every restart cycle against the 0.5s
+        norm. Its own budget must cover that with margin, and both attempts
+        must still fit the deadline."""
+        observed_set_leader_sec = 0.669
+        assert constants.FENCE_SET_LEADER_TIMEOUT_SEC > constants.FENCE_RPC_TIMEOUT_SEC
+        assert constants.FENCE_SET_LEADER_TIMEOUT_SEC >= 2 * observed_set_leader_sec
+        attempts = 1 + constants.FENCE_RPC_RETRY
+        assert attempts * constants.FENCE_SET_LEADER_TIMEOUT_SEC < constants.FENCE_DEADLINE_SEC
 
     def test_client_keepalive_outlasts_the_worst_fence(self):
         """The client must not give up while we still hold the port."""
@@ -74,6 +86,7 @@ class TestClamp:
     def test_clamped_call_can_never_pass_the_deadline(self):
         for elapsed in (0.0, 1.0, 3.3, 5.0, 7.0, 7.79):
             for budget in (constants.FENCE_RPC_TIMEOUT_SEC,
+                           constants.FENCE_SET_LEADER_TIMEOUT_SEC,
                            constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC):
                 assert elapsed + self._clamp(budget, elapsed) <= constants.FENCE_DEADLINE_SEC + 1e-9
 

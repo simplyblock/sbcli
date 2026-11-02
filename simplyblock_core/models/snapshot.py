@@ -19,6 +19,10 @@ class SnapShot(BaseModel):
             [(snap.lvol.get_id(),)] if snap.lvol else []
         )),
         Unique(('cluster_id', 'snap_name')),
+        # A consistency group's member snapshots, and one generation's by
+        # prefix. A snapshot outside any group has a blank group_id, which the
+        # index drops, so only group snapshots are indexed.
+        Index(('group_id', 'group_seq')),
         # Creation order within one lvol: the tail is the chain predecessor,
         # found by a reverse range read of limit 1. Ordered, so its segments
         # are the fixed-width encoding `encode_value` reserves for that.
@@ -74,6 +78,10 @@ class SnapShot(BaseModel):
     #: this snapshot belongs to (0 = not a group snapshot).
     group_id: str = ""
     group_seq: int = 0
+    #: the caller's request id for the group generation this snapshot belongs
+    #: to, stamped on every member snapshot of it, so a retried take with the
+    #: same id answers with this generation instead of taking another.
+    group_request_id: str = ""
     #: The volume's own snapshot sequence, in creation order. prev_snap_uuid
     #: is also the blob parent: a snapshot's blob holds only the clusters
     #: written since that predecessor. It is empty on the first snapshot taken
@@ -89,6 +97,12 @@ class SnapShot(BaseModel):
     # On Snapshot transfer or replicate this field is the same
     # This value can be used to identify the same snapshot on other nodes
     data_uuid: str = ""
+    #: Replication snapshots only: the lvstore members' local write counts
+    #: right before and right after the snapshot was taken,
+    #: {node_id: [count, online_since]} (controllers/replication_delta.py).
+    #: Empty when they could not be read, which rules out a delta transfer.
+    local_writes_before: dict = default_factory(dict)
+    local_writes_after: dict = default_factory(dict)
 
     def watch_scope(self):
         return (self.pool_uuid,)

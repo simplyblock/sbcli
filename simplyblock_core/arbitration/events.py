@@ -136,7 +136,9 @@ def forward_legacy_jm_event(db, cluster, node_id: str, event_dict: dict) -> bool
     import time
     if not is_legacy_jm_event(event_dict):
         return False
-    if getattr(cluster, "two_node_arbitration", False):
+    # Mode pacemaker: no arbiter consumes the queue (kubernetes-fencing contract, 4.2).
+    if getattr(cluster, "two_node_arbitration", False) and getattr(
+            cluster, "two_node_fencing_authority", "witness") != "pacemaker":
         now_ns = time.time_ns()
         queue_event(db, cluster.get_id(), node_id, LEGACY_INSTANCE, now_ns, event_dict, now_ns // 1_000_000)
     return True

@@ -20,7 +20,6 @@ dependencies = [
     "graypy==2.1.0",
     "boto3",
     "jinja2",
-    "jc",
     "prometheus-client",
     "ec2-metadata",
     "flask-swagger-ui",
@@ -102,18 +101,15 @@ constraint-dependencies = [
 ]
 
 [tool.ruff]
+required-version = ">=0.17"
 extend-exclude = ['simplyblock_cli/cli.py']
 
 [tool.ruff.lint]
 extend-select = ["TID251"]
 ignore = [
     "BLE001",
-    "DTZ005",
-    "DTZ006",
-    "DTZ007",
     "FA100",
     "FLY002",
-    "ISC004",
     "LOG015",
     "PLC0206",
     "PLR0402",
@@ -123,7 +119,6 @@ ignore = [
     "PLW0602",
     "PLW1508",
     "PLW1510",
-    "RET501",
     "RUF015",
     "RUF059",
     "RUF100",

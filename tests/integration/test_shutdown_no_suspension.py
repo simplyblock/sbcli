@@ -22,6 +22,9 @@ The new shutdown flow:
   5. spdk_process_kill
   6. set status -> offline
 
+A forced shutdown skips Loops 1+2, kills, then runs Loop 1 after the
+kill (the devices are gone; the peers must stop routing IO to them).
+
 These tests verify each property using lightweight mocks.
 """
 
@@ -31,6 +34,7 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from tests._mocks import route_fences
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -320,7 +324,7 @@ class TestDetachRemoteControllersFromPeers(unittest.TestCase):
 
 class TestShutdownStorageNodeGraceful(unittest.TestCase):
     """Verify the graceful path runs Loop 1 (device-unavailable) and
-    Loop 2 (detach), does NOT call FirewallClient, and finishes with
+    Loop 2 (detach), does NOT fence any port, and finishes with
     a SPDK kill + offline transition."""
 
     def _patch(self, force=False):
@@ -396,9 +400,8 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        fw_patch = patch.object(sno, "port_block")  # MUST NOT be used
-        fw_mock = fw_patch.start()
-        self.addCleanup(fw_patch.stop)
+        fw_mock = MagicMock()  # MUST NOT be called: shutdown fences nothing
+        route_fences([snode, peer], fw_mock)
 
         return {
             "snode": snode, "peer": peer, "db": db,
@@ -434,25 +437,27 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         self.assertEqual(statuses[-1], StorageNode.STATUS_OFFLINE)
 
     def test_graceful_never_invokes_firewall(self):
-        """The suspension phase is removed; no FirewallClient call must
+        """The suspension phase is removed; no port may be fenced
         happen during graceful shutdown."""
         from simplyblock_core import storage_node_ops as sno
         env = self._patch()
         sno.shutdown_storage_node(env["snode"].get_id(), force=False)
-        env["fw_mock"].set_port.assert_not_called()
+        env["fw_mock"].assert_not_called()
 
-    def test_force_skips_loops(self):
-        """--force keeps the legacy "go straight to kill" semantics:
-        no Loop 1, no Loop 2 (peers find out via TCP drops)."""
+    def test_force_skips_detach_and_marks_devices_unavailable_after_kill(self):
+        """--force goes straight to kill (no Loop 2 detach), then runs
+        Loop 1 after the kill so the peers stop routing IO to the dead
+        devices instead of waiting for the restart to bring them back."""
         from simplyblock_core import storage_node_ops as sno
         env = self._patch()
-        sno.shutdown_storage_node(env["snode"].get_id(), force=True)
+        self.assertTrue(sno.shutdown_storage_node(env["snode"].get_id(),
+                                                  force=True))
 
-        self.assertEqual(env["dev_unavail"], [])
-        self.assertEqual(env["set_jm"], [])
         self.assertEqual(env["detach_calls"], [])
-        # Kill still happens.
         self.assertEqual(len(env["kill_calls"]), 1)
+        # Loop 1 after the kill: every nvme device + the JM device.
+        self.assertEqual(len(env["dev_unavail"]), 2)
+        self.assertEqual(len(env["set_jm"]), 1)
 
     def test_shutdown_does_not_consult_ftt_removal_guard(self):
         # Regression guard: shutdown_storage_node must not call

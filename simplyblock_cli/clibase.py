@@ -18,6 +18,7 @@ from simplyblock_core.controllers import (
     health_controller,
     lvol_controller,
     migration_controller,
+    migration_plan_controller,
     pool_controller,
     qos_controller,
     replication_policy_controller,
@@ -27,7 +28,12 @@ from simplyblock_core.controllers import (
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup.chain import BackupChain
-from simplyblock_core.controllers.backup.manifest import ManifestError, parse_export
+from simplyblock_core.controllers.backup.manifest import (
+    ManifestError,
+    list_all,
+    parse_export,
+    parse_group_export,
+)
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -159,11 +165,12 @@ class CLIWrapperBase:
         # max-subsys, the huge-page floor and the vCPU count are cluster-level
         # settings now, and this command runs on the host before it belongs to
         # any cluster, so it cannot read them. It therefore sizes the host for
-        # the product ceiling (MAX_SUBSYSTEMS_PER_NODE): any cluster value then
-        # fits, and add-node/restart push the cluster's actual numbers into the
-        # host config. Sizing for a smaller default instead would leave a node
-        # unable to honour a larger cluster setting.
-        max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+        # the product default (DEFAULT_SUBSYSTEMS_PER_NODE), which is what a
+        # cluster without --max-subsys runs with. A cluster that sets a larger
+        # value, up to MAX_SUBSYSTEMS_PER_NODE, gets it at add-node, which
+        # resizes the host config before it reserves the huge pages
+        # (reserve_cluster_hugepages); restart recomputes it the same way.
+        max_lvol = constants.DEFAULT_SUBSYSTEMS_PER_NODE
         max_size = 0
         number_of_devices = args.number_of_devices or 0
         sockets_to_use = [0]
@@ -203,6 +210,9 @@ class CLIWrapperBase:
                 "with each other, but not with --pci-allowed or --pci-blocked), or --lblk with "
                 "its --blk-* selectors."
             )
+        lblk_journal_device = getattr(args, 'lblk_journal_device', False)
+        if lblk_journal_device and not lblk:
+            self.parser.error("--lblk-journal-device requires --lblk")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -215,6 +225,7 @@ class CLIWrapperBase:
                 "names": [str(x) for x in blk_names.split(',')] if blk_names else None,
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
+                "journal_device": bool(lblk_journal_device),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
@@ -437,6 +448,20 @@ class CLIWrapperBase:
     def storage_node__restart_device(self, sub_command, args):
         return device_controller.restart_device(args.device_id, args.force)
 
+    def storage_node__resize_device(self, sub_command, args):
+        try:
+            result = device_controller.resize_device(args.device_id)
+        except ValueError as e:
+            print(e)
+            return False
+        if not result["resized"]:
+            return f"Device size unchanged: {utils.humanbytes(result['new_size'])}"
+        out = (f"Device grown from {utils.humanbytes(result['old_size'])} "
+               f"to {utils.humanbytes(result['new_size'])}")
+        if result["warning"]:
+            out += f"\nWarning: {result['warning']}"
+        return out
+
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
 
@@ -534,7 +559,9 @@ class CLIWrapperBase:
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
     def storage_node__get_device_health_info(self, sub_command, args):
-        return device_controller.get_device_health_info(args.device_id)
+        # The controller returns a dict (the v2 API serializes it through a
+        # DTO); rendering it for the terminal is the CLI's job.
+        return _format_json(device_controller.get_device_health_info(args.device_id))
 
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)
@@ -739,9 +766,92 @@ class CLIWrapperBase:
         cluster_ops.change_cluster_name(cluster_id, cluster_name)
         return True
 
+    def cluster__grow_devices(self, sub_command, args):
+        result = device_controller.grow_cluster_devices(
+            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
+        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+                 for r in result["devices"] if r["resized"]]
+        lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
+        rebalance = result.get("rebalance")
+        if rebalance and rebalance["started"]:
+            lines.append("The devices have grown unevenly: device weights set to the new sizes, "
+                         "cluster rebalancing started.")
+        elif rebalance and rebalance["weights_updated"]:
+            lines.append(f"The devices have grown unevenly: device weights set to the new sizes. "
+                         f"{rebalance['reason']}")
+        elif rebalance:
+            lines.append(f"Warning: the devices have grown unevenly. {rebalance['reason']}")
+        elif not result["uniform"]:
+            lines.append("Warning: the data devices of the cluster have grown unevenly; the added capacity is "
+                         "only fully usable once all of them have grown by the same factor, or after "
+                         "grow-devices without --no-rebalance has updated the weights.")
+        return "\n".join(lines) or "No device has grown"
+
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
         return True
+
+    @staticmethod
+    def _migration_plan_output(plan, forecast, as_json, dry_run=False):
+        volumes = [{
+            "Volume": v.get("name") or v["lvol_id"],
+            "State": v["state"],
+            "Target node": v.get("target_node_id", ""),
+            "Remaining": utils.humanbytes(v.get("bytes_remaining", 0)),
+            "ETA": utils.strfdelta_seconds(v.get("eta_seconds", 0)),
+            "Error": v.get("error", ""),
+        } for v in plan.volumes]
+        if as_json:
+            return _format_json({"id": None if dry_run else plan.uuid, "status": plan.status,
+                                 "volumes": plan.volumes, "forecast": forecast})
+        rate = utils.humanbytes(forecast["throughput_bytes_per_sec"]) + "/s"
+        if not forecast["throughput_measured"]:
+            rate += " (default, not yet measured)"
+        header = (f"Plan {'(dry run)' if dry_run else plan.uuid}: {plan.status}, "
+                  f"{utils.humanbytes(forecast['bytes_remaining'])} remaining, "
+                  f"ETA {utils.strfdelta_seconds(forecast['eta_seconds'])} at {rate}")
+        lines = [header]
+        if not forecast.get("converging", True):
+            lines.append(
+                f"NOT CONVERGING: clients write {utils.humanbytes(forecast['dirty_bytes_per_sec'])}/s, "
+                f"faster than lvstore(s) {', '.join(forecast['not_converging_lvs'])} replicate; "
+                f"no cutover can start until writes drop below the replication throughput")
+        lines.extend(f"WARNING: {w}" for w in plan.warnings)
+        return "\n".join(lines) + "\n" + utils.print_table(volumes)
+
+    def cluster__migrate(self, sub_command, args):
+        lvol_ids = [i.strip() for i in args.lvol_ids.split(",") if i.strip()] if args.lvol_ids else None
+        kwargs = dict(pool_id=args.pool_id, lvol_ids=lvol_ids, delete_source=args.delete_source,
+                      interval_min=args.interval_min)
+        try:
+            if args.dry_run:
+                plan = migration_plan_controller.build_plan(
+                    args.cluster_id, args.target_cluster_id, **kwargs)
+                forecast = migration_plan_controller.forecast_only(plan)
+                return self._migration_plan_output(plan, forecast, args.json, dry_run=True)
+            plan = migration_plan_controller.start_plan(
+                args.cluster_id, args.target_cluster_id, **kwargs)
+        except migration_plan_controller.MigrationPlanError as e:
+            return f"Error: {e}"
+        plan, forecast = migration_plan_controller.plan_status(plan.uuid)
+        return self._migration_plan_output(plan, forecast, args.json)
+
+    def cluster__migrate_status(self, sub_command, args):
+        plan, forecast = migration_plan_controller.plan_status(args.plan_id)
+        return self._migration_plan_output(plan, forecast, args.json)
+
+    def cluster__migrate_list(self, sub_command, args):
+        return utils.print_table([{
+            "ID": p.uuid,
+            "Target cluster": p.target_cluster_id,
+            "Status": p.status,
+            "Volumes": len(p.volumes),
+            "Created": _format_timestamp(p.created_at),
+        } for p in migration_plan_controller.list_plans(args.cluster_id)])
+
+    def cluster__migrate_cancel(self, sub_command, args):
+        plan = migration_plan_controller.cancel_plan(args.plan_id)
+        return f"Plan {plan.uuid}: {plan.status}"
 
     def cluster__add_replication(self, sub_command, args):
         return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)
@@ -780,11 +890,13 @@ class CLIWrapperBase:
 
     def cluster__replication_policy_snapshot(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller
-        snap_ids, err = consistency_group_controller.create_group_snapshot(
+        group_seq, err = consistency_group_controller.create_group_snapshot(
             args.policy_id)
         if err:
             return f"Group snapshot failed: {err}"
-        return utils.print_table([{"Snapshot": s} for s in snap_ids])
+        group = db_controller.DBController().get_consistency_group_for_policy(
+            args.policy_id)
+        return self._cg_generation_table(group, group_seq)
 
     def cluster__replication_policy_list(self, sub_command, args):
         data = [{
@@ -1294,6 +1406,13 @@ class CLIWrapperBase:
                     return g
             raise
 
+    def _cg_generation_table(self, group, group_seq):
+        """The member snapshots of the generation a take answered with."""
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        return utils.print_table([
+            {"Gen": group_seq, "Snapshot": s.get_id(), "Volume": s.lvol.get_id()}
+            for s in cgc.generation_snapshots(group, group_seq)])
+
     def consistency_group__list(self, sub_command, args):
         db = db_controller.DBController()
         data = [{
@@ -1354,10 +1473,11 @@ class CLIWrapperBase:
 
     def consistency_group__snapshot_take(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller as cgc
-        ids, err = cgc.create_group_snapshot_for_group(self._cg_resolve(args.group_id))
+        group = self._cg_resolve(args.group_id)
+        group_seq, err = cgc.create_group_snapshot_for_group(group)
         if err:
             return f"Group snapshot failed: {err}"
-        return utils.print_table([{"Snapshot": s} for s in ids])
+        return self._cg_generation_table(group, group_seq)
 
     def consistency_group__snapshot_list(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller as cgc
@@ -1386,6 +1506,140 @@ class CLIWrapperBase:
             return f"Clone failed: {err}"
         return utils.print_table([{"Volume": v} for v in created])
 
+    def consistency_group__backup_create(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        group = self._cg_resolve(args.group_id)
+        group_backup_id, err = group_backup.create_group_backup(
+            group.get_id(), group_seq=getattr(args, 'group_seq', None))
+        if err:
+            return f"Group backup failed: {err}"
+        return f"Group backup {group_backup_id} started"
+
+    def _group_backup_row(self, gb):
+        return {
+            "ID": gb.get_id(),
+            "Group": gb.consistency_group_name or "-",
+            "Gen": gb.group_seq,
+            "Status": gb.status,
+            "Members": len(gb.member_backup_ids),
+            "Size": utils.humanbytes(gb.size),
+        }
+
+    def group_backup__list(self, sub_command, args):
+        db = db_controller.DBController()
+        group_backups = sorted(db.get_group_backups(args.cluster_id),
+                               key=lambda g: (g.created_at, g.uuid), reverse=True)
+        return _format_result([self._group_backup_row(g) for g in group_backups],
+                              json=args.json)
+
+    def group_backup__get(self, sub_command, args):
+        db = db_controller.DBController()
+        try:
+            gb = db.get_group_backup_by_id(args.group_backup_id)
+        except KeyError:
+            return f"Group backup {args.group_backup_id} not found"
+        if args.json:
+            return _format_json(gb.get_clean_dict())
+        return utils.print_table([self._group_backup_row(gb)])
+
+    def group_backup__restore(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        group_id, lvol_ids, err = group_backup.restore_group_backup(
+            args.group_backup_id, args.into_group_name, args.pool,
+            target_node_id=getattr(args, 'node', None),
+            s3_credentials=_s3_credentials(args))
+        if err:
+            return f"Group restore failed: {err}"
+        return (f"Restoring group backup into consistency group {group_id} "
+                f"({len(lvol_ids)} volumes)")
+
+    def group_backup__delete(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        try:
+            group_backup.delete_group_backup(args.group_backup_id)
+        except KeyError:
+            return f"Delete failed: group backup {args.group_backup_id} not found"
+        except (PreconditionError, ManifestError) as e:
+            return f"Delete failed: {e}"
+        return (f"Group backup {args.group_backup_id} is being deleted; its "
+                f"member backups are retired in the background")
+
+    def group_backup__export(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        try:
+            export = group_backup.export_group_backup(
+                args.group_backup_id, cluster_id=getattr(args, 'cluster_id', None))
+        except (PreconditionError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+
+        output = _format_json(export.model_dump(mode="json"))
+        output_file = getattr(args, 'output', None)
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(output)
+            print(f"Exported group backup {args.group_backup_id} to {output_file}")
+        else:
+            print(output)
+        return True
+
+    def group_backup__discover(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        config = _bucket_config(args)
+        try:
+            manifests = group_backup.discover_group_backups(config)
+            # "Complete" means the bucket still holds every member's manifest,
+            # which the group manifest alone cannot say -- a torn generation is
+            # worth showing rather than hiding, as that IS the finding a
+            # discover is for.
+            member_manifests = list_all(config) if manifests else []
+        except (ManifestError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+        if not manifests:
+            print(f"No group backups found in {args.bucket}")
+            return False
+        # str, not UUID: this row goes through `utils.dump_json` for --json output,
+        # and json.dumps has no encoder for a UUID.
+        return [{
+            "ID": str(m.group_backup_id),
+            "Group": m.source.consistency_group_name,
+            "Gen": m.source.generation,
+            "Members": len(m.member_backup_ids),
+            "Complete": "yes" if m.is_complete(member_manifests) else "no",
+            "Size": m.size,
+            "Encrypted": "yes" if m.encrypted else "no",
+            "Created": _format_timestamp(m.created_at.timestamp()),
+        } for m in manifests]
+
+    def group_backup__import(self, sub_command, args):
+        from simplyblock_core.controllers.backup import group_backup
+        from_file = getattr(args, 'from_file', None)
+        bucket = getattr(args, 'bucket', None)
+
+        # An export file records the location of everything in it, so naming a
+        # bucket alongside one could only contradict it. Reading a bucket needs
+        # the opposite: the name is how the manifests are found at all.
+        if bool(from_file) == bool(bucket):
+            print("Error: give exactly one of --from-file or --bucket")
+            return False
+
+        cluster_id = getattr(args, 'cluster_id', None)
+        try:
+            if bucket:
+                ids = group_backup.import_group_backup_from_bucket(
+                    _bucket_config(args), cluster_id=cluster_id)
+            else:
+                with open(str(from_file), 'rb') as f:
+                    export = parse_group_export(f.read(), str(from_file))
+                ids = [group_backup.import_group_backup(export, cluster_id=cluster_id)]
+        except (ManifestError, PreconditionError, ValueError, OSError) as e:
+            print(f"Error: {e}")
+            return False
+
+        print(f"Imported {len(ids)} group backup(s)")
+        return True
+
     def snapshot__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)
 
@@ -1409,7 +1663,7 @@ class CLIWrapperBase:
 
     def backup__list(self, sub_command, args):
         cluster_id = getattr(args, 'cluster_id', None)
-        data = backup_controller.list_backups(cluster_id)
+        data = backup_controller.list_backups(cluster_id, show_all=args.all)
         if data:
             return utils.print_table(data)
         return "No backups found"
@@ -1639,6 +1893,7 @@ class CLIWrapperBase:
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            page_copy=getattr(args, 'page_copy', False),
         )
 
     def cluster_create(self, args):
@@ -1712,6 +1967,7 @@ class CLIWrapperBase:
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
             cluster_vip=cluster_vip,
+            page_copy=getattr(args, 'page_copy', False),
         )
 
     def query_yes_no(self, question, default="yes"):

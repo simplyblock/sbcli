@@ -369,7 +369,7 @@ def _monitor_run(monkeypatch, arbitrated, ha_state):
 
     from simplyblock_core import storage_node_ops as sno
     from simplyblock_core.services import storage_node_monitor as mon
-    from simplyblock_core.utils import port_block
+    from tests._mocks import route_fences
     node = MagicMock()
     node.get_id.return_value = "n1"
     node.cluster_id = "cl-mon-%s" % arbitrated
@@ -387,9 +387,9 @@ def _monitor_run(monkeypatch, arbitrated, ha_state):
     unblocked = []
     mon._blocked_port_since.clear()
     hc = mon.health_controller
+    route_fences([node], lambda n, p, **kw: unblocked.append(p))
     with patch.object(hc, "_restart_owns_lvs", return_value=False), \
          patch.object(hc, "_check_node_hublvol", return_value=True), \
-         patch.object(port_block, "set_port", side_effect=lambda n, p, **kw: unblocked.append(p)), \
          patch.object(mon.time, "monotonic", side_effect=[0.0, 100.0]):
         mon._remediate_stale_port_blocks(db, node, {4426: False}, {4426: "n1"})
     return unblocked, rpc

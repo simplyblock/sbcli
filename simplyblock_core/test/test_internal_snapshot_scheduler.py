@@ -92,13 +92,14 @@ def test_take_due_internal_snapshots_creates_internal_type(monkeypatch):
 
     calls = []
 
-    class _SnapCtl:
-        def add(self, lvol_id, name, snap_type=SnapShot.TYPE_USER):
-            calls.append((lvol_id, snap_type))
-            return "snap-uuid", None
+    # replication snapshots are taken through replication_delta, which
+    # brackets snapshot_controller.add with the members' local write counts
+    def _add_snapshot(lvol, name, snap_type=SnapShot.TYPE_USER):
+        calls.append((lvol.get_id(), snap_type))
+        return "snap-uuid", None
 
     monkeypatch.setattr(sm, "db", _DB())
-    monkeypatch.setattr(sm, "snapshot_controller", _SnapCtl())
+    monkeypatch.setattr(sm.replication_delta, "add_snapshot", _add_snapshot)
 
     sm.take_due_internal_snapshots("CL1", 10_000)
 

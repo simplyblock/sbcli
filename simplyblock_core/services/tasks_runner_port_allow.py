@@ -20,7 +20,6 @@ from simplyblock_core.services.task_runner_base import (
     serve,
     set_result,
 )
-from simplyblock_core.utils import port_block
 
 logger = utils.get_logger(__name__)
 
@@ -657,7 +656,7 @@ def exec_port_allow_task(task):
     for data_nic in node.data_nics:
         if data_nic.ip4_address:
             data_ping = health_controller._check_ping_from_node(
-                data_nic.ip4_address, ifname=data_nic.if_name, node=node)
+                data_nic.listen_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping}")
             data_results.append(data_ping)
     if data_results and not any(r is True for r in data_results):
@@ -971,7 +970,7 @@ def exec_port_allow_task(task):
         lvs_ports.append(port_number)
     logger.info(f"Allow LVS ports {lvs_ports} on node {node.get_id()}")
     for p in lvs_ports:
-        port_block.set_port(node, p, block=False, timeout=5, retry=2)
+        node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)
         tcp_ports_events.port_allowed(node, p)
 
     # Deferred ANA failover, AFTER the port release: a secondary recovering

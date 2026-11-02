@@ -294,3 +294,4 @@ def test_a_leaderless_target_runs_the_recovery_then_requires_it_settled():
     assert stable.call_count == 2
     src.rpc_client().bdev_lvol_transfer.assert_not_called()
     assert "moving" in task.function_result
+

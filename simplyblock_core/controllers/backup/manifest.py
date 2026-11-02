@@ -41,14 +41,25 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
+from collections.abc import Iterable
+from enum import StrEnum
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, TypeAdapter
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    SecretStr,
+    TypeAdapter,
+)
 
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMS
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.utils.secrets import unwrap_secret
@@ -120,6 +131,12 @@ class ManifestVolume(BaseModel):
     ha_type: Literal["single", "ha"] | None = None
 
     fabric: Literal["tcp", "rdma", "tcp,rdma"] | None = None
+    #: The namespace cap of the subsystem the volume was created with: 1 is a
+    #: subsystem of its own, more is a namespaced volume sharing one. Unlike the
+    #: settings below it comes off the backup record, so it survives the volume
+    #: and a restore -- including an imported one -- recreates the same sharing.
+    #: Absent for a backup recorded before the field existed.
+    max_namespace_per_subsys: int | None = None
     lvol_priority_class: int | None = None
     max_size: int | None = None
     rw_ios_per_sec: int | None = None
@@ -455,5 +472,312 @@ def parse_export(body: bytes, source: str) -> BackupExport:
 
     try:
         return BackupExport.model_validate(data)
+    except ValueError as e:
+        raise ManifestError(f"{source} is malformed: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Group backup manifest
+#
+# The self-describing part of a CONSISTENCY-GROUP backup: one JSON document per
+# group backup, under a "groups/" prefix, naming the N member backups of one
+# generation as a unit. It is written LAST, after every member manifest exists,
+# so its presence is the group backup's all-or-nothing commit barrier. A reader
+# resolves a group backup from this document, then reads each member's
+# manifests/<backup_id>.json to assemble that member's chain. Like the
+# per-backup manifest, it records identity and encoding, never the bucket,
+# region, endpoint, or credentials.
+# ---------------------------------------------------------------------------
+
+GROUP_MANIFEST_PREFIX = "groups/"
+GROUP_MANIFEST_SCHEMA_VERSION = 1
+
+
+def group_manifest_key(group_backup_id: UUID) -> str:
+    return f"{GROUP_MANIFEST_PREFIX}{group_backup_id}.json"
+
+
+class GroupManifestSource(BaseModel):
+    """Where a group backup's generation came from. Provenance for a reader."""
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: UUID
+    #: ``ConsistencyGroup.get_id()``: the composite "<cluster_id>/<uuid>".
+    consistency_group_id: str
+    consistency_group_name: str
+    #: The generation (``group_seq``) this backup was taken from.
+    generation: int
+    #: Absent when the cluster's own record of its name was unreadable.
+    cluster_name: str | None = None
+
+
+class GroupManifestState(StrEnum):
+    """Whether a group manifest's member backups can be relied on.
+
+    A group manifest is written ``committed``, at the commit barrier. A delete
+    marks it ``deleting`` before it touches any member, and removes it only once
+    every member is retired. A delete that ended after retiring a member marks it
+    ``broken``: some members are gone, so the group backup cannot restore, and
+    the bucket says so rather than presenting it as whole. Only a ``committed``
+    group backup is restorable or importable.
+    """
+    COMMITTED = "committed"
+    DELETING = "deleting"
+    BROKEN = "broken"
+
+
+class GroupBackupManifest(BaseModel):
+    """The self-describing document for one consistency-group backup."""
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = GROUP_MANIFEST_SCHEMA_VERSION
+    group_backup_id: UUID
+    created_at: AwareDatetime
+    #: When the group backup committed. A group manifest is written only at
+    #: commit, so this is always set.
+    completed_at: AwareDatetime
+    #: The sum of the member backups' sizes, in bytes.
+    size: Annotated[int, Field(ge=0)]
+
+    source: GroupManifestSource
+    #: The member backups, one per member volume of the generation. Everything
+    #: about a member -- its volume, s3 id, chain link, key -- is in its own
+    #: manifest, ``manifests/<backup_id>.json``.
+    member_backup_ids: list[UUID]
+
+    #: Whether the member backups can be relied on; see GroupManifestState. A
+    #: manifest written before deletes marked it reads as committed, which is
+    #: what it was.
+    state: GroupManifestState = GroupManifestState.COMMITTED
+
+    #: Whether the members are encrypted. Homogeneous: every member
+    #: shares this disposition. The actual per-member keys are NOT here -- each
+    #: member has its own DEK, recorded in its own manifest
+    #: (``manifests/<backup_id>.json``) -- so this is only the group-level
+    #: statement that a reader must resolve per-member keys before a restore.
+    encrypted: bool = False
+
+    def is_complete(self, member_manifests: Iterable[BackupManifest]) -> bool:
+        """Whether a bucket holding ``member_manifests`` holds this group backup
+        whole: a manifest for every member it names.
+
+        The group manifest is written only once every member completed, so a
+        torn group backup is one whose member manifests have since gone missing,
+        which the group manifest alone cannot show.
+        """
+        present = {m.backup_id for m in member_manifests}
+        return all(backup_id in present for backup_id in self.member_backup_ids)
+
+
+def write_group(config: BackupConfig, manifest: GroupBackupManifest) -> None:
+    """Store a group manifest, next to the member backups it names.
+
+    Written LAST, after every member manifest exists: its presence is the group
+    backup's commit barrier.
+
+    Raises:
+        ManifestError: it could not be stored. A group backup with member
+            manifests but no group manifest is not a committed group backup.
+    """
+    try:
+        s3_client(config).put_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(manifest.group_backup_id),
+            Body=manifest.model_dump_json().encode(),
+            ContentType="application/json",
+        )
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            "Failed to write group manifest for group backup "
+            f"{manifest.group_backup_id}") from e
+
+    logger.info("Wrote group manifest for group backup %s to %s",
+                manifest.group_backup_id, config.bucket_name)
+
+
+def read_group(config: BackupConfig, group_backup_id: UUID) -> GroupBackupManifest:
+    """Load one group manifest by group backup id.
+
+    Raises:
+        ManifestError: it is absent, unreadable, or a schema version this build
+            does not understand.
+    """
+    try:
+        body = s3_client(config).get_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(group_backup_id))["Body"].read()
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            f"Failed to read group manifest for group backup {group_backup_id} "
+            f"from {config.bucket_name}") from e
+
+    return _parse_group(body, group_manifest_key(group_backup_id))
+
+
+def list_all_groups(config: BackupConfig) -> list[GroupBackupManifest]:
+    """Every group manifest in the bucket, newest first.
+
+    The disaster-recovery entry point for group backups, parallel to
+    :func:`list_all`.
+
+    Raises:
+        ManifestError: the bucket could not be listed, or one group manifest
+            could not be parsed. Not best-effort, for :func:`list_all`'s reason.
+    """
+    client = s3_client(config)
+    manifests = []
+
+    try:
+        pages = client.get_paginator("list_objects_v2").paginate(
+            Bucket=config.bucket_name, Prefix=GROUP_MANIFEST_PREFIX)
+        for page in pages:
+            for entry in page.get("Contents", []):
+                key = entry["Key"]
+                if not key.endswith(".json"):
+                    continue
+                body = client.get_object(Bucket=config.bucket_name, Key=key)["Body"].read()
+                manifests.append(_parse_group(body, key))
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            f"Failed to list group manifests in {config.bucket_name}") from e
+
+    manifests.sort(key=lambda m: (m.created_at, m.group_backup_id), reverse=True)
+    return manifests
+
+
+def delete_retired_group(config: BackupConfig, group_backup_id: UUID) -> None:
+    """Remove the group manifest of a group backup whose delete has retired
+    every member: the last bucket step of deleting a group backup.
+
+    The group manifest is not a link in any backup chain. A member manifest
+    names its own predecessor, never a group manifest, so removing one breaks
+    no chain. What it does is un-commit the group backup: the bucket stops
+    naming its members as one restorable generation, and that cannot be undone
+    from the bucket. So only a manifest a delete has marked ``deleting``
+    (``GroupManifestState.DELETING``) is removed. The delete marks it before it
+    touches any member and calls this once every member is retired, which the
+    control plane's records, not the bucket, can tell (a deleted member's
+    manifest stays in the bucket as the only record of its objects). A
+    committed or broken manifest is refused and left in place. An absent one
+    is already removed, which is what a retried delete pass finds.
+
+    Raises:
+        PreconditionError: the manifest is not marked ``deleting``.
+        ManifestError: the manifest could not be read, parsed, or removed.
+    """
+    manifest = _read_group_if_present(config, group_backup_id)
+    if manifest is None:
+        return
+    if manifest.state != GroupManifestState.DELETING:
+        raise PreconditionError(
+            f"Group manifest of group backup {group_backup_id} is {manifest.state}, "
+            f"not {GroupManifestState.DELETING}; only a group backup whose delete "
+            f"has retired its members may lose its manifest")
+    _delete_group_object(config, group_backup_id)
+
+
+def _read_group_if_present(config: BackupConfig, group_backup_id: UUID) -> GroupBackupManifest | None:
+    """:func:`read_group`, but None for a manifest the bucket does not hold."""
+    try:
+        body = s3_client(config).get_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(group_backup_id))["Body"].read()
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise ManifestError(
+            f"Failed to read group manifest for group backup {group_backup_id} "
+            f"from {config.bucket_name}") from e
+    except BotoCoreError as e:
+        raise ManifestError(
+            f"Failed to read group manifest for group backup {group_backup_id} "
+            f"from {config.bucket_name}") from e
+    return _parse_group(body, group_manifest_key(group_backup_id))
+
+
+def _delete_group_object(config: BackupConfig, group_backup_id: UUID) -> None:
+    """Remove a group manifest object, unconditionally.
+
+    Private: removing a group manifest un-commits its group backup, and nothing
+    here checks that may happen. :func:`delete_retired_group` is the only
+    caller, after it has.
+    """
+    try:
+        s3_client(config).delete_object(
+            Bucket=config.bucket_name,
+            Key=group_manifest_key(group_backup_id))
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            "Failed to delete group manifest for group backup "
+            f"{group_backup_id}") from e
+
+
+def _parse_group(body: bytes, key: str) -> GroupBackupManifest:
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise ManifestError(f"Group manifest {key} is not valid JSON") from e
+
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if version != GROUP_MANIFEST_SCHEMA_VERSION:
+        # Refuse rather than guess, for the reason `_parse` refuses a manifest.
+        raise ManifestError(
+            f"Group manifest {key} has schema version {version}, "
+            f"this build understands {GROUP_MANIFEST_SCHEMA_VERSION}")
+
+    try:
+        return GroupBackupManifest.model_validate(data)
+    except ValueError as e:
+        raise ManifestError(f"Group manifest {key} is malformed: {e}") from e
+
+
+GROUP_EXPORT_SCHEMA_VERSION = 1
+
+
+class GroupBackupExport(BaseModel):
+    """A group backup carried out of a cluster in a file: the group manifest plus
+    the member backup manifests it names, as one unit.
+
+    This is to the group manifest what ``BackupExport`` is to a single-volume
+    manifest -- the one document that does record a location, because it is not
+    stored in the bucket it describes. The group manifest names the generation's
+    members; ``members`` carries each member's whole restorable chain, grouped by
+    the location it lives in exactly as a single-volume export groups its
+    manifests. A group backup is homogeneous -- its members share one location
+ -- so there is one group in practice, but reusing ``BackupExport`` keeps
+    the member records on the single-volume import path and describes a member's
+    chain the same way everywhere.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = GROUP_EXPORT_SCHEMA_VERSION
+    group_manifest: GroupBackupManifest
+    members: BackupExport
+
+
+def parse_group_export(body: bytes, source: str) -> GroupBackupExport:
+    """Read a group export document, naming *source* in anything it rejects.
+
+    The group analog of :func:`parse_export`.
+
+    Raises:
+        ManifestError: It is not valid JSON, states a schema version this build
+            does not understand, or is not shaped like a group export.
+    """
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise ManifestError(f"{source} is not valid JSON") from e
+
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if version != GROUP_EXPORT_SCHEMA_VERSION:
+        # Refused rather than guessed at, for the reason `_parse` refuses a
+        # manifest: the field names may not mean the same thing.
+        raise ManifestError(
+            f"{source} has group export schema version {version}, "
+            f"this build understands {GROUP_EXPORT_SCHEMA_VERSION}")
+
+    try:
+        return GroupBackupExport.model_validate(data)
     except ValueError as e:
         raise ManifestError(f"{source} is malformed: {e}") from e

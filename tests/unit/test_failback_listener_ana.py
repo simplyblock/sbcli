@@ -101,7 +101,7 @@ class EnsureListenerTest(unittest.TestCase):
 
 
 def _node(node_id, ips=("10.0.0.2",), port=4428, rpc=None):
-    nics = [SimpleNamespace(ip4_address=ip, trtype="TCP") for ip in ips]
+    nics = [SimpleNamespace(ip4_address=ip, listen_address=ip, trtype="TCP") for ip in ips]
     node = MagicMock()
     node.get_id.return_value = node_id
     node.data_nics = nics
@@ -225,7 +225,7 @@ class RecreateUsesPresumedLeaderTest(unittest.TestCase):
         i_fallback = src.index("_presumed_acting_leader(")
         i_compression = src.index("_jc_compression_status_with_retry(current_leader, lvs_jm_vuid)")
         i_fence = src.index(
-            "port_block.set_port(sec_node, snode_lvs_port, block=True")
+            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         i_disable = src.index(".jc_disable_replication(lvs_jm_vuid)")
         i_examine = src.index('_fenced("bdev_distrib_force_to_non_leader"')
         self.assertLess(i_probe, i_fallback)

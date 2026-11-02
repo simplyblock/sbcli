@@ -111,6 +111,7 @@ class TestTheBuildUsesTheNamedRole(unittest.TestCase):
             pass
 
         snode = MagicMock(spec=StorageNode)
+        snode.pod_network = False  # a host-network node publishes no Service ports
         snode.get_id = MagicMock(return_value="wzkz2")
         snode.cluster_id = "cluster-1"
         snode.rpc_client = MagicMock(return_value=MagicMock())

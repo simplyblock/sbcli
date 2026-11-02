@@ -121,17 +121,17 @@ def fio_verify_read(mgmt, dev):
     """crc32c verify-only pass over the stamped region — fails on any
     corruption or read error."""
     ssh_exec(mgmt, [
-        f"sudo fio {_FIO_VERIFY_JOB} --filename={dev}"
-        " --verify_only --verify_fatal=1"
+        (f"sudo fio {_FIO_VERIFY_JOB} --filename={dev}"
+        " --verify_only --verify_fatal=1")
     ], check=True, timeout=3600)
 
 
 def fio_mixed(mgmt, dev, runtime=MIX_RUNTIME_S):
     ssh_exec(mgmt, [
-        f"sudo fio --name=mix {FIO_COMMON} --filename={dev} --rw=randrw"
+        (f"sudo fio --name=mix {FIO_COMMON} --filename={dev} --rw=randrw"
         f" --rwmixread=70 --bs=16k --iodepth=16"
         f" --offset={MIX_REGION_OFFSET} --size=4G"
-        f" --time_based=1 --runtime={runtime}"
+        f" --time_based=1 --runtime={runtime}")
     ], check=True, timeout=runtime + 600)
 
 

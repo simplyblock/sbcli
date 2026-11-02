@@ -124,6 +124,62 @@ Moves during a run:
 - **Moves in the idle window.** These are covered because the leader is
   resolved before every transfer.
 
+### Target: the primary or the secondary receives, never the tertiary
+
+A settled leader is necessary, but it is not sufficient. The transfer reaches
+the target through a **transfer hub**. These facts decide which hub, and which
+member may receive:
+
+| Fact | Where |
+|---|---|
+| SPDK demuxes hub IO by map id in the **hub's own** lvstore: `lvol->lvol_store->lvol_map.lvol[EXTRACT_ID(offset)]`. The leader gate checks the same lvstore. | `vbdev_hublvol_submit_request`, spdk `module/bdev/lvol/vbdev_lvol.c` |
+| A node's regular transfer hub lives on `self.lvstore`, the lvstore that node is **primary** of. | `StorageNode.create_transfer_hublvol` |
+| A hub blob is in-memory: `spdk_bs_create_hubblob` uses blob id `UINT64_MAX`, starts CLEAN, and writes no metadata. Any member can create one on any lvstore it hosts. | spdk `lib/blob/blobstore.c` |
+| On a tertiary, hub IO is never demuxed: the branch requires `lvs->node_role != NODE_TERTIARY`. | `vbdev_lvol_submit_request` |
+| A non-leading secondary forwards hub IO to the leader with the map-id offset intact (`is_hublvol_io`). | `vbdev_redirect_request_to_hublvol` |
+
+**The rule (`process_snap_replicate_start`):**
+
+- **Primary leads:** it receives through its own transfer hub, as before.
+- **Secondary leads:** it receives through a **per-lvstore hub** that it
+  creates in the target lvstore, `<lvs>/transferhub_<node8>`. The hub has its
+  own NQN, `…:transferhub:<lvs>:<node uuid>`, and listens on the target
+  lvstore's hub port (`replication_final_step.receiving_hub` and
+  `ensure_hub_attached(src_rpc, node, lvs_primary)`).
+  - The name has to be distinct, because the source reuses an attached
+    controller by name. A shared name would keep sending to the old primary.
+  - The hub is derived, not persisted. Creating and exposing it is idempotent,
+    which also heals it after a restart.
+  - If the secondary loses leadership mid-transfer, SPDK forwards its hub IO to
+    the new leader.
+- **Tertiary leads:** the start waits with backoff, and the wait is not
+  counted. This is reached only when the primary and the secondary are both
+  out.
+- **Detach:** the controller the source attached is recorded on the task as
+  `hub_ctrl`. Both detach paths close exactly that controller.
+
+**Before this change** the receiving node always used its regular transfer hub
+(`_receiving_leader_node`, and #1441 after it). A secondary that led the target
+lvstore therefore resolved the landing volume's map id in **its own** lvstore,
+whose leader gate it passes. If no volume there has that map id, the IO fails
+("orglvol is none"). If one does, the snapshot is written into an unrelated
+volume.
+
+**To check on beds:**
+
+- Target SPDK logs containing `FAILED - orglvol is none`.
+- Older replication tasks whose `target_node_id` is not the landing volume's
+  `node_id`.
+
+**Still open:**
+
+1. **Tertiary demux (SPDK fork).** Allow hub demux on a tertiary that leads,
+   for example `lvol->hublvol && (lvs->node_role != NODE_TERTIARY || lvs->leader)`.
+   This needs review by the SPDK owners. After that, drop the tertiary wait.
+2. **Cross-cluster cutover.** `replication_final_step.run_cutover` still
+   receives on the target primary only. With `receiving_hub` it can take the
+   acting secondary too (branch `feat/online-migration-gaps`).
+
 ### Retry bounds
 
 A node switch is not the transfer's fault, so it does not spend retries. Both

@@ -206,3 +206,49 @@ class TestFailures:
 
         with pytest.raises(RuntimeError, match="Failed to create restore task"):
             _restore()
+
+
+class TestVolumeShape:
+    """Restore recreates the subsystem sharing the source had.
+
+    Three members of a consistency group shared one subsystem (NSIDs 1..3) and
+    came back as three subsystems at NSID 1 each: the record carried no
+    namespacing and restore created every volume as a bare add_lvol does. The
+    backup records the cap now and restore passes it through.
+    """
+
+    def _restore_with_cap(self, db, cap, **kwargs):
+        backup = _backup(node_id="target-node")
+        backup.max_namespace_per_subsys = cap
+        db.get_backup_by_id.return_value = backup
+        db.get_backups.return_value = [backup]
+        return _restore(**kwargs)
+
+    def test_a_shared_subsystem_member_comes_back_namespaced(self, db, add_lvol_ha, tasks):
+        self._restore_with_cap(db, 10)
+        kwargs = add_lvol_ha.call_args.kwargs
+        assert kwargs["namespaced"] is True
+        assert kwargs["max_namespace_per_subsys"] == 10
+
+    def test_a_volume_owning_its_subsystem_comes_back_owning_one(self, db, add_lvol_ha, tasks):
+        self._restore_with_cap(db, 1)
+        kwargs = add_lvol_ha.call_args.kwargs
+        assert kwargs["namespaced"] is False
+        assert kwargs["max_namespace_per_subsys"] == 1
+
+    def test_a_record_without_the_field_takes_the_default(self, db, add_lvol_ha, tasks):
+        """0 predates the field: neither forced, add_lvol_ha decides as before."""
+        self._restore_with_cap(db, 0)
+        kwargs = add_lvol_ha.call_args.kwargs
+        assert kwargs["namespaced"] is False
+        assert kwargs["max_namespace_per_subsys"] is None
+
+    def test_the_group_is_joined_at_creation(self, db, add_lvol_ha, tasks):
+        """A group restore names the group it forms, so a namespaced member takes
+        the group's subsystem rather than any of the pool's with a free slot."""
+        self._restore_with_cap(db, 10, consistency_group="restored-cg")
+        assert add_lvol_ha.call_args.kwargs["consistency_group"] == "restored-cg"
+
+    def test_a_single_volume_restore_joins_no_group(self, db, add_lvol_ha, tasks):
+        self._restore_with_cap(db, 10)
+        assert add_lvol_ha.call_args.kwargs["consistency_group"] is None

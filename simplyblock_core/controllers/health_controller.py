@@ -251,23 +251,18 @@ def _log_port_check_failure(db_controller, snode, port, exc):
 
 
 def check_port_on_node(snode, port_id):
-    from simplyblock_core.utils import port_block
-    return not port_block.is_port_blocked(snode, port_id)
+    return int(port_id) not in snode.rpc_client(timeout=5, retry=5).nvmf_get_blocked_ports()
 
 
 def check_ports_on_node(snode, port_ids):
     """Batch variant of :func:`check_port_on_node`: ONE
     ``nvmf_get_blocked_ports`` fetch answers every port in ``port_ids``.
-    Returns ``{port: bool}`` (True = open). Falls back to per-port checks on
-    legacy nodes without the RPC. Raises on fetch failure — callers treat it
-    like the single-port failure path."""
-    from simplyblock_core.utils import port_block
+    Returns ``{port: bool}`` (True = open). Raises on fetch failure — callers
+    treat it like the single-port failure path."""
     port_ids = list(port_ids)
     if not port_ids:
         return {}
-    blocked = port_block.get_blocked_ports_set(snode)
-    if blocked is None:
-        return {p: check_port_on_node(snode, p) for p in port_ids}
+    blocked = snode.rpc_client(timeout=5, retry=5).nvmf_get_blocked_ports()
     return {p: int(p) not in blocked for p in port_ids}
 
 
@@ -293,6 +288,14 @@ def _check_ping_from_node(ip, ifname, node):
     # node DOWN on that; the caller ignores None and re-evaluates next cycle.
     # (The previous mgmt-side ICMP fallback pinged the data IP from mgmt, which
     # is typically off the data VLAN -> always False -> spurious node-down.)
+    if node.on_pod_network:
+        # The interface is in the SPDK pod's namespace; ask its proxy, not the agent.
+        try:
+            return bool(node.rpc_client(timeout=8, retry=1).net_check(ifname, ip))
+        except Exception as e:
+            logger.error(e)
+            logger.info("data-nic check through the SPDK proxy failed; treating as inconclusive")
+            return None
     snodeapi = node.client(timeout=8, retry=1, connect_retry=0)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
@@ -935,12 +938,12 @@ def check_node(node_id, with_devices=True):
 
     # 3- check node RPC
     node_rpc_check, _ = check_node_rpc(snode)
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+    logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}")
 
     data_nics_check = True
     for data_nic in snode.data_nics:
         if data_nic.ip4_address:
-            ping_check = _check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
+            ping_check = _check_ping_from_node(data_nic.listen_address, ifname=data_nic.if_name, node=snode)
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 

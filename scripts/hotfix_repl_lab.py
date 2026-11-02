@@ -46,6 +46,8 @@ HOTFIX_DIR = "/opt/sb-hotfix"
 #: appearing (49 in 6 minutes) on a lab that had just been "verified".
 CONTAINER_PATHS = ("/app/simplyblock_core",
                    "/usr/local/lib/python3.12/site-packages/simplyblock_core")
+#: where sbcli is installed on the mgmt host; set by main() from the host's own
+#: interpreter, since that is 3.9 on older labs and 3.11 since sbcli requires it
 HOST_SP = "/usr/local/lib/python3.9/site-packages"
 
 #: local path -> path under simplyblock_core
@@ -110,10 +112,17 @@ def discover_drift(mgmt):
     if not ref:
         log("no reference container; falling back to the static mount list")
         return {}
-    probe = ("cd /usr/local/lib/python3.12/site-packages && "
-             'find simplyblock_core -name "*.py" | sort | xargs md5sum')
-    listing = ssh(mgmt, f"sudo docker exec {ref} sh -c {shlex.quote(probe)}",
-                  check=False)
+    # Hash the IMAGE, not the running container: the container's copy is
+    # overlaid by earlier hotfix mounts, and its site-packages directory may
+    # hold nothing but mount targets (the image's interpreter moved past 3.12
+    # and imports sbcli from /app, so docker creates that directory just for
+    # the mounts). A throwaway container from the service's image sees /app
+    # exactly as built.
+    image = ssh(mgmt, "sudo docker service inspect app_TasksRunnerReplicationFinal "
+                      "--format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'", check=False).strip()
+    probe = 'cd /app && find simplyblock_core -name "*.py" | sort | xargs md5sum'
+    listing = ssh(mgmt, f"sudo docker run --rm --entrypoint sh {shlex.quote(image)} "
+                        f"-c {shlex.quote(probe)}", check=False) if image else ""
     image = {}
     for line in listing.splitlines():
         parts = line.split()
@@ -235,6 +244,13 @@ def main():
     meta = json.loads((HERE / "cluster_metadata_repl.json").read_text())
     mgmt = meta["mgmt"]["public_ip"]
     log(f"mgmt={mgmt}")
+    global HOST_SP
+    found = ssh(mgmt, "head -1 /usr/local/bin/sbctl | sed 's/^#!//' | xargs -I{} sudo {} -c "
+                      "'import os, simplyblock_core as m; print(os.path.dirname(os.path.dirname(m.__file__)))'",
+                check=False).strip().splitlines()
+    if found and found[-1].startswith("/"):
+        HOST_SP = found[-1]
+    log(f"host site-packages: {HOST_SP}")
     if "--verify-only" not in sys.argv:
         # Mount everything that differs from the image, not a hand-kept list.
         DRIFT = discover_drift(mgmt)

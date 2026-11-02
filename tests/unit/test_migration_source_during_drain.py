@@ -95,7 +95,7 @@ class ResolvedOnceAtCreateTests(unittest.TestCase):
 
     def test_create_pins_the_resolved_source_on_the_record(self):
         """Without this write every reader below silently means "the primary"."""
-        body = self._body(ctl.create_migration)
+        body = self._body(ctl._create_migration_impl)
         self.assertIn("_resolve_active_source_node(src_node, target_node_id)", body)
         self.assertIn("migration.active_source_node_id = active_src_node.get_id()", body)
 
