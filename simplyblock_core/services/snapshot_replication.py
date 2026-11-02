@@ -218,6 +218,11 @@ def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
         if rec.status == SnapShot.STATUS_IN_DELETION:
             return ("blocked", rec,
                     f"chain ancestor {rec.get_id()} is mid-deletion")
+        if rec.status == SnapShot.STATUS_IN_CREATION:
+            # Not yet a snapshot: its create is in progress, or its process
+            # died and reap_snapshot_intents will roll it back.
+            return ("blocked", rec,
+                    f"chain ancestor {rec.get_id()} is still being created")
         if deepest is None and _transfer_completed(rec, replicate_to_source):
             # The direct base has arrived and only its merge and convert on
             # the remote side remain; the finish chains onto its copy once it

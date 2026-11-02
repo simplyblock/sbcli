@@ -600,6 +600,10 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
         full = db.get_snapshot_by_id(newest.get_id())
     except KeyError:
         return None                       # vanished under us: nothing outstanding
+    if getattr(full, "status", "") == SnapShot.STATUS_IN_CREATION:
+        # Still being created, or its creator died and the intent reaper will
+        # roll it back: outstanding either way, and nothing to queue for it.
+        return full
     # Either direction counts as delivered: to-target replication records the
     # target copy, fail-back records the source copy.
     if full.target_replicated_snap_uuid or full.source_replicated_snap_uuid:
@@ -896,6 +900,11 @@ def main():
                 take_due_internal_snapshots(cluster.get_id(), int(time.time()))
             except Exception as e:
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
+
+            try:
+                snapshot_controller.reap_snapshot_intents(cluster.get_id())
+            except Exception as e:
+                logger.error(f"Snapshot intent reaping failed for cluster {cluster.get_id()}: {e}")
 
             try:
                 deletions_in_flight += replication_snapshot_retire.reap_retired(
