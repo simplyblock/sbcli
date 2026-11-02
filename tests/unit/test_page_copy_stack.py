@@ -1,7 +1,8 @@
 """
-Page copy (snapshot copy-on-write in the distribution layer) is a cluster-wide
-setting fixed at creation: create_lvstore persists it on every distrib stack
-entry, and bdev_distrib_create sends it to the data plane.
+Page copy (snapshot copy-on-write in the distribution layer) is always on for
+new clusters; clusters created before it keep it off (model default), since it
+is a property of the distribs. create_lvstore persists it on every distrib
+stack entry, and bdev_distrib_create sends it to the data plane.
 """
 
 import unittest
@@ -72,6 +73,21 @@ def test_bdev_distrib_create_sends_page_copy(page_copy):
 
 def test_cluster_page_copy_defaults_off():
     assert Cluster().page_copy is False
+
+
+def test_new_clusters_always_use_page_copy():
+    import inspect
+
+    from simplyblock_cli.cli import CLIWrapper
+    from simplyblock_core import cluster_ops
+    from simplyblock_web.api.v2.cluster import ClusterParams
+
+    src = inspect.getsource(cluster_ops)
+    # both create paths (create_cluster, add_cluster) switch it on, nothing turns it off
+    assert src.count("cluster.page_copy = True") == 2
+    assert "page_copy=" not in src
+    assert "page-copy" not in inspect.getsource(CLIWrapper)
+    assert "page_copy" not in ClusterParams.model_fields
 
 
 class TestKeepPlacedBalancing(unittest.TestCase):
