@@ -400,6 +400,14 @@ TALOSCTL_IMAGE = get_config_var(
 # holds the client config the Job authenticates to the node's apid with.
 TALOS_API_SECRET = get_config_var(
         "TALOS_API_SECRET", "talos-api-access-talos-secrets")
+# Whether the node may change a Talos worker's machine config through the Talos
+# API ("managed": talosctl Jobs patch machine.sysfs and machine.kubelet.extraConfig,
+# which needs the os:admin Secret above in the namespace) or only verifies what
+# the machine config already provides ("preprovisioned", the default: no Talos
+# API credentials anywhere, and a short pool or an unconfigured kubelet fails the
+# add with the patch to apply). The operator passes it through from
+# StorageCluster.spec.storageNodes.talosMachineConfig.
+TALOS_MACHINE_CONFIG = get_config_var("TALOS_MACHINE_CONFIG", "preprovisioned")
 SIMPLY_BLOCK_VERSION = __version__
 
 GELF_PORT = 12202
