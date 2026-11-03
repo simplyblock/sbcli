@@ -565,6 +565,27 @@ def _due_for_internal_snapshot(lvol, all_snaps, now_ts):
     return (now_ts - last_ts) >= interval_sec
 
 
+def _deletion_backlog(lvol):
+    """How many of *lvol*'s snapshots are waiting to be deleted: those already
+    in deletion, plus the replicated internal snapshots beyond what retention
+    keeps (retention should have removed them). Read only for a volume that is
+    due, so at most once per volume per interval.
+
+    Replication must not run ahead of snapshot deletion by more than a few
+    rounds: every snapshot kept adds a copy generation behind every page
+    rewritten since, and the deletes left behind pile up (2026-11-03)."""
+    from simplyblock_core.services.snapshot_replication import _keep_replicated_for
+    in_deletion = 0
+    replicated = 0
+    for s in db.get_snapshots_by_lvol_id(lvol.get_id()):
+        if s.status == SnapShot.STATUS_IN_DELETION:
+            in_deletion += 1
+        elif (s.snap_type == SnapShot.TYPE_INTERNAL and s.status == SnapShot.STATUS_ONLINE
+              and s.target_replicated_snap_uuid):
+            replicated += 1
+    return in_deletion + max(0, replicated - _keep_replicated_for(lvol))
+
+
 def _outstanding_internal_snapshot(lvol, all_snaps):
     """The newest internal snapshot of *lvol* that has NOT reached the remote
     side yet, or None when the last one completed.
@@ -869,6 +890,14 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     "previous one (%s, taken %ss ago) has not replicated yet",
                     lvol.get_id(), outstanding.get_id(),
                     max(0, now_ts - outstanding.created_at))
+                continue
+            backlog = _deletion_backlog(lvol)
+            if backlog >= constants.REPL_MAX_DELETION_BACKLOG:
+                logger.warning(
+                    "Skipping internal replication snapshot for lvol %s: %d of its "
+                    "snapshots are waiting to be deleted (limit %d); replication "
+                    "waits for deletion to catch up",
+                    lvol.get_id(), backlog, constants.REPL_MAX_DELETION_BACKLOG)
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")

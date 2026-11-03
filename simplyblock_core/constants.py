@@ -542,8 +542,15 @@ REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
 # stops.
 REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
 # Safety bound: a volume written faster than it replicates never converges, so
-# stop and freeze rather than looping forever.
-REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# stop and freeze rather than looping forever. Every round's snapshot is held
+# until the cutover completes, so the bound is also the number of snapshots
+# (and copy generations behind every rewritten page) an endgame keeps: more
+# than a few rounds behind on deletion is not acceptable (2026-11-03).
+REPL_CUTOVER_MAX_SHRINK_ROUNDS = 4
+# A volume whose snapshots are not being deleted as fast as replication takes
+# them takes no new internal replication snapshot while this many are pending
+# deletion (in deletion, or replicated beyond what retention keeps).
+REPL_MAX_DELETION_BACKLOG = 3
 # When to stop converging in the open and take the lvstore for the endgame.
 # A round completing within this multiple of the target means the delta is
 # nearly converged, so the exclusive window that follows will be short. Claiming
