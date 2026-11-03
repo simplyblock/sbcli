@@ -348,4 +348,4 @@ def test_a_configured_node_only_confirms_numa_readiness(tmp_path):
         pools={POOL: {"values": ["worker-1"]}}, mcs=[MC], kcs={KC: {}}, render_after=0), marker=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "skipping patch" in proc.stdout
-    assert "NUMA plugin is ready" in proc.stdout
+    assert "numa-align/numa-0 is available (100)" in proc.stdout

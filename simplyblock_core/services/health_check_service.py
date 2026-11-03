@@ -5,14 +5,17 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import (
+    device_controller,
     device_events,
     health_controller,
+    port_release_budget,
     storage_events,
     tasks_controller,
 )
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -395,6 +398,11 @@ def check_node(snode):
                 if rpc_client.bdev_get(jm_device.jm_bdev):
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     connected_jms.append(jm_device.get_id())
+                    if jm_device.stale_jm_legs:
+                        try:
+                            device_controller.clear_rebuilt_jm_legs(snode, rpc_client)
+                        except RPCException as e:
+                            logger.warning("JM raid rebuild check failed: %s", e)
                 else:
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
 
@@ -581,7 +589,19 @@ def check_node(snode):
                         logger.info(
                             f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
                         if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
-                            tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
+                            # Release budget (models/fence_release.py): a
+                            # port the control plane already reopened
+                            # FENCE_RELEASE_BUDGET times this window is being
+                            # re-fenced by SPDK on every IO; another
+                            # port_allow task would only feed that loop.
+                            if port_release_budget.exhausted(db, snode, port):
+                                logger.warning(
+                                    "Port %s on %s is blocked but was released %d times in the "
+                                    "last %ds; not scheduling port_allow (fence loop)",
+                                    port, snode.get_id(), constants.FENCE_RELEASE_BUDGET,
+                                    constants.FENCE_RELEASE_WINDOW_SEC)
+                            else:
+                                tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
                 except Exception as e:
                     for port in ports:
                         health_controller._log_port_check_failure(db, snode, port, e)

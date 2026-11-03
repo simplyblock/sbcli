@@ -284,7 +284,7 @@ class TestLandingMerge(unittest.TestCase):
     #: what bdev_lvol_merge_base_stat answers before any job ran
     NONE: ClassVar[dict] = {"state": "none", "rc": 0}
 
-    def _merge(self, params, start=None, stats=(NONE,), side_effect=None):
+    def _merge(self, params, start=None, stats=(NONE,), side_effect=None, class_on=False):
         task = SimpleNamespace(function_params=params, write_to_db=MagicMock(), uuid="t")
         lv = SimpleNamespace(get_id=lambda: "landing", top_bdev="LVS/LAND")
         node = MagicMock()
@@ -293,7 +293,7 @@ class TestLandingMerge(unittest.TestCase):
         rpc.bdev_lvol_merge_base.return_value = start
         rpc.bdev_lvol_merge_base.side_effect = side_effect
         rpc.bdev_lvol_merge_base_stat.side_effect = list(stats)
-        with patch.object(snapshot_replication.constants, "REPL_MERGE_INLINE_WAIT_SEC", 0.05),                 patch.object(snapshot_replication.constants, "REPL_MERGE_POLL_SEC", 0.01):
+        with patch.object(snapshot_replication, "_replication_class_on", return_value=class_on),                 patch.object(snapshot_replication.constants, "REPL_MERGE_INLINE_WAIT_SEC", 0.05),                 patch.object(snapshot_replication.constants, "REPL_MERGE_POLL_SEC", 0.01):
             return snapshot_replication._merge_landing(task, lv, node), rpc, task
 
     def test_a_full_transfer_needs_no_merge(self):
@@ -305,7 +305,7 @@ class TestLandingMerge(unittest.TestCase):
         res, rpc, task = self._merge({"partial_base": 7}, start={"state": "running"},
                                      stats=[self.NONE, {"state": "done", "rc": 0, "clusters": 3}])
         self.assertEqual(res, "ok")
-        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND")
+        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND", priority_class=None)
         self.assertEqual(task.function_params["merged_landing"], "landing")
         res, rpc, _ = self._merge(dict(task.function_params))
         self.assertEqual(res, "ok")
@@ -329,6 +329,15 @@ class TestLandingMerge(unittest.TestCase):
         self.assertEqual(res, "restart")
         rpc.bdev_lvol_merge_base.assert_not_called()
 
+    def test_the_merge_runs_in_the_replication_class(self):
+        # bf10 2026-11-02: the merge ran in Default, outside the replication's
+        # share, and starved the target's journal heartbeats.
+        res, rpc, _ = self._merge({"partial_base": 7}, start={"state": "running"},
+                                  stats=[self.NONE, {"state": "done", "rc": 0}], class_on=True)
+        self.assertEqual(res, "ok")
+        rpc.bdev_lvol_merge_base.assert_called_once_with(
+            "LVS/LAND", priority_class=snapshot_replication.constants.QOS_REPLICATION_WIRE_CLASS)
+
     def test_a_running_merge_is_not_started_again(self):
         res, rpc, _ = self._merge({"partial_base": 7}, stats=[{"state": "running"}] * 50)
         self.assertEqual(res, "pending")
@@ -338,7 +347,7 @@ class TestLandingMerge(unittest.TestCase):
         res, rpc, _ = self._merge({"partial_base": 7}, start={"state": "running"},
                                   stats=[{"state": "failed", "rc": -5}] + [{"state": "running"}] * 50)
         self.assertEqual(res, "pending")
-        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND")
+        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND", priority_class=None)
 
     def test_other_failures_retry_the_finish(self):
         from simplyblock_core.rpc_client import RPCRemoteError

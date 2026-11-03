@@ -209,6 +209,21 @@ def _resolve_policy(policy):
     raise KeyError(f'ReplicationPolicy {policy} not found')
 
 
+def _refuse_encrypted(lvol):
+    """Raise unless *lvol* may replicate.
+
+    Checked before the policy pointer is written, so the API caller is told why
+    rather than being handed the generic "could not start replication" of the
+    roll-back path.
+
+    Raises:
+        ReplicationConfigError: The volume is encrypted.
+    """
+    if lvol.crypto_bdev:
+        raise ReplicationConfigError(
+            lvol_controller.ENCRYPTED_REPLICATION_REFUSAL.format(lvol.get_id()))
+
+
 def start_member_replication(lvol_id, pol, target):
     """Point one volume at *pol* and start replicating to *target*, WITHOUT
     touching consistency-group membership.
@@ -222,6 +237,7 @@ def start_member_replication(lvol_id, pol, target):
     ``joined_seq``) and tear the group's snapshot history.
     """
     lvol = db.get_lvol_by_id(lvol_id)
+    _refuse_encrypted(lvol)
     lvol.replication_policy_id = pol.get_id()
     lvol.write_to_db()
     ret = lvol_controller.replication_start(
@@ -276,6 +292,7 @@ def attach_policy(lvol_id, policy):
     it is expensive for a large volume.
     """
     lvol = db.get_lvol_by_id(lvol_id)
+    _refuse_encrypted(lvol)
     pol = _resolve_policy(policy)
     target = db.get_replication_target_by_id(pol.target_id)
 
@@ -1413,8 +1430,15 @@ def set_cutover_proceed(lvol_id):
     handles this case without changing the API surface.
 
     Returns the replication ID on success, raises KeyError when no matching
-    cutover_pending record is found.
+    cutover_pending record is found, SyncReplicationUnsupportedError on a
+    sync-replication cluster.
     """
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        lvol = None  # no volume record to judge; the relationship lookup below decides
+    if lvol is not None:
+        lvol_controller.reject_async_replication_on_sync(db, lvol, "Replication cutover-proceed")
     rep = _active_relationship(lvol_id)
     if rep is None or rep.state != LVolReplication.STATE_CUTOVER_PENDING:
         # Failback path: lvol_id is the target of the reverse replication.

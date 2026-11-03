@@ -3280,6 +3280,14 @@ def _budget_suspend(task, migration, migration_id, error_msg):
 # Main task runner entry point
 # ---------------------------------------------------------------------------
 
+def _on_sync_replication_cluster(cluster_id) -> bool:
+    try:
+        return db.get_cluster_by_id(cluster_id).sync_replication is True
+    except KeyError:
+        # No cluster record to go by: the runner's own checks decide.
+        return False
+
+
 def task_runner(task):
     """
     Process one iteration of a FN_LVOL_MIG task.
@@ -3305,6 +3313,14 @@ def task_runner(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         return True
+
+    # create_migration refuses a sync-replication cluster; a migration that
+    # exists anyway is never driven: it rebuilds lvol.nodes and the paths for
+    # one triplet, without the site rule (so _CNTLID_RANGES never meets a
+    # six-path volume).
+    if _on_sync_replication_cluster(task.cluster_id):
+        return _fail_task(task, migration,
+                          "Volume migration is not supported on a sync-replication cluster")
 
     if migration.status == LVolMigration.STATUS_FAILED:
         if migration.retry_on_failure:

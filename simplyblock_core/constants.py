@@ -68,6 +68,27 @@ PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
 DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
+#: A distrib ``error_read``/``error_write``/... event names an IO the distrib
+#: could not serve from the chunks it can reach -- a stripe that has lost its
+#: redundancy. The raw event goes to the cluster log every time; the operator
+#: alert naming the owning LVS is raised at most once per (distrib, error)
+#: in this many seconds, so a client retrying the same read every 20 s does
+#: not turn one defect into hundreds of alerts.
+DISTR_ERROR_ALERT_DEBOUNCE_SEC = 600
+#: How far back ``sbctl volume check`` / ``sbctl cluster check`` look for
+#: those events when reporting an lvstore's distrib read errors.
+DISTR_ERROR_LOOKBACK_SEC = 7 * 24 * 3600
+#: A distrib error newer than this fails ``volume check`` / ``cluster check``;
+#: an older one inside the lookback is reported as a warning only.
+DISTR_ERROR_ACTIVE_SEC = 3600
+#: Fence-release budget (models/fence_release.py). A client LVS port that
+#: SPDK fenced may be reopened by the control plane this many times inside
+#: FENCE_RELEASE_WINDOW_SEC; the next refusal leaves it fenced and raises an
+#: event. Three is well above anything legitimate -- a leaked fence is lifted
+#: once -- and stops the leader/peer ping-pong of an unreadable stripe within
+#: a minute instead of letting it run until the missing node returns.
+FENCE_RELEASE_BUDGET = 3
+FENCE_RELEASE_WINDOW_SEC = 600
 #: JM events are polled on their own cadence. Unlike the distrib source there
 #: is no discard counterpart -- jm_get_events returns every event it holds on
 #: every call -- so the collector filters what it has already logged and the
@@ -972,6 +993,36 @@ qos_class_replication_weight_percent = 10
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
+# Sync-replication resync (tasks_runner_sync_resync): the shared task driver
+# re-runs a failed catch-up after BASE * 2^(runs-1) seconds, capped at MAX (its
+# backoff, held in memory: a restarted runner re-runs at once once the lagging
+# zone is up), and one alert is raised once ALERT_RUNS runs have not converged.
+# A catch-up held back by an open device migration on the leader for HELD_ALERT_SEC raises that alert once.
+SYNC_RESYNC_RETRY_BASE_SEC = 30
+SYNC_RESYNC_RETRY_MAX_SEC = 600
+SYNC_RESYNC_ALERT_RUNS = 5
+SYNC_RESYNC_HELD_ALERT_SEC = 1800
+
+# Sync-replication promote (tasks_runner_sync_promote): a failed or canceled
+# pass ends its task; a pass interrupted by an unexpected error is a retry of the
+# shared task driver, which enforces this as the task's max_retry - at the
+# ceiling the task ends failed (its leadership moves settled).
+SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS = 5
+
+# Sync-replication status (sync_replication_controller): the status endpoints
+# may serve an answer this many seconds old (the gates never do); one status
+# query per storage node is bounded by the RPC timeout.
+SYNC_STATUS_CACHE_SEC = 5
+SYNC_STATUS_RPC_TIMEOUT_SEC = 5
+
+#: Fewest ONLINE nodes of a site a site activation needs: a site-aware journal needs this many local JMs
+#: (ultra alg_journal.hpp:108 c_jc_ha_min_required_jms; jc_open refuses fewer, the JC aborts the node).
+SYNC_JC_MIN_LOCAL_JMS = 2
+
+#: ``StorageNode.lvs_active_site`` of an LVS whose leadership is being moved to
+#: the site after the prefix (sync replication promote): ``moving:<site>``.
+LVS_MOVING_PREFIX = "moving:"
+
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
@@ -1220,3 +1271,14 @@ TWO_NODE_STORAGE_FENCED_CONDITION = "StorageFenced"
 #: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
 #: retried while it fails (a journal re-level in progress) before the restart aborts.
 RESTART_JC_COMPRESSION_RETRY_S = 60
+
+# Before the control plane makes any node leader of an lvstore, every other
+# member must be proven non-leader (its RPC) or dead (its node agent) -- twice,
+# this far apart -- so a slow or recovering old leader cannot become a second
+# writer (storage_node_ops._leadership_proven_free).
+LEADERSHIP_SAFETY_WINDOW_SEC = 10
+
+# A snapshot record still in_creation after this long belongs to a create
+# whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
+# Far above any create (lock waits included).
+SNAPSHOT_INTENT_REAP_SEC = 600

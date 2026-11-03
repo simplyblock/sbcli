@@ -35,6 +35,17 @@ class Cluster(BaseModel):
     #: clear out from under a live rebuild.
     STATUS_IN_SHRINK = "in_shrink"
 
+    #: ``lost_site_state`` values (sync replication). Written by the
+    #: storage-node monitor: the site is beyond its FTT and what is left of it
+    #: is being shut down (DRAINING), or every node of it is gone and it may
+    #: return (DOWN). Written by a disaster fail-over (a forced promote): its
+    #: site steps are running - a retry redoes them (FENCING) - or they are
+    #: complete (DONE). The one definition - every reader compares against these.
+    LOST_SITE_DRAINING = "draining"
+    LOST_SITE_DOWN = "down"
+    LOST_SITE_FENCING = "fencing"
+    LOST_SITE_DONE = "done"
+
     STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 1,
         STATUS_INACTIVE: 2,
@@ -300,6 +311,40 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # Site-level synchronous replication (two sites, one cluster). Deploy-time
+    # only, like enable_failure_domain: set at cluster create, never toggled.
+    # Every storage node then carries a `site`, and every LVS is replicated to
+    # the other site.
+    sync_replication: bool = False
+    # The site recorded as out ("" = both sites in service) and its state:
+    # LOST_SITE_DRAINING / LOST_SITE_DOWN when the storage-node monitor judged
+    # it beyond its FTT / gone as a whole (no fail-over involved), or how far
+    # the site-level fencing of a disaster fail-over got - LOST_SITE_FENCING
+    # while its steps run (a retry redoes them, they are idempotent),
+    # LOST_SITE_DONE once they completed. One site at a time; only the site
+    # return clears a record, except that a suspension clears the monitor's.
+    lost_site: str = ""
+    lost_site_state: str = ""
+    # The site whose Kubernetes operator leads the cluster's cluster-scoped
+    # lifecycle (activate, expand, cluster-wide restarts) on a stretched
+    # deployment ("" = unset); the other site's operator follows
+    # (design-stretched-sync-replication-ramen §5.1). Set by the create, read
+    # by a follower's adoption, moved by the hub's role swap (§11.1) through
+    # sync_replication_controller.set_leader_site - only to a site the cluster
+    # has and never to the recorded lost site. A record for the operators:
+    # the data plane never reads it.
+    leader_site: str = ""
+    # The site activation running for the recorded site ("" = none): the site
+    # it builds, the ISO time it began - the token its holder checks at every
+    # step and ends with - and the heartbeat its wrapper stamps every ~60s.
+    # Written only by sync_replication_controller.begin_site_activation /
+    # stamp_site_activation / end_site_activation, and by
+    # clear_site_activation, the storage-node monitor's watchdog. While it is
+    # set, the monitor's handling of a stored SUSPENDED waits for it, as it
+    # waits behind IN_ACTIVATION.
+    site_activation_site: str = ""
+    site_activation_since: str = ""
+    site_activation_heartbeat: str = ""
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one
@@ -320,6 +365,13 @@ class Cluster(BaseModel):
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
     # fallback-mode inline checksum. Frozen at cluster create time.
     atomic_4k: bool = False
+    # Journal blobstore metadata pages so a write torn by a power loss cannot
+    # leave a half-written page behind. Needed when a device is not 4K-write
+    # atomic. The lvstore records it in its super block at creation, so it is
+    # frozen at cluster create time. Both create paths turn it on unless told
+    # otherwise; False here is what a record written before the field existed
+    # reads as, a cluster whose lvstores were created without it.
+    md_journal: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

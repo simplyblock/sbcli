@@ -21,21 +21,22 @@ class TestRepairFanout(unittest.TestCase):
         return [(f"ctrl{i}", MagicMock(), MagicMock()) for i in range(count)]
 
     def test_jobs_run_on_several_threads_and_overlap(self):
-        threads, lock = set(), threading.Lock()
+        # A barrier, not a wall-clock bound: each repair passes only while a
+        # second one is running, so overlap is proven however slow the runner
+        # is. Run serially, the first wait times out and breaks the barrier.
+        barrier = threading.Barrier(2, timeout=10)
+        met, lock = [], threading.Lock()
 
-        def slow(ctrl, dev, node):
+        def meet(ctrl, dev, node):
+            barrier.wait()
             with lock:
-                threads.add(threading.current_thread().name)
-            time.sleep(0.2)
+                met.append(ctrl)
 
-        with patch.object(svc.storage_node_ops, "repair_multipath_controller", slow):
-            started = time.monotonic()
+        with patch.object(svc.storage_node_ops, "repair_multipath_controller", meet):
             svc._run_repairs_in_parallel(self._jobs(4), "device")
-            elapsed = time.monotonic() - started
 
-        self.assertGreater(len(threads), 1, "repairs did not fan out")
-        self.assertLess(elapsed, 0.7,
-                        f"4 x 0.2s repairs took {elapsed:.2f}s, i.e. serially")
+        self.assertEqual(sorted(met), ["ctrl0", "ctrl1", "ctrl2", "ctrl3"],
+                         "repairs did not overlap")
 
     def test_one_failure_does_not_abort_the_group(self):
         done = []

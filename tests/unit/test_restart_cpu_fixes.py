@@ -269,7 +269,7 @@ class TestPerLvsRecreateLock:
     def test_same_lvs_serializes(self, monkeypatch):
         state, impl = self._concurrency_probe()
         monkeypatch.setattr(storage_node_ops, "_recreate_lvstore_impl", impl)
-        snode = types.SimpleNamespace(lvstore="LVS_serial")
+        snode = types.SimpleNamespace(lvstore="LVS_serial", site="")
         threads = [threading.Thread(target=storage_node_ops.recreate_lvstore, args=(snode,))
                    for _ in range(4)]
         for t in threads:
@@ -282,7 +282,7 @@ class TestPerLvsRecreateLock:
     def test_different_lvs_run_concurrently(self, monkeypatch):
         state, impl = self._concurrency_probe()
         monkeypatch.setattr(storage_node_ops, "_recreate_lvstore_impl", impl)
-        nodes = [types.SimpleNamespace(lvstore=f"LVS_par_{i}") for i in range(4)]
+        nodes = [types.SimpleNamespace(lvstore=f"LVS_par_{i}", site="") for i in range(4)]
         threads = [threading.Thread(target=storage_node_ops.recreate_lvstore, args=(sn,))
                    for sn in nodes]
         for t in threads:
@@ -300,7 +300,7 @@ class TestPerLvsRecreateLock:
             got["activation_mode"] = activation_mode
             return True
         monkeypatch.setattr(storage_node_ops, "_recreate_lvstore_impl", impl)
-        snode = types.SimpleNamespace(lvstore="LVS_act")
+        snode = types.SimpleNamespace(lvstore="LVS_act", site="")
         # hold the LVS lock; activation-mode call must still proceed (not block)
         with storage_node_ops._recreate_lvstore_lock("LVS_act"):
             storage_node_ops.recreate_lvstore(snode, activation_mode=True)
@@ -447,7 +447,10 @@ class TestPeerSweepDedupe:
 class TestBlockSpanAccounting:
     def test_impls_stamp_and_report(self):
         import inspect
-        src_p = inspect.getsource(storage_node_ops._recreate_lvstore_impl)
+        # the leader rebuild and the fenced hand-off it runs through
+        src_p = "\n".join(inspect.getsource(fn) for fn in (
+            storage_node_ops._recreate_lvstore_impl, storage_node_ops._LvsFence,
+            storage_node_ops._fence_and_demote_leader))
         assert "_block_started[" in src_p
         assert "was blocked" in src_p
         assert "Longest client-port block" in src_p

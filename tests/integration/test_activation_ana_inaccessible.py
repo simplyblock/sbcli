@@ -177,7 +177,7 @@ class TestClusterActivatePass4(unittest.TestCase):
         for record in (cluster, primary, secondary, *lvols):
             record.write_to_db(db.kv_store)
 
-        def _ana(lvol, node, ana_state):
+        def _ana(lvol, node, ana_state, **kwargs):
             events.append(("ana", node.get_id(), ana_state))
 
         real_set_status = cluster_ops.set_cluster_status

@@ -72,6 +72,7 @@ class TestPlacementWeight(unittest.TestCase):
     def _build_map(self, node):
         with patch.object(distr_controller, "DBController") as DBCtor:
             cluster = MagicMock()
+            cluster.sync_replication = False
             cluster.enable_node_affinity = False
             cluster.enable_failure_domain = False
             DBCtor.return_value.get_cluster_by_id.return_value = cluster
@@ -88,6 +89,7 @@ class TestPlacementWeight(unittest.TestCase):
         target = _node([dev])
         db = MagicMock()
         db.get_storage_node_by_id.return_value = target
+        db.get_cluster_by_id.return_value.sync_replication = False
         rpc = MagicMock()
         target.rpc_client.return_value = rpc
         with patch.object(distr_controller, "DBController", return_value=db):

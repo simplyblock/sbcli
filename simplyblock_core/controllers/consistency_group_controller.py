@@ -30,7 +30,11 @@ from datetime import datetime
 
 from simplyblock_core import constants, utils
 from simplyblock_core import db_controller as db_mod
-from simplyblock_core.controllers import snapshot_events, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    snapshot_events,
+    tasks_controller,
+)
 from simplyblock_core.controllers.snapshot_controller import (
     _find_lvs_leader,
     _rollback_snapshot_bdev,
@@ -836,17 +840,25 @@ def _peer_group_is_being_served(members):
     Fails safe: a member whose node cannot be reached, or whose connection state
     cannot be read, is treated as still being served. The worst case of that
     choice is a relocate that stalls and retries (recoverable); the worst case of
-    the opposite default is fencing a live app (an outage)."""
+    the opposite default is fencing a live app (an outage).
+
+    A member on a sync-replication cluster is probed on every instance of its
+    LVS, the triplets of both sites: its ``node_id`` is the home owner, while a
+    host only holds controllers on the triplet of the site the LVS is led from,
+    which may be the remote one."""
+    from simplyblock_core.storage_node_ops import _lvs_member_ids, _sync_site
     for m in members:
         try:
-            node = db.get_storage_node_by_id(m.node_id)
-            controllers = node.rpc_client().nvmf_subsystem_get_controllers(m.nqn)
+            owner = db.get_storage_node_by_id(m.node_id)
+            node_ids = _lvs_member_ids(owner) if _sync_site(owner) else (owner.get_id(),)
+            for node_id in node_ids:
+                node = owner if node_id == owner.get_id() else db.get_storage_node_by_id(node_id)
+                if node.rpc_client().nvmf_subsystem_get_controllers(m.nqn):
+                    return True
         except Exception as e:
             logger.warning("Peer serving-check for %s could not reach its node "
                            "(%s); treating it as still served so a demote never "
                            "fences a live volume", m.get_id(), e)
-            return True
-        if controllers:
             return True
     return False
 
@@ -1154,6 +1166,9 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
     host_node = db.get_storage_node_by_id(group.node_id)
     pool = db.get_pool_by_id(members[0].pool_uuid)
     cluster = db.get_cluster_by_id(pool.cluster_id)
+    site_activation = activation_gate.site_activation_blocks(cluster, host_node)
+    if site_activation:
+        return None, f"Cannot create group snapshot on LVS {group.lvs_name}: {site_activation}"
 
     # Leader + HA member set, same as the single-snapshot path.
     secondary_ids = [host_node.secondary_node_id]
@@ -1172,9 +1187,26 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
         return None, (f"No leader available for LVS {group.lvs_name} — "
                       f"rejecting the group snapshot until leadership is "
                       f"re-established")
-    secondary_nodes = [n for n in all_nodes
-                       if n.get_id() != primary_node.get_id()
-                       and n.status == StorageNode.STATUS_ONLINE]
+    from simplyblock_core.storage_node_ops import (
+        check_non_leader_for_operation,
+        member_absent_on_recorded_site,
+    )
+    secondary_nodes = []
+    for n in all_nodes:
+        if n.get_id() == primary_node.get_id() or n.status != StorageNode.STATUS_ONLINE:
+            continue
+        if not member_absent_on_recorded_site(cluster, n):
+            secondary_nodes.append(n)
+            continue
+        # Sync replication: an ONLINE node of the recorded site holds its
+        # instance only once the site activation has rebuilt it; one being
+        # rebuilt refuses the generation instead of deferring its registration.
+        action = check_non_leader_for_operation(n.get_id(), group.lvs_name, operation_type="create")
+        if action == "proceed":
+            secondary_nodes.append(n)
+        elif action != "skip":
+            return None, (f"Cannot create group snapshot on LVS {group.lvs_name}: member "
+                          f"{n.get_id()[:8]} of site {n.site} is being rebuilt; retry")
 
     # Serialize concurrent takes on THIS group end to end. Without it, two
     # group snapshots taken with a near-zero gap both read the same

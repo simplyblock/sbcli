@@ -1,18 +1,21 @@
 # coding=utf- 8
+import contextlib
 import copy
 import datetime
+import enum
 import json
 import logging
 import math
 import os
 import platform
+import re
 import socket
 import subprocess
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, NamedTuple
 
 import psutil
 from docker.types import LogConfig
@@ -45,19 +48,28 @@ from simplyblock_core.constants import (
     LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID,
 )
 from simplyblock_core.controllers import (
+    activation_gate,
     device_controller,
     device_events,
     health_controller,
     lvol_controller,
     migration_controller,
+    port_release_budget,
     qos_controller,
     snapshot_controller,
     storage_events,
     tasks_controller,
     tcp_ports_events,
 )
+from simplyblock_core.controllers.cluster_expansion import planner as role_planner
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.distr_controller import DistribHomeSiteError
+from simplyblock_core.exceptions import (
+    PreconditionError,
+    SyncReplicationUnsupportedError,
+    reject_on_sync_replication,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -273,12 +285,19 @@ def _presumed_acting_leader(lvs_node, sec_nodes, disconnected_peers, snode):
     False), so when the probe is inconclusive and ``snode`` is recreating
     its own primary LVS, the connected peer that would have taken over --
     the secondary, else the tertiary -- is quiesced as if it were the
-    leader. Returns None when no such peer is connected."""
-    if lvs_node is None or lvs_node.get_id() != snode.get_id():
+    leader. Returns None when no such peer is connected.
+
+    On a sync-replication cluster ``snode`` may be the primary of the LVS's
+    remote triplet (lvs_triplet_of), whose secondary / tertiary are the peers
+    that took over there."""
+    if lvs_node is None:
+        return None
+    primary_id, secondary_id, tertiary_id = lvs_triplet_of(lvs_node, snode.get_id())
+    if primary_id != snode.get_id():
         return None
     connected = {p.get_id(): p for p in sec_nodes
                  if p.get_id() not in disconnected_peers}
-    for peer_id in (lvs_node.secondary_node_id, lvs_node.tertiary_node_id):
+    for peer_id in (secondary_id, tertiary_id):
         if peer_id and peer_id in connected:
             return connected[peer_id]
     return None
@@ -454,26 +473,69 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
 
 
 
-def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
-    """Set ANA state for a single lvol's listeners on a given node."""
+def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state, *, promoted=False):
+    """Set ANA state for a single lvol's listeners on a given node.
+
+    On a sync-replication cluster the state is the site rule's
+    (lvol_ana_state), whatever the caller passed: ``promoted`` marks the
+    in-site failover target. The rule is read and applied under the LVS's
+    site-rule lock (sync_site_rule_locks), so a promote / demote never
+    interleaves with it; when the lock cannot be taken nothing is sent (the
+    lvol monitor's ANA-drift check repairs the path later). A follower whose
+    hublvol redirect to the leader is broken (_unwired_follower) is sent
+    ``inaccessible`` and handed to the durable retry."""
+    if not _sync_site(node):
+        _send_lvol_ana(lvol, node, ana_state)
+        return
+    try:
+        with sync_site_rule_locks(node.cluster_id, [lvol.lvs_name]):
+            fresh, ctx = _fresh_site_rule_inputs(lvol)
+            state = ("inaccessible" if fresh is None
+                     else lvol_ana_state(fresh, node, ana_state, promoted=promoted, ctx=ctx))
+            if _unwired_follower(node.rpc_client(timeout=5, retry=1), lvol, node, state, {}):
+                state = "inaccessible"
+                queue_sync_ana_retry(node, [fresh])
+            _send_lvol_ana(lvol, node, state)
+    except PreconditionError as e:
+        logger.error("ANA of %s ns %s on %s not set: %s", lvol.nqn, lvol.ns_id, node.get_id(), e)
+
+
+def _send_lvol_ana(lvol: LVol, node: StorageNode, ana_state) -> None:
     rpc_client = node.rpc_client(timeout=10, retry=2)
     listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
-    for iface in node.data_nics:
-        if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
-            trtype = iface.trtype if lvol.fabric == iface.trtype.lower() else "TCP"
-            # Scope the flip to this volume's ANA group (group id == namespace
-            # id): a subsystem can carry several namespaces whose volumes are
-            # migrated, suspended or failed over independently.
-            try:
-                rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.listen_address, listener_port, trtype=trtype, ana=ana_state,
-                    anagrpid=lvol.ns_id)
-            except RPCException as e:
-                logger.warning("Failed to set ANA state %s for %s on %s: %s",
-                               ana_state, lvol.nqn, node.get_id(), e)
-            else:
-                logger.info("ANA: %s ns %s on %s (%s) → %s", lvol.nqn, lvol.ns_id,
-                            node.get_id(), iface.ip4_address, ana_state)
+    for trtype, ip in _lvol_listener_nics(lvol, node):
+        # Scope the flip to this volume's ANA group (group id == namespace
+        # id): a subsystem can carry several namespaces whose volumes are
+        # migrated, suspended or failed over independently.
+        try:
+            rpc_client.nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, ip, listener_port, trtype=trtype, ana=ana_state,
+                anagrpid=lvol.ns_id)
+        except RPCException as e:
+            logger.warning("Failed to set ANA state %s for %s on %s: %s",
+                           ana_state, lvol.nqn, node.get_id(), e)
+        else:
+            logger.info("ANA: %s ns %s on %s (%s) → %s", lvol.nqn, lvol.ns_id,
+                        node.get_id(), ip, ana_state)
+
+
+def _served_lvols(db_ctrl, owner_id) -> list[LVol]:
+    """``owner_id``'s volumes that serve IO, one per namespace.
+
+    Dedupe per NAMESPACE, not per subsystem: each volume's state is confined
+    to its own ANA group, so skipping the other namespaces of a shared
+    subsystem would leave every volume but the first one unflipped. Records
+    that share (nqn, lvs, ns_id) are genuine duplicates."""
+    seen_namespaces = set()
+    out = []
+    for lvol in db_ctrl.get_lvols_by_node_id(owner_id):
+        if lvol.status not in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]:
+            continue
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
+            continue
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
+        out.append(lvol)
+    return out
 
 
 def _failover_primary_ana(primary_node: StorageNode) -> bool:
@@ -491,10 +553,9 @@ def _failover_primary_ana(primary_node: StorageNode) -> bool:
     the skip, and the primary's volumes stayed unserved until the promotion
     was triggered by hand).
     """
+    if _sync_site(primary_node):
+        return _sync_flip_active_peer(primary_node, [primary_node], "optimized", promoted=True)
     db_ctrl = DBController()
-    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
-                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
-
     first_sec = None
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
@@ -504,17 +565,7 @@ def _failover_primary_ana(primary_node: StorageNode) -> bool:
                     first_sec.status if first_sec else "absent")
         return False
 
-    # Dedupe per NAMESPACE, not per subsystem. The old per-(nqn, lvs) dedupe was
-    # correct only while the flip was subsystem-wide: now that each volume's
-    # state is confined to its own ANA group, skipping the other namespaces of a
-    # shared subsystem would leave every volume but the first one unpromoted.
-    # Records that share (nqn, lvs, ns_id) are genuine duplicates and still cost
-    # only one call.
-    seen_namespaces = set()
-    for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
-            continue
-        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
+    for lvol in _served_lvols(db_ctrl, primary_node.get_id()):
         _set_lvol_ana_on_node(lvol, first_sec, "optimized")
     return True
 
@@ -524,22 +575,104 @@ def _failback_primary_ana(primary_node: StorageNode):
 
     The second_sec is already non_optimized and never changes.
     """
+    if _sync_site(primary_node):
+        _sync_flip_active_peer(primary_node, [primary_node], "non_optimized")
+        return
     db_ctrl = DBController()
-    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
-                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
-
     first_sec = None
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Same per-namespace dedupe as _failover_primary_ana.
-    seen_namespaces = set()
-    for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
-            continue
-        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
+    for lvol in _served_lvols(db_ctrl, primary_node.get_id()):
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
+
+
+def _lvs_owners_on(node: StorageNode, db_ctrl) -> list[StorageNode]:
+    """The owners of every LVS with an instance on ``node``: its own first,
+    then the ones it hosts (hosted_lvs_owners)."""
+    owners = [node] if node.lvstore else []
+    return owners + [o for o in hosted_lvs_owners(node, db_ctrl) if o.get_id() != node.get_id()]
+
+
+def _active_primary_down(status: str) -> bool:
+    """Whether an active triplet's primary in ``status`` has no SPDK serving:
+    OFFLINE, or shut down by a removal (REMOVAL_SHUT_DOWN_STATUSES, which never
+    passes through OFFLINE again). Its secondary is then the optimized path."""
+    return status == StorageNode.STATUS_OFFLINE or status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES
+
+
+def _active_pair(owner: StorageNode) -> tuple[str, str] | None:
+    """``(primary, secondary)`` ids of the triplet leading ``owner``'s LVS
+    (lvs_active_triplet), None while a move is in flight (nothing is open
+    then) or without a second member."""
+    active = lvs_active_triplet(owner)
+    if active.moving_to or len(active.node_ids) < 2:
+        return None
+    return active.node_ids[0], active.node_ids[1]
+
+
+def _sync_flip_active_peer(node: StorageNode, owners, ana_state, *, promoted=False) -> bool:
+    """In-site ANA failover / failback on a sync-replication cluster: for every
+    LVS of ``owners`` whose ACTIVE triplet has ``node`` as primary, set its
+    next member (the active triplet's secondary, when ONLINE) to
+    ``ana_state`` under the site rule (``promoted`` = the failover target). An
+    LVS led from the other site, or being moved, is not touched: its paths on
+    ``node``'s site are fenced anyway. Nor is a peer that holds no instance,
+    an empty node of the recorded site (member_absent_on_recorded_site): it
+    counts as if OFFLINE.
+
+    Returns whether a flip was attempted: True once some LVS had such a peer,
+    whatever each flip answered and even with no volume to flip; False when
+    every LVS was skipped (the sync form of _failover_primary_ana's skip of a
+    first secondary that is not ONLINE)."""
+    db_ctrl = DBController()
+    cluster = None
+    attempted = False
+    for owner in owners:
+        pair = _active_pair(owner)
+        if pair is None or pair[0] != node.get_id():
+            continue
+        try:
+            peer = db_ctrl.get_storage_node_by_id(pair[1])
+        except KeyError:
+            continue
+        if peer.status != StorageNode.STATUS_ONLINE:
+            continue
+        cluster = cluster or db_ctrl.get_cluster_by_id(node.cluster_id)
+        if member_absent_on_recorded_site(cluster, peer):
+            continue
+        attempted = True
+        for lvol in _served_lvols(db_ctrl, owner.get_id()):
+            _set_lvol_ana_on_node(lvol, peer, ana_state, promoted=promoted)
+    return attempted
+
+
+def promote_active_secondary_ana(node: StorageNode) -> None:
+    """Deferred ANA failover on a sync-replication cluster (port allow of a
+    recovered node): for every LVS whose ACTIVE triplet has ``node`` as
+    secondary and whose active primary is down (_active_primary_down: OFFLINE
+    or shut down by a removal), set ``node``'s paths ``optimized`` under the
+    site rule. Per volume, best effort."""
+    db_ctrl = DBController()
+    for owner in _lvs_owners_on(node, db_ctrl):
+        pair = _active_pair(owner)
+        if pair is None or pair[1] != node.get_id():
+            continue
+        try:
+            primary = db_ctrl.get_storage_node_by_id(pair[0])
+        except KeyError:
+            continue
+        if not _active_primary_down(primary.status):
+            continue
+        logger.info("Active primary %s of %s is %s; promoting recovered secondary %s",
+                    primary.get_id()[:8], owner.lvstore, primary.status, node.get_id()[:8])
+        for lvol in _served_lvols(db_ctrl, owner.get_id()):
+            try:
+                _set_lvol_ana_on_node(lvol, node, "optimized", promoted=True)
+            except Exception as e:
+                logger.warning("Deferred ANA promotion of %s on %s failed: %s",
+                               lvol.nqn, node.get_id()[:8], e)
 
 
 def trigger_ana_failover_for_node(offline_node: StorageNode) -> bool:
@@ -548,6 +681,10 @@ def trigger_ana_failover_for_node(offline_node: StorageNode) -> bool:
     Only action needed: if the offline node is a primary, promote its
     first_sec to optimized.  The second_sec is always non_optimized and
     never needs ANA state changes.
+
+    Sync replication: the node may be the primary of the ACTIVE triplet of
+    its own LVS or of another owner's (its remote triplet); each such LVS
+    promotes the next member of that triplet.
 
     Returns True when a promotion was attempted, whether or not every flip
     succeeded; False when nothing was attempted because the node is not a
@@ -558,6 +695,22 @@ def trigger_ana_failover_for_node(offline_node: StorageNode) -> bool:
     flips is not hammered every cycle (the 2026-08-09 pause storm).
     """
     node_id = offline_node.get_id()
+
+    if _sync_site(offline_node):
+        # A removed node leads no triplet any more: nothing to fail over, and
+        # the monitor's retry of a skipped failover stays free of DB scans.
+        if offline_node.status == StorageNode.STATUS_REMOVED:
+            return False
+        try:
+            attempted = _sync_flip_active_peer(offline_node, _lvs_owners_on(offline_node, DBController()),
+                                               "optimized", promoted=True)
+        except Exception as e:
+            logger.error("ANA failover for %s failed: %s", node_id, e)
+            return True
+        if attempted:
+            logger.info("ANA failover: node %s, promotion of the next member of the triplets "
+                        "it leads attempted", node_id)
+        return attempted
 
     if not offline_node.secondary_node_id:
         return False
@@ -574,8 +727,21 @@ def trigger_ana_failback_for_node(restarting_node: StorageNode):
 
     Demote first_sec from optimized back to non_optimized.
     The second_sec is always non_optimized and never changes.
+
+    Sync replication: every triplet the node is the ACTIVE primary of (see
+    trigger_ana_failover_for_node) demotes its next member again.
     """
     node_id = restarting_node.get_id()
+
+    if _sync_site(restarting_node):
+        logger.info("ANA failback: node %s restarting, demoting the next member of every "
+                    "triplet it leads", node_id)
+        try:
+            _sync_flip_active_peer(restarting_node, _lvs_owners_on(restarting_node, DBController()),
+                                   "non_optimized")
+        except Exception as e:
+            logger.error("ANA failback for %s failed: %s", node_id, e)
+        return
 
     if restarting_node.secondary_node_id:
         first_sec = DBController().get_storage_node_by_id(restarting_node.secondary_node_id)
@@ -1604,6 +1770,28 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
             logger.error(f"Failed to create raid_jm_{node}")
             return False
 
+    # The raid has no superblock, so creating it with both legs neither resyncs
+    # nor tells a stale leg from a current one: a leg taken out of the raid
+    # while the JM kept writing would be read as current and the JM alceml
+    # fails to load (SFAM-2843). Drop such legs before the alceml reads, and
+    # re-add them (raid1 rebuilds them from the current leg) once it is up.
+    stale_legs: list[str] = []
+    if after_restart and jm_dev and plan["level"] != jm_raid.RAID_NONE:
+        top_legs = leg_bdevs or plan["members"]
+        stale_legs = [leg for leg in jm_dev.stale_jm_legs if leg in top_legs]
+        if len(stale_legs) >= len(top_legs):
+            logger.error("Every JM raid leg of %s is marked stale (%s): mounting them all",
+                         node[:8], stale_legs)
+            stale_legs = []
+        for leg in stale_legs:
+            logger.warning("JM raid leg %s is stale: removing it from %s before the JM alceml loads",
+                           leg, raid_bdev)
+            try:
+                rpc_client.bdev_raid_remove_base_bdev(leg)
+            except RPCRemoteError as e:
+                logger.error("Failed to remove stale JM raid leg %s: %s", leg, e)
+                return False
+
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
@@ -1668,6 +1856,14 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
 
     ret = rpc_client.bdev_get(raid_bdev)
 
+    for leg in stale_legs:
+        # Stays recorded as stale until the health check sees the rebuild done.
+        logger.info("Re-adding stale JM raid leg %s to %s", leg, raid_bdev)
+        try:
+            rpc_client.bdev_raid_add_base_bdev(raid_bdev, leg)
+        except RPCRemoteError as e:
+            logger.warning("Failed to re-add JM raid leg %s (JM runs degraded): %s", leg, e)
+
     return JMDevice({
         'uuid': alceml_id,
         'device_name': jm_bdev,
@@ -1677,6 +1873,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
         'raid_bdev': raid_bdev,
         'jm_leg_bdevs': leg_bdevs,
         'jm_leg_members': leg_members,
+        'stale_jm_legs': stale_legs,
         'alceml_bdev': alceml_name,
         'alceml_name': alceml_name,
         'jm_bdev': jm_bdev,
@@ -2771,11 +2968,16 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node: StorageNode, peer_p
     one or more peers and none of them report the target reachable, treat it
     as data-plane unreachable and skip the attach. If we can't probe any
     peer, default to True (don't block on missing information).
+
+    The key is the peer's own name for the target's JM, which on a
+    sync-replication cluster depends on whether the two share a site.
     """
     db_controller = DBController()
-    remote_key = f"remote_jm_{target_node_id}n1"
+    nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
+    target_site = next((n.site for n in nodes if n.get_id() == target_node_id), "")
     probed = False
-    for peer in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+    for peer in nodes:
+        remote_key = remote_jm_controller_name(peer.site, target_site, f"jm_{target_node_id}") + "n1"
         if peer.get_id() in (target_node_id, this_node.get_id()):
             continue
         if peer.status != StorageNode.STATUS_ONLINE:
@@ -2886,6 +3088,11 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
     return problems
 
 
+#: A remote JM is attached only while its owner is in one of these states.
+_JM_OWNER_ATTACHABLE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                                 StorageNode.STATUS_RESTARTING)
+
+
 def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None):
     """Connect ``this_node`` to remote JM devices and return the refreshed
     remote-JM records.
@@ -2926,31 +3133,27 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
             if jm_dev and jm_dev not in remote_devices:
                 remote_devices.append(jm_dev)
 
-    for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
-        sec_primary_id = getattr(this_node, sec_attr, None)
-        if sec_primary_id:
-            # A dangling peer linkage (primary removed, or a legacy record
-            # value StorageNode.from_dict could not repair) must degrade to
-            # "skip this peer's JMs", never abort the whole restart: the JM
-            # mesh verifier re-establishes missing links once both sides are
-            # up (verify_jm_mesh_coverage).
-            try:
-                org_node = db_controller.get_storage_node_by_id(sec_primary_id)
-            except KeyError:
-                logger.warning(
-                    "Node %s %s references unknown primary %r; skipping its "
-                    "JM devices", this_node.get_id()[:8], sec_attr,
-                    sec_primary_id)
-                continue
-            if org_node.jm_device and org_node.jm_device not in remote_devices:
-                remote_devices.append(org_node.jm_device)
-            for jm_id in org_node.jm_ids:
-                jm_dev = db_controller.get_jm_device_by_id(jm_id)
-                if jm_dev and jm_dev not in remote_devices:
-                    remote_devices.append(jm_dev)
+    all_nodes = db_controller.get_storage_nodes()
+    # Every LVS hosted here (as secondary / tertiary, or on a sync cluster in
+    # a remote triplet) runs a JC instance over its owner's journal, so this
+    # node reaches that owner's JM and jm_ids too. A dangling peer linkage
+    # (primary removed, or a legacy record value StorageNode.from_dict could
+    # not repair) degrades to "skip this peer's JMs" inside
+    # lvs_owners_on_node, never aborting the whole restart: the JM mesh
+    # verifier re-establishes missing links once both sides are up
+    # (verify_jm_mesh_coverage).
+    for org_node in distr_controller.lvs_owners_on_node(this_node, all_nodes):
+        if org_node.get_id() == this_node.get_id():
+            continue
+        if org_node.jm_device and org_node.jm_device not in remote_devices:
+            remote_devices.append(org_node.jm_device)
+        for jm_id in org_node.jm_ids:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            if jm_dev and jm_dev not in remote_devices:
+                remote_devices.append(jm_dev)
 
     logger.debug(f"remote_devices: {remote_devices}")
-    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING]
+    allowed_node_statuses = _JM_OWNER_ATTACHABLE_STATUSES
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
 
     new_devs = []
@@ -2959,7 +3162,7 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
     # scan cost O(JMs x nodes) FDB reads per call (called several times per
     # restart / create).
     jm_owner_by_id = {}
-    for node in db_controller.get_storage_nodes():
+    for node in all_nodes:
         if node.jm_device:
             jm_owner_by_id[node.jm_device.get_id()] = node
     for jm_dev in remote_devices:
@@ -2969,7 +3172,8 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         org_dev_node = jm_owner_by_id.get(jm_dev.get_id())
         org_dev = org_dev_node.jm_device if org_dev_node is not None else None
 
-        if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
+        if (org_dev_node is None or not org_dev or org_dev in new_devs
+                or org_dev_node.get_id() == this_node.get_id()):
             continue
 
         if only_node_id and org_dev_node is not None and org_dev_node.get_id() != only_node_id:
@@ -3007,8 +3211,8 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         remote_device.jm_bdev = resolved_name
         remote_device.status = NVMeDevice.STATUS_ONLINE
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
-        expected_bdev = f"remote_{resolved_name}n1"
-        controller_name = f"remote_{resolved_name}"
+        controller_name = remote_jm_controller_name(this_node.site, org_dev_node.site, resolved_name)
+        expected_bdev = f"{controller_name}n1"
         connect_failed = False
         try:
             remote_device.remote_bdev = str(connect_device(
@@ -3225,7 +3429,12 @@ def ifc_is_roce(nic):
     return False
 
 
-def get_required_ha_jm_count(cluster) -> int:
+#: JC accepts at most this many journal names per jm_vuid (ultra
+#: c_jc_nmax_working_copies); a sync-replication journal is 4 + 4 at most.
+MAX_HA_JM_COUNT = 8
+
+
+def _required_ha_jm_count_per_site(cluster) -> int:
     # FTT>=2 always needs 4 HA journals (can lose 2, keep >=2 quorum).
     if cluster.max_fault_tolerance >= 2:
         return 4
@@ -3240,11 +3449,31 @@ def get_required_ha_jm_count(cluster) -> int:
     return 3
 
 
+def get_required_ha_jm_count(cluster) -> int:
+    """The minimum HA journal size of a node of ``cluster``.
+
+    A sync-replication cluster applies the rule to each of its two sites: the
+    journal holds that many copies on the node's own site and as many on the
+    other one (a node's per-site count is ``ha_jm_count // 2``).
+    """
+    per_site = _required_ha_jm_count_per_site(cluster)
+    return 2 * per_site if cluster.sync_replication else per_site
+
+
 def resolve_enable_ha_jm(cluster, enable_ha_jm) -> bool:
     """Single-node clusters run without HA journaling: one local journal
     (deterministic jm_vuid=1 / LVS_1), no fabric export, no remote JMs. This
     is a deployment-time property of the cluster, overriding the CLI/API
-    default of enable_ha_jm=True."""
+    default of enable_ha_jm=True.
+
+    Sync-replication clusters always journal across both sites -- a journal
+    without remote copies loses acknowledged writes with its site -- so the
+    same override forces HA journaling on there."""
+    if cluster.sync_replication:
+        if not enable_ha_jm:
+            logger.warning("Sync-replication cluster: HA journaling cannot be disabled; "
+                           "enabling it for this node")
+        return True
     if cluster.is_single_node and enable_ha_jm:
         logger.info("Single-node cluster: disabling HA journaling for this node "
                     "(single local journal)")
@@ -3264,7 +3493,30 @@ def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
             f"{cluster.max_fault_tolerance}; minimum required is {required_ha_jm_count}"
         )
 
+    if cluster.sync_replication and (ha_jm_count % 2 or ha_jm_count > MAX_HA_JM_COUNT):
+        raise ValueError(
+            f"ha_jm_count={ha_jm_count} is invalid on a sync-replication cluster: it must be "
+            f"even (the same number of journal copies on each site) and at most "
+            f"{MAX_HA_JM_COUNT}")
+
     return ha_jm_count
+
+
+#: Prefix of the bdev through which a node reaches a JM on the OTHER site of a
+#: sync-replication cluster. JC sorts the journal names and counts the first
+#: ``jm_n_local`` as local, so the names must sort own JM < same-site remote JM
+#: < other-site remote JM: "jm_<id>" < "remote_jm_<id>n1" < "remote_xs_jm_<id>n1".
+_CROSS_SITE_JM_PREFIX = "remote_xs_"
+
+
+def remote_jm_controller_name(this_site: str, owner_site: str, jm_bdev: str) -> str:
+    """Name of the NVMe controller a node on ``this_site`` attaches for the JM
+    bdev ``jm_bdev`` of a node on ``owner_site``; its namespace bdev is this
+    name + "n1". Sites are empty outside sync replication: always "remote_<jm_bdev>".
+    """
+    if this_site != owner_site:
+        return f"{_CROSS_SITE_JM_PREFIX}{jm_bdev}"
+    return f"remote_{jm_bdev}"
 
 
 def _find_flagged_journal_device(snode, devices):
@@ -3731,6 +3983,59 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
             f"until deleted by hand.")
 
 
+class NodeSiteError(ValueError):
+    """A node's sync-replication site is missing, malformed, not allowed on
+    this cluster, or conflicts with the site of its host. Permanent: retrying
+    the same add cannot succeed."""
+
+
+#: A site name ends up inside other state values (e.g. an LVS moving to a
+#: site is recorded as "moving:<site>"), so separators are never allowed.
+_SITE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+
+
+def validate_node_site(cluster, site) -> str:
+    """The site a new node of ``cluster`` gets: ``site`` on a sync-replication
+    cluster, "" on any other.
+
+    Raises:
+        NodeSiteError: the site is missing / malformed on a sync cluster, or
+            given on a cluster without sync replication.
+    """
+    if not cluster.sync_replication:
+        if site:
+            raise NodeSiteError(
+                "--site was given but this cluster was not created with "
+                "--sync-replication; sites exist only on sync-replication clusters")
+        return ""
+    if not site:
+        raise NodeSiteError(
+            "this cluster was created with --sync-replication; --site is required "
+            "when adding a node")
+    if not _SITE_PATTERN.fullmatch(site):
+        raise NodeSiteError(
+            f"invalid site {site!r}: use 1-63 characters from [A-Za-z0-9._-], "
+            f"starting with a letter or digit")
+    return site
+
+
+def _check_host_site(db_controller, cluster_id, mgmt_ip, site) -> None:
+    """A host sits entirely on one site: refuse a node whose host already
+    carries a node on another site.
+
+    Raises:
+        NodeSiteError: a non-removed node on ``mgmt_ip`` has a different site.
+    """
+    if not site or not mgmt_ip:
+        return
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if (node.status != StorageNode.STATUS_REMOVED
+                and node.mgmt_ip == mgmt_ip and node.site != site):
+            raise NodeSiteError(
+                f"host {mgmt_ip} already belongs to site {node.site!r} "
+                f"(node {node.get_id()}); a host cannot span two sites")
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -3738,7 +4043,17 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
              spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
-             force_format=False, networks=None, pod_network=False):
+             force_format=False, site=None, networks=None,
+             pod_network=False):
+    """Add the storage node(s) configured on ``node_addr`` to the cluster.
+
+    Returns a truthy value on success and False on the legacy failure paths.
+
+    Raises:
+        NodeSiteError: the sync-replication ``site`` is missing, malformed, not
+            allowed on this cluster, or conflicts with the host's site. Checked
+            before anything on the host is changed.
+    """
     if networks and pod_network:
         logger.error("A node is added with networks or on the pod network, not both")
         return False
@@ -3778,6 +4093,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             "while the cluster is ACTIVE so roles are rotated and data is "
             "rebalanced", cluster_id)
         return False
+
+    # Sync-replication site: validated before anything on the host changes
+    # (the vcpu resize and hugepage reservation below can reboot it).
+    site = validate_node_site(_cluster, site)
+    _site_ip_iface = utils.get_mgmt_ip(node_info, iface_name, networks, pod_network)
+    _check_host_site(db_controller, cluster_id, _site_ip_iface[0] if _site_ip_iface else None, site)
 
     # Resize this host's core layout to the cluster's vcpu_count once, before
     # any node_config entry is consumed below, so every entry in the loop
@@ -4097,7 +4418,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             # the newcomer in the DB by integrate_new_node_into_cluster.
             ok, reason = check_fd_admission_for_add(
                 cluster, db_controller, failure_domain_id,
-                new_mgmt_ip=mgmt_ip)
+                new_mgmt_ip=mgmt_ip, new_site=site or "")
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
                 return False
@@ -4433,6 +4754,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.rpc_username = rpc_user
         snode.rpc_password = rpc_pass
         snode.cluster_id = cluster_id
+        snode.site = site
         snode.api_endpoint = node_addr
         snode.host_secret = SecretStr(utils.generate_string(20))
         snode.ctrl_secret = SecretStr(utils.generate_string(20))
@@ -5031,6 +5353,11 @@ def check_removal_admission(snode, db_controller, force_remove=False, check_snap
     check_snapshots=False skips the "no snapshots on the node" check: the
     drain migrates the node's volumes, and their snapshots with them, after
     this; the removal's own call (the node DELETE) still makes it.
+
+    On a sync-replication cluster nothing can be drained (volume migration is
+    not supported there), so a node with volumes or snapshots is refused
+    whatever check_snapshots says, before the removal shuts anything down. A
+    removal already under way is not admitted again and is not re-checked.
     """
     node_id = snode.get_id()
     if snode.status == StorageNode.STATUS_REMOVED:
@@ -5052,19 +5379,29 @@ def check_removal_admission(snode, db_controller, force_remove=False, check_snap
     # longer part of node removal", with the operator expected to migrate them
     # separately. That is reversed on purpose; standalone `volume migrate` keeps
     # working exactly as before, and removal is simply another caller of it.
+    # A sync-replication cluster is the exception (see the docstring).
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     lvols = db_controller.get_lvols_by_node_id(node_id)
+    sync = cluster.sync_replication is True
+    node_snaps = []
+    if check_snapshots or sync:
+        node_snaps = [
+            sn for sn in db_controller.get_snapshots()
+            if sn.deleted is False and _snapshot_lives_on_node(sn, node_id, db_controller)
+        ]
+    if sync and (lvols or node_snaps):
+        try:
+            reject_on_sync_replication(cluster, "Volume migration")
+        except SyncReplicationUnsupportedError as e:
+            return False, (f"{len(lvols)} volume(s) and {len(node_snaps)} snapshot(s) present; "
+                           f"delete them first: {e}")
     if lvols:
         logger.info(
             f"Node {node_id} holds {len(lvols)} LVol(s); the removal will "
             f"migrate them off before tearing anything down.")
 
-    if check_snapshots:
-        node_snaps = [
-            sn for sn in db_controller.get_snapshots()
-            if sn.deleted is False and _snapshot_lives_on_node(sn, node_id, db_controller)
-        ]
-        if node_snaps:
-            return False, f"{len(node_snaps)} snapshot(s) present. Remove them first."
+    if node_snaps:
+        return False, f"{len(node_snaps)} snapshot(s) present. Remove them first."
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
     if tasks:
@@ -5080,7 +5417,6 @@ def check_removal_admission(snode, db_controller, force_remove=False, check_snap
     from simplyblock_core.controllers.cluster_expansion.preconditions import (
         check_fd_admission_for_remove,
     )
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
     if not ok:
         return False, reason
@@ -5195,6 +5531,19 @@ def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller)
     every LVS that will end up degraded. The per-role probe below stays as
     the fallback for clusters the planner declines."""
     from simplyblock_core.controllers import replica_placement
+
+    # Sync replication: the remote-triplet roles this node holds for owners
+    # on the other site must have a replacement there too (refs re-selected
+    # by _reselect_remote_roles_held_by after phase 3b).
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
+    if cluster.sync_replication:
+        nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+        owners = owners_with_remote_role_on(removed_node.get_id(), nodes)
+        if owners:
+            try:
+                plan_remote_triplets(cluster, nodes, owners, exclude_ids=[removed_node.get_id()])
+            except role_planner.RemoteTripletPlacementError as e:
+                return False, f"no replacement for the remote-triplet roles it holds: {e}"
 
     inputs = _relocation_planner_inputs(removed_node, db_controller, allow_without_fd=True)
     if inputs is not None:
@@ -5447,7 +5796,9 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     Returns ``(p_id, x_id)`` or ``None`` if no valid edge exists.
     """
     field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_primary.cluster_id)
+    all_nodes = _same_site_nodes(
+        db_controller.get_cluster_by_id(stranded_primary.cluster_id), stranded_primary,
+        db_controller.get_storage_nodes_by_cluster_id(stranded_primary.cluster_id))
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     by_id = {n.get_id(): n for n in all_nodes}
     exclude = set(exclude_ids) | {stranded_primary.get_id()}
@@ -5808,6 +6159,7 @@ REMOVAL_STEPS = (
     "decommission_jm",
     "relocate_hosted",
     "verify_stacks",
+    "reselect_remote_roles",
     "finalize",
     "devices",
 )
@@ -6091,9 +6443,12 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
         # secondary/tertiary pointers and those peers' back-references.
         # These two peers are the ones left running a JC instance for THIS
         # node's own jm_vuid, and phase 2 cannot find them any other way --
-        # see _decommission_node_jm's replica_peer_ids.
+        # see _decommission_node_jm's replica_peer_ids. On a sync-replication
+        # cluster the three members of its remote triplet run one as well
+        # (phase 3a clears those refs too).
         replica_peer_ids = tuple(
-            pid for pid in (snode.secondary_node_id, snode.tertiary_node_id) if pid)
+            pid for pid in (snode.secondary_node_id, snode.tertiary_node_id,
+                            *remote_triplet_refs(snode)) if pid)
 
         # Phase 0 — prove phase 3b has a valid layout BEFORE phase 3a
         # destroys anything.
@@ -6178,6 +6533,17 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
         _verify_replica_stacks(snode.cluster_id, db_controller,
                                context=f" after removing {node_id}")
 
+        # Phase 3d — sync replication: re-select the remote-triplet roles
+        # this node holds for owners on the other site and build the LVS
+        # instances on the new members. Before phase 4 on purpose: a
+        # failure retries the whole block; the refs are rewritten only
+        # once, and the pending marks written with them let the retry
+        # finish the builds.
+        cursor.enter("reselect_remote_roles",
+                     f"[REMOVAL] {node_id}: phase 3d — re-select remote-triplet roles")
+        if not _reselect_remote_roles_held_by(snode):
+            return False
+
         # Phase 4 — finalize (swarm leave, gpt cleanup) and flip to removed.
         cursor.enter("finalize", f"[REMOVAL] {node_id}: phase 4 — finalize")
         _finalize_node_removal(snode)
@@ -6200,6 +6566,72 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
         return False
 
     logger.info(f"[REMOVAL] {node_id}: done")
+    return True
+
+
+def _reselect_remote_roles_held_by(removed_node: StorageNode) -> bool:
+    """Point every remote triplet that names ``removed_node`` at a
+    replacement on the same site, and build the LVS instance on each new
+    member (sync-replication clusters only).
+
+    The refs and the new members' pending marks are written together
+    (assign_remote_triplets). The builds then run for the pending members of
+    every owner whose remote triplet lies on ``removed_node``'s site -- found
+    by the marks, not by the refs, so a retry after a crash between the two
+    still finishes them although no ref names ``removed_node`` any more. A
+    pending member that is not online stays pending: its restart builds the
+    instance (restart Step 4). So does a member of the site the cluster
+    records lost, in any state: the site activation builds it (Pass 2).
+    ``removed_node``'s own refs were cleared in phase 3a. Returns False when
+    no replacement exists or a build fails (the removal is retried).
+    """
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
+    if not cluster.sync_replication:
+        return True
+    removed_id = removed_node.get_id()
+    nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+    owners = owners_with_remote_role_on(removed_id, nodes)
+    if owners:
+        try:
+            assign_remote_triplets(cluster, owners, exclude_ids=[removed_id],
+                                   db_controller=db_controller)
+        except role_planner.RemoteTripletPlacementError as e:
+            logger.error(f"[REMOVAL] {removed_id}: cannot re-select the remote-triplet "
+                         f"roles it holds: {e}")
+            return False
+
+    # Fresh records: the refs and marks just written.
+    for owner in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id):
+        if (owner.status == StorageNode.STATUS_REMOVED or owner.get_id() == removed_id
+                or owner.site == removed_node.site or not owner.lvstore):
+            continue
+        for member_id in owner.remote_instances_pending:
+            try:
+                member = db_controller.get_storage_node_by_id(member_id)
+            except KeyError:
+                continue
+            if member.status != StorageNode.STATUS_ONLINE:
+                logger.info(f"[REMOVAL] {removed_id}: remote-triplet member {member_id} of "
+                            f"{owner.lvstore} is {member.status}; left for its restart")
+                continue
+            if cluster.sync_replication is True and cluster.lost_site and member.site == cluster.lost_site:
+                logger.info(f"[REMOVAL] {removed_id}: remote-triplet member {member_id} of "
+                            f"{owner.lvstore} is on the recorded site {member.site}; left for the "
+                            f"site activation")
+                continue
+            logger.info(f"[REMOVAL] {removed_id}: building {owner.lvstore} on remote-triplet "
+                        f"member {member_id}")
+            try:
+                built = _rebuild_remote_instance(member, owner)
+            except (LVSLeaderUnknownError, RPCException) as e:
+                logger.error(f"[REMOVAL] {removed_id}: cannot build {owner.lvstore} on "
+                             f"{member_id} now: {e}")
+                built = False
+            if not built:
+                logger.error(f"[REMOVAL] {removed_id}: failed to build {owner.lvstore} on "
+                             f"remote-triplet member {member_id}")
+                return False
     return True
 
 
@@ -6354,6 +6786,42 @@ def _teardown_replicas_of_primary(removed_node: StorageNode):
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
 
+    # Sync replication: the LVS also runs on the members of its remote
+    # triplet. Torn down FIRST and, unlike the best-effort local teardown
+    # below, VERIFIED gone: a distrib that survived a failed delete keeps the
+    # dying JM in use, and phase 2's jc_replace_jm on that peer then rejects
+    # its batch (-17). Any survivor fails the phase before a single pointer is
+    # cleared, so the retry captures the same replica peers (phase 2 needs all
+    # of them) and tears down again.
+    remote_ids = [pid for pid in remote_triplet_refs(removed_node) if pid]
+    for peer_id in remote_ids:
+        try:
+            peer = db_controller.get_storage_node_by_id(peer_id)
+        except KeyError:
+            continue
+        # A node that is not online runs no SPDK holding an instance, and with
+        # the ref gone its restart does not rebuild one.
+        if peer.status != StorageNode.STATUS_ONLINE:
+            continue
+        _delete_replica_on_peer(peer, removed_node, cluster, destroy_lvstore=False)
+        leftovers = _remote_instance_leftovers(peer, removed_node)
+        if leftovers:
+            _delete_remote_instance_leftovers(peer, removed_node, leftovers)
+            leftovers = _remote_instance_leftovers(peer, removed_node)
+        if leftovers:
+            logger.error(f"[REMOVAL] {removed_node.get_id()}: remote-triplet instance on "
+                         f"{peer_id} not torn down, still present: {leftovers}")
+            return False
+    for peer_id in remote_ids:
+        try:
+            _prune_stale_lvstore_ports(peer_id, removed_node.lvstore, db_controller)
+        except KeyError:
+            pass
+    if remote_ids:
+        removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+        db_controller.atomic_update(removed_node, lambda n: _set_remote_triplet_refs(n, ("", "", "")))
+        removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+
     for field, backref in (
             ("secondary_node_id", "lvstore_stack_secondary"),
             ("tertiary_node_id", "lvstore_stack_tertiary")):
@@ -6383,6 +6851,43 @@ def _teardown_replicas_of_primary(removed_node: StorageNode):
         removed_node.write_to_db()
 
     return True
+
+
+def _remote_instance_leftovers(peer: StorageNode, owner: StorageNode) -> list[str]:
+    """Names of ``owner``'s distrib / raid bdevs still present on ``peer``.
+    A name whose probe fails counts as present: only an explicit "no such
+    device" proves it gone."""
+    rpc_client = peer.rpc_client()
+    leftovers = []
+    for bdev in owner.lvstore_stack or []:
+        if bdev.get("type") not in ("bdev_distr", "bdev_raid"):
+            continue
+        try:
+            if rpc_client.bdev_get(bdev["name"]) is None:
+                continue
+        except RPCException as e:
+            logger.warning(f"Probe of {bdev['name']} on {peer.get_id()} failed: {e}")
+        leftovers.append(bdev["name"])
+    return leftovers
+
+
+def _delete_remote_instance_leftovers(peer: StorageNode, owner: StorageNode, leftovers) -> None:
+    """Delete the ``leftovers`` (names of ``owner``'s distrib / raid bdevs
+    still on ``peer``) of a remote-triplet instance teardown, then release
+    the vuid's JC contexts again.
+
+    The full-stack teardown stops at its first raising delete, e.g. a raid
+    already gone on a retry, so the distribs below it survive; only the bdevs
+    still present are deleted here. The release that ran right after that
+    teardown was refused by JC while those distribs still used the JMs."""
+    stack = [copy.deepcopy(bdev) for bdev in owner.lvstore_stack or []
+             if bdev.get("name") in leftovers]
+    try:
+        _remove_bdev_stack(stack, peer.rpc_client(), remove_distr_only=True)
+    except RPCException as e:
+        logger.warning(f"Teardown of {owner.lvstore} leftovers {leftovers} on "
+                       f"{peer.get_id()} failed: {e}")
+    _release_jm_contexts_of_deleted_vuid(peer, owner)
 
 
 def _delete_replica_on_peer(peer, primary, cluster, destroy_lvstore=True):
@@ -6874,7 +7379,11 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller,
         return None
     ftt = cluster.max_fault_tolerance if cluster.max_fault_tolerance in (1, 2) else 1
 
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+    # Sync replication: local roles never leave the home site, so the removed
+    # node's site is a closed permutation of its own -- the other site's
+    # primaries never point into it.
+    all_nodes = _same_site_nodes(
+        cluster, removed_node, db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id))
     survivors = [
         n for n in all_nodes
         if n.get_id() != removed_node.get_id() and n.status != StorageNode.STATUS_REMOVED
@@ -7011,10 +7520,18 @@ def _rebuild_replica_for_relocation(new_host, primary, role, db_controller):
     the leader's blocked port and marked a healthy node DOWN for 7 s (run 50,
     2026-10-01 15:16:46, htthx). The rebuild's success path clears the marker
     itself; a failure clears it here, as the restart's does.
+
+    The node quiesced is _leader_for_non_leader_rebuild's: ``primary``, or on
+    a sync-replication cluster the member of the active triplet the rebuild
+    stands behind. It is resolved before the marker is written, so a refusal
+    there (LVSLeaderUnknownError) leaves nothing to clear. The marker stays on
+    ``primary``: the monitor reads the owner's lvstore_status for that LVS's
+    port on every member.
     """
+    leader = _leader_for_non_leader_rebuild(primary, new_host, db_controller)
     _set_lvstore_status_atomic(primary.get_id(), "in_creation", db_controller)
     try:
-        built = recreate_lvstore_on_non_leader(new_host, primary, primary, role=role)
+        built = recreate_lvstore_on_non_leader(new_host, leader, primary, role=role)
     except Exception:
         _restore_peer_lvstore_status_ready(primary.get_id(), db_controller)
         raise
@@ -7077,8 +7594,10 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     primary = db_controller.get_storage_node_by_id(primary_id)
 
     # Build the replica on the new node. The primary is online and remains the
-    # leader, so recreate_lvstore_on_non_leader wires distribs/raid/lvstore,
-    # role + ANA, and the hublvol connection exactly as the restart path does.
+    # leader (sync replication: whoever leads the active triplet, see
+    # _rebuild_replica_for_relocation), so recreate_lvstore_on_non_leader wires
+    # distribs/raid/lvstore, role + ANA, and the hublvol connection exactly as
+    # the restart path does.
     ret = _rebuild_replica_for_relocation(new_node, primary, role, db_controller)
     if not ret:
         logger.error(
@@ -7469,8 +7988,9 @@ def _jm_names_used_by_other_vuids(host, deleted_vuid):
     when that cannot be told.
 
     The vuids asked about are the ones ``host`` runs per the DB: its own, if
-    it leads an lvstore, and those of the primaries it hosts as secondary or
-    tertiary. Each must answer with its member map: jc_get_jm_status returns
+    it leads an lvstore, those of the primaries it hosts as secondary or
+    tertiary and, on a sync-replication cluster, those of the owners whose
+    remote triplet names it. Each must answer with its member map: jc_get_jm_status returns
     None on an SPDK-side error rather than raising, and an unanswered vuid
     might be using any of the candidates.
     """
@@ -7489,6 +8009,8 @@ def _jm_names_used_by_other_vuids(host, deleted_vuid):
             vuids.add(db_controller.get_storage_node_by_id(ref).jm_vuid)
         except KeyError:
             continue
+    # Sync replication: and those of the owners whose remote triplet names it.
+    vuids.update(owner.jm_vuid for owner in remote_instance_owners(host, db_controller))
     vuids.discard(deleted_vuid)
     used: set[str] = set()
     rpc_client = host.rpc_client(timeout=10, retry=1)
@@ -7535,7 +8057,7 @@ def _release_jm_contexts_of_deleted_vuid(host, owner) -> None:
     """
     try:
         names = get_node_jm_names(
-            owner, remote_node=None if host.get_id() == owner.get_id() else host)
+            owner, remote_node=None if host.get_id() == owner.get_id() else host).names
     except AttributeError as e:
         # A member's JM record is gone; nothing to name, nothing to release.
         logger.warning(
@@ -7625,6 +8147,11 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
     entirely, so this function never has to account for it (found live
     2026-08-25, the very next removal after the phase-2/3b fix above:
     removed_node's own hosted-replica peer failed this way).
+
+    Sync replication: the replacement comes from the removed node's site (JC
+    keeps the slot's position and so its locality, see
+    _pick_site_replacement_jm), and every LVS also runs on its remote triplet,
+    so up to six instances of one jm_vuid take the same decision.
     """
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
@@ -7634,7 +8161,12 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         logger.info(f"[REMOVAL] {removed_node.get_id()}: removing JM device")
         device_controller.remove_jm_device(removed_node.jm_device.get_id(), force=True)
         removed_jm_id = removed_node.jm_device.get_id()
-        removed_jm_name = f"remote_{removed_node.jm_device.jm_bdev}n1"
+        removed_jm_bdev = removed_node.jm_device.jm_bdev
+
+        def removed_jm_name(node):
+            # The name ``node`` reaches the removed JM by: a JM on the other
+            # site of a sync-replication cluster is a ``remote_xs_`` bdev.
+            return remote_jm_controller_name(node.site, removed_node.site, removed_jm_bdev) + "n1"
         removed_fd = removed_node.failure_domain
 
         # get_storage_nodes_by_cluster_id returns every node regardless of
@@ -7664,11 +8196,21 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # as REMOVED: the removal has already stopped that node's SPDK, so its
         # rpc_client cannot resolve. PENDING_REMOVAL is excluded on purpose --
         # a node is put in it before the shutdown step runs.
-        live_nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+        cluster_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+        live_nodes = [n for n in cluster_nodes
                       if n.status not in StorageNode.REMOVAL_SHUT_DOWN_STATUSES
                       and n.get_id() != removed_node.get_id()]
+        # Sync replication (only there does a node have a site): the
+        # replacement comes from the removed JM's site, see
+        # _pick_site_replacement_jm.
+        removed_site = removed_node.site
+        fd_enabled = (db_controller.get_cluster_by_id(removed_node.cluster_id).enable_failure_domain
+                      if removed_site else False)
 
         def _pick_replacement(primary):
+            if removed_site:
+                return _pick_site_replacement_jm(
+                    primary, removed_jm_id, removed_site, cluster_nodes, fd_enabled)
             # get_sorted_ha_jms ranks candidates by host-disjoint (hard) +
             # failure-domain balance (best-effort) -- it has no notion of
             # "primary already holds this candidate", so filter that here.
@@ -7734,12 +8276,24 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # local jm_vuid using name_old to be covered in ONE call (-17
         # otherwise), so for each node, gather every jm_vuid it needs to
         # patch and issue exactly one call.
+        live_by_id = {n.get_id(): n for n in live_nodes}
         for node in live_nodes:
             targets = []  # (jm_vuid, owner_primary, replacement_jm_id)
             if node.get_id() in decisions:
                 targets.append((node.jm_vuid, node, decisions[node.get_id()]))
-            for backref in (node.lvstore_stack_secondary, node.lvstore_stack_tertiary):
-                if backref and backref in decisions:
+            hosted_ids = [backref for backref in (node.lvstore_stack_secondary, node.lvstore_stack_tertiary)
+                          if backref]
+            # Sync replication: an LVS also runs on the three nodes of its
+            # remote triplet, each a JC instance of the owner's jm_vuid -- all
+            # six instances take the SAME decision, and jc_replace_jm must see
+            # every one hosted here in its single call.
+            hosted_ids += [primary_id for primary_id in decisions
+                           if primary_id in live_by_id and node.get_id() in (
+                               live_by_id[primary_id].remote_primary_node_id,
+                               live_by_id[primary_id].remote_secondary_node_id,
+                               live_by_id[primary_id].remote_tertiary_node_id)]
+            for backref in dict.fromkeys(hosted_ids):
+                if backref in decisions:
                     hosted_primary = db_controller.get_storage_node_by_id(backref)
                     targets.append((hosted_primary.jm_vuid, hosted_primary, decisions[backref]))
             # Replace and remove are MUTUALLY EXCLUSIVE on a node -- per the
@@ -7775,7 +8329,7 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # A safety net: _release_jm_contexts_of_deleted_vuid
                     # releases those where the vuid is deleted. No detach:
                     # nothing live here uses the bdev.
-                    _release_orphaned_jm(node, removed_jm_name)
+                    _release_orphaned_jm(node, removed_jm_name(node))
                     #
                     # Then reconcile the DB record.
                     # remote_jm_devices is derived from three sources (an
@@ -7820,7 +8374,7 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     node.write_to_db()
                 else:
                     # No record, but JC may still hold the JM's context.
-                    _release_orphaned_jm(node, removed_jm_name)
+                    _release_orphaned_jm(node, removed_jm_name(node))
                 continue
 
             # Capture the exact bdev name node's JC currently has live for
@@ -7863,7 +8417,11 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                         replacements.append({"jm_vuid": jm_vuid, "name_new": d.jm_bdev})
                         continue
 
-                    controller_name = f"remote_{d.jm_bdev}"
+                    if removed_site:
+                        controller_name = remote_jm_controller_name(
+                            node.site, db_controller.get_storage_node_by_id(d.node_id).site, d.jm_bdev)
+                    else:
+                        controller_name = f"remote_{d.jm_bdev}"
                     expected_bdev = f"{controller_name}n1"
                     # Recorded BEFORE our own connect call below, so a
                     # failure's cleanup only ever detaches a connection THIS
@@ -8600,6 +9158,10 @@ def _restart_storage_node_impl(
     if cluster.status == Cluster.STATUS_IN_ACTIVATION:
         logger.error("Cluster is in activation status, can not restart node")
         return False
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if site_activation:
+        logger.error(f"Can not restart node {node_id}: {site_activation}")
+        return False
 
     # Guard: atomically check no peer is restarting/shutting down and set RESTARTING.
     # Uses a single FDB transaction to prevent TOCTOU race conditions.
@@ -9234,7 +9796,18 @@ def _restart_storage_node_impl(
     snode.write_to_db(db_controller.kv_store)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+    # Sync replication: a node of the site the cluster records lost (any state)
+    # comes back the way main's nodes do under a cluster that serves nothing -
+    # devices, its own JM, its links, ONLINE - without lvstores; the site
+    # activation builds them once its nodes are back. A site-aware journal
+    # counts only its local JMs (ultra DISTR_v2 alg_journal.cpp:2316 ->
+    # alg_journal_site_rules.hpp:123 jc_site_outage_detect) against
+    # c_jc_ha_min_required_jms = 2 (alg_journal.hpp:108): the first node of the
+    # site to come back sees one local JM, and the JC would abort it.
+    on_recorded_site = (cluster.sync_replication is True and bool(cluster.lost_site)
+                        and snode.site == cluster.lost_site)
+    if (cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]
+            or on_recorded_site):
 
         # make other nodes connect to the new devices
         # Per-peer locks + parallel workers replace the old global gate +
@@ -9293,6 +9866,9 @@ def _restart_storage_node_impl(
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
         logger.info("Cluster is not ready yet")
+        # A restart reopens this node's LVS ports by design; those releases
+        # must not count against the fence-release budget (review of #1580).
+        port_release_budget.forget_node(db_controller, snode)
         logger.info("Setting node status to Online")
         if not set_node_status(node_id, StorageNode.STATUS_ONLINE, caused_by="restart"):
             # FSM rejected the final flip — typically because a racing
@@ -9441,6 +10017,9 @@ def _restart_storage_node_impl(
             logger.info(f"Starting migration task for node {snode.get_id()}")
             tasks_controller.add_device_mig_task_for_node(snode.get_id())
 
+        # A restart reopens this node's LVS ports by design; those releases
+        # must not count against the fence-release budget (review of #1580).
+        port_release_budget.forget_node(db_controller, snode)
         logger.info("Setting node status to Online")
         if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart"):
             # See twin call site above (single-leader restart path) for
@@ -11274,6 +11853,10 @@ def get_restart_phase(node_id, lvs_name):
             cluster = db_controller.get_cluster_by_id(node.cluster_id)
             if cluster.status in Cluster.TOPOLOGY_OWNED_STATUSES:
                 return phase
+            # Sync replication: the site activation rebuilds the instances of a
+            # node of its site by the restart path while the node is ONLINE.
+            if _sync_site(node) and activation_gate.activating_site(cluster) == node.site:
+                return phase
             # A removal dismantling a node owns the layout the way IN_SHRINK
             # did: its replica relocation sets phases on ONLINE targets. The
             # removal no longer holds a cluster status for that, so the
@@ -11428,6 +12011,16 @@ def _is_node_rpc_responsive(node: StorageNode, lvs_name, timeout=5, retry=2):
         return False
 
 
+def _node_holds_lvstore(node: StorageNode, lvs_name, timeout=5, retry=2) -> bool:
+    """Whether ``node``'s SPDK holds ``lvs_name`` now. An RPC error is not
+    proof that it does."""
+    try:
+        return node.rpc_client(timeout=timeout, retry=retry).get_lvstore(lvs_name) is not None
+    except RPCException as e:
+        logger.warning("LVS %s: lvstore probe on %s failed: %s", lvs_name, node.get_id(), e)
+        return False
+
+
 def _is_fabric_connected(node: StorageNode, lvs_peer_ids=None):
     """Check if a node's fabric is connected (JM quorum says NOT disconnected)."""
     return not _check_peer_disconnected(node, lvs_peer_ids=lvs_peer_ids)
@@ -11442,8 +12035,19 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
     return count
 
 
-def _leadership_moving_tasks_active(cluster_id, node_ids):
-    """True when a port-allow or restart task is active on any LVS member.
+def sync_promote_task_owns_move(task) -> bool:
+    """Whether an FN_SYNC_PROMOTE task still owns the leadership move of its
+    LVS: not finished, not canceled, and its runner alive (task lease not
+    stale - a RUNNING / SUSPENDED task whose runner died owns nothing)."""
+    return (task.function_name == JobSchedule.FN_SYNC_PROMOTE
+            and task.status != JobSchedule.STATUS_DONE and not task.canceled
+            and not tasks_controller._task_lease_is_stale(task))
+
+
+def _leadership_moving_tasks_active(cluster_id, node_ids, lvs_name=None):
+    """True when a port-allow or restart task is active on any LVS member, or
+    a sync promote task owns the move of the LVS (sync_promote_task_owns_move;
+    matched by its node or by ``lvs_name`` in its ``lvs_names``).
 
     Those flows own leadership movement (the restart flow's fenced
     demote->grant handoff; the port-allow failback demotes the acting leader
@@ -11456,6 +12060,12 @@ def _leadership_moving_tasks_active(cluster_id, node_ids):
     try:
         db = DBController()
         for task in db.get_job_tasks(cluster_id):
+            if task.function_name == JobSchedule.FN_SYNC_PROMOTE:
+                if sync_promote_task_owns_move(task) and (
+                        task.node_id in node_ids
+                        or (lvs_name and lvs_name in (task.function_params or {}).get("lvs_names", []))):
+                    return True
+                continue
             if task.function_name not in (JobSchedule.FN_PORT_ALLOW,
                                           JobSchedule.FN_NODE_RESTART):
                 continue
@@ -11469,32 +12079,134 @@ def _leadership_moving_tasks_active(cluster_id, node_ids):
     return False
 
 
-def _taker_jm_quorum_ok(taker):
+def _taker_jm_quorum_ok(taker, jm_vuid=None, *, sync=False):
     """True when the prospective leadership taker's JC reports at least the
     JM write quorum (2) ready. Granting leadership to a primary whose JMs are
     excluded is pointless and harmful: it self-demotes on the next quorum
     check and the grant/demote cycle flaps (run 20260725: LVS_1 primary
     self-demoted at 20:46/20:55 on JM quorum loss, every subsequent grant
-    lasted seconds)."""
-    if not taker.jm_vuid:
+    lasted seconds).
+
+    ``jm_vuid`` is the LVS's journal (default: the taker's own LVS). With
+    ``sync`` (sync replication) only the copies on the taker's site count -
+    the journal acks with >= 2 local copies and tolerates the other site's
+    missing - so two ready other-site copies (named with the cross-site
+    prefix, remote_jm_controller_name) and no local one do not qualify."""
+    jm_vuid = jm_vuid or taker.jm_vuid
+    if not jm_vuid:
         return False
     try:
-        st = taker.rpc_client(timeout=5, retry=1).jc_get_jm_status(taker.jm_vuid)
+        st = taker.rpc_client(timeout=5, retry=1).jc_get_jm_status(jm_vuid)
     except Exception as e:
         logger.warning("jc_get_jm_status on %s failed: %s — refusing to grant "
                        "leadership", taker.get_id()[:8], e)
         return False
     if not st:
         return False
-    ready = sum(1 for v in st.values() if v)
+    ready = sum(1 for name, v in st.items()
+                if v and not (sync and str(name).startswith(_CROSS_SITE_JM_PREFIX)))
     if ready < 2:
-        logger.warning("taker %s has only %d ready JM(s) — refusing to grant "
-                       "leadership", taker.get_id()[:8], ready)
+        logger.warning("taker %s has only %d ready %sJM(s) — refusing to grant "
+                       "leadership", taker.get_id()[:8], ready, "local " if sync else "")
         return False
     return True
 
 
-def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
+def _taker_on_lost_site(db, cluster_id, taker_id) -> bool:
+    """Whether ``taker_id`` is a node of the cluster's recorded lost site (any
+    lost-site state): no leadership may be granted there until the record is
+    cleared. Only the site activation of that site rebuilds a leader there
+    (_refuse_leader_rebuild)."""
+    cluster = db.get_cluster_by_id(cluster_id)
+    if not cluster.lost_site:
+        return False
+    try:
+        return db.get_storage_node_by_id(taker_id).site == cluster.lost_site
+    except KeyError:
+        return False
+
+
+@contextlib.contextmanager
+def _sync_grant_guard(cluster_id, lvs_name, owner_id, taker_id, *, timeout=0):
+    """Yield whether a leadership grant of ``lvs_name`` to ``taker_id`` may run
+    now, holding the grant lock (_lvs_grant_lock) for the whole block.
+
+    Outside sync replication (``owner_id`` None) always True, no lock. On a
+    sync cluster the owner is re-read AFTER the lock is held: the grant needs
+    no move in flight and the taker in the active triplet. Lock not acquired
+    within ``timeout`` -> False."""
+    if owner_id is None:
+        yield True
+        return
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(_lvs_grant_lock(cluster_id, lvs_name, timeout=timeout))
+        except PreconditionError as e:
+            logger.warning("LVS %s: grant lock not acquired (%s) — no grant", lvs_name, e)
+            yield False
+            return
+        db = DBController()
+        active = lvs_active_triplet(db.get_storage_node_by_id(owner_id))
+        permitted = active.grants_allowed and taker_id in active.node_ids
+        on_lost = permitted and _taker_on_lost_site(db, cluster_id, taker_id)
+        if not permitted or on_lost:
+            logger.warning("LVS %s: no grant on %s — %s", lvs_name, taker_id,
+                           "it is on the lost site" if on_lost
+                           else f"leadership moving to {active.moving_to}" if active.moving_to
+                           else "not in the active triplet")
+        yield permitted and not on_lost
+
+
+def _member_proven_non_leader(node, lvs_name):
+    """``(True, why)`` when *node* demonstrably does not lead *lvs_name*: its
+    own RPC answers non-leader, or its SPDK process is confirmed gone by its
+    node agent. A member that cannot be asked either way is a POSSIBLE
+    leader: ``(False, why)``."""
+    from simplyblock_core.controllers.lvol_controller import is_node_leader
+    try:
+        if is_node_leader(node, lvs_name):
+            return False, f"{node.get_id()[:8]} reports leadership"
+        return True, f"{node.get_id()[:8]} reports non-leader"
+    except Exception as e:                                  # noqa: BLE001
+        rpc_err = e
+    try:
+        up = node.client(timeout=5, retry=1).spdk_process_is_up(node.rpc_port, node.cluster_id)
+        is_up = up[0] if isinstance(up, (list, tuple)) else bool(up)
+    except Exception as e:                                  # noqa: BLE001
+        return False, (f"{node.get_id()[:8]} unknown: RPC failed ({rpc_err}) and its "
+                       f"node agent could not confirm SPDK is gone ({e})")
+    if is_up:
+        return False, (f"{node.get_id()[:8]} unknown: RPC failed ({rpc_err}) but its "
+                       f"SPDK process is still running")
+    return True, f"{node.get_id()[:8]} SPDK process confirmed gone"
+
+
+def _leadership_proven_free(all_nodes, lvs_name, taker):
+    """Whether *taker* may become leader of *lvs_name*: every other member is
+    proven non-leader (RPC) or dead (node agent), and still is after
+    LEADERSHIP_SAFETY_WINDOW_SEC -- so a member that is merely slow, or about
+    to regain leadership, cannot end up a second writer.
+
+    bf8 (2026-11-02, LVS_10): a forced shutdown leaves the old primary's SPDK
+    running ~10 s after its management RPC stops answering. The failover
+    treated "RPC fails" as "not leader", promoted the secondary, and both led
+    the lvstore for 12 s (JM write-lock conflict); a landing volume created on
+    the new leader ended with invalid metadata and the lvstore could no longer
+    be loaded on the primary."""
+    others = [n for n in all_nodes if n.get_id() != taker.get_id()]
+    for attempt in (0, 1):
+        if attempt:
+            time.sleep(constants.LEADERSHIP_SAFETY_WINDOW_SEC)
+        for node in others:
+            ok, why = _member_proven_non_leader(node, lvs_name)
+            if not ok:
+                logger.error("Refusing to make %s leader of %s: %s",
+                             taker.get_id()[:8], lvs_name, why)
+                return False
+    return True
+
+
+def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker, owner_id=None):
     """Recovery for a leaderless-but-healthy LVS.
 
     Leadership placement is otherwise the restart/creation/activation flows'
@@ -11518,11 +12230,19 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
          IO-driven promotion performs — and, only after the reload succeeded,
          ``set_leader(True)``; then verify the grant took.
 
+    Sync replication (``owner_id`` = the LVS owner): ``all_nodes`` is the
+    active triplet, the grant runs under _sync_grant_guard (grant lock, no
+    move in flight, taker in the active triplet), the JM quorum counts the
+    taker's LOCAL copies of this LVS's journal, and the step-1 hublvol repair
+    is skipped for a taker that is not the owner (it would wire the taker's
+    OWN LVS hublvol: _check_sec_node_hublvol reads ``taker.hublvol``).
+
     Returns the confirmed leader node or None (callers fail fast; the
     no-leader negative cache bounds re-entry)."""
     from simplyblock_core.controllers.lvol_controller import is_node_leader
 
     db = DBController()
+    lvs_owner = db.get_storage_node_by_id(owner_id) if owner_id else None
     owner = f"{socket.gethostname()}-{os.getpid()}-{threading.get_ident()}"
     won, holder = db.acquire_lvstore_lock(
         cluster_id, f"takeleader/{lvs_name}", owner)
@@ -11537,7 +12257,12 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     member_ids = [n.get_id() for n in all_nodes]
 
     # 1- repair the redirect paths so the primary CAN self-promote.
-    for peer in all_nodes:
+    repair_peers = all_nodes
+    if lvs_owner is not None and taker.get_id() != lvs_owner.get_id():
+        logger.info("LVS %s: taker %s is not the owner — no hublvol repair "
+                    "towards it", lvs_name, taker.get_id()[:8])
+        repair_peers = []
+    for peer in repair_peers:
         if peer.get_id() == taker.get_id():
             continue
         if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
@@ -11565,36 +12290,45 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     # 2- reload-then-grant, guarded. The explicit bdev_lvol_update_lvstore
     # replays the same blob-md reload the IO-driven promotion does, so the
     # subsequent set_leader cannot serve stale metadata.
-    if _leadership_moving_tasks_active(cluster_id, member_ids):
-        logger.warning("leaderless recovery for %s: port-allow/restart task "
-                       "active on an LVS member — leaving leadership movement "
-                       "to it", lvs_name)
+    if _leadership_moving_tasks_active(cluster_id, member_ids, lvs_name):
+        logger.warning("leaderless recovery for %s: port-allow/restart/promote "
+                       "task active on an LVS member — leaving leadership "
+                       "movement to it", lvs_name)
         return None
-    if not _taker_jm_quorum_ok(taker):
+    if lvs_owner is not None:
+        quorum_ok = _taker_jm_quorum_ok(taker, lvs_owner.jm_vuid, sync=True)
+    else:
+        quorum_ok = _taker_jm_quorum_ok(taker)
+    if not quorum_ok:
         return None
-    logger.warning(
-        "LVS %s still leaderless after hublvol repair and no handoff task is "
-        "active — reloading lvstore metadata on %s before granting leadership",
-        lvs_name, taker.get_id())
-    try:
-        if not taker.rpc_client(timeout=10, retry=1).bdev_lvol_update_lvstore(
-                lvs_name):
-            logger.error("bdev_lvol_update_lvstore on %s for %s returned "
-                         "False — refusing to grant leadership on top of "
-                         "un-reloaded metadata", taker.get_id(), lvs_name)
+    if not _leadership_proven_free(all_nodes, lvs_name, taker):
+        return None
+    with _sync_grant_guard(cluster_id, lvs_name, owner_id, taker.get_id()) as permitted:
+        if not permitted:
             return None
-    except Exception as e:
-        logger.error("bdev_lvol_update_lvstore on %s for %s failed: %s — "
-                     "refusing to grant leadership", taker.get_id(),
-                     lvs_name, e)
-        return None
-    try:
-        taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
-            lvs_name, leader=True)
-    except Exception as e:
-        logger.error("take-leadership RPC on %s for %s failed: %s",
-                     taker.get_id(), lvs_name, e)
-        return None
+        logger.warning(
+            "LVS %s still leaderless after hublvol repair and no handoff task is "
+            "active — reloading lvstore metadata on %s before granting leadership",
+            lvs_name, taker.get_id())
+        try:
+            if not taker.rpc_client(timeout=10, retry=1).bdev_lvol_update_lvstore(
+                    lvs_name):
+                logger.error("bdev_lvol_update_lvstore on %s for %s returned "
+                             "False — refusing to grant leadership on top of "
+                             "un-reloaded metadata", taker.get_id(), lvs_name)
+                return None
+        except Exception as e:
+            logger.error("bdev_lvol_update_lvstore on %s for %s failed: %s — "
+                         "refusing to grant leadership", taker.get_id(),
+                         lvs_name, e)
+            return None
+        try:
+            taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
+                lvs_name, leader=True)
+        except Exception as e:
+            logger.error("take-leadership RPC on %s for %s failed: %s",
+                         taker.get_id(), lvs_name, e)
+            return None
     for _ in range(5):
         try:
             if is_node_leader(taker, lvs_name):
@@ -11757,7 +12491,7 @@ def _resync_solo_lvs_after_restart(snode, cluster=None):
         logger.warning("Solo-LVS resync after restart of %s failed: %s", snode.get_id(), e)
 
 
-def find_leader_with_failover(all_nodes, lvs_name):
+def find_leader_with_failover(all_nodes, lvs_name, *, recover: bool = True):
     """Detect the current leader and failover if needed — with a no-leader
     fail-fast gate.
 
@@ -11768,8 +12502,24 @@ def find_leader_with_failover(all_nodes, lvs_name):
     process — under a mass-create workload against a leaderless LVS, running
     the pass per request stormed every LVS member with several
     get_lvstore per second for hours (run 20260712-231123).
+
+    ``recover=False`` is a lookup without recovery, for a caller that must
+    never make a leader (automation: the sync resync runner, the timer of the
+    scheduled snapshots, the promote runner's transfer step - a sync LVS has
+    no leader between a promote and its first client IO, and that is not a
+    fault). The candidates are resolved as usual (an abandoned move is still
+    reconciled) and probed; when none reports the leadership the answer is
+    (None, []) and nothing is granted, forced or signalled. Such an answer is
+    not a full pass, so it is not recorded as a no-leader verdict; a verdict
+    another lookup recorded is still honoured.
     """
     from simplyblock_core.utils.ttl_cache import NO_LEADER_TTL_SEC, no_leader_cache
+
+    # Sync replication: probe and grant only within the active triplet
+    # (_lvs_leader_candidates) - resolved BEFORE the negative cache so an
+    # abandoned move is reconciled even while a no-leader verdict is cached.
+    # The returned non-leaders stay the caller's own members.
+    candidates = _lvs_leader_candidates(all_nodes, lvs_name)
 
     cluster_id = all_nodes[0].cluster_id if all_nodes else ""
     cache_key = (cluster_id, lvs_name)
@@ -11780,16 +12530,27 @@ def find_leader_with_failover(all_nodes, lvs_name):
             "re-established", lvs_name, NO_LEADER_TTL_SEC)
         return None, []
 
-    leader, non_leaders = _find_leader_with_failover_impl(all_nodes, lvs_name)
+    leader, _ = _find_leader_with_failover_impl(
+        candidates.nodes, lvs_name, grants_allowed=candidates.grants_allowed and recover,
+        owner_id=candidates.owner_id, taker_id=candidates.taker_id)
     if leader is None:
-        no_leader_cache.put(cache_key, True)
-    else:
-        no_leader_cache.invalidate(cache_key)
-    return leader, non_leaders
+        if recover:
+            no_leader_cache.put(cache_key, True)
+        return None, []
+    no_leader_cache.invalidate(cache_key)
+    return leader, [n for n in all_nodes if n.get_id() != leader.get_id()]
 
 
-def _find_leader_with_failover_impl(all_nodes, lvs_name):
+def _find_leader_with_failover_impl(all_nodes, lvs_name, *, grants_allowed=True,
+                                    owner_id=None, taker_id=None):
     """Single full leader-detection/recovery pass.
+
+    ``all_nodes`` are the candidates (_lvs_leader_candidates). Without
+    ``grants_allowed`` (a sync LVS whose leadership is being moved or whose
+    owner is unknown, or a lookup without recovery - find_leader_with_failover
+    ``recover=False``) only steps 0-1 and the confirm-only branch run: nothing
+    is granted or forced.
+    ``owner_id`` / ``taker_id`` (sync replication) are passed to the grants.
 
     0. Cached fast path: if a leader for this lvstore was confirmed within
        LEADER_TTL_SEC, probe ONLY that node (one RPC). Leadership rarely moves,
@@ -11872,6 +12633,22 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
         leader_cache.put(cache_key, leader.get_id())
         return leader, non_leaders
 
+    if not grants_allowed:
+        # This lookup makes no leader - the leadership is being moved, the
+        # owner is unknown, or the caller asked for a lookup without recovery:
+        # only a node that admits the leadership counts, nothing may be
+        # granted or forced here.
+        try:
+            if is_node_leader(leader, lvs_name):
+                leader_cache.put(cache_key, leader.get_id())
+                return leader, non_leaders
+        except Exception:
+            pass
+        logger.warning("LVS %s: no member reports the leadership and this "
+                       "lookup makes no leader — nothing granted or forced",
+                       lvs_name)
+        return None, []
+
     # Unconfirmed-leader fallback: `leader` is only a fabric-connected guess —
     # no node admitted leadership above. RPC-responsiveness does NOT make a node
     # the leader, so a tight responsiveness probe here can route the operation to
@@ -11910,14 +12687,19 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
                                   if n.get_id() != node.get_id()]
             except Exception:
                 continue
-        # Prefer the configured primary of this LVS as the taker; fall back
-        # to the responsive guess.
-        taker = next((n for n in all_nodes if n.lvstore == lvs_name), leader)
+        # Prefer the configured primary of this LVS as the taker (sync
+        # replication: the active triplet's primary); fall back to the
+        # responsive guess.
+        if taker_id:
+            taker = next((n for n in all_nodes if n.get_id() == taker_id), leader)
+        else:
+            taker = next((n for n in all_nodes if n.lvstore == lvs_name), leader)
         if taker.get_id() != leader.get_id() and not (
                 _is_fabric_connected(taker)
                 and _is_node_rpc_responsive(taker, lvs_name)):
             taker = leader
-        recovered = _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, taker)
+        recovered = _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, taker,
+                                            owner_id=owner_id)
         if recovered is not None:
             leader_cache.put(cache_key, recovered.get_id())
             return recovered, [n for n in all_nodes
@@ -11943,8 +12725,16 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
                 return nl, new_non_leaders
         return None, []
 
-    # Leader fabric healthy but RPC failing — force leadership change
-    # Need at least one non-leader with healthy fabric
+    # Leader fabric healthy but RPC failing. This used to FORCE a handoff: a
+    # best-effort "drop leadership" signal to the old leader, then accepting
+    # the new node as soon as IT reported leadership -- without ever proving
+    # the old leader had let go. A leader whose management RPC fails can be
+    # very much alive (a forced shutdown keeps SPDK running ~10 s after its
+    # API stops answering): bf8 2026-11-02, LVS_10 had two leaders for 12 s
+    # and its metadata was corrupted. Leadership now moves only after every
+    # other member is proven non-leader or dead for a safety window, and then
+    # through the guarded leaderless recovery (metadata reload before grant),
+    # never by signal.
     failover_target = None
     for nl in non_leaders:
         if _is_fabric_connected(nl) and _is_node_rpc_responsive(nl, lvs_name):
@@ -11956,40 +12746,21 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
                      leader.get_id())
         return None, []
 
-    # Force leadership change via fabric signal: send bdev_lvol_set_lvs_signal
-    # FROM failover_target through the fabric TO the leader (whose mgmt is down
-    # but data plane is healthy). The signal tells the leader's SPDK to drop
-    # leadership for this LVS.
+    if not _leadership_proven_free(all_nodes, lvs_name, failover_target):
+        return None, []
     try:
-        rpc = failover_target.rpc_client(timeout=5, retry=2)
-        rpc.bdev_lvol_set_lvs_signal(lvs_name)
-        time.sleep(2)
-        logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to leader %s via fabric",
-                    lvs_name, failover_target.get_id(), leader.get_id())
-    except Exception as e:
-        logger.error("Failed to send fabric signal for leadership change: %s", e)
+        if is_node_leader(failover_target, lvs_name):
+            # promoted itself meanwhile (JM-driven): accept, nothing to force
+            new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
+            leader_cache.put(cache_key, failover_target.get_id())
+            return failover_target, new_non_leaders
+    except Exception:
+        pass
+    recovered = _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, failover_target,
+                                        owner_id=owner_id)
+    if recovered is None:
         return None, []
-
-    # Verify the forced leadership change actually took effect before routing.
-    # The signal is best-effort: if the old leader was merely slow (not down)
-    # and reclaims leadership, failover_target never becomes leader and routing
-    # to it would land the operation on a non-leader. Confirm with a short
-    # retry; reject if leadership did not settle on failover_target.
-    leadership_confirmed = False
-    for _ in range(3):
-        try:
-            if is_node_leader(failover_target, lvs_name):
-                leadership_confirmed = True
-                break
-        except Exception:
-            pass
-        time.sleep(1)
-    if not leadership_confirmed:
-        logger.error("Forced leadership change to %s for %s did not take effect — "
-                     "refusing to route to a non-leader",
-                     failover_target.get_id(), lvs_name)
-        return None, []
-
+    failover_target = recovered
     new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
     leader_cache.put(cache_key, failover_target.get_id())
     return failover_target, new_non_leaders
@@ -12020,9 +12791,15 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
     except KeyError:
         return "skip"
 
-    # 1. Check disconnect state (JM quorum)
+    # 1. Check disconnect state (JM quorum). Sync replication: a node of the
+    # site being activated counts as absent until the record is cleared, yet
+    # its instances are being rebuilt under restart phases - the phase decides
+    # first there, so an operation queues instead of skipping a node
+    # mid-examine.
     lvs_peer_ids = [sid for sid in [node.secondary_node_id, node.tertiary_node_id] if sid]
-    if _check_peer_disconnected(node, lvs_peer_ids=lvs_peer_ids):
+    cluster = db_controller.get_cluster_by_id(node.cluster_id)
+    phase_first = bool(_sync_site(node)) and activation_gate.activating_site(cluster) == node.site
+    if not phase_first and _check_peer_disconnected(node, lvs_peer_ids=lvs_peer_ids):
         return "skip"
 
     # 2. Check restart phase — any non-empty phase means the restart task
@@ -12058,6 +12835,13 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
                     "under the held lock", node_id[:8])
     elif phase in _restart_phases:
         return "queue"
+    if phase_first and _check_peer_disconnected(node, lvs_peer_ids=lvs_peer_ids):
+        # Absent only by the record, with its instance of the LVS already
+        # rebuilt by the site activation (its SPDK holds the lvstore): it
+        # takes the operation. A node not rebuilt yet holds no lvstore.
+        if member_absent_on_recorded_site(cluster, node) and _node_holds_lvstore(node, lvs_name):
+            return "proceed"
+        return "skip"
 
     # 3. Fabric is connected — check RPC responsiveness
     if _is_node_rpc_responsive(node, lvs_name):
@@ -12160,6 +12944,25 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
         return False, new_leader, f"Operation failed on new leader: {e}"
 
 
+def member_absent_on_recorded_site(cluster, node: StorageNode) -> bool:
+    """Whether ``node`` is a triplet member that holds no instance: an ONLINE
+    node of the site the sync-replication ``cluster`` records lost ``down`` /
+    ``fencing`` / ``done``. Such a node came back through the restart without
+    lvstores (_restart_storage_node_impl) and gets its instances from the site
+    activation, so until the record is cleared a triplet reader treats it as
+    disconnected - the answer it gets for an OFFLINE member. It stays in every
+    member and candidate list.
+
+    Not while the site is ``draining``: its nodes not yet shut down still hold
+    their instances. A node in any other status is classified by its status
+    (_check_peer_disconnected) or proven gone by its own probes (the promote's
+    hand-off check)."""
+    return (cluster.sync_replication is True and bool(cluster.lost_site)
+            and node.site == cluster.lost_site
+            and cluster.lost_site_state != Cluster.LOST_SITE_DRAINING
+            and node.status == StorageNode.STATUS_ONLINE)
+
+
 #: Mgmt statuses that make a peer unusable as a routing, port-block, or
 #: failover target, without consulting the data plane at all. Each one means
 #: mgmt has already observed the peer leaving the cluster and is not expecting
@@ -12184,11 +12987,16 @@ _PEER_DISCONNECTED_STATUSES = (
 ) + StorageNode.REMOVAL_SHUT_DOWN_STATUSES
 
 
-def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
+def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None, *, fresh=False):
     """Check if a peer node should be treated as disconnected for the purpose
     of routing (takeover vs. non-leader path) and peer-port-block decisions.
 
     Returns True if peer is disconnected (should be skipped), False otherwise.
+
+    ``fresh`` takes the data-plane verdict (signal 2) now instead of from the
+    caches - the verdict cache here and the vote cache under it - and
+    refreshes both: for a caller that grants a leadership on the answer after
+    it waited for its locks (_refuse_leader_rebuild). Signal 1 is never cached.
 
     Two signals, first match wins:
 
@@ -12211,6 +13019,10 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
          tertiary spent its deferred hublvol attach on the node being removed,
          "Failed to add deferred hublvol failover path to <removed> …
          for LVS_21").
+
+         Sync replication: an ONLINE node of the site the cluster records
+         lost holds no instance (member_absent_on_recorded_site) and is
+         disconnected by the same rule, without a vote.
 
       2. Data-plane JM quorum (legacy path). Only reached if mgmt says
          the peer is in an "alive" state. Useful to detect fabric
@@ -12246,6 +13058,12 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
                     peer_node.get_id(), peer_node.status)
         return True
 
+    if _sync_site(peer_node) and member_absent_on_recorded_site(
+            db_ctrl.get_cluster_by_id(peer_node.cluster_id), peer_node):
+        logger.info("Peer %s is on the recorded site %s and holds no instance — treating as "
+                    "disconnected", peer_node.get_id(), peer_node.site)
+        return True
+
     # The NVMe-ctrlr quorum sweep costs ~10 RPCs across the cluster and is
     # re-run for every peer on every create/clone/snapshot. Its verdict is
     # connectivity state that moves on node-failure timescales, so cache it
@@ -12258,9 +13076,14 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
         QUORUM_VERDICT_TTL_SEC,
         quorum_verdict_cache,
     )
-    verdict = quorum_verdict_cache.get_or_compute(
-        (peer_node.get_id(), tuple(lvs_peer_ids or ())), QUORUM_VERDICT_TTL_SEC,
-        lambda: is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids))
+    verdict_key = (peer_node.get_id(), tuple(lvs_peer_ids or ()))
+    if fresh:
+        verdict = is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids, fresh=True)
+        quorum_verdict_cache.put(verdict_key, verdict)
+    else:
+        verdict = quorum_verdict_cache.get_or_compute(
+            verdict_key, QUORUM_VERDICT_TTL_SEC,
+            lambda: is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids))
     if verdict:
         logger.info("Peer %s is data-plane disconnected (NVMe-ctrlr quorum confirmed), will skip",
                      peer_node.get_id())
@@ -12384,6 +13207,10 @@ def _derive_lvstore_ports(snode, primary_node, db_controller):
     call is definitionally hosting -- it is the stack being built. Where the
     slots already cover it the entry is identical (same node, same ports), so
     adding it last is idempotent rather than an override.
+
+    Sync replication: a node also serves the LVS of every owner whose remote
+    triplet names it -- without those, building one remote instance would
+    drop the port entries of the others hosted here.
     """
     ports = {}
     if snode.lvstore:
@@ -12392,6 +13219,8 @@ def _derive_lvstore_ports(snode, primary_node, db_controller):
         if slot_id:
             nd = db_controller.get_storage_node_by_id(slot_id)
             ports[nd.lvstore] = _lvstore_port_entry(nd)
+    for owner in remote_instance_owners(snode, db_controller):
+        ports[owner.lvstore] = _lvstore_port_entry(owner)
     if primary_node is not None and primary_node.lvstore:
         ports[primary_node.lvstore] = _lvstore_port_entry(primary_node)
     return ports
@@ -12415,7 +13244,9 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
 def _non_leader_role(snode, primary_node, role=None):
     """The role ``snode`` holds for ``primary_node.lvstore``: the one the caller
-    names, else the one the primary's pointers give it.
+    names, else the one its position in its own triplet gives it
+    (lvs_triplet_of: the primary's home pointers, or on a sync-replication
+    cluster the remote triplet when snode is a member of it).
 
     The pointers are right for a node restart, where the topology is settled.
     They are wrong for a removal's replica relocation, which updates them only
@@ -12427,7 +13258,8 @@ def _non_leader_role(snode, primary_node, role=None):
     knows the role it is building, and passes it.
     """
     if role is None:
-        return "tertiary" if primary_node.tertiary_node_id == snode.get_id() else "secondary"
+        _, _, triplet_tertiary_id = lvs_triplet_of(primary_node, snode.get_id())
+        return "tertiary" if triplet_tertiary_id == snode.get_id() else "secondary"
     if role not in ("secondary", "tertiary"):
         raise ValueError(f"not a non-leader role: {role!r}")
     return role
@@ -12459,8 +13291,12 @@ def _non_leader_min_cntlid(lvol, snode):
 LVOL_REGISTER_MAX_WORKERS = 10
 
 
-def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
+def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label="", *, promoted=False):
     """Register every lvol's subsystem on ``snode`` and report what failed.
+
+    ``lvol_ana_state`` is the state outside sync replication; on a sync
+    cluster each listener follows the site rule (lvol_ana_state(), with
+    ``promoted`` for a takeover leader), read once for the batch.
 
     Returns a list of ``(lvol_id, reason)`` for lvols that are not serving on
     ``snode`` afterwards; an empty list means every one is registered AND
@@ -12562,7 +13398,8 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
         if lvol.get_id() in failures or lvol.nqn in blocked_nqns:
             continue
         try:
-            ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state)
+            ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state,
+                                             promoted=promoted)
         except Exception as e:
             ok, msg = False, "raised: %s" % e
         if not ok:
@@ -12741,7 +13578,11 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
 
     Args:
         snode: the restarting node (RPCs are executed here)
-        leader_node: whoever currently leads this LVS
+        leader_node: the node snode stands behind - its port is blocked
+            around the examine and, on snode's site, its hublvol is the one
+            snode connects to. Whoever currently leads this LVS; on a sync
+            cluster the anchor (_rebuild_anchor), which does not lead when
+            nobody does (an LVS waiting for its first IO)
         primary_node: the original primary (for lvol list, lvstore name, etc.)
         activation_mode: when True, skip all peer operations (port blocking,
             hublvol creation/connection, leader demotion).  Used during
@@ -12749,11 +13590,38 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         role: "secondary" / "tertiary", the role snode is being built for;
             derived from the primary's pointers when not given -- see
             _non_leader_role.
+
+    Sync replication: ``snode`` may also be a member of the LVS's remote
+    triplet (a "remote instance"), or the owner itself while its LVS is led
+    from the other site. Its position, and so its role and its hublvol peers,
+    come from the triplet it belongs to (lvs_triplet_of), and every hublvol
+    step runs only when the leader is on snode's site (no cross-site IO
+    redirect). A remote instance
+    publishes the lvol subsystems like any member - in the cntlid window of
+    its position in ``lvol.nodes``, under the site ANA rule
+    (lvol_ana_state) - and never touches the owner's lvstore_status: a remote
+    copy's health is not the owner LVS's health.
     """
     role = _non_leader_role(snode, primary_node, role)
     is_tertiary = role == "tertiary"
     db_controller = DBController()
     snode_rpc_client = snode.rpc_client()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    snode_id = snode.get_id()
+    is_remote = cluster.sync_replication and snode_id in remote_triplet_refs(primary_node)
+    _, triplet_secondary_id, triplet_tertiary_id = lvs_triplet_of(
+        primary_node, snode_id)
+    hub_ok = _non_leader_hub_ok(cluster, snode, leader_node, primary_node)
+    # The persisted role of an examined lvstore is PRIMARY; a non-leader with
+    # that role takes the leadership on the first IO it sees. Outside
+    # activation mode a local secondary / tertiary is stamped again AFTER the
+    # examine by connect_to_hublvol, whose failure aborts the rebuild. Every
+    # other instance is stamped only once after the examine, below, so that
+    # stamp must hold: activation mode (its hublvol connect runs before the
+    # examine), a remote instance, the owner rebuilt as a non-leader, any
+    # instance whose leader is on the other site (no hublvol).
+    role_stamp_required = (activation_mode or is_remote or snode_id == primary_node.get_id()
+                           or not hub_ok)
 
     # Soft prelude: reconnect any missing remote devices + remote JMs before
     # touching the LVS stack. Both helpers iterate existing bdevs internally
@@ -12767,27 +13635,35 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     # missing whichever peer it had no other prior reason to already be
     # connected to (found live 2026-08-25: a replaced node's JM stayed
     # unreachable on the new host because of exactly this gap).
+    #
+    # Field-scoped (atomic) writes: snode's record is written concurrently by
+    # other builds -- on a sync-replication cluster a remote-triplet member
+    # clears the pending mark on it (snode owning an LVS) while snode rebuilds
+    # another LVS here, and a full-object write would bring the mark back.
     try:
         fresh_remote_devs = _connect_to_remote_devs(snode, reattach=False)
+        if fresh_remote_devs:
+            db_controller.atomic_update(
+                snode, lambda n, v=fresh_remote_devs: setattr(n, "remote_devices", v))
         snode = db_controller.get_storage_node_by_id(snode.get_id())
-        snode.remote_devices = fresh_remote_devs or snode.remote_devices
-        snode.write_to_db()
     except Exception as e:
         logger.warning("Soft reconnect of remote devices failed on %s: %s",
                        snode.get_id(), e)
     try:
         fresh_remote_jms = _connect_to_remote_jm_devs(snode)
+        if fresh_remote_jms:
+            db_controller.atomic_update(
+                snode, lambda n, v=fresh_remote_jms: setattr(n, "remote_jm_devices", v))
         snode = db_controller.get_storage_node_by_id(snode.get_id())
-        snode.remote_jm_devices = fresh_remote_jms or snode.remote_jm_devices
-        snode.write_to_db()
     except Exception as e:
         logger.warning("Soft reconnect of remote JMs failed on %s: %s",
                        snode.get_id(), e)
 
     # Ensure snode has per-lvstore ports for every lvstore it serves,
     # including the one this call is building.
-    snode.lvstore_ports = _derive_lvstore_ports(snode, primary_node, db_controller)
-    snode.write_to_db()
+    lvstore_ports = _derive_lvstore_ports(snode, primary_node, db_controller)
+    db_controller.atomic_update(snode, lambda n: setattr(n, "lvstore_ports", lvstore_ports))
+    snode.lvstore_ports = lvstore_ports
     storage_network.publish_ports(snode)
 
     lvol_list = []
@@ -12828,14 +13704,15 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # tertiary after the partner dac5725c was force-shut-down). Mark it
         # "failed" and propagate so the restart is retried instead — once the
         # missing peer returns, the retry rebuilds the replica cleanly.
-        _set_lvstore_status_atomic(primary_node.get_id(), "failed", db_controller)
+        if not is_remote:
+            _set_lvstore_status_atomic(primary_node.get_id(), "failed", db_controller)
         return False
 
     # Expansion/activate (activation_mode=True) skips the port-blocked
     # retry block below, so it establishes the hublvol here. A normal
     # restart (activation_mode=False) connects in that block instead —
     # connecting here too would double the hublvol attach.
-    if activation_mode:
+    if activation_mode and hub_ok and _hublvol_same_site(cluster, snode, primary_node):
         try:
             # Role from topology, never a default: this call used to pass
             # no role and connect_to_hublvol defaulted to "secondary", so
@@ -12866,7 +13743,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     ### 2- create lvols nvmf subsystems (idempotent: skip existing)
     for lvol in lvol_list:
         allow_any = not bool(lvol.allowed_hosts)
-        min_cntlid = _non_leader_min_cntlid(lvol, snode)
+        # Sync replication: the window of snode's position in lvol.nodes
+        # (six paths; the owner rebuilt as a non-leader keeps its own).
+        min_cntlid = (lvol_controller.lvol_min_cntlid(lvol_controller._lvol_path_index(lvol, snode))
+                      if cluster.sync_replication else _non_leader_min_cntlid(lvol, snode))
         existing = snode_rpc_client.subsystem_get(lvol.nqn)
         if existing:
             logger.info("subsystem %s already exists on %s, skipping create",
@@ -12898,10 +13778,13 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     _port_block_t0 = time.monotonic()
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
 
-    # Resolve the secondary node for tertiary→secondary hublvol fallback
+    # Resolve the secondary node for tertiary→secondary hublvol fallback: the
+    # secondary of snode's own triplet, and never one on another site.
     secondary_node = None
-    if primary_node.secondary_node_id and primary_node.secondary_node_id != snode.get_id():
-        secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    if triplet_secondary_id and triplet_secondary_id != snode_id:
+        secondary_node = db_controller.get_storage_node_by_id(triplet_secondary_id)
+        if not _hublvol_same_site(cluster, snode, secondary_node):
+            secondary_node = None
 
     leader_port_blocked = False
 
@@ -12914,7 +13797,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     # pre-acquire is non-fatal: connect_to_hublvol then locks internally
     # (the pre-fix behavior).
     _hub_lock_holder = {"lock": None}
-    if not activation_mode:
+    if not activation_mode and hub_ok:
         try:
             from simplyblock_core.utils.hublvol_reconnect import (
                 HublvolReconnectCoordinator,
@@ -13066,8 +13949,12 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
 
     # Quorum check on the current leader ONLY. Use a peer list that excludes the
     # restarting node (snode) — snode's JM is expected to be disconnected on peers
-    # during restart, so including it would cause false negatives.
-    lvs_peer_ids_excl_snode = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id]
+    # during restart, so including it would cause false negatives. The peers
+    # are those of the leader's triplet: the home one, unless a sync-replication
+    # LVS is led from its remote triplet (lost home site).
+    _, leader_triplet_secondary, leader_triplet_tertiary = lvs_triplet_of(
+        primary_node, leader_node.get_id())
+    lvs_peer_ids_excl_snode = [sid for sid in [leader_triplet_secondary, leader_triplet_tertiary]
                                if sid and sid != snode.get_id()]
     leader_has_quorum = not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids_excl_snode)
 
@@ -13243,18 +14130,9 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             if activation_mode:
                 return
 
-            def _lvol_bdev_registered(lv):
-                for candidate in (lv.lvol_uuid, f"{lv.lvs_name}/{lv.lvol_bdev}"):
-                    try:
-                        if snode_rpc_client.bdev_get(candidate):
-                            return True
-                    except Exception:
-                        pass
-                return False
-
             missing_lvols = []
             for lv in lvol_list:
-                if _lvol_bdev_registered(lv):
+                if _lvol_bdev_registered(snode_rpc_client, lv):
                     continue
                 missing_lvols.append(lv)
 
@@ -13280,9 +14158,12 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # bdev_examine brings the LVS back with its metadata-persisted role
         # (primary). Leaving it as primary makes SPDK reject a later
         # bdev_lvol_connect_hublvol with "-22 nonsecondary node".
+        # Sync replication: an instance of the inactive triplet keeps a
+        # non-leader role by its position there (p/s -> secondary, t ->
+        # tertiary), so an IO reaching it fails instead of taking the lead.
         sec_role = "tertiary" if is_tertiary else "secondary"
         try:
-            lvs_opts_ok = snode_rpc_client.bdev_lvol_set_lvs_opts(
+            role_stamped = snode_rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
                 subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
@@ -13290,14 +14171,22 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                 role=sec_role,
             )
         except RPCException as e:
-            # Best effort, as before RPCs raised: a raise here escaped with
-            # the leader's port still blocked (SFAM-2834).
+            # Best effort unless the role stamp is required: a raise here
+            # escaped with the leader's port still blocked (SFAM-2834).
             logger.error("bdev_lvol_set_lvs_opts(%s) raised for %s on %s: %s",
                          sec_role, primary_node.lvstore, snode.get_id(), e)
-            lvs_opts_ok = True
-        if not lvs_opts_ok:
+            role_stamped = not role_stamp_required
+        if not role_stamped:
             logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
                          sec_role, primary_node.lvstore, snode.get_id())
+            if role_stamp_required:
+                reason = (f"{primary_node.lvstore} on {snode_id} could not be stamped "
+                          f"non-leader ({sec_role}) after examine")
+                if not activation_mode:
+                    _abort_and_unblock(reason)
+                logger.error("Non-leader build aborted: %s", reason)
+                _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
+                return False
 
         # Track the deferred failover-path attach so we can run it AFTER the
         # leader port is unblocked. The in-freeze attach below uses a single
@@ -13310,10 +14199,12 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         if not activation_mode:
             ### 6- create hublvol on secondary (non-leader) for multipath failover
             # Secondary creates its own hublvol so the tertiary can use it as a failover path.
-            if not is_tertiary:
+            if not is_tertiary and hub_ok:
                 try:
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-                    snode.create_secondary_hublvol(leader_node, cluster.nqn)
+                    # The LVS metadata (name, NQN, port) is the owner's: a
+                    # leader may host this LVS without owning it.
+                    snode.create_secondary_hublvol(primary_node, cluster.nqn)
                     logger.info("Created secondary hublvol on restarting node %s for %s",
                                 snode.get_id(), primary_node.lvstore)
                 except Exception as e:
@@ -13327,7 +14218,12 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             # — the dead leader's IP is not even tried.
             attach_target = None
             try:
-                if is_tertiary:
+                if not hub_ok:
+                    # Sync replication: the leader is on the other site, and
+                    # a hublvol never crosses a site.
+                    logger.info("Leader %s of %s is not on the site of %s: no hublvol",
+                                leader_node.get_id(), primary_node.lvstore, snode_id)
+                elif is_tertiary:
                     secondary_alive = (secondary_node and not _check_peer_disconnected(
                         secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode))
                     # leader_has_quorum was computed earlier (line ~4722). When
@@ -13512,7 +14408,8 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # the leader-port-block freeze any more, so client IO is unaffected.
         if deferred_failover_target is not None and deferred_failover_via is not None:
             try:
-                if snode.add_hublvol_failover_path(deferred_failover_via, deferred_failover_target):
+                if snode.add_hublvol_failover_path(deferred_failover_via, deferred_failover_target,
+                                                   lvs_node=primary_node):
                     logger.info("Added deferred hublvol failover path to %s (via %s) on %s for %s",
                                 deferred_failover_target.get_id(),
                                 deferred_failover_via.get_id(),
@@ -13528,20 +14425,22 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         ### 9- add lvols to subsystems (non_optimized for non-leader; INACCESSIBLE
         # during (re)activation so no client IO flows before hublvol redirects are
         # connected and leadership settles — cluster_activate sets the correct ANA
-        # in a dedicated pass before flipping the cluster to ACTIVE).
+        # in a dedicated pass before flipping the cluster to ACTIVE). On a sync
+        # cluster the site rule decides (a remote instance included).
         non_leader_ana_state = "inaccessible" if activation_mode else "non_optimized"
         _register_lvols_on_node(lvol_list, snode, non_leader_ana_state,
                                 lvs_label=primary_node.lvstore)
 
         if not activation_mode:
             ### 10- add non-optimized path on tertiary to newly-restarted secondary's hublvol
-            if not is_tertiary and primary_node.tertiary_node_id and leader_node.hublvol:
-                tert_id = primary_node.tertiary_node_id
+            if hub_ok and not is_tertiary and triplet_tertiary_id and leader_node.hublvol:
+                tert_id = triplet_tertiary_id
                 if tert_id != snode.get_id() and tert_id != leader_node.get_id():
                     tert_node = db_controller.get_storage_node_by_id(tert_id)
-                    if tert_node and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids_excl_snode):
+                    if (tert_node and _hublvol_same_site(cluster, snode, tert_node)
+                            and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids_excl_snode)):
                         try:
-                            if tert_node.add_hublvol_failover_path(leader_node, snode):
+                            if tert_node.add_hublvol_failover_path(leader_node, snode, lvs_node=primary_node):
                                 logger.info("Added secondary %s hublvol path on tertiary %s for %s",
                                             snode.get_id(), tert_node.get_id(), primary_node.lvstore)
                             else:
@@ -13554,7 +14453,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # Clear restart phase for this LVS
         _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
 
-        _set_lvstore_status_atomic(primary_node.get_id(), "ready", db_controller)
+        if is_remote:
+            _clear_remote_instance_pending(primary_node.get_id(), snode_id, db_controller)
+        else:
+            _set_lvstore_status_atomic(primary_node.get_id(), "ready", db_controller)
 
         return True
     finally:
@@ -13645,7 +14547,9 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
     2026-06-03 LVS_8720 incident, where vm203 (the sole surviving leader)
     stayed port-blocked for 10m12s. Calling this on any recreate failure
     guarantees the port is reopened. Idempotent: 'allow' is a no-op when the
-    port is not blocked.
+    port is not blocked. On a sync-replication cluster the leader of the LVS
+    may be a member of its remote triplet (a lost home site), so those are
+    covered too.
     """
     try:
         port = lvs_node.get_lvol_subsys_port(lvs_node.lvstore)
@@ -13655,7 +14559,8 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
         return
     peer_ids = {pid for pid in (lvs_node.get_id(),
                                 lvs_node.secondary_node_id,
-                                lvs_node.tertiary_node_id)
+                                lvs_node.tertiary_node_id,
+                                *remote_triplet_refs(lvs_node))
                 if pid and pid != exclude_node_id}
     for pid in peer_ids:
         try:
@@ -13721,9 +14626,20 @@ def _recreate_all_lvstores_serial(snode: StorageNode, force=False):
     db_controller = DBController()
 
     # --- Step 1: Primary LVS ---
+    # Sync replication: an own LVS led from its remote triplet (or being moved)
+    # also comes back non-leader - only its active triplet may lead it - behind
+    # the node _rebuild_anchor names, whether somebody leads the LVS or not.
     logger.info("=== Phase: Primary LVS recreation ===")
     try:
-        ret = recreate_lvstore(snode, force=force)
+        own_led_elsewhere = bool(snode.lvstore and snode.site) and _lvs_led_elsewhere(
+            db_controller.get_storage_node_by_id(snode.get_id()))
+        if not own_led_elsewhere:
+            ret = recreate_lvstore(snode, force=force)
+        else:
+            leader_node = _rebuild_anchor(snode, snode, db_controller)
+            logger.info("Led from the other site: own LVS %s on %s comes back non-leader (behind %s)",
+                        snode.lvstore, snode.get_id(), leader_node.get_id())
+            ret = recreate_lvstore_on_non_leader(snode, leader_node, snode, force=force)
     except Exception:
         # A raw RPC exception (e.g. the restarting node's SPDK going
         # unreachable mid-rebuild) unwinds past recreate_lvstore's internal
@@ -13750,19 +14666,33 @@ def _recreate_all_lvstores_serial(snode: StorageNode, force=False):
         secondary_primary_node = None
         try:
             secondary_primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
+            # Field-scoped: a full-object write of this PEER's record could
+            # bring back what a concurrent flow just changed on it (e.g. a
+            # remote-triplet build clearing its pending mark).
+            _set_lvstore_status_atomic(secondary_primary_node.get_id(), "in_creation", db_controller)
             secondary_primary_node.lvstore_status = "in_creation"
-            secondary_primary_node.write_to_db()
 
             sec_lvs_peer_ids = [sid for sid in [secondary_primary_node.secondary_node_id,
                                                  secondary_primary_node.tertiary_node_id] if sid]
-            primary_disconnected = _check_peer_disconnected(secondary_primary_node, lvs_peer_ids=sec_lvs_peer_ids)
+            # Sync replication: led from the other site's triplet (or being
+            # moved) -> never a takeover here, a non-leader behind a member of
+            # the triplet that leads it (_rebuild_anchor).
+            sec_led_elsewhere = _lvs_led_elsewhere(secondary_primary_node)
+            primary_disconnected = not sec_led_elsewhere and _check_peer_disconnected(
+                secondary_primary_node, lvs_peer_ids=sec_lvs_peer_ids)
 
-            if primary_disconnected:
+            if sec_led_elsewhere:
+                leader_node = _rebuild_anchor(secondary_primary_node, snode, db_controller)
+                logger.info("Led from the other site: non-leader for %s on %s (behind %s)",
+                            secondary_primary_node.lvstore, snode.get_id(),
+                            leader_node.get_id())
+                ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node, force=force)
+            elif primary_disconnected:
                 logger.info("Primary %s disconnected — %s taking leadership for %s",
                             secondary_primary_node.get_id(), snode.get_id(), secondary_primary_node.lvstore)
                 ret = recreate_lvstore(snode, force=force, lvs_primary=secondary_primary_node)
             else:
-                leader_node = secondary_primary_node
+                leader_node = _leader_for_non_leader_rebuild(secondary_primary_node, snode, db_controller)
                 logger.info("Non-leader for %s on %s (leader=%s)",
                             secondary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
                 ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node, force=force)
@@ -13786,14 +14716,22 @@ def _recreate_all_lvstores_serial(snode: StorageNode, force=False):
         tertiary_primary_node = None
         try:
             tertiary_primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_tertiary)
+            _set_lvstore_status_atomic(tertiary_primary_node.get_id(), "in_creation", db_controller)
             tertiary_primary_node.lvstore_status = "in_creation"
-            tertiary_primary_node.write_to_db()
 
             tert_lvs_peer_ids = [sid for sid in [tertiary_primary_node.secondary_node_id,
                                                   tertiary_primary_node.tertiary_node_id] if sid]
-            primary_disconnected = _check_peer_disconnected(tertiary_primary_node, lvs_peer_ids=tert_lvs_peer_ids)
+            tert_led_elsewhere = _lvs_led_elsewhere(tertiary_primary_node)
+            primary_disconnected = not tert_led_elsewhere and _check_peer_disconnected(
+                tertiary_primary_node, lvs_peer_ids=tert_lvs_peer_ids)
 
-            if primary_disconnected:
+            if tert_led_elsewhere:
+                leader_node = _rebuild_anchor(tertiary_primary_node, snode, db_controller)
+                logger.info("Led from the other site: non-leader (tertiary) for %s on %s (behind %s)",
+                            tertiary_primary_node.lvstore, snode.get_id(),
+                            leader_node.get_id())
+                ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
+            elif primary_disconnected:
                 sec_id = tertiary_primary_node.secondary_node_id
                 sec_disconnected = True
                 if sec_id and sec_id != snode.get_id():
@@ -13811,7 +14749,7 @@ def _recreate_all_lvstores_serial(snode: StorageNode, force=False):
                                    tertiary_primary_node.lvstore)
                     ret = True
             else:
-                leader_node = tertiary_primary_node
+                leader_node = _leader_for_non_leader_rebuild(tertiary_primary_node, snode, db_controller)
                 logger.info("Non-leader (tertiary) for %s on %s (leader=%s)",
                             tertiary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
                 ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
@@ -13829,24 +14767,1764 @@ def _recreate_all_lvstores_serial(snode: StorageNode, force=False):
                 _restore_peer_lvstore_status_ready(
                     tertiary_primary_node.get_id(), db_controller)
 
+    # --- Step 4: remote-triplet LVS (sync replication) ---
+    # A remote triplet that is the ACTIVE one restarts as the home triplet
+    # does in Steps 1-3: its primary rebuilds the LVS as its leader, its
+    # secondary takes over from a disconnected primary
+    # (_remote_member_leads_at_restart; decided here, before the leader
+    # rebuild waits for its locks, and asked again under them by
+    # _refuse_leader_rebuild). Everybody else is a non-leader
+    # (_rebuild_remote_instance): the rest of the active triplet, every member
+    # of a passive one - which never takes the leadership here, even with the
+    # whole home triplet down (that is a promote) -, every member while the
+    # LVS is being moved. Nobody is skipped: unlike main's
+    # Step 3, a tertiary whose primary and secondary are both disconnected is
+    # built too - a sync cluster keeps running with a site down, and a node
+    # that came online without its instance makes the later leader rebuild of
+    # its primary abort on the hublvol connect.
+    for owner in remote_instance_owners(snode, db_controller):
+        logger.info("=== Phase: remote-triplet LVS %s recreation ===", owner.lvstore)
+        as_leader = False
+        try:
+            owner = db_controller.get_storage_node_by_id(owner.get_id())
+            as_leader = _remote_member_leads_at_restart(owner, snode, db_controller)
+            if as_leader:
+                logger.info("Active remote triplet: %s rebuilds %s as its leader",
+                            snode.get_id(), owner.lvstore)
+                # Called from here, never from _rebuild_remote_instance: it
+                # holds the non-reentrant recreate lock recreate_lvstore takes.
+                _set_lvstore_status_atomic(owner.get_id(), "in_creation", db_controller)
+                ret = recreate_lvstore(snode, force=force, lvs_primary=owner)
+            else:
+                ret = _rebuild_remote_instance(snode, owner, force=force)
+        except Exception as e:
+            logger.error("Remote-triplet LVS %s recreation failed: %s", owner.lvstore, e)
+            ret = False
+            if as_leader:
+                _release_lvs_subsys_port_on_peers(owner, snode.get_id(), db_controller)
+        if not ret:
+            logger.error(f"Failed to recreate remote-triplet LVS {owner.lvstore}")
+            if as_leader:
+                _restore_peer_lvstore_status_ready(owner.get_id(), db_controller)
+            non_leader_ok = False
+            break
+
     # Fail the restart if any non-leader replica did not come up, so the
     # restart task runner retries (the node must not go online advertising a
     # replica it does not actually hold).
     return non_leader_ok
 
 
-def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
+def _remote_member_leads_at_restart(owner: StorageNode, snode: StorageNode, db_controller, *,
+                                    fresh_verdict=False) -> bool:
+    """Restart Step 4: whether ``snode``, a member of the remote triplet of
+    ``owner``'s LVS (``owner`` as just read), rebuilds it as its LEADER. By
+    its position in the ACTIVE triplet, as main decides it by the position in
+    the only one: the primary always, the secondary when the primary is
+    disconnected (_check_peer_disconnected; an empty primary slot counts as
+    disconnected). Never the tertiary, a member of the passive triplet, or
+    anybody while the LVS is being moved.
+
+    Asked twice for a leader rebuild: by Step 4, which chooses the rebuild
+    before recreate_lvstore waits for its locks, and under those locks by
+    _refuse_leader_rebuild with ``fresh_verdict`` - the primary's
+    connectivity as it is then, not the verdict the first question cached."""
+    position = active_position(owner, snode.get_id())
+    if position is ActivePosition.PRIMARY:
+        return True
+    if position is not ActivePosition.SECONDARY:
+        return False
+    primary, secondary, tertiary = active_triplet_nodes(owner, db_controller)
+    if primary is None:
+        return True
+    peer_ids = [n.get_id() for n in (secondary, tertiary) if n is not None]
+    return _check_peer_disconnected(primary, lvs_peer_ids=peer_ids, fresh=fresh_verdict)
+
+
+def _rebuild_remote_instance(member: StorageNode, owner: StorageNode, *, force=False) -> bool:
+    """Rebuild ``owner``'s LVS on ``member``, a node of its remote triplet, as
+    a NON-LEADER (the leader rebuild of an active remote triplet's member is
+    recreate_lvstore, called by restart Step 4 itself): a quiesced examine
+    behind the node _rebuild_anchor names.
+
+    The owner's lvstore_status carries the ``in_creation`` window marker for
+    the rebuild (it port-blocks the anchor, and the storage-node monitor skips
+    an ``in_creation`` node) and gets its previous value back afterwards,
+    success or not: a remote copy's outcome is not the owner LVS's health.
+    Capture, marker, build and restore run under the per-LVS recreate lock,
+    so two members rebuilding at once cannot restore each other's marker.
+    """
+    db_controller = DBController()
+    with _recreate_lvstore_lock(owner.lvstore):
+        owner = db_controller.get_storage_node_by_id(owner.get_id())
+        previous_status = owner.lvstore_status
+        _set_lvstore_status_atomic(owner.get_id(), "in_creation", db_controller)
+        ok = False
+        try:
+            anchor = _rebuild_anchor(owner, member, db_controller)
+            ok = _recreate_lvstore_on_non_leader_impl(member, anchor, owner, force=force)
+            return ok
+        finally:
+            if not ok:
+                _release_lvs_subsys_port_on_peers(owner, member.get_id(), db_controller)
+            _set_lvstore_status_atomic(owner.get_id(), previous_status, db_controller)
+
+
+def activation_leader_builder_id(owner: StorageNode) -> str:
+    """The node that builds ``owner``'s LVS leader in a cluster activation:
+    the primary of its active triplet - the owner (led from home, and always
+    outside sync replication), or the primary of its remote triplet when the
+    LVS is led from there. A move in flight keeps the owner, whose rebuild
+    then refuses (LVSLeadershipElsewhereError) until the move is settled."""
+    if (not owner.site or lvs_led_from_home(owner)
+            or owner.lvs_active_site.startswith(LVS_MOVING_PREFIX)):
+        return owner.get_id()
+    node_ids = lvs_active_triplet(owner).node_ids
+    return node_ids[0] if node_ids else owner.get_id()
+
+
+def _refuse_leader_rebuild(owner: StorageNode, snode: StorageNode, *, activation_mode,
+                           site_activation=None) -> StorageNode:
+    """Sync replication: raise LVSLeadershipElsewhereError unless ``snode``
+    may rebuild ``owner``'s LVS as its leader. The owner is re-read; refused
+    are a move in flight, a node of the cluster's lost site, a node that is
+    no member of the ACTIVE triplet and, in a cluster activation, every node
+    but activation_leader_builder_id (an activation never takes over on a
+    secondary).
+
+    A node of the lost site is admitted only by the site activation of its
+    site: ``site_activation`` (activation_gate.SiteActivation) naming that
+    site and holding the cluster's activation flag. ``activation_mode`` alone
+    never admits it - a full activation passes it too.
+
+    Outside an activation a member of an active REMOTE triplet is also held
+    to its position (_remote_member_leads_at_restart, restart Step 4's rule,
+    with a fresh verdict): the primary, or the secondary while the primary is
+    disconnected. The caller decided that before it waited for the locks this
+    runs under, and a primary that came back meanwhile - and may have rebuilt
+    the LVS as its leader under them - is no peer of the taker's rebuild: the
+    taker would be granted the leadership next to it. A primary that comes
+    back later, during the rebuild, is not seen. The HOME triplet is not
+    checked: there the position is the caller's precondition, as on main
+    (Step 2).
+
+    Returns the owner as re-read: the copy the answer holds for, and the one
+    the rebuild has to take its triplet from."""
+    db = DBController()
+    fresh = db.get_storage_node_by_id(owner.get_id())
+    snode_id = snode.get_id()
+    try:
+        position = active_position(fresh, snode_id)
+    except ValueError as e:
+        raise LVSLeadershipElsewhereError(f"{e}: no leader rebuild there") from e
+    if position is ActivePosition.MOVING:
+        raise LVSLeadershipElsewhereError(
+            f"LVS {fresh.lvstore} is being moved ({fresh.lvs_active_site!r}): no leader rebuild "
+            f"on {snode_id} before the move is settled")
+    if _taker_on_lost_site(db, fresh.cluster_id, snode_id) and not (
+            site_activation is not None and snode.site == site_activation.site
+            and site_activation.holds(db.get_cluster_by_id(fresh.cluster_id))):
+        raise LVSLeadershipElsewhereError(
+            f"LVS {fresh.lvstore}: {snode_id} is on the lost site {snode.site!r}: no leader "
+            f"rebuild there before the site returns")
+    if position is ActivePosition.INACTIVE:
+        raise LVSLeadershipElsewhereError(
+            f"LVS {fresh.lvstore} is led from site {lvs_active_site_of(fresh)!r}: {snode_id} is "
+            f"not a member of its active triplet, no leader rebuild there")
+    if activation_mode and activation_leader_builder_id(fresh) != snode_id:
+        raise LVSLeadershipElsewhereError(
+            f"LVS {fresh.lvstore}: a cluster activation builds its leader on "
+            f"{activation_leader_builder_id(fresh)}, the primary of its active triplet, not on {snode_id}")
+    if (not activation_mode and not lvs_led_from_home(fresh)
+            and not _remote_member_leads_at_restart(fresh, snode, db, fresh_verdict=True)):
+        raise LVSLeadershipElsewhereError(
+            f"LVS {fresh.lvstore}: {snode_id} is the {position.name.lower()} of its active triplet "
+            f"and no takeover is due (its primary is connected, or it is the tertiary): "
+            f"no leader rebuild there")
+    return fresh
+
+
+def _rebuild_leader_off_owner(snode: StorageNode, owner: StorageNode, *, force, activation_mode):
+    """Sync replication: rebuild ``owner``'s LVS as its leader on ``snode``, a
+    member that does not own it (_recreate_lvstore_impl with ``lvs_primary``).
+
+    The owner is another node, live when it is on the passive site: its
+    lvstore_status carries the ``in_creation`` window marker of the rebuild
+    (the storage-node monitor skips an ``in_creation`` node) and gets the
+    value it had back when the rebuild fails - the rebuild itself sets
+    ``ready`` on success."""
+    db_controller = DBController()
+    previous_status = db_controller.get_storage_node_by_id(owner.get_id()).lvstore_status
+    ok = False
+    try:
+        ok = _recreate_lvstore_impl(
+            snode, force=force, lvs_primary=owner, activation_mode=activation_mode)
+        return ok
+    finally:
+        if not ok:
+            _set_lvstore_status_atomic(owner.get_id(), previous_status, db_controller)
+
+
+def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False,
+                     site_activation=None):
     """Per-LVS-locked wrapper: serialize recreate of this LVS only against a
     concurrent recreate of the SAME LVS. The LVS is ``lvs_primary.lvstore``
-    (secondary taking leadership) or ``snode.lvstore`` (own primary).
-    Activation-mode (globally blocked, serves no IO) bypasses the lock."""
+    (``snode`` does not own it) or ``snode.lvstore`` (own primary).
+    Activation-mode (globally blocked, serves no IO) bypasses the lock.
+
+    Sync replication: the rebuild grants the leadership, so it is refused
+    (LVSLeadershipElsewhereError, _refuse_leader_rebuild) for a node that is
+    no member of the ACTIVE triplet - whichever site that triplet is on -,
+    for every node while a move is in flight or on the lost site, and in a
+    cluster activation for every node but the active primary. Inside an
+    active REMOTE triplet the check also holds ``snode`` to its position, as
+    it is once the locks are held: its primary, or its secondary taking over
+    from a primary that is DISCONNECTED then (restart Step 4 decides the same
+    before the lock wait). Inside the HOME triplet it does NOT look at the
+    position: that is the caller's precondition (restart Steps 1-2, main's
+    contract), and a secondary or tertiary that got here next to a connected
+    primary would be granted the leadership next to it - the peers the rebuild
+    fences, probes and demotes are the triplet's secondary and tertiary, never
+    its primary. For the same reason a primary that comes back while the
+    rebuild of its secondary runs is not noticed, on either site.
+
+    With ``lvs_primary`` (the owner; a live node when the triplet is the
+    remote one) the rebuild works on the owner as that check re-read it, not
+    on the caller's copy. A node's own LVS is rebuilt from the caller's
+    ``snode`` (main's contract). Outside activation the check and the whole
+    rebuild hold the per-LVS grant lock (_lvs_grant_lock), so a promote cannot
+    mark the LVS moving in between.
+
+    ``site_activation`` (activation_gate.SiteActivation): the site activation
+    building the leader on a node of the recorded site (_refuse_leader_rebuild)."""
     lvs_name = lvs_primary.lvstore if lvs_primary is not None else snode.lvstore
+    owner = lvs_primary if lvs_primary is not None else snode
+
+    def _rebuild():
+        if owner.site:
+            fresh_owner = _refuse_leader_rebuild(owner, snode, activation_mode=activation_mode,
+                                                 site_activation=site_activation)
+            if lvs_primary is not None:
+                return _rebuild_leader_off_owner(
+                    snode, fresh_owner, force=force, activation_mode=activation_mode)
+        return _recreate_lvstore_impl(
+            snode, force=force, lvs_primary=lvs_primary, activation_mode=activation_mode)
+
     if activation_mode:
-        return _recreate_lvstore_impl(
-            snode, force=force, lvs_primary=lvs_primary, activation_mode=True)
+        return _rebuild()
     with _recreate_lvstore_lock(lvs_name):
-        return _recreate_lvstore_impl(
-            snode, force=force, lvs_primary=lvs_primary, activation_mode=False)
+        if not owner.site:
+            return _rebuild()
+        with _lvs_grant_lock(owner.cluster_id, lvs_name,
+                             timeout=constants.LVSTORE_MUTATION_LOCK_WAIT_SEC):
+            return _rebuild()
+
+
+def _lvs_led_elsewhere(owner: StorageNode) -> bool:
+    """Sync replication: ``owner``'s LVS (as read) is led from its remote
+    triplet or being moved. Always False outside it."""
+    return bool(owner.site) and not lvs_led_from_home(owner)
+
+
+def _leader_for_non_leader_rebuild(owner: StorageNode, snode: StorageNode, db_controller) -> StorageNode:
+    """The node a non-leader rebuild of ``owner``'s LVS on ``snode``
+    quiesces: the owner outside sync replication; on a sync
+    cluster the member of the active triplet _rebuild_anchor names - the
+    owner may not lead there, and nobody may."""
+    if not owner.site:
+        return owner
+    return _rebuild_anchor(owner, snode, db_controller)
+
+
+class LeadershipTransferError(Exception):
+    """A fenced leadership hand-off was aborted: every fenced port has been
+    released. ``granted`` tells whether the taker had already been granted the
+    leadership when it happened (False: the LVS may be leaderless if the old
+    leader was demoted)."""
+
+    def __init__(self, message, *, granted=False):
+        super().__init__(message)
+        self.granted = granted
+
+
+class _LvsFence:
+    """The client-port fence of one LVS leadership hand-off
+    (transfer_lvs_leadership): the peers whose LVS port is blocked, the
+    port-block window gate, the hublvol advisory locks taken ahead of the
+    window, and the deferred side effects paid once the window closes.
+
+    ``rpc_node`` is the node that takes the leadership: every fenced RPC
+    (``fenced``) runs there. ``on_abort`` runs after the ports are released
+    and before the gate closes on an abort (a restart kills the restarting
+    node's SPDK there; a transfer between running nodes kills nothing).
+    """
+
+    def __init__(self, lvs_node, rpc_node, db_controller, *, on_abort=None,
+                 what="recreate_lvstore", abort_prefix="Abort restart",
+                 removal_in_progress=False):
+        self.lvs_node = lvs_node
+        self.lvs_name = lvs_node.lvstore
+        self.port = lvs_node.get_lvol_subsys_port(lvs_node.lvstore)
+        self.rpc_node = rpc_node
+        self.db_controller = db_controller
+        self.on_abort = on_abort
+        self.what = what
+        self.abort_prefix = abort_prefix
+        #: A removal in flight in the cluster relaxes the UNFENCED RPC bound
+        #: of ``fenced`` (see _fence_rpc_bounds); the restart decides it once.
+        self.removal_in_progress = removal_in_progress
+        #: Whether the taker has been granted the leadership.
+        self.granted = False
+        # Peers whose LVS port is currently blocked. Client IO to any peer on
+        # snode_lvs_port is rejected until that peer is removed from the list.
+        # Every blocked peer MUST be unblocked — either per-peer after its
+        # connect_to_hublvol succeeds, or en bloc on abort.
+        self.blocked_peers: list = []
+        # True client-outage accounting: per-peer monotonic stamp at successful
+        # block, duration logged at unblock. The phase print below brackets the
+        # whole BLOCKED->POST_UNBLOCK phase (incl. work after the last unblock)
+        # and overstates the real outage ~2x (2026-07-21: printed 11-21s vs
+        # 6.2-8.9s true block->unblock from spdk logs). The 6s nvmf ack-timeout
+        # reject applies to THIS number, per port.
+        self.block_started: dict = {}
+        #: Fired once every fenced port is released, so deferred redundant-path
+        #: hublvol attaches run outside the client-visible window.
+        self.defer_gate_event = threading.Event()
+        self.block_longest = {"sec": 0.0}
+        # #3: port deny/allow event emission (FDB+graylog write, ~190ms measured
+        # in-window) is deferred to after the unblock; the per-port block-span
+        # logs carry the true timing, the events remain complete for audit.
+        self.deferred_port_events: list = []
+        # Pre-acquired hublvol advisory locks, one per peer that will
+        # connect_to_hublvol inside the blocked window (key: peer id). The
+        # acquire is an FDB transaction (avg 858ms/std 487 measured INSIDE
+        # blocked windows, 2026-07-21 n=11) — paying it before the peer ports
+        # are blocked keeps the client-visible outage short. Released after the
+        # unblock/print below, on aborts, and by the 60s lock TTL on any other
+        # escape. Pre-acquire failure is non-fatal: connect_to_hublvol then
+        # locks internally (the pre-fix behavior).
+        self.hub_locks: dict = {}
+        # Deferred persistence of hublvol/transfer_hublvol metadata mutated
+        # in-window with defer_db_write=True. Persisted ATOMICALLY (field-only
+        # update) post-unblock — a full-object write here is both an in-window
+        # FDB round-trip and a stale-write hazard (2026-07-21 resurrection).
+        self.deferred_node_persist = {"needed": False}
+        # Global port-block window gate (see _port_block_window_gate): at most
+        # one LVS's client port is blocked at any moment across the runner.
+        self.gate_state = {"held": False}
+
+    def flush_port_events(self):
+        for _kind, _n, _p in self.deferred_port_events:
+            try:
+                if _kind == "deny":
+                    tcp_ports_events.port_deny(_n, _p)
+                else:
+                    tcp_ports_events.port_allowed(_n, _p)
+            except Exception as _ev_e:
+                logger.warning("Deferred port event emit failed: %s", _ev_e)
+        del self.deferred_port_events[:]
+
+    def warn_if_unblocking_a_non_leader(self, peer):
+        """Read-only: warn when a peer is being returned to service demoted.
+
+        Leadership can move WHILE the fence is held. On 2026-09-01 it did: the
+        fence went on LVS_10's primary at 16:28:25, the secondary took
+        leadership at 16:28:31, and the control plane unblocked the old primary
+        at 16:28:37 regardless. The client reconnected within milliseconds to a
+        node that was no longer leader, that node could not redirect, and the
+        IO came back as a generic INTERNAL DEVICE ERROR -- which
+        nvme-multipath does not retry on another path. Client EIO, fio rc=4.
+
+        Deliberately does NOT repair here. Wiring a hublvol inside the fence is
+        exactly the kind of extra in-window work that made the fence 12.2s in
+        the first place, and on the abort path it would delay the release we
+        want immediate. One bounded probe (0.5s via the ambient fence budget)
+        buys the diagnosis; the fix belongs to the post-unblock repair, and to
+        keeping the fence short enough that leadership does not move inside it.
+
+        A peer demoted on purpose (the old leader of a transfer to the other
+        site) is expected to be no longer leader: see unblock_peer_port.
+        """
+        lvs_name = self.lvs_name
+        try:
+            lvs = peer.rpc_client().get_lvstore(lvs_name)
+        except Exception:
+            return                      # never let a probe delay the release
+        if not lvs or lvs.get("lvs leadership"):
+            return
+        logger.error(
+            "[RESTART] Unblocking %s for %s while it is NO LONGER leader -- "
+            "the client will reconnect to a demoted node; if its hublvol "
+            "redirect path is missing, its next IO is failed outright. Fence "
+            "held %.3fs.",
+            peer.get_id()[:8], lvs_name, self.fence_elapsed())
+
+    def unblock_peer_port(self, peer, *, demoted=False):
+        """Remove the port block for snode_lvs_port on peer and drop
+        the peer from blocked_peers. Safe to call if peer is not currently
+        blocked (no-op). Tolerates RPC failure — logs and continues so
+        other peers can still be unblocked. ``demoted``: the peer lost the
+        leadership on purpose, no warning probe."""
+        blocked_peers = self.blocked_peers
+        snode_lvs_port = self.port
+        if peer in blocked_peers and not demoted:
+            self.warn_if_unblocking_a_non_leader(peer)
+        if not _may_unblock_peer_port(peer, snode_lvs_port, self.rpc_node.jm_vuid, self.db_controller,
+                                      "Recreate LVS", rebuild_too=False):
+            try:
+                blocked_peers.remove(peer)
+            except ValueError:
+                pass
+            return
+        try:
+            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(snode_lvs_port)
+            self.deferred_port_events.append(("allow", peer, snode_lvs_port))
+            _t0 = self.block_started.pop(peer.get_id(), None)
+            if _t0 is not None:
+                _d = time.monotonic() - _t0
+                self.block_longest["sec"] = max(self.block_longest["sec"], _d)
+                logger.info(
+                    "[RESTART] Client port %s on %s was blocked %.3fs "
+                    "(reject threshold 6s)",
+                    snode_lvs_port, peer.get_id()[:8], _d)
+        except Exception as ue:
+            logger.error("Failed to unblock port %s on %s: %s",
+                         snode_lvs_port, peer.get_id(), ue)
+        finally:
+            try:
+                blocked_peers.remove(peer)
+            except ValueError:
+                pass
+            if not blocked_peers:
+                # Fence over: normal work must not inherit the 0.5s budget,
+                # and the deferred hublvol attaches may now run.
+                rpc_budget.clear_budget()
+                self.defer_gate_event.set()
+
+    def persist_deferred_node_fields(self):
+        if not self.deferred_node_persist.pop("needed", False):
+            return
+        snode = self.rpc_node
+        try:
+            def _apply_hub_fields(n, h=snode.hublvol,
+                                  t=snode.transfer_hublvol):
+                n.hublvol = h
+                n.transfer_hublvol = t
+            self.db_controller.atomic_update(snode, _apply_hub_fields)
+        except Exception as _pe:
+            logger.error("Deferred hublvol persist failed for %s: %s",
+                         snode.get_id(), _pe)
+
+    def release_hub_locks(self):
+        for _pid in list(self.hub_locks):
+            lk = self.hub_locks.pop(_pid, None)
+            if lk is not None:
+                if getattr(lk, "pending_stamp", False):
+                    # Deferred success stamp (#2): paid here, post-unblock,
+                    # instead of inside the port-block window.
+                    try:
+                        lk.stamp_attach()
+                    except Exception as _st_e:
+                        logger.warning("Deferred hublvol stamp failed: %s", _st_e)
+                lk.release()
+
+    def acquire_block_gate(self):
+        _waited = _open_port_block_window(self.lvs_name)
+        self.gate_state["held"] = True
+        if _waited > 0.5:
+            logger.info("[RESTART] Waited %.3fs for port-block window "
+                        "(gate + fan-out drain) (%s)",
+                        _waited, self.lvs_name)
+
+    def release_block_gate(self):
+        if self.gate_state["held"]:
+            self.gate_state["held"] = False
+            _close_port_block_window()
+
+    def abort(self, reason):
+        """Abort: unblock every blocked peer, run ``on_abort`` (a restart
+        kills SPDK and sets the node offline there), raise
+        LeadershipTransferError."""
+        logger.error("Aborting %s on %s for %s: %s",
+                     self.what, self.rpc_node.get_id(), self.lvs_name, reason)
+        # Release the fences FIRST. Every fenced peer has its client
+        # listener blocked and cannot answer keep-alives, so each extra
+        # second risks clients (KATO 4s) dropping that path. _kill_app()
+        # used to run first and cost ~1.2s of spdk_process_kill +
+        # spdk_process_is_up polling before any peer was released
+        # (2026-08-31: unblock landed at 13:33:29.13, one second after the
+        # client had already failed IO at 13:33:28). Killing our own SPDK
+        # can wait; a fenced healthy peer cannot.
+        for peer in list(self.blocked_peers):
+            self.unblock_peer_port(peer)
+        self.persist_deferred_node_fields()
+        self.release_hub_locks()
+        if self.on_abort is not None:
+            self.on_abort()
+        self.release_block_gate()
+        self.flush_port_events()
+        raise LeadershipTransferError(f"{self.abort_prefix}: {reason}", granted=self.granted)
+
+    def fence_elapsed(self):
+        """Seconds since the first peer port was fenced (0.0 if none is)."""
+        if not self.block_started:
+            return 0.0
+        return time.monotonic() - min(self.block_started.values())
+
+    def check_fence_deadline(self, where):
+        """Release and abort if the fence has run to FENCE_DEADLINE_SEC.
+
+        Called between steps and inside the in-window wait loops. The fence
+        must be lifted by us before SPDK converts the block to reject at
+        ack_timeout * 4 (8s): the conversion quiesces every qpair on the port,
+        so the client loses the path rather than merely waiting for it.
+        """
+        if not self.block_started:
+            return
+        elapsed = self.fence_elapsed()
+        if elapsed >= constants.FENCE_DEADLINE_SEC:
+            self.abort(
+                f"port fence held {elapsed:.3f}s at {where}, over the "
+                f"{constants.FENCE_DEADLINE_SEC}s deadline (reject threshold 8s)")
+
+    def fenced(self, method, *args, budget=None, **kwargs):
+        """Run one RPC of the hand-off on the taker, bounded while a peer port
+        is fenced.
+
+        ``method`` is the RPCClient method name. The client is built per call
+        so its timeout can be clamped to the time left on the fence -- a fixed
+        per-call timeout is not enough on its own, since a 6s call started late
+        in the window would still overrun the deadline.
+
+        With no peer port fenced (every peer skipped as disconnected or
+        offline) the call runs on the ordinary client: see
+        ``_fence_rpc_bounds`` for why the fence budget must not apply there.
+
+        Any failure, a timeout above all, releases the fence and aborts the
+        hand-off. The task runner re-queues an aborted restart; a quiesced
+        client path is not recoverable.
+        """
+        timeout, retry = _fence_rpc_bounds(bool(self.block_started), self.fence_elapsed(), budget,
+                                           removal_in_progress=self.removal_in_progress)
+        if timeout is not None and timeout <= 0:
+            self.check_fence_deadline(method)
+        try:
+            if timeout is None:
+                client = self.rpc_node.rpc_client()
+            else:
+                client = self.rpc_node.rpc_client(timeout=timeout, retry=retry)
+            return getattr(client, method)(*args, **kwargs)
+        except Exception as e:
+            if timeout is None:
+                self.abort(
+                    f"{method} failed with no port fenced during a removal "
+                    f"(client defaults): {e}")
+            self.abort(
+                f"{method} failed inside the port-fence window "
+                f"(budget {timeout:.2f}s, fence {self.fence_elapsed():.3f}s): {e}")
+
+    def close(self):
+        """Idempotent end-of-hand-off cleanup, on every exit path."""
+        self.release_block_gate()
+        # An unbounded fence is bad; a fence budget leaking onto this thread's
+        # later work would be worse. Every exit path clears it.
+        rpc_budget.clear_budget()
+        try:
+            self.defer_gate_event.set()
+            hublvol_reconnect.clear_defer_gate()
+        except Exception:
+            pass
+
+
+def _fence_and_demote_leader(fence, current_leader, sec_nodes, disconnected_peers):
+    """The fenced half of a leadership hand-off up to the demote, moved out of
+    _recreate_lvstore_impl (transfer_lvs_leadership): hublvol locks, subsystem
+    pre-stage and pre-block attach for the taker's same-triplet peers, the
+    patient JM-replication wait, the window gate, then the port block of every
+    connected peer (non-leaders first), the leader's replication suspend, the
+    in-flight drain and the leadership drop. ``fence.rpc_node`` is the taker.
+    """
+    snode = fence.rpc_node
+    lvs_node = fence.lvs_node
+    lvs_name = fence.lvs_name
+    lvs_jm_vuid = lvs_node.jm_vuid
+    snode_lvs_port = fence.port
+    db_controller = fence.db_controller
+    blocked_peers = fence.blocked_peers
+    _block_started = fence.block_started
+    _deferred_port_events = fence.deferred_port_events
+    _hub_locks = fence.hub_locks
+    _defer_gate_event = fence.defer_gate_event
+    _acquire_block_gate = fence.acquire_block_gate
+    _unblock_peer_port = fence.unblock_peer_port
+    _abort_restart_and_unblock = fence.abort
+    _check_fence_deadline = fence.check_fence_deadline
+    _fenced = fence.fenced
+    # The taker's own triplet: the home one outside sync replication.
+    _, triplet_sec_id, triplet_tert_id = lvs_triplet_of(lvs_node, snode.get_id())
+
+    try:
+        from simplyblock_core.utils.hublvol_reconnect import (
+            HublvolReconnectCoordinator,
+        )
+        _hub_coord = HublvolReconnectCoordinator(db_controller)
+        for _peer in sec_nodes:
+            if _peer.get_id() in disconnected_peers:
+                continue
+            _hub_locks[_peer.get_id()] = _hub_coord.acquire_lock(
+                _peer.get_id(), lvs_node.lvstore)
+    except Exception as _hl_e:
+        logger.warning(
+            "Pre-acquire of hublvol locks for %s failed — reconcile "
+            "will lock in-window: %s", lvs_name, _hl_e)
+
+    # #1 pre-stage: NVMf subsystems + listeners for the hublvols wired
+    # inside the window have no lvstore/bdev dependency — create them
+    # here so the in-window expose calls reduce to probe+add_ns. All
+    # params come from persisted hublvol metadata; every call is
+    # idempotent and failure is non-fatal (in-window expose creates as
+    # before).
+    try:
+        if lvs_node.hublvol:
+            _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
+            # snode's own (leader) hublvol subsystem
+            snode.prestage_hublvol_subsystem(
+                nqn=lvs_node.hublvol.nqn,
+                model_number=lvs_node.hublvol.model_number,
+                port=lvs_node.hublvol.nvmf_port,
+                ana_state="optimized",
+            )
+            # transferhub subsystem (only when its metadata is persisted;
+            # otherwise create_transfer_hublvol mints a fresh model
+            # number in-window and must own the create)
+            if snode.transfer_hublvol and snode.transfer_hublvol.nqn:
+                snode.prestage_hublvol_subsystem(
+                    nqn=snode.transfer_hublvol.nqn,
+                    model_number=snode.transfer_hublvol.model_number,
+                    port=snode.transfer_hublvol.nvmf_port,
+                    ana_state="optimized",
+                )
+            # sec_1's shared-NQN secondary hublvol subsystem
+            _sec1_pre = next(
+                (p for p in sec_nodes
+                 if p.get_id() == triplet_sec_id
+                 and p.get_id() not in disconnected_peers), None)
+            if _sec1_pre is not None:
+                _sec1_pre.prestage_hublvol_subsystem(
+                    nqn=StorageNode.lvs_hublvol_nqn(
+                        lvs_node, _cluster_pre.nqn),
+                    model_number=lvs_node.hublvol.model_number,
+                    port=lvs_node.hublvol.nvmf_port,
+                    ana_state="non_optimized",
+                    min_cntlid=1000,
+                )
+    except Exception as _ps_e:
+        logger.warning(
+            "Hublvol subsystem pre-stage failed for %s "
+            "(in-window expose will create it): %s", lvs_name, _ps_e)
+
+    # Pre-block controller ATTACH from every connected peer to snode's
+    # pre-staged hublvol subsystem. The subsystem is still NAMESPACE-LESS
+    # (the hublvol bdev exists only after the in-window examine): the
+    # controller attaches empty and the peer's n1 bdev surfaces via AER
+    # once the in-window add_ns runs — connect_to_hublvol's n1-wait
+    # covers that. The attach is inert until the in-window
+    # bdev_lvol_connect_hublvol registers the redirect. Non-fatal per
+    # peer: failure falls back to the in-window attach.
+    if lvs_node.hublvol:
+        for _peer in sec_nodes:
+            if _peer.get_id() in disconnected_peers:
+                continue
+            if _peer.get_id() == triplet_sec_id:
+                _pre_role = "secondary"
+            elif _peer.get_id() == triplet_tert_id:
+                _pre_role = "tertiary"
+            else:
+                continue
+            try:
+                _peer.connect_to_hublvol(
+                    snode, failover_node=None, role=_pre_role,
+                    rpc_timeout=1.0, lvs_node=lvs_node,
+                    coordinator_lock=_hub_locks.get(_peer.get_id()),
+                    attach_only=True)
+            except Exception as _pa_e:
+                logger.warning(
+                    "Pre-block hublvol attach on %s for %s failed "
+                    "(in-window attach will retry): %s",
+                    _peer.get_id(), lvs_name, _pa_e)
+
+    # Precondition, paid BEFORE the window gate and before any peer
+    # port is fenced: wait out in-flight JM replication on the leader
+    # here, where waiting is free.
+    #
+    # This wait used to live at step (a) inside the loop below. Once
+    # the non-leader block was reordered ahead of the leader's suspend
+    # (see ORDER MATTERS below), step (a) began running with peer ports
+    # already fenced -- and wait_for_jm_rep_tasks_to_finish defaults to
+    # retry=10/delay=20, a 200s budget whose *single* sleep is 20s,
+    # against a FENCE_DEADLINE_SEC of 7.5s. The ambient fence RPC
+    # budget (rpc_budget, set at each block below) clamps the helper's
+    # RPCs but cannot clamp its time.sleep().
+    #
+    # 2026-09-10 14:32:20, LVS_13: a91b9596 was fenced, the leader
+    # 588fdb5b then reported active replication and this wait slept
+    # 20s. The next fence check (the inflight drain, ~350 lines down)
+    # aborted at 20.087s. SPDK converts a port block to reject at
+    # ack_timeout * 4 = 8s, quiescing every qpair on the port, so
+    # a91b9596's clients lost the path rather than waiting for it.
+    # With replication active on the leader that abort was certain,
+    # not a flake.
+    #
+    # A False return is NOT fatal and deliberately does not abort:
+    # jc_disable_replication in (c) below is the authority on whether
+    # replication is actually suspended, and it retries.
+    if current_leader and current_leader.get_id() not in disconnected_peers:
+        try:
+            _jm_clear = current_leader.wait_for_jm_rep_tasks_to_finish(
+                lvs_jm_vuid)
+        except Exception as e:
+            # Same contract as step (a) below, which this wait was
+            # moved out of: a RAISING replication-wait aborts the
+            # restart, and the message must still name it. Failing
+            # here is strictly cheaper -- no port is fenced yet.
+            raise Exception(
+                f"Abort restart: replication-wait on leader "
+                f"{current_leader.get_id()} failed: {e}")
+        if not _jm_clear:
+            logger.warning(
+                "JM replication still active on leader %s (jm_vuid %s) "
+                "after the pre-fence wait; entering the window anyway "
+                "-- jc_disable_replication decides",
+                current_leader.get_id(), lvs_jm_vuid)
+
+    # Serialize the client-port outage span across all concurrent
+    # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
+    # order: per-LVS recreate lock -> hublvol locks -> window gate).
+    _acquire_block_gate()
+    ### 3- block LVS port on every connected peer (leader + non-leaders),
+    # then suspend the leader's journal replication before the flap.
+    #
+    # Per attempt against the current leader:
+    #   a. confirm no in-flight JM replication with ONE unpaced poll
+    #      (the patient wait is paid before the gate above, where it
+    #      costs no client IO);
+    #   b. mark the leader in_creation and block its LVS port;
+    #   c. jc_disable_replication(jm_vuid):
+    #        True  -> no active replication; it is now suspended (~12s) ->
+    #                 proceed with the drain + leadership drop below.
+    #        False -> active replication present -> unblock the leader port
+    #                 and retry the whole sequence (re-wait, re-block,
+    #                 re-disable).
+    #
+    # Without blocking the tertiary too, client IO can leak to it during the
+    # leader flap: tertiary's LVOL listener stays open and serves writes
+    # whose hublvol redirect target is mid-transition, producing
+    # writer_conflict events on the journal. Non-leader peers are blocked
+    # each peer stays blocked until its connect_to_hublvol succeeds in ### 8b.
+    #
+    # ORDER MATTERS. Block the non-leader peers FIRST, then the leader,
+    # and only then start the leader's demote (replication suspend +
+    # leadership drop below). A non-leader (e.g. the tertiary) left
+    # serving while the leader is mid-demote keeps its LVOL listener
+    # open, accepts client IO, and redirects it through the hublvol to a
+    # leader whose leadership is in transition -> writer_conflict on the
+    # journal. Blocking the leader first (as this used to) left exactly
+    # that window open between the leader's replication-disable and the
+    # non-leader block.
+    for sec_node in sec_nodes:
+        if sec_node is current_leader:
+            continue
+        if sec_node.get_id() in disconnected_peers:
+            continue
+        if sec_node in blocked_peers:
+            continue
+        try:
+            sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
+            _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
+            blocked_peers.append(sec_node)
+            _block_started[sec_node.get_id()] = time.monotonic()
+            rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                  constants.FENCE_RPC_RETRY)
+        except Exception as e:
+            # Cannot safely decide "peer gone" vs "peer slow" before
+            # snode has reconnected to peer hublvols. A non-leader peer
+            # left serving on snode_lvs_port during the leader flap can
+            # accept client IO whose hublvol redirect is mid-transition,
+            # producing a writer conflict.
+            _abort_restart_and_unblock(
+                f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
+
+    # Now block the leader and suspend its replication. Every non-leader
+    # port is already shut, so the demote below starts only once ALL
+    # ports are blocked.
+    if current_leader and current_leader.get_id() not in disconnected_peers:
+        _REPL_SUSPEND_MAX_ATTEMPTS = 10
+        replication_suspended = False
+        for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
+            # a. confirm no active replication on the leader.
+            #
+            # retry=1/delay=0 is ONE poll and no sleep: the helper's
+            # RPCs inherit the ambient fence budget, so this costs
+            # ~0.5s worst case. It only catches a leader that resumed
+            # replicating between the pre-fence wait and here; (c)
+            # below is the authority. Do NOT restore the default
+            # 10 x 20s budget at this call site -- one of those sleeps
+            # alone is 2.7x the whole fence deadline.
+            try:
+                ret = current_leader.wait_for_jm_rep_tasks_to_finish(
+                    lvs_jm_vuid, retry=1, delay=0)
+                if not ret:
+                    msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
+                    logger.error(msg)
+                    storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
+            except Exception as e:
+                raise Exception(
+                    f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
+
+            # The fence clock is otherwise unchecked from the
+            # non-leader block above until the inflight drain ~350
+            # lines below. Check it here -- outside the try, so the
+            # abort is not re-wrapped by the except -- so any overrun
+            # aborts while still under the 8s reject threshold.
+            _check_fence_deadline("jm replication confirm")
+
+            # b. block the leader's LVS port
+            try:
+                # Field-scoped and transactional. A plain
+                # `leader.lvstore_status = X; leader.write_to_db()`
+                # serialises the WHOLE record from a copy read at
+                # the top of this function -- before the peer went
+                # down -- so it silently restores status=online over
+                # the monitor's offline write, and emits no
+                # STATUS_CHANGE event because it never goes through
+                # the status path.
+                #
+                # 2026-08-31: that resurrected "online" for a node
+                # whose SPDK was dead (it started at 12:02:31, the
+                # record read online from 11:52 to 12:02). So
+                # _check_peer_disconnected could never observe
+                # offline, the port-block below was issued to a dead
+                # node, and the restart aborted -- and every retry
+                # re-resurrected it: 5 aborts over 15 minutes, with
+                # the peer reported online in sn list throughout.
+                # Deliberately does NOT rebind current_leader: the
+                # rest of this flow keeps the object it was called
+                # with, so behaviour is unchanged. Not clobbering the
+                # record is enough to break the retry loop --
+                # _check_peer_disconnected re-reads from FDB on the
+                # next attempt, so it now sees offline and skips the
+                # port-block instead of failing on it forever.
+                db_controller.atomic_update(
+                    current_leader,
+                    lambda x: setattr(x, "lvstore_status", "in_creation"))
+                current_leader.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
+                _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
+                blocked_peers.append(current_leader)
+                _block_started[current_leader.get_id()] = time.monotonic()
+                # From here until the last port is released, every
+                # rpc_client() built on this thread -- including the
+                # ones inside hublvol/bdev-stack helpers we do not own
+                # -- is bounded. Cleared in _unblock_peer_port once
+                # blocked_peers empties, and in the outer finally.
+                rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                      constants.FENCE_RPC_RETRY)
+                # Redundant hublvol paths must land AFTER the fence,
+                # not 3s after the foreground attach (which is still
+                # inside it -- 2026-09-01 16:28:27.739, mid-block).
+                hublvol_reconnect.set_defer_gate(_defer_gate_event)
+            except Exception as e:
+                # Failing to port-block the current leader means we cannot
+                # safely promote snode: the old leader may still be serving
+                # IO, and a parallel leader on snode would produce a writer
+                # conflict (observed 2026-04-25, LVS_6609 incident).
+                # _check_hublvol_connected from snode is meaningless here —
+                # snode hasn't reconnected to peer hublvols yet — so we
+                # cannot use it to discriminate "peer gone" from "peer slow".
+                # Abort the attempt; the task runner will retry.
+                _abort_restart_and_unblock(
+                    f"Failed to port-block leader {current_leader.get_id()}: {e}")
+
+            repl_disabled = False
+            # c. suspend journal replication while the port is blocked
+            try:
+                # Bounded: this runs with the leader's port already
+                # fenced, and a bare rpc_client() inherits
+                # RPCClient(timeout=180, retry=3) -> ~726s worst case
+                # with backoff. The leader answers this in ~11ms; if
+                # it has just died, the fence must not be held for
+                # minutes (client KATO is 4s). Failure here is
+                # already handled: repl_disabled stays False, the
+                # port is unblocked and the suspend loop retries.
+                repl_disabled = current_leader.rpc_client(
+                    timeout=0.5, retry=1).jc_disable_replication(lvs_jm_vuid)
+            except RPCRemoteError as e:
+                if e.code == RPCErrorCode.method_not_found:
+                    try:
+                        logger.warning("Failed to disable replication on leader, trying other method")
+                        ret = current_leader.rpc_client(
+                            timeout=0.5, retry=1).jc_get_jm_status(lvs_jm_vuid)
+                        repl_disabled = True
+                        for jm in ret:
+                            if ret[jm] is False:  # jm is not ready (has active replication task)
+                                repl_disabled = False
+                                break
+                    except Exception as ex:
+                        _abort_restart_and_unblock(
+                            f"jc_get_jm_status on leader {current_leader.get_id()} failed: {ex}")
+                else:
+                    _abort_restart_and_unblock(
+                        f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+            except RPCException as e:
+                _abort_restart_and_unblock(
+                    f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+
+            if repl_disabled:
+                replication_suspended = True
+                break
+
+            # Active replication still present: unblock the leader port and
+            # retry the full sequence from the replication wait.
+            logger.warning(
+                "jc_disable_replication reports active replication on leader %s "
+                "(attempt %d/%d); unblocking and retrying",
+                current_leader.get_id(), _attempt + 1, _REPL_SUSPEND_MAX_ATTEMPTS)
+            _unblock_peer_port(current_leader)
+
+        if not replication_suspended:
+            _abort_restart_and_unblock(
+                f"Could not suspend journal replication on leader "
+                f"{current_leader.get_id()} after {_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
+
+    if current_leader and current_leader in blocked_peers:
+        # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
+        leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
+
+        ### 4- drain in-flight IO BEFORE dropping leadership
+        #
+        # If we drop leadership while IO is still in distrib, those
+        # in-flight IOs land on a non-leader lvstore and either get
+        # redirected via the hub bdev (which may not be open yet on
+        # the new follower) or aborted — both produce client-visible
+        # IO errors and qpair tear-downs.  Concrete example: incident
+        # 2026-05-02 (k8s_native_failover_ha-20260502-101452), worker1.
+        # 123 state-9 IOs were in flight on its distribs at the moment
+        # set_leader=False fired; the open of LVS_4729/hublvoln1
+        # returned ENODEV; nvmf_tcp_qpair_set_recv_state floods and
+        # disconnects followed ~1.6 s later.
+        #
+        # The drain runs while the leader's lvol port is iptables-
+        # blocked, so we must not hold this open indefinitely.  The
+        # earlier fixed 0.5 s sleep was a workaround put in place
+        # after the original 10 s drain regression — but that
+        # regression was on the recreate_lvstore_on_non_leader path,
+        # where the blocked node is the configured primary and runs
+        # data migration (which never pauses on port block, hence the
+        # poll never settled).  *This* path blocks `current_leader`,
+        # which is a secondary or tertiary that became acting leader
+        # while the configured primary was out — and migration never
+        # runs on a secondary/tertiary, so the inflight counter
+        # genuinely drains.
+        #
+        # Bound at _DRAIN_BOUND_SEC anyway: a slow JM/distrib
+        # completion shouldn't be allowed to hold the leader's port
+        # blocked beyond client max_latency.  On timeout we proceed
+        # with the drop and accept the same residual class of error
+        # this is trying to prevent — but bounded.
+        _DRAIN_BOUND_SEC = _DRAIN_BOUND_SEC_DEFAULT
+        _DRAIN_POLL_SEC = _DRAIN_POLL_SEC_DEFAULT
+        deadline = time.time() + _DRAIN_BOUND_SEC
+        drained = False
+        while time.time() < deadline:
+            _check_fence_deadline("inflight drain")
+            try:
+                still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
+            except Exception as e:
+                logger.warning(
+                    "bdev_distrib_check_inflight_io poll failed for %s on %s: %s",
+                    lvs_name, current_leader.get_id(), e)
+                break
+            if not still_inflight:
+                drained = True
+                break
+            time.sleep(_DRAIN_POLL_SEC)
+        if not drained:
+            # Continuing with the leadership drop while IO is still in
+            # the distrib pipeline produces exactly the failure this
+            # drain is meant to prevent (in-flight IO hitting a
+            # non-leader lvstore at the moment of transition: hub-bdev
+            # redirect failures, qpair tear-downs, client IO errors).
+            # Abort cleanly: _abort_restart_and_unblock kills the
+            # recovering node's SPDK, sets it OFFLINE, and unblocks
+            # every peer port we just blocked above. The restart task
+            # runner re-queues from there; on the next attempt the
+            # cluster may have settled enough for drain to complete
+            # within the bound.
+            _abort_restart_and_unblock(
+                f"Inflight IO did not drain on acting-leader "
+                f"{current_leader.get_id()} within {_DRAIN_BOUND_SEC}s; "
+                f"refusing to drop leadership against a non-empty distrib "
+                f"pipeline")
+
+        ### 5- drop leadership on current leader (drain complete)
+        try:
+            leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
+            leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+        except Exception as e:
+            _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
+
+    if disconnected_peers:
+        logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
+        _fenced("jc_explicit_synchronization", lvs_jm_vuid)
+
+
+def _grant_lvs_leadership(fence, *, force=False, reload_metadata=False, grant=True):
+    """Step 7 of a leadership hand-off, all through the fence, in one of two
+    modes. ``grant=True``: stamp the taker's (``fence.rpc_node``) kernel role,
+    grant it the leadership by RPC and confirm the grant. ``grant=False``:
+    check the taker is a member and stamp its role, nothing else - no
+    bdev_lvol_update_lvstore, no bdev_lvol_set_leader, no poll,
+    ``fence.granted`` stays False; the taker takes the leadership itself on
+    its first IO (the lvstore is reloaded and promoted then; each lvol
+    reloads its blob on its own first IO). A role stamp that does not land
+    aborts there (the taker would never promote itself).
+
+    The rule that picks the mode: only an instance examined since anyone last
+    led is granted by RPC. ``reload_metadata`` (with a grant only) runs
+    bdev_lvol_update_lvstore first; that rebuilds the blobstore-wide bitmaps
+    and does not reload open blobs, so it never makes a long-lived non-leader
+    safe to grant."""
+    snode = fence.rpc_node
+    lvs_node = fence.lvs_node
+    lvs_name = fence.lvs_name
+    lvs_jm_vuid = lvs_node.jm_vuid
+    _abort_restart_and_unblock = fence.abort
+    _check_fence_deadline = fence.check_fence_deadline
+    _fenced = fence.fenced
+
+    ### 7- take leadership
+    # Derive the kernel-side role from snode's topology relative to lvs_node.
+    # On takeover snode is acting as leader, but its kernel role must still
+    # reflect topology so the peer view of the original primary stays
+    # coherent. Hardcoding role="primary" caused the LVS_9060 follow-on
+    # incident (2026-04-25 11:28:50 run): when the original primary later
+    # rejoins, peers disagree on who the primary is and a writer conflict
+    # follows. The position is in snode's own triplet (lvs_instance_role): a
+    # member of the remote triplet of a sync-replication LVS is a peer too.
+    if snode.get_id() not in _lvs_member_ids(lvs_node):
+        _abort_restart_and_unblock(
+            f"snode {snode.get_id()} is not a registered peer of "
+            f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
+    snode_lvs_role = lvs_instance_role(lvs_node, snode.get_id(), leading=True)
+    if grant and reload_metadata:
+        # bdev_lvol_update_lvstore rebuilds the blobstore-wide bitmaps from
+        # disk; it does NOT reload the blobs this instance holds open (only
+        # the IO path of a non-leader does), so it cannot make a long-lived
+        # non-leader safe to grant.
+        if not _fenced("bdev_lvol_update_lvstore", lvs_name,
+                       budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC):
+            _abort_restart_and_unblock(
+                f"bdev_lvol_update_lvstore returned False on {snode.get_id()} "
+                f"for {lvs_name}: no grant on top of un-reloaded metadata")
+    ret = _fenced(
+        "bdev_lvol_set_lvs_opts",
+        lvs_name,
+        groupid=lvs_jm_vuid,
+        subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
+        hublvol_port=lvs_node.get_hublvol_port(lvs_name),
+        role=snode_lvs_role,
+    )
+    if not grant:
+        # The role is all the taker gets: a non-leader lvstore whose role is
+        # PRIMARY promotes itself on its first IO. Without the role it never
+        # would, so a stamp that did not land aborts the hand-off.
+        if not ret:
+            _abort_restart_and_unblock(
+                f"bdev_lvol_set_lvs_opts({snode_lvs_role}) returned False on "
+                f"{snode.get_id()} for {lvs_name}: the taker cannot take the leadership")
+        return
+    # Journal replay and blobstore re-level happen inside this call, so it
+    # gets its own budget (see FENCE_SET_LEADER_TIMEOUT_SEC) -- the 0.5s
+    # norm is sized for calls that only schedule work.
+    ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True,
+                  budget=constants.FENCE_SET_LEADER_TIMEOUT_SEC)
+    leader_restored = False
+    for _ in range(10):
+        # 10 x 0.2s of sleep plus 10 RPCs is a large slice of the fence
+        # budget on its own; give up the fence rather than the deadline.
+        _check_fence_deadline("leader-restore poll")
+        try:
+            ret = _fenced("get_lvstore", lvs_name)
+            if ret and ret.get("lvs leadership"):
+                leader_restored = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+    if not leader_restored:
+        logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
+        if not force:
+            _abort_restart_and_unblock(f"Failed to restore leadership for {lvs_name}")
+    fence.granted = True
+
+
+def _wire_taker_hublvol(fence, current_leader, sec_nodes, disconnected_peers):
+    """Steps 8 / 8b of a leadership hand-off: the hublvol on the taker
+    (``fence.rpc_node``; adopted when it is not the owner), the secondary
+    hublvol of its triplet's secondary, and every connected peer of its
+    triplet connected to it, each port released right after its connect.
+    Sync replication: the other site's peers get no hublvol (no cross-site
+    redirect); stamped non-leader before the taker's step, they are released
+    here. Closes the window (gate, port events, deferred fields).
+    Returns the deferred tertiary->secondary failover paths to add
+    post-unblock (_add_deferred_tertiary_paths)."""
+    snode = fence.rpc_node
+    lvs_node = fence.lvs_node
+    lvs_name = fence.lvs_name
+    db_controller = fence.db_controller
+    blocked_peers = fence.blocked_peers
+    _hub_locks = fence.hub_locks
+    _unblock_peer_port = fence.unblock_peer_port
+    _abort_restart_and_unblock = fence.abort
+    _release_block_gate = fence.release_block_gate
+    _flush_port_events = fence.flush_port_events
+    _persist_deferred_node_fields = fence.persist_deferred_node_fields
+    is_takeover = snode.get_id() != lvs_node.get_id()
+    snode_triplet = lvs_triplet_of(lvs_node, snode.get_id())
+    _, triplet_sec_id, triplet_tert_id = snode_triplet
+    other_site_ids = {nid for nid in _lvs_member_ids(lvs_node) if nid not in snode_triplet}
+    # A hand-off without a grant leaves the taker a non-leader until its first IO.
+    taker_is = "new leader" if fence.granted else "taker"
+
+    ### 8- create hublvol and expose via subsystem with listeners
+    if sec_nodes:
+        if is_takeover:
+            try:
+                cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+                snode.adopt_hublvol(lvs_node, cluster.nqn)
+                logger.info("Adopted hublvol on %s %s for %s", taker_is, snode.get_id(), lvs_name)
+            except Exception as e:
+                logger.error("Error adopting hublvol on %s: %s", taker_is, e)
+                _abort_restart_and_unblock(f"adopt_hublvol on {taker_is} failed: {e}")
+        else:
+            try:
+                if not snode.recreate_hublvol():
+                    _abort_restart_and_unblock(
+                        f"recreate_hublvol returned False on {snode.get_id()}")
+            except RPCException as e:
+                logger.error("Error creating hublvol: %s", e)
+                _abort_restart_and_unblock(f"recreate_hublvol raised: {e}")
+            try:
+                # defer_db_write: the full-object node write (~150ms FDB
+                # round-trip caught in-window by the [NODE-WRITE]
+                # tripwire) is persisted atomically post-unblock below.
+                snode.create_transfer_hublvol(defer_db_write=True)
+                fence.deferred_node_persist["needed"] = True
+            except RPCException as e:
+                logger.error("Error creating transfer hublvol: %s", e)
+
+    ### 8b- connect peers to hublvol WITHIN port-blocked window
+    # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
+    # BEFORE we unblock its port.  Otherwise new IO can arrive and trigger
+    # spdk_lvs_trigger_leadership_switch, re-promoting the old leader and
+    # causing a writer conflict.
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+
+    # Identify the topological secondary owner (sec_1) of this LVS by
+    # looking at lvs_node, NOT by sec_nodes ordering. The previous
+    # index-based code (sec_nodes[0]) routed sec_1 work to whichever
+    # peer happened to be first after disconnected_peers filtering —
+    # which on the LVS_9060 takeover (2026-04-25 11:28:50) wasn't even
+    # the right LVS, since create_secondary_hublvol read the lvstore
+    # name off snode.lvstore (snode's own primary, not the LVS being
+    # taken over).
+    sec1_id = triplet_sec_id
+    sec1_node = next((s for s in sec_nodes if s.get_id() == sec1_id), None)
+    sec1_online = bool(sec1_node and sec1_node.get_id() not in disconnected_peers)
+
+    # Create the sec_1 hublvol only if sec_1 is a peer (not snode itself)
+    # and it's online. When snode IS the topological sec_1 (secondary
+    # owner taking leadership), there is no separate node to expose
+    # the secondary hublvol on — the leader's primary hublvol on snode
+    # is the only path until the original primary returns.
+    if sec1_online and sec1_node is not None:
+        try:
+            sec1_node.create_secondary_hublvol(lvs_node, cluster.nqn)
+        except Exception as e:
+            logger.error("Error creating secondary hublvol on sec_1: %s", e)
+            _abort_restart_and_unblock(
+                f"create_secondary_hublvol on {sec1_node.get_id()} raised: {e}")
+
+    # Track tertiary→secondary failover-path attaches to run AFTER the
+    # peer port unblock — keeping the in-freeze attach single-path with
+    # a 0.2 s RPC budget and pushing the second-path INTER_ATTACH_SLEEP
+    # outside the IO-impact window. ``deferred_tertiary_paths`` holds
+    # ``(tert_node, primary_node, sec1_node)`` tuples to apply later.
+    deferred_tertiary_paths = []
+
+    for sec_node in sec_nodes:
+        if sec_node.get_id() in disconnected_peers:
+            continue
+        # Role and failover are determined by topology, not by index.
+        # An index-based assignment (sec_nodes[0] -> 'secondary',
+        # rest -> 'tertiary') breaks when the original primary is
+        # filtered out via disconnected_peers and shifts the
+        # remaining peers up one slot.
+        if sec_node.get_id() == triplet_sec_id:
+            sec_role = "secondary"
+        elif sec_node.get_id() == triplet_tert_id:
+            sec_role = "tertiary"
+            # Defer the tertiary→secondary path; in-freeze attach is
+            # single-path against the (returning) primary only.
+            if sec1_online:
+                deferred_tertiary_paths.append((sec_node, snode, sec1_node))
+        elif sec_node.get_id() in other_site_ids:
+            # Sync replication: a peer of the other site's triplet never
+            # redirects to the taker (no cross-site hublvol). It was stamped
+            # non-leader before the taker's step (_restamp_other_site_peers); release.
+            if sec_node in blocked_peers:
+                _unblock_peer_port(sec_node, demoted=True)
+            continue
+        else:
+            logger.warning(
+                "Skipping hublvol connect for %s: not a registered "
+                "peer of %s (lvs_node=%s)",
+                sec_node.get_id(), lvs_name, lvs_node.get_id())
+            continue
+        try:
+            # Single-path attach against ``snode`` (the leader). The
+            # secondary failover for tertiary is appended in a
+            # post-unblock pass via ``add_hublvol_failover_path``.
+            #
+            # Pass lvs_node=lvs_node so LVS metadata (lvstore name,
+            # jm_vuid, port, hublvol NQN/bdev) comes from the
+            # configured primary of the LVS being taken over, *not*
+            # from snode — when this is a takeover (lvs_primary set,
+            # configured primary offline), snode.hublvol points at
+            # snode's OWN primary-LVS, which is the wrong LVS for
+            # this connection. Without it, the call sets up the
+            # wrong LVS on the peer, the LVS being taken over is
+            # never wired up, and the subsequent peer-port unblock
+            # opens the tertiary path to a still-unconfigured LVS —
+            # any client IO arriving on the still-open existing
+            # connection triggers spdk_lvs_trigger_leadership_switch
+            # on the peer and produces a dual-leader writer
+            # conflict. (incident 2026-05-21 05:38:14 k8s_native_
+            # resilient_failover-20260520-231822, LVS_270 takeover
+            # by worker-4: tertiary worker-1 was wired up as
+            # tertiary of LVS_9915 instead of LVS_270, port 4432
+            # was unblocked, worker-1 re-promoted on next client
+            # write, writer conflict on worker-4.)
+            ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
+                                             rpc_timeout=0.2, lvs_node=lvs_node,
+                                             coordinator_lock=_hub_locks.get(sec_node.get_id()))
+        except Exception as e:
+            logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
+            _abort_restart_and_unblock(
+                f"connect_to_hublvol on {sec_node.get_id()} raised: {e}")
+        if not ok:
+            _abort_restart_and_unblock(
+                f"connect_to_hublvol returned False on {sec_node.get_id()} ({sec_role})")
+
+        ### 8c- unblock this peer's port only after its hublvol is connected
+        if sec_node in blocked_peers:
+            _unblock_peer_port(sec_node)
+
+    # Every peer port is unblocked — end of the client-visible outage
+    # span. Release the window gate BEFORE the lvol-attach pass below
+    # so the next recreate's block window can start while lvols attach.
+    _release_block_gate()
+    _flush_port_events()
+    _persist_deferred_node_fields()
+
+    return deferred_tertiary_paths
+
+
+def _restamp_non_leader_role(fence, node):
+    """Stamp ``node``'s non-leader kernel role for the fenced LVS
+    (lvs_instance_role): a peer on the other site than the taker, where no
+    hublvol connect re-stamps it. Aborts the hand-off when the stamp does not
+    land: a former-leader lvs keeps PRIMARY and would take the leadership
+    back on its first IO."""
+    lvs_node = fence.lvs_node
+    lvs_name = fence.lvs_name
+    role = lvs_instance_role(lvs_node, node.get_id(), leading=False)
+    try:
+        stamped = node.rpc_client(timeout=constants.FENCE_RPC_TIMEOUT_SEC,
+                                  retry=constants.FENCE_RPC_RETRY).bdev_lvol_set_lvs_opts(
+            lvs_name,
+            groupid=lvs_node.jm_vuid,
+            subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
+            hublvol_port=lvs_node.get_hublvol_port(lvs_name),
+            role=role,
+        )
+    except RPCException as e:
+        fence.abort(f"bdev_lvol_set_lvs_opts({role}) on other-site peer {node.get_id()} raised: {e}")
+    if not stamped:
+        fence.abort(f"bdev_lvol_set_lvs_opts({role}) on other-site peer {node.get_id()} failed")
+
+
+def _restamp_other_site_peers(fence, sec_nodes, disconnected_peers):
+    """Sync replication, before the taker's step (its role stamp, with or
+    without a grant): stamp every connected peer on the other site than the
+    taker (``fence.rpc_node``) with its non-leader role while its port is
+    still fenced. A failed stamp aborts with the taker untouched - a peer left
+    PRIMARY must never see the taker serve."""
+    lvs_node = fence.lvs_node
+    taker_triplet = lvs_triplet_of(lvs_node, fence.rpc_node.get_id())
+    for peer in sec_nodes:
+        if peer.get_id() in disconnected_peers or peer.get_id() in taker_triplet:
+            continue
+        if peer.get_id() in _lvs_member_ids(lvs_node):
+            _restamp_non_leader_role(fence, peer)
+
+
+def _add_deferred_tertiary_paths(deferred_tertiary_paths, lvs_name, lvs_node=None):
+    """Step 10b of a leadership hand-off, post-unblock: the tertiary's second
+    hublvol path (to its triplet's secondary). ``lvs_node``: the owner, when
+    the taker does not own the LVS (add_hublvol_failover_path)."""
+    for tert_node, primary_node, sec1_failover in deferred_tertiary_paths:
+        if sec1_failover is None:
+            # Only appended when ``sec1_online`` was True (meaning
+            # ``sec1_node`` was non-None at the time), so this branch
+            # should be unreachable in practice — guard for mypy.
+            continue
+        try:
+            if lvs_node is None:
+                added = tert_node.add_hublvol_failover_path(primary_node, sec1_failover)
+            else:
+                added = tert_node.add_hublvol_failover_path(primary_node, sec1_failover,
+                                                            lvs_node=lvs_node)
+            if added:
+                logger.info("Added deferred secondary %s hublvol path on tertiary %s for %s",
+                            sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+            else:
+                logger.warning("Failed to add deferred secondary %s hublvol path on tertiary %s for %s",
+                               sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+        except Exception as e:
+            logger.error("Error adding deferred hublvol failover path on tertiary %s: %s",
+                         tert_node.get_id(), e)
+
+
+def _lvs_disconnected_peers(lvs_node, peers) -> set:
+    """Ids of the ``peers`` of ``lvs_node``'s LVS that are disconnected
+    (_check_peer_disconnected, each judged by the members of its own triplet)."""
+    member_ids = {p.get_id() for p in peers}
+    disconnected = set()
+    for peer in peers:
+        triplet = lvs_triplet_of(lvs_node, peer.get_id())
+        voters = [nid for nid in triplet if nid and nid != peer.get_id() and nid in member_ids]
+        if _check_peer_disconnected(peer, lvs_peer_ids=voters):
+            disconnected.add(peer.get_id())
+    return disconnected
+
+
+def transfer_lvs_leadership(current_leader, taker, peers, *, lvs_node, fence=None,
+                            disconnected_peers=None, before_grant=None,
+                            reload_metadata=True, force=False, grant: bool = True):
+    """Fenced hand-off of the leadership of ``lvs_node``'s LVS from
+    ``current_leader`` (None: nobody leads) to ``taker``, the node the fenced
+    RPCs run on; ``peers`` are the LVS's other instances (``current_leader``
+    among them), each port-blocked while connected.
+
+    Sequence: pre-window prep, block every connected peer's LVS port
+    (non-leaders first), suspend the leader's journal replication, drain its
+    in-flight IO, drop its leadership (_fence_and_demote_leader); stamp
+    every connected peer on the other site non-leader
+    (_restamp_other_site_peers, sync replication); ``before_grant()``; the
+    taker's step (_grant_lvs_leadership), in one of two modes; create its
+    hublvol and connect the peers of its triplet, release the other-site ones
+    (_wire_taker_hublvol).
+
+    ``grant=True``: the taker's role is stamped and the leadership granted to
+    it by RPC, after bdev_lvol_update_lvstore when ``reload_metadata``.
+    ``grant=False``: the taker's role is stamped and nothing is granted - it
+    takes the leadership itself on its first IO (the lvstore is reloaded and
+    promoted then; each lvol reloads its blob on its own first IO);
+    ``reload_metadata`` is not consulted. Only an instance examined since
+    anyone last led is granted by RPC:
+    bdev_lvol_update_lvstore rebuilds the blobstore-wide bitmaps and does not
+    reload open blobs, so a long-lived non-leader must take the leadership by
+    IO.
+
+    With ``fence`` the caller owns the fence (recreate_lvstore: the restarting
+    node, killed on abort) and the steps after the window; the deferred
+    tertiary->secondary paths are returned for it to add. Without it the
+    transfer runs between live nodes: its own fence kills nothing on abort,
+    the peers' connectivity is probed here, the deferred paths are added and
+    the old leader's lvstore_status is restored; returns [].
+
+    Raises:
+        LeadershipTransferError: the hand-off was aborted (every fenced port
+            released); ``granted`` says whether an RPC grant had been issued
+            (never with ``grant=False``).
+    """
+    if current_leader is not None:
+        # The hand-off tells the leader apart from its peers by identity.
+        leader_id = current_leader.get_id()
+        peers = [current_leader if p.get_id() == leader_id else p for p in peers]
+        if current_leader not in peers:
+            peers.append(current_leader)
+    if fence is not None:
+        _fence_and_demote_leader(fence, current_leader, peers, disconnected_peers or set())
+        _restamp_other_site_peers(fence, peers, disconnected_peers or set())
+        if before_grant is not None:
+            before_grant()
+        _grant_lvs_leadership(fence, force=force, reload_metadata=reload_metadata, grant=grant)
+        return _wire_taker_hublvol(fence, current_leader, peers, disconnected_peers or set())
+
+    db_controller = DBController()
+    fence = _LvsFence(lvs_node, taker, db_controller, what="leadership transfer",
+                      abort_prefix="Abort leadership transfer")
+    if disconnected_peers is None:
+        disconnected_peers = _lvs_disconnected_peers(lvs_node, peers)
+    if current_leader is not None:
+        # A leader the caller confirmed answered for itself: a (cached)
+        # disconnected verdict must never let it skip the fence and demote
+        # and keep leading next to the taker after the hand-off. Its block
+        # failing aborts.
+        disconnected_peers = set(disconnected_peers) - {current_leader.get_id()}
+    leader_status = None
+    if current_leader is not None and current_leader.get_id() not in disconnected_peers:
+        leader_status = db_controller.get_storage_node_by_id(current_leader.get_id()).lvstore_status
+    logger.info("Transferring the leadership of %s from %s to %s", lvs_node.lvstore,
+                current_leader.get_id() if current_leader is not None else "nobody", taker.get_id())
+    try:
+        _fence_and_demote_leader(fence, current_leader, peers, disconnected_peers)
+        _restamp_other_site_peers(fence, peers, disconnected_peers)
+        if before_grant is not None:
+            before_grant()
+        _grant_lvs_leadership(fence, force=force, reload_metadata=reload_metadata, grant=grant)
+        deferred = _wire_taker_hublvol(fence, current_leader, peers, disconnected_peers)
+        fence.release_hub_locks()
+        fence.close()
+        _add_deferred_tertiary_paths(
+            deferred, lvs_node.lvstore,
+            lvs_node=lvs_node if taker.get_id() != lvs_node.get_id() else None)
+        if grant:
+            logger.info("Leadership of %s transferred to %s", lvs_node.lvstore, taker.get_id())
+        else:
+            logger.info("%s handed off to %s without a grant, leadership follows its first IO",
+                        lvs_node.lvstore, taker.get_id())
+        return []
+    finally:
+        # A raw error (not a fence abort) can leave ports blocked: release them.
+        for peer in list(fence.blocked_peers):
+            fence.unblock_peer_port(peer)
+        fence.flush_port_events()
+        fence.release_hub_locks()
+        fence.close()
+        if leader_status is not None and current_leader is not None:
+            _set_lvstore_status_atomic(current_leader.get_id(), leader_status, db_controller)
+
+
+def _move_lvs_leadership_locked(owner_id, moving_value, final_site, *, current_leader_id=None, taker_id):
+    """move_lvs_leadership with the grant lock already held by the caller.
+
+    Revalidates everything under the lock: the owner still carries
+    ``moving_value``, the taker is the primary of the triplet on
+    ``final_site``, a fresh probe of every member (the fenced lost site
+    excepted) finds exactly ``current_leader_id`` leading (nobody when None)
+    and every member on the other site answering. Then transfer_lvs_leadership
+    without a grant (the taker gets its role and takes the leadership itself
+    on its first IO), one more probe of every member but the taker - none may
+    lead, none on the other site may be silent - and CAS ``moving_value ->
+    final_site``. The probe after the hand-off is a single one: a
+    self-promotion that completes after it is not seen here.
+
+    Raises:
+        LVSMoveChangedError: the marker, the taker or the leader changed, or
+            after the hand-off a member other than the taker leads or may lead
+            (the marker stays ``moving_value`` for the reconciler; the taker
+            keeps the role it was stamped with, see lvs_instance_role).
+        LeadershipTransferError: the fenced hand-off was aborted.
+    """
+    db = DBController()
+    owner = db.get_storage_node_by_id(owner_id)
+    if owner.lvs_active_site != moving_value:
+        raise LVSMoveChangedError(
+            f"LVS {owner.lvstore}: lvs_active_site is {owner.lvs_active_site!r}, "
+            f"expected {moving_value!r}")
+    members = {}
+    for node_id in _lvs_member_ids(owner):
+        try:
+            members[node_id] = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            logger.warning("LVS %s: member %s not found", owner.lvstore, node_id)
+    taker = members.get(taker_id)
+    if taker is None or taker.site != final_site or lvs_triplet_of(owner, taker_id)[0] != taker_id:
+        raise LVSMoveChangedError(
+            f"LVS {owner.lvstore}: {taker_id} is not the primary of the triplet on "
+            f"site {final_site!r}")
+    # A fresh leadership verdict under the lock, never the cached connectivity
+    # one: every member answers a leadership probe now, except one on the
+    # fenced lost site. The only member that may lead is ``current_leader_id``
+    # (demoted by the transfer); any other leader - or one appearing on a
+    # "leaderless" move - means the state changed: no hand-off. A silent member
+    # on the other site than the taker may still hold the PRIMARY role and
+    # cannot be stamped: no hand-off. A silent one on the taker's site is
+    # skipped like a disconnected peer of a restart.
+    cluster = db.get_cluster_by_id(owner.cluster_id)
+    # The fence's two-node unblock guard reads the flag remembered here, not
+    # the database, inside the port-block window.
+    _remember_cluster_arbitration(cluster)
+    if cluster.lost_site and taker.site == cluster.lost_site:
+        raise LVSMoveChangedError(
+            f"LVS {owner.lvstore}: {taker_id} is on the lost site {cluster.lost_site!r}, no hand-off")
+    fenced_site = cluster.lost_site if cluster.lost_site_state == Cluster.LOST_SITE_DONE else ""
+    verdict = _lvs_leadership_verdict(owner.lvstore, members, skip_site=fenced_site)
+    for node_id in verdict.silent:
+        node = members[node_id]
+        if node_id == taker_id or node.site != taker.site:
+            raise LVSMoveChangedError(
+                f"LVS {owner.lvstore}: {node_id} on site {node.site!r} does not answer - "
+                f"its role cannot be made non-leader, no hand-off")
+    disconnected = verdict.skipped | set(verdict.silent)
+    leading = verdict.leading
+    if leading != ([current_leader_id] if current_leader_id else []):
+        raise LVSMoveChangedError(
+            f"LVS {owner.lvstore}: the leadership is on {leading}, the move expected "
+            f"{current_leader_id or 'nobody'}")
+    current_leader = members.get(current_leader_id) if current_leader_id else None
+    peers = [node for node_id, node in members.items() if node_id != taker_id]
+    transfer_lvs_leadership(current_leader, taker, peers, lvs_node=owner,
+                            disconnected_peers=disconnected, grant=False)
+    # Nothing was granted: the taker takes the leadership on its first IO. One
+    # more probe before the marker, outside the fenced window: a self-promotion
+    # armed on another member before the hand-off (the previous taker of a move
+    # "from nobody" gets no demote) may have completed during it, and a demote
+    # may not have taken. Any member but the taker that leads fails the move;
+    # so does a silent one on the other site ("did not answer" is never read
+    # as "does not lead"); a silent one on the taker's site is skipped as
+    # above. The taker is not asked: whether it leads yet decides nothing.
+    others = {node_id: node for node_id, node in members.items() if node_id != taker_id}
+    after = _lvs_leadership_verdict(owner.lvstore, others, skip_site=fenced_site)
+    if after.leading:
+        raise LVSMoveChangedError(
+            f"LVS {owner.lvstore}: the leadership is on {after.leading} after the hand-off "
+            f"to {taker_id}")
+    for node_id in after.silent:
+        node = members[node_id]
+        if node.site != taker.site:
+            raise LVSMoveChangedError(
+                f"LVS {owner.lvstore}: {node_id} on site {node.site!r} does not answer after "
+                f"the hand-off to {taker_id} - it may lead")
+    if not set_lvs_active_site(owner_id, final_site, expect=moving_value):
+        raise LVSMoveChangedError(
+            f"LVS {owner.lvstore}: marker changed during the transfer to {taker_id} "
+            f"(expected {moving_value!r})")
+    logger.info("LVS %s: handed off to %s, leadership follows the first IO, lvs_active_site=%s",
+                owner.lvstore, taker_id, final_site)
+
+
+def move_lvs_leadership(owner_id, moving_value, final_site, *, current_leader_id=None, taker_id):
+    """The only leadership hand-off of an LVS in ``moving:*``: under the grant
+    lock (_lvs_grant_lock), revalidate, hand the LVS off to ``taker_id`` and
+    settle ``lvs_active_site`` from ``moving_value`` to ``final_site``
+    (_move_lvs_leadership_locked). Nothing is granted: the old leader, if
+    there is one, is fenced and demoted, ``taker_id`` gets its role and takes
+    the leadership itself on its first IO; until then nobody leads. ``taker_id``
+    is the primary of the triplet on ``final_site``. Used by the sync promote
+    (FN_SYNC_PROMOTE) and by reconcile_lvs_move.
+
+    Raises:
+        PreconditionError: the grant lock is held by another grant.
+        LVSMoveChangedError, LeadershipTransferError: see the locked variant.
+    """
+    owner = DBController().get_storage_node_by_id(owner_id)
+    with _lvs_grant_lock(owner.cluster_id, owner.lvstore,
+                         timeout=constants.LVSTORE_MUTATION_LOCK_WAIT_SEC):
+        _move_lvs_leadership_locked(owner_id, moving_value, final_site,
+                                    current_leader_id=current_leader_id, taker_id=taker_id)
+
+
+class _LeadershipVerdict(NamedTuple):
+    """A fresh leadership probe of an LVS's members (_lvs_leadership_verdict)."""
+    #: Members that report the leadership.
+    leading: list[str]
+    #: Members that did not answer (an RPC error or no lvstore).
+    silent: list[str]
+    #: Members not probed (on the skipped site).
+    skipped: set[str]
+
+
+def _lvs_leadership_verdict(lvs_name, members: dict, *, skip_site="") -> _LeadershipVerdict:
+    """Probe every member of ``members`` (``{node id: node}``) for the
+    leadership of ``lvs_name`` now - never a cached connectivity verdict -
+    except the ones on ``skip_site`` (a fenced lost site)."""
+    leading, silent, skipped = [], [], set()
+    for node_id, node in members.items():
+        if skip_site and node.site == skip_site:
+            skipped.add(node_id)
+            continue
+        try:
+            lvs = node.rpc_client(timeout=5, retry=1).get_lvstore(lvs_name)
+        except RPCException as e:
+            logger.warning("LVS %s: leadership probe on %s failed: %s", lvs_name, node_id, e)
+            lvs = None
+        if lvs and lvs.get("lvs leadership"):
+            leading.append(node_id)
+        elif not lvs:
+            silent.append(node_id)
+    return _LeadershipVerdict(leading, silent, skipped)
+
+
+def _move_taker(owner, triplet_ids, members, fenced_ids, lost_site=""):
+    """The primary of ``triplet_ids`` (a triplet of ``owner``'s LVS) when it
+    may be the taker of a move (handed the LVS without a grant, it leads from
+    its first IO): it answered the leadership probe, is not site-fenced, not
+    on the cluster's lost site (whatever its state) and has the journal's
+    local write quorum (_taker_jm_quorum_ok). Only a triplet primary: the
+    hand-off wires the other members of its triplet as its secondary /
+    tertiary. None otherwise."""
+    node_id = triplet_ids[0] if triplet_ids else ""
+    node = members.get(node_id)
+    if node is None or node_id in fenced_ids or (lost_site and node.site == lost_site):
+        return None
+    if not _taker_jm_quorum_ok(node, owner.jm_vuid, sync=True):
+        logger.warning("LVS %s: %s lacks the local journal quorum — not a move taker",
+                       owner.lvstore, node_id)
+        return None
+    return node
+
+
+def _reconcile_lvs_move_locked(owner_id, db):
+    owner = db.get_storage_node_by_id(owner_id)
+    moving = owner.lvs_active_site
+    if not moving.startswith(LVS_MOVING_PREFIX):
+        return None
+    lvs_name = owner.lvstore
+    if _leadership_moving_tasks_active(owner.cluster_id, [owner_id], lvs_name):
+        return None
+    target = moving[len(LVS_MOVING_PREFIX):]
+    cluster = db.get_cluster_by_id(owner.cluster_id)
+    fenced_site = cluster.lost_site if cluster.lost_site_state == Cluster.LOST_SITE_DONE else ""
+
+    members = {}
+    for node_id in _lvs_member_ids(owner):
+        try:
+            members[node_id] = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            logger.warning("LVS %s: member %s not found — move not reconciled", lvs_name, node_id)
+            return None
+    # A complete verdict or nothing: every member answers the leadership
+    # probe, except one on a lost site whose fence has run (its devices are
+    # unavailable in every distrib). No cached connectivity verdict counts.
+    verdict = _lvs_leadership_verdict(lvs_name, members, skip_site=fenced_site)
+    leaders = [members[node_id] for node_id in verdict.leading]
+    unknown, fenced_ids = verdict.silent, verdict.skipped
+    if unknown:
+        logger.warning("LVS %s: %s left in place, no complete leadership verdict (unknown: %s)",
+                       lvs_name, moving, unknown)
+        return None
+    if len(leaders) > 1:
+        logger.error("LVS %s: several members report the leadership (%s) — %s left in place",
+                     lvs_name, [n.get_id() for n in leaders], moving)
+        return None
+    if leaders:
+        leader_id, site = leaders[0].get_id(), leaders[0].site
+        # On the target site only the primary of its triplet - the taker of
+        # the move - is followed. Another member leading there is an anomaly
+        # (that triplet was the passive one), and the taker next to it may be
+        # stamped PRIMARY and wired as the hub by a hand-off its last probe
+        # refused: a marker settled there would have the next promote open
+        # that primary as the optimized path, and its first IO make it a
+        # second leader. The marker stays - ``moving:*`` keeps both sites
+        # closed - until that member is restarted (a non-leader rebuild while
+        # the LVS is moving) and the nobody-leads branch below finishes the
+        # move. A non-primary leading on the SOURCE site is the state before
+        # the move (an in-site takeover) and is followed.
+        if site == target and lvs_triplet_of(owner, leader_id)[0] != leader_id:
+            logger.error("LVS %s: %s leads on the target site %s and is not the primary of its "
+                         "triplet — %s left in place, restart %s to finish the move",
+                         lvs_name, leader_id, site, moving, leader_id)
+            return None
+        if set_lvs_active_site(owner_id, site, expect=moving):
+            logger.warning("LVS %s: abandoned %s settled to the actual leader %s (site %s)",
+                           lvs_name, moving, leader_id, site)
+            return site
+        return None
+
+    # Nobody leads: finish the move on the target triplet's primary, by the
+    # move's own hand-off - nothing is granted, and it can be repeated on a
+    # taker that was handed the LVS already and has seen no IO yet. Hand back
+    # to the source triplet's primary only when the target site is the fenced
+    # lost site (unreachable for good); a reachable target that cannot take it
+    # now (no local journal quorum) keeps the marker for a retry.
+    home = (owner.get_id(), owner.secondary_node_id, owner.tertiary_node_id)
+    remote = remote_triplet_refs(owner)
+    target_triplet, source_triplet = (home, remote) if target == owner.site else (remote, home)
+    if fenced_site and fenced_site == target:
+        final_site = next((members[n].site for n in source_triplet if n in members), "")
+        triplet = source_triplet
+    else:
+        final_site, triplet = target, target_triplet
+    taker = _move_taker(owner, triplet, members, fenced_ids, cluster.lost_site) if final_site else None
+    if taker is None:
+        logger.error("LVS %s: abandoned %s with no leader and no eligible taker on %r — "
+                     "left in place", lvs_name, moving, final_site)
+        return None
+    logger.warning("LVS %s: abandoned %s with no leader — handing off to %s (site %s)",
+                   lvs_name, moving, taker.get_id(), final_site)
+    try:
+        _move_lvs_leadership_locked(owner_id, moving, final_site, taker_id=taker.get_id())
+    except (LVSMoveChangedError, LeadershipTransferError) as e:
+        logger.error("LVS %s: reconciling %s failed: %s", lvs_name, moving, e)
+        return None
+    return final_site
+
+
+def _lvol_bdev_registered(rpc_client, lvol: LVol) -> bool:
+    """Whether ``lvol``'s bdev is registered on the node of ``rpc_client``
+    (by uuid or by ``<lvs>/<bdev>``); a probe that fails counts as absent."""
+    for candidate in (lvol.lvol_uuid, f"{lvol.lvs_name}/{lvol.lvol_bdev}"):
+        try:
+            if rpc_client.bdev_get(candidate):
+                return True
+        except RPCException:
+            pass
+    return False
+
+
+def reconcile_lvs_move(owner_id):
+    """Settle an LVS left at ``moving:<site>`` by a promote that no longer
+    owns the move (task finished / canceled / its runner died:
+    sync_promote_task_owns_move). Under the grant lock, with the task check,
+    the probes, any hand-off and the marker write all inside it:
+
+    - every member of both triplets answered (a member of a lost site whose
+      fence ran counts as not leading) and exactly one leads -> the marker
+      becomes that leader's site;
+    - but a leader on the move's TARGET site that is not the primary of the
+      triplet there (the move's taker) -> nothing: the marker stays, both
+      sites closed, until that member is restarted and no longer leads (then
+      the last case below);
+    - any answer missing, or two leaders -> nothing (retried by the next
+      lookup);
+    - nobody leads -> the LVS is handed off to the target triplet's primary
+      (local journal quorum; no grant - it takes the leadership on its first
+      IO, _move_lvs_leadership_locked) and the marker settles on the target
+      site; to the source triplet's primary instead only when the target site
+      is the fenced lost site. No eligible taker, or a hand-off that failed ->
+      nothing. "Nobody leads" is also what a completed hand-off looks like
+      before the first IO: the hand-off is then simply repeated.
+
+    A promote runner that fails records its task DONE / canceled BEFORE
+    calling this; while its task owns the move this is a no-op. Returns the
+    settled site, or None when nothing was settled."""
+    db = DBController()
+    try:
+        owner = db.get_storage_node_by_id(owner_id)
+    except KeyError:
+        return None
+    if not owner.lvs_active_site.startswith(LVS_MOVING_PREFIX):
+        return None
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(_lvs_grant_lock(owner.cluster_id, owner.lvstore, timeout=0))
+        except PreconditionError as e:
+            logger.info("LVS %s: move not reconciled now, grant lock busy (%s)", owner.lvstore, e)
+            return None
+        return _reconcile_lvs_move_locked(owner_id, db)
 
 
 #: The removal statuses a node passes through while a removal is still being
@@ -13902,14 +16580,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     """Recreate LVStore as leader.
 
     Per design: runs for snode's own primary LVS, and also when snode
-    takes over leadership from an offline primary (lvs_primary is set).
+    leads an LVS it does not own (lvs_primary is set): a secondary taking
+    over from an offline primary, or - sync replication - a member of the
+    LVS's active REMOTE triplet (its primary, or its secondary taking over).
+    The peers snode fences, probes for an acting leader and wires to its
+    hublvol are the other members of its OWN triplet (lvs_triplet_of); the
+    other site's triplet of a sync LVS is never touched here.
 
     Args:
         snode: the restarting node (RPCs are executed here)
         force: force recreation even on validation failure
-        lvs_primary: when set, the original primary node (now offline)
-            whose LVS this node is taking over.  When None, snode is the
-            primary for its own LVS.
+        lvs_primary: when set, the owner of the LVS snode rebuilds as its
+            leader: the original primary, now offline, or - for a member of
+            the remote triplet - a live node of the passive site, whose
+            record is therefore changed by field-scoped updates only.  When
+            None, snode is the primary for its own LVS.
         activation_mode: when True, skip all peer operations (port blocking,
             hublvol creation/connection, leader demotion).  Used during
             cluster_activate() where peer LVS may not exist yet.  Hublvol
@@ -13924,8 +16609,15 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     lvs_jm_vuid = lvs_node.jm_vuid
     lvs_raid = lvs_node.raid
 
-    lvs_node.lvstore_status = "in_creation"
-    lvs_node.write_to_db()
+    if is_takeover and _sync_site(lvs_node):
+        # Field-scoped: the owner is another node - live, when snode is in the
+        # remote triplet - and a full-object write of this copy would bring
+        # back what a concurrent flow changed on it since it was read.
+        _set_lvstore_status_atomic(lvs_node.get_id(), "in_creation", db_controller)
+        lvs_node.lvstore_status = "in_creation"
+    else:
+        lvs_node.lvstore_status = "in_creation"
+        lvs_node.write_to_db()
 
     if activation_mode:
         # Soft prelude: reconnect any missing remote devices + remote JMs
@@ -13942,10 +16634,26 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             logger.warning("Soft reconnect of remote devices failed on %s: %s",
                            snode.get_id(), e)
 
+    # A remote-triplet member building the leader of a remote-led LVS (in
+    # activation or at its restart) holds that LVS's journal on the other
+    # site's JMs too: connect them like the owner does (the non-leader
+    # rebuild's soft prelude does the same for every remote instance).
+    remote_takeover = is_takeover and _sync_site(snode) and snode.site != lvs_node.site
     if not is_takeover:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.write_to_db()
+    elif remote_takeover:
+        # Field-scoped: this runs under the locks of the owner's LVS only, and
+        # snode's record is changed meanwhile by flows that hold the locks of
+        # the LVS snode owns itself, or none (a move of that LVS, a pending
+        # mark cleared on it, another member's rebuild) - a full-object write
+        # of a copy held across the connect would bring back what they wrote.
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        fresh_remote_jms = _connect_to_remote_jm_devs(snode)
+        db_controller.atomic_update(
+            snode, lambda n, v=fresh_remote_jms: setattr(n, "remote_jm_devices", v))
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
 
     # A removal in flight anywhere in the cluster relaxes the UNFENCED RPC
     # bound in _fenced() (see _fence_rpc_bounds); the fenced bound is never
@@ -13957,9 +16665,12 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         n.status in REMOVAL_IN_FLIGHT_STATUSES
         for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id))
 
-    # Gather peer nodes for this LVS, EXCLUDING snode itself
+    # Gather peer nodes for this LVS, EXCLUDING snode itself: the secondary /
+    # tertiary of snode's own triplet - the home one, or the remote one of a
+    # sync LVS when snode is a member of it.
     sec_nodes = []
-    lvs_all_peer_ids = [sid for sid in [lvs_node.secondary_node_id, lvs_node.tertiary_node_id] if sid]
+    _, triplet_sec_id, triplet_tert_id = lvs_triplet_of(lvs_node, snode.get_id())
+    lvs_all_peer_ids = [sid for sid in [triplet_sec_id, triplet_tert_id] if sid]
     # Peer list for quorum checks: exclude snode (restarting node) since its JM
     # is expected to be disconnected on peers during restart.
     lvs_peer_ids = [sid for sid in lvs_all_peer_ids if sid != snode.get_id()]
@@ -14111,8 +16822,12 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         lvol.nqn, snode.get_id())
             created_subsystems.append(lvol.nqn)
         else:
+            # Sync replication: the window of snode's position in lvol.nodes
+            # (a takeover leader is not at position 0).
+            min_cntlid = (lvol_controller.lvol_min_cntlid(lvol_controller._lvol_path_index(lvol, snode))
+                          if _sync_site(snode) else 1)
             logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
-            ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
+            ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
                                               max_namespaces=lvol.max_namespace_per_subsys,
                                               allow_any_host=allow_any)
             if ret:
@@ -14135,115 +16850,18 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             _failback_primary_ana(snode)
         except Exception:
             logger.exception("ANA failback for primary %s skipped", snode.get_id())
-
-    snode_lvs_port = lvs_node.get_lvol_subsys_port(lvs_name)
+    elif remote_takeover and lvol_list:
+        # Sync replication: the same for the primary of an active remote
+        # triplet coming back. Nothing is sent for its secondary taking over
+        # (_sync_flip_active_peer flips the peer of the active PRIMARY only).
+        try:
+            _sync_flip_active_peer(snode, [lvs_node], "non_optimized")
+        except Exception:
+            logger.exception("ANA failback for primary %s skipped", snode.get_id())
 
     # Phase transition: blocked — sync deletes and registrations must be delayed
     _port_block_t0 = time.monotonic()
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
-
-    # Peers whose LVS port is currently blocked. Client IO to any peer on
-    # snode_lvs_port is rejected until that peer is removed from the list.
-    # Every blocked peer MUST be unblocked — either per-peer after its
-    # connect_to_hublvol succeeds, or en bloc on abort.
-    blocked_peers: list = []
-    # True client-outage accounting: per-peer monotonic stamp at successful
-    # block, duration logged at unblock. The phase print below brackets the
-    # whole BLOCKED->POST_UNBLOCK phase (incl. work after the last unblock)
-    # and overstates the real outage ~2x (2026-07-21: printed 11-21s vs
-    # 6.2-8.9s true block->unblock from spdk logs). The 6s nvmf ack-timeout
-    # reject applies to THIS number, per port.
-    _block_started: dict = {}
-    #: Fired once every fenced port is released, so deferred redundant-path
-    #: hublvol attaches run outside the client-visible window.
-    _defer_gate_event = threading.Event()
-    _block_longest = {"sec": 0.0}
-
-    # #3: port deny/allow event emission (FDB+graylog write, ~190ms measured
-    # in-window) is deferred to after the unblock; the per-port block-span
-    # logs carry the true timing, the events remain complete for audit.
-    _deferred_port_events: list = []
-
-    def _flush_port_events():
-        for _kind, _n, _p in _deferred_port_events:
-            try:
-                if _kind == "deny":
-                    tcp_ports_events.port_deny(_n, _p)
-                else:
-                    tcp_ports_events.port_allowed(_n, _p)
-            except Exception as _ev_e:
-                logger.warning("Deferred port event emit failed: %s", _ev_e)
-        del _deferred_port_events[:]
-
-    def _warn_if_unblocking_a_non_leader(peer):
-        """Read-only: warn when a peer is being returned to service demoted.
-
-        Leadership can move WHILE the fence is held. On 2026-09-01 it did: the
-        fence went on LVS_10's primary at 16:28:25, the secondary took
-        leadership at 16:28:31, and the control plane unblocked the old primary
-        at 16:28:37 regardless. The client reconnected within milliseconds to a
-        node that was no longer leader, that node could not redirect, and the
-        IO came back as a generic INTERNAL DEVICE ERROR -- which
-        nvme-multipath does not retry on another path. Client EIO, fio rc=4.
-
-        Deliberately does NOT repair here. Wiring a hublvol inside the fence is
-        exactly the kind of extra in-window work that made the fence 12.2s in
-        the first place, and on the abort path it would delay the release we
-        want immediate. One bounded probe (0.5s via the ambient fence budget)
-        buys the diagnosis; the fix belongs to the post-unblock repair, and to
-        keeping the fence short enough that leadership does not move inside it.
-        """
-        try:
-            lvs = peer.rpc_client().get_lvstore(lvs_name)
-        except Exception:
-            return                      # never let a probe delay the release
-        if not lvs or lvs.get("lvs leadership"):
-            return
-        logger.error(
-            "[RESTART] Unblocking %s for %s while it is NO LONGER leader -- "
-            "the client will reconnect to a demoted node; if its hublvol "
-            "redirect path is missing, its next IO is failed outright. Fence "
-            "held %.3fs.",
-            peer.get_id()[:8], lvs_name, _fence_elapsed())
-
-    def _unblock_peer_port(peer):
-        """Remove the port block for snode_lvs_port on peer and drop
-        the peer from blocked_peers. Safe to call if peer is not currently
-        blocked (no-op). Tolerates RPC failure — logs and continues so
-        other peers can still be unblocked."""
-        if peer in blocked_peers:
-            _warn_if_unblocking_a_non_leader(peer)
-        if not _may_unblock_peer_port(peer, snode_lvs_port, snode.jm_vuid, db_controller,
-                                      "Recreate LVS", rebuild_too=False):
-            try:
-                blocked_peers.remove(peer)
-            except ValueError:
-                pass
-            return
-        try:
-            peer.rpc_client(timeout=0.5, retry=2).nvmf_port_unblock(snode_lvs_port)
-            _deferred_port_events.append(("allow", peer, snode_lvs_port))
-            _t0 = _block_started.pop(peer.get_id(), None)
-            if _t0 is not None:
-                _d = time.monotonic() - _t0
-                _block_longest["sec"] = max(_block_longest["sec"], _d)
-                logger.info(
-                    "[RESTART] Client port %s on %s was blocked %.3fs "
-                    "(reject threshold 6s)",
-                    snode_lvs_port, peer.get_id()[:8], _d)
-        except Exception as ue:
-            logger.error("Failed to unblock port %s on %s: %s",
-                         snode_lvs_port, peer.get_id(), ue)
-        finally:
-            try:
-                blocked_peers.remove(peer)
-            except ValueError:
-                pass
-            if not blocked_peers:
-                # Fence over: normal work must not inherit the 0.5s budget,
-                # and the deferred hublvol attaches may now run.
-                rpc_budget.clear_budget()
-                _defer_gate_event.set()
 
     def _kill_app():
         """Kill SPDK on snode and mark OFFLINE before peer ports unblock.
@@ -14264,149 +16882,18 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
                         caused_by="restart_cleanup")
 
-    # Pre-acquired hublvol advisory locks, one per peer that will
-    # connect_to_hublvol inside the blocked window (key: peer id). The
-    # acquire is an FDB transaction (avg 858ms/std 487 measured INSIDE
-    # blocked windows, 2026-07-21 n=11) — paying it before the peer ports
-    # are blocked keeps the client-visible outage short. Released after the
-    # unblock/print below, on aborts, and by the 60s lock TTL on any other
-    # escape. Pre-acquire failure is non-fatal: connect_to_hublvol then
-    # locks internally (the pre-fix behavior).
-    _hub_locks: dict = {}
-
-    # Deferred persistence of hublvol/transfer_hublvol metadata mutated
-    # in-window with defer_db_write=True. Persisted ATOMICALLY (field-only
-    # update) post-unblock — a full-object write here is both an in-window
-    # FDB round-trip and a stale-write hazard (2026-07-21 resurrection).
-    _deferred_node_persist = {"needed": False}
-
-    def _persist_deferred_node_fields():
-        if not _deferred_node_persist.pop("needed", False):
-            return
-        try:
-            def _apply_hub_fields(n, h=snode.hublvol,
-                                  t=snode.transfer_hublvol):
-                n.hublvol = h
-                n.transfer_hublvol = t
-            db_controller.atomic_update(snode, _apply_hub_fields)
-        except Exception as _pe:
-            logger.error("Deferred hublvol persist failed for %s: %s",
-                         snode.get_id(), _pe)
-
-    def _release_hub_locks():
-        for _pid in list(_hub_locks):
-            lk = _hub_locks.pop(_pid, None)
-            if lk is not None:
-                if getattr(lk, "pending_stamp", False):
-                    # Deferred success stamp (#2): paid here, post-unblock,
-                    # instead of inside the port-block window.
-                    try:
-                        lk.stamp_attach()
-                    except Exception as _st_e:
-                        logger.warning("Deferred hublvol stamp failed: %s", _st_e)
-                lk.release()
-
-    # Global port-block window gate (see _port_block_window_gate): at most
-    # one LVS's client port is blocked at any moment across the runner.
-    _gate_state = {"held": False}
-
-    def _acquire_block_gate():
-        _waited = _open_port_block_window(lvs_name)
-        _gate_state["held"] = True
-        if _waited > 0.5:
-            logger.info("[RESTART] Waited %.3fs for port-block window "
-                        "(gate + fan-out drain) (%s)",
-                        _waited, lvs_name)
-
-    def _release_block_gate():
-        if _gate_state["held"]:
-            _gate_state["held"] = False
-            _close_port_block_window()
-
-    def _abort_restart_and_unblock(reason):
-        """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""
-        logger.error("Aborting recreate_lvstore on %s for %s: %s",
-                     snode.get_id(), lvs_name, reason)
-        # Release the fences FIRST. Every fenced peer has its client
-        # listener blocked and cannot answer keep-alives, so each extra
-        # second risks clients (KATO 4s) dropping that path. _kill_app()
-        # used to run first and cost ~1.2s of spdk_process_kill +
-        # spdk_process_is_up polling before any peer was released
-        # (2026-08-31: unblock landed at 13:33:29.13, one second after the
-        # client had already failed IO at 13:33:28). Killing our own SPDK
-        # can wait; a fenced healthy peer cannot.
-        #
-        # Iterate over a copy: _unblock_peer_port removes the peer from
-        # blocked_peers, and a loop over the live list skips every second
-        # entry. The leader is appended after the non-leaders, so it was the
-        # one left fenced (EKS bed 2026-10-30: the acting leader's client port
-        # went to reject mode, clients failed over to the tertiary, which
-        # took the JM write lock, and the two writers' JC aborted both nodes).
-        for peer in list(blocked_peers):  # noqa: PERF101
-            _unblock_peer_port(peer)
-        _persist_deferred_node_fields()
-        _release_hub_locks()
-        _kill_app()
-        _release_block_gate()
-        _flush_port_events()
-        raise Exception(f"Abort restart: {reason}")
-
-    def _fence_elapsed():
-        """Seconds since the first peer port was fenced (0.0 if none is)."""
-        if not _block_started:
-            return 0.0
-        return time.monotonic() - min(_block_started.values())
-
-    def _check_fence_deadline(where):
-        """Release and abort if the fence has run to FENCE_DEADLINE_SEC.
-
-        Called between steps and inside the in-window wait loops. The fence
-        must be lifted by us before SPDK converts the block to reject at
-        ack_timeout * 4 (8s): the conversion quiesces every qpair on the port,
-        so the client loses the path rather than merely waiting for it.
-        """
-        if not _block_started:
-            return
-        elapsed = _fence_elapsed()
-        if elapsed >= constants.FENCE_DEADLINE_SEC:
-            _abort_restart_and_unblock(
-                f"port fence held {elapsed:.3f}s at {where}, over the "
-                f"{constants.FENCE_DEADLINE_SEC}s deadline (reject threshold 8s)")
-
-    def _fenced(method, *args, budget=None, **kwargs):
-        """Run one RPC of the restart flow, bounded while a peer port is fenced.
-
-        ``method`` is the RPCClient method name. The client is built per call
-        so its timeout can be clamped to the time left on the fence -- a fixed
-        per-call timeout is not enough on its own, since a 6s call started late
-        in the window would still overrun the deadline.
-
-        With no peer port fenced (every peer skipped as disconnected or
-        offline) the call runs on the ordinary client: see
-        ``_fence_rpc_bounds`` for why the fence budget must not apply there.
-
-        Any failure, a timeout above all, releases the fence and aborts the
-        restart. The task runner re-queues an aborted restart; a quiesced
-        client path is not recoverable.
-        """
-        timeout, retry = _fence_rpc_bounds(bool(_block_started), _fence_elapsed(), budget,
-                                           removal_in_progress=removal_in_progress)
-        if timeout is not None and timeout <= 0:
-            _check_fence_deadline(method)
-        try:
-            if timeout is None:
-                client = snode.rpc_client()
-            else:
-                client = snode.rpc_client(timeout=timeout, retry=retry)
-            return getattr(client, method)(*args, **kwargs)
-        except Exception as e:
-            if timeout is None:
-                _abort_restart_and_unblock(
-                    f"{method} failed with no port fenced during a removal "
-                    f"(client defaults): {e}")
-            _abort_restart_and_unblock(
-                f"{method} failed inside the port-fence window "
-                f"(budget {timeout:.2f}s, fence {_fence_elapsed():.3f}s): {e}")
+    # The client-port fence of this rebuild's leadership hand-off: blocked
+    # peers, window gate, hublvol locks, deferred side effects
+    # (_LvsFence / transfer_lvs_leadership). An abort kills this node's SPDK.
+    fence = _LvsFence(lvs_node, snode, db_controller, on_abort=_kill_app,
+                      removal_in_progress=removal_in_progress)
+    _block_longest = fence.block_longest
+    _flush_port_events = fence.flush_port_events
+    _persist_deferred_node_fields = fence.persist_deferred_node_fields
+    _release_hub_locks = fence.release_hub_locks
+    _release_block_gate = fence.release_block_gate
+    _abort_restart_and_unblock = fence.abort
+    _fenced = fence.fenced
 
     # #4: compute the examine-idempotency probes BEFORE the block window —
     # they only read snode's own fresh SPDK (raid built at ###1 pre-block),
@@ -14416,501 +16903,90 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     lvstore_already = _rpc_lvstore_exists(rpc_client, lvs_name)
 
     try:
-        if not activation_mode:
-            try:
-                from simplyblock_core.utils.hublvol_reconnect import (
-                    HublvolReconnectCoordinator,
-                )
-                _hub_coord = HublvolReconnectCoordinator(db_controller)
-                for _peer in sec_nodes:
-                    if _peer.get_id() in disconnected_peers:
-                        continue
-                    _hub_locks[_peer.get_id()] = _hub_coord.acquire_lock(
-                        _peer.get_id(), lvs_node.lvstore)
-            except Exception as _hl_e:
-                logger.warning(
-                    "Pre-acquire of hublvol locks for %s failed — reconcile "
-                    "will lock in-window: %s", lvs_name, _hl_e)
-
-            # #1 pre-stage: NVMf subsystems + listeners for the hublvols wired
-            # inside the window have no lvstore/bdev dependency — create them
-            # here so the in-window expose calls reduce to probe+add_ns. All
-            # params come from persisted hublvol metadata; every call is
-            # idempotent and failure is non-fatal (in-window expose creates as
-            # before).
-            try:
-                if lvs_node.hublvol:
-                    _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
-                    # snode's own (leader) hublvol subsystem
-                    snode.prestage_hublvol_subsystem(
-                        nqn=lvs_node.hublvol.nqn,
-                        model_number=lvs_node.hublvol.model_number,
-                        port=lvs_node.hublvol.nvmf_port,
-                        ana_state="optimized",
-                    )
-                    # transferhub subsystem (only when its metadata is persisted;
-                    # otherwise create_transfer_hublvol mints a fresh model
-                    # number in-window and must own the create)
-                    if snode.transfer_hublvol and snode.transfer_hublvol.nqn:
-                        snode.prestage_hublvol_subsystem(
-                            nqn=snode.transfer_hublvol.nqn,
-                            model_number=snode.transfer_hublvol.model_number,
-                            port=snode.transfer_hublvol.nvmf_port,
-                            ana_state="optimized",
-                        )
-                    # sec_1's shared-NQN secondary hublvol subsystem
-                    _sec1_pre = next(
-                        (p for p in sec_nodes
-                         if p.get_id() == lvs_node.secondary_node_id
-                         and p.get_id() not in disconnected_peers), None)
-                    if _sec1_pre is not None:
-                        _sec1_pre.prestage_hublvol_subsystem(
-                            nqn=StorageNode.lvs_hublvol_nqn(
-                                lvs_node, _cluster_pre.nqn),
-                            model_number=lvs_node.hublvol.model_number,
-                            port=lvs_node.hublvol.nvmf_port,
-                            ana_state="non_optimized",
-                            min_cntlid=1000,
-                        )
-            except Exception as _ps_e:
-                logger.warning(
-                    "Hublvol subsystem pre-stage failed for %s "
-                    "(in-window expose will create it): %s", lvs_name, _ps_e)
-
-            # Pre-block controller ATTACH from every connected peer to snode's
-            # pre-staged hublvol subsystem. The subsystem is still NAMESPACE-LESS
-            # (the hublvol bdev exists only after the in-window examine): the
-            # controller attaches empty and the peer's n1 bdev surfaces via AER
-            # once the in-window add_ns runs — connect_to_hublvol's n1-wait
-            # covers that. The attach is inert until the in-window
-            # bdev_lvol_connect_hublvol registers the redirect. Non-fatal per
-            # peer: failure falls back to the in-window attach.
-            if lvs_node.hublvol:
-                for _peer in sec_nodes:
-                    if _peer.get_id() in disconnected_peers:
-                        continue
-                    if _peer.get_id() == lvs_node.secondary_node_id:
-                        _pre_role = "secondary"
-                    elif _peer.get_id() == lvs_node.tertiary_node_id:
-                        _pre_role = "tertiary"
-                    else:
-                        continue
-                    try:
-                        _peer.connect_to_hublvol(
-                            snode, failover_node=None, role=_pre_role,
-                            rpc_timeout=1.0, lvs_node=lvs_node,
-                            coordinator_lock=_hub_locks.get(_peer.get_id()),
-                            attach_only=True)
-                    except Exception as _pa_e:
-                        logger.warning(
-                            "Pre-block hublvol attach on %s for %s failed "
-                            "(in-window attach will retry): %s",
-                            _peer.get_id(), lvs_name, _pa_e)
-
-            # Precondition, paid BEFORE the window gate and before any peer
-            # port is fenced: wait out in-flight JM replication on the leader
-            # here, where waiting is free.
-            #
-            # This wait used to live at step (a) inside the loop below. Once
-            # the non-leader block was reordered ahead of the leader's suspend
-            # (see ORDER MATTERS below), step (a) began running with peer ports
-            # already fenced -- and wait_for_jm_rep_tasks_to_finish defaults to
-            # retry=10/delay=20, a 200s budget whose *single* sleep is 20s,
-            # against a FENCE_DEADLINE_SEC of 7.5s. The ambient fence RPC
-            # budget (rpc_budget, set at each block below) clamps the helper's
-            # RPCs but cannot clamp its time.sleep().
-            #
-            # 2026-09-10 14:32:20, LVS_13: a91b9596 was fenced, the leader
-            # 588fdb5b then reported active replication and this wait slept
-            # 20s. The next fence check (the inflight drain, ~350 lines down)
-            # aborted at 20.087s. SPDK converts a port block to reject at
-            # ack_timeout * 4 = 8s, quiescing every qpair on the port, so
-            # a91b9596's clients lost the path rather than waiting for it.
-            # With replication active on the leader that abort was certain,
-            # not a flake.
-            #
-            # A False return is NOT fatal and deliberately does not abort:
-            # jc_disable_replication in (c) below is the authority on whether
-            # replication is actually suspended, and it retries.
-            if current_leader and current_leader.get_id() not in disconnected_peers:
-                try:
-                    _jm_clear = current_leader.wait_for_jm_rep_tasks_to_finish(
-                        lvs_jm_vuid)
-                except Exception as e:
-                    # Same contract as step (a) below, which this wait was
-                    # moved out of: a RAISING replication-wait aborts the
-                    # restart, and the message must still name it. Failing
-                    # here is strictly cheaper -- no port is fenced yet.
-                    raise Exception(
-                        f"Abort restart: replication-wait on leader "
-                        f"{current_leader.get_id()} failed: {e}")
-                if not _jm_clear:
-                    logger.warning(
-                        "JM replication still active on leader %s (jm_vuid %s) "
-                        "after the pre-fence wait; entering the window anyway "
-                        "-- jc_disable_replication decides",
-                        current_leader.get_id(), lvs_jm_vuid)
-
-            # Serialize the client-port outage span across all concurrent
-            # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
-            # order: per-LVS recreate lock -> hublvol locks -> window gate).
-            _acquire_block_gate()
-            ### 3- block LVS port on every connected peer (leader + non-leaders),
-            # then suspend the leader's journal replication before the flap.
-            #
-            # Per attempt against the current leader:
-            #   a. confirm no in-flight JM replication with ONE unpaced poll
-            #      (the patient wait is paid before the gate above, where it
-            #      costs no client IO);
-            #   b. mark the leader in_creation and block its LVS port;
-            #   c. jc_disable_replication(jm_vuid):
-            #        True  -> no active replication; it is now suspended (~12s) ->
-            #                 proceed with the drain + leadership drop below.
-            #        False -> active replication present -> unblock the leader port
-            #                 and retry the whole sequence (re-wait, re-block,
-            #                 re-disable).
-            #
-            # Without blocking the tertiary too, client IO can leak to it during the
-            # leader flap: tertiary's LVOL listener stays open and serves writes
-            # whose hublvol redirect target is mid-transition, producing
-            # writer_conflict events on the journal. Non-leader peers are blocked
-            # each peer stays blocked until its connect_to_hublvol succeeds in ### 8b.
-            #
-            # ORDER MATTERS. Block the non-leader peers FIRST, then the leader,
-            # and only then start the leader's demote (replication suspend +
-            # leadership drop below). A non-leader (e.g. the tertiary) left
-            # serving while the leader is mid-demote keeps its LVOL listener
-            # open, accepts client IO, and redirects it through the hublvol to a
-            # leader whose leadership is in transition -> writer_conflict on the
-            # journal. Blocking the leader first (as this used to) left exactly
-            # that window open between the leader's replication-disable and the
-            # non-leader block.
-            for sec_node in sec_nodes:
-                if sec_node is current_leader:
-                    continue
-                if sec_node.get_id() in disconnected_peers:
-                    continue
-                if sec_node in blocked_peers:
-                    continue
-                try:
-                    sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
-                    _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
-                    blocked_peers.append(sec_node)
-                    _block_started[sec_node.get_id()] = time.monotonic()
-                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
-                                          constants.FENCE_RPC_RETRY)
-                except Exception as e:
-                    # Cannot safely decide "peer gone" vs "peer slow" before
-                    # snode has reconnected to peer hublvols. A non-leader peer
-                    # left serving on snode_lvs_port during the leader flap can
-                    # accept client IO whose hublvol redirect is mid-transition,
-                    # producing a writer conflict.
-                    _abort_restart_and_unblock(
-                        f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
-
-            # Now block the leader and suspend its replication. Every non-leader
-            # port is already shut, so the demote below starts only once ALL
-            # ports are blocked.
-            if current_leader and current_leader.get_id() not in disconnected_peers:
-                _REPL_SUSPEND_MAX_ATTEMPTS = 10
-                replication_suspended = False
-                for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
-                    # a. confirm no active replication on the leader.
-                    #
-                    # retry=1/delay=0 is ONE poll and no sleep: the helper's
-                    # RPCs inherit the ambient fence budget, so this costs
-                    # ~0.5s worst case. It only catches a leader that resumed
-                    # replicating between the pre-fence wait and here; (c)
-                    # below is the authority. Do NOT restore the default
-                    # 10 x 20s budget at this call site -- one of those sleeps
-                    # alone is 2.7x the whole fence deadline.
-                    try:
-                        ret = current_leader.wait_for_jm_rep_tasks_to_finish(
-                            lvs_jm_vuid, retry=1, delay=0)
-                        if not ret:
-                            msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
-                            logger.error(msg)
-                            storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
-                    except Exception as e:
-                        raise Exception(
-                            f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
-
-                    # The fence clock is otherwise unchecked from the
-                    # non-leader block above until the inflight drain ~350
-                    # lines below. Check it here -- outside the try, so the
-                    # abort is not re-wrapped by the except -- so any overrun
-                    # aborts while still under the 8s reject threshold.
-                    _check_fence_deadline("jm replication confirm")
-
-                    # b. block the leader's LVS port
-                    try:
-                        # Field-scoped and transactional. A plain
-                        # `leader.lvstore_status = X; leader.write_to_db()`
-                        # serialises the WHOLE record from a copy read at
-                        # the top of this function -- before the peer went
-                        # down -- so it silently restores status=online over
-                        # the monitor's offline write, and emits no
-                        # STATUS_CHANGE event because it never goes through
-                        # the status path.
-                        #
-                        # 2026-08-31: that resurrected "online" for a node
-                        # whose SPDK was dead (it started at 12:02:31, the
-                        # record read online from 11:52 to 12:02). So
-                        # _check_peer_disconnected could never observe
-                        # offline, the port-block below was issued to a dead
-                        # node, and the restart aborted -- and every retry
-                        # re-resurrected it: 5 aborts over 15 minutes, with
-                        # the peer reported online in sn list throughout.
-                        # Deliberately does NOT rebind current_leader: the
-                        # rest of this flow keeps the object it was called
-                        # with, so behaviour is unchanged. Not clobbering the
-                        # record is enough to break the retry loop --
-                        # _check_peer_disconnected re-reads from FDB on the
-                        # next attempt, so it now sees offline and skips the
-                        # port-block instead of failing on it forever.
-                        db_controller.atomic_update(
-                            current_leader,
-                            lambda x: setattr(x, "lvstore_status", "in_creation"))
-                        current_leader.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)
-                        _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
-                        blocked_peers.append(current_leader)
-                        _block_started[current_leader.get_id()] = time.monotonic()
-                        # From here until the last port is released, every
-                        # rpc_client() built on this thread -- including the
-                        # ones inside hublvol/bdev-stack helpers we do not own
-                        # -- is bounded. Cleared in _unblock_peer_port once
-                        # blocked_peers empties, and in the outer finally.
-                        rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
-                                              constants.FENCE_RPC_RETRY)
-                        # Redundant hublvol paths must land AFTER the fence,
-                        # not 3s after the foreground attach (which is still
-                        # inside it -- 2026-09-01 16:28:27.739, mid-block).
-                        hublvol_reconnect.set_defer_gate(_defer_gate_event)
-                    except Exception as e:
-                        # Failing to port-block the current leader means we cannot
-                        # safely promote snode: the old leader may still be serving
-                        # IO, and a parallel leader on snode would produce a writer
-                        # conflict (observed 2026-04-25, LVS_6609 incident).
-                        # _check_hublvol_connected from snode is meaningless here —
-                        # snode hasn't reconnected to peer hublvols yet — so we
-                        # cannot use it to discriminate "peer gone" from "peer slow".
-                        # Abort the attempt; the task runner will retry.
-                        _abort_restart_and_unblock(
-                            f"Failed to port-block leader {current_leader.get_id()}: {e}")
-
-                    repl_disabled = False
-                    # c. suspend journal replication while the port is blocked
-                    try:
-                        # Bounded: this runs with the leader's port already
-                        # fenced, and a bare rpc_client() inherits
-                        # RPCClient(timeout=180, retry=3) -> ~726s worst case
-                        # with backoff. The leader answers this in ~11ms; if
-                        # it has just died, the fence must not be held for
-                        # minutes (client KATO is 4s). Failure here is
-                        # already handled: repl_disabled stays False, the
-                        # port is unblocked and the suspend loop retries.
-                        repl_disabled = current_leader.rpc_client(
-                            timeout=0.5, retry=1).jc_disable_replication(lvs_jm_vuid)
-                    except RPCRemoteError as e:
-                        if e.code == RPCErrorCode.method_not_found:
-                            try:
-                                logger.warning("Failed to disable replication on leader, trying other method")
-                                ret = current_leader.rpc_client(
-                                    timeout=0.5, retry=1).jc_get_jm_status(lvs_jm_vuid)
-                                repl_disabled = True
-                                for jm in ret:
-                                    if ret[jm] is False:  # jm is not ready (has active replication task)
-                                        repl_disabled = False
-                                        break
-                            except Exception as ex:
-                                _abort_restart_and_unblock(
-                                    f"jc_get_jm_status on leader {current_leader.get_id()} failed: {ex}")
-                        else:
-                            _abort_restart_and_unblock(
-                                f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
-                    except RPCException as e:
-                        _abort_restart_and_unblock(
-                            f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
-
-                    if repl_disabled:
-                        replication_suspended = True
-                        break
-
-                    # Active replication still present: unblock the leader port and
-                    # retry the full sequence from the replication wait.
-                    logger.warning(
-                        "jc_disable_replication reports active replication on leader %s "
-                        "(attempt %d/%d); unblocking and retrying",
-                        current_leader.get_id(), _attempt + 1, _REPL_SUSPEND_MAX_ATTEMPTS)
-                    _unblock_peer_port(current_leader)
-
-                if not replication_suspended:
-                    _abort_restart_and_unblock(
-                        f"Could not suspend journal replication on leader "
-                        f"{current_leader.get_id()} after {_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
-
-            if current_leader and current_leader in blocked_peers:
-                # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
-                leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
-
-                ### 4- drain in-flight IO BEFORE dropping leadership
-                #
-                # If we drop leadership while IO is still in distrib, those
-                # in-flight IOs land on a non-leader lvstore and either get
-                # redirected via the hub bdev (which may not be open yet on
-                # the new follower) or aborted — both produce client-visible
-                # IO errors and qpair tear-downs.  Concrete example: incident
-                # 2026-05-02 (k8s_native_failover_ha-20260502-101452), worker1.
-                # 123 state-9 IOs were in flight on its distribs at the moment
-                # set_leader=False fired; the open of LVS_4729/hublvoln1
-                # returned ENODEV; nvmf_tcp_qpair_set_recv_state floods and
-                # disconnects followed ~1.6 s later.
-                #
-                # The drain runs while the leader's lvol port is iptables-
-                # blocked, so we must not hold this open indefinitely.  The
-                # earlier fixed 0.5 s sleep was a workaround put in place
-                # after the original 10 s drain regression — but that
-                # regression was on the recreate_lvstore_on_non_leader path,
-                # where the blocked node is the configured primary and runs
-                # data migration (which never pauses on port block, hence the
-                # poll never settled).  *This* path blocks `current_leader`,
-                # which is a secondary or tertiary that became acting leader
-                # while the configured primary was out — and migration never
-                # runs on a secondary/tertiary, so the inflight counter
-                # genuinely drains.
-                #
-                # Bound at _DRAIN_BOUND_SEC anyway: a slow JM/distrib
-                # completion shouldn't be allowed to hold the leader's port
-                # blocked beyond client max_latency.  On timeout we proceed
-                # with the drop and accept the same residual class of error
-                # this is trying to prevent — but bounded.
-                _DRAIN_BOUND_SEC = _DRAIN_BOUND_SEC_DEFAULT
-                _DRAIN_POLL_SEC = _DRAIN_POLL_SEC_DEFAULT
-                deadline = time.time() + _DRAIN_BOUND_SEC
-                drained = False
-                while time.time() < deadline:
-                    _check_fence_deadline("inflight drain")
-                    try:
-                        still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
-                    except Exception as e:
-                        logger.warning(
-                            "bdev_distrib_check_inflight_io poll failed for %s on %s: %s",
-                            lvs_name, current_leader.get_id(), e)
-                        break
-                    if not still_inflight:
-                        drained = True
-                        break
-                    time.sleep(_DRAIN_POLL_SEC)
-                if not drained:
-                    # Continuing with the leadership drop while IO is still in
-                    # the distrib pipeline produces exactly the failure this
-                    # drain is meant to prevent (in-flight IO hitting a
-                    # non-leader lvstore at the moment of transition: hub-bdev
-                    # redirect failures, qpair tear-downs, client IO errors).
-                    # Abort cleanly: _abort_restart_and_unblock kills the
-                    # recovering node's SPDK, sets it OFFLINE, and unblocks
-                    # every peer port we just blocked above. The restart task
-                    # runner re-queues from there; on the next attempt the
-                    # cluster may have settled enough for drain to complete
-                    # within the bound.
-                    _abort_restart_and_unblock(
-                        f"Inflight IO did not drain on acting-leader "
-                        f"{current_leader.get_id()} within {_DRAIN_BOUND_SEC}s; "
-                        f"refusing to drop leadership against a non-empty distrib "
-                        f"pipeline")
-
-                ### 5- drop leadership on current leader (drain complete)
-                try:
-                    leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
-                    leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
-                except Exception as e:
-                    _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
-
-            if disconnected_peers:
-                logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
-                _fenced("jc_explicit_synchronization", lvs_jm_vuid)
-
-        ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
-        # #4: raid/lvstore probes were computed pre-block (see above the block
-        # section) — they read snode's own fresh SPDK only, and
-        # force_to_non_leader does not affect bdev/lvstore presence.
-        _fenced("bdev_distrib_force_to_non_leader", lvs_jm_vuid)
-        if raid_already and lvstore_already:
-            logger.info(
-                "Raid %s and lvstore %s already present on %s; skipping examine",
-                lvs_raid, lvs_name, snode.get_id())
-        else:
-            if raid_already and not lvstore_already and raid_preexisted:
-                # Raid pre-existed this pass and the lvstore module never surfaced
-                # it on this SPDK process (a prior activation pass examined the
-                # raid and the lvstore-side examine failed/was incomplete).
-                # SPDK rejects re-examine of an already-examined bdev with
-                # "Duplicate bdev name for manual examine: <raid>", so calling
-                # bdev_examine again is a no-op that leaves the lvstore
-                # missing forever and burns the activation retry loop.
-                #
-                # Drop the raid so the underlying distribs are reusable, then
-                # re-create it via _create_bdev_stack (which is itself
-                # idempotent — it skips bdevs already present and only creates
-                # what's missing). The fresh bdev_examine below now runs
-                # against a newly-registered raid and the lvstore module gets
-                # a real chance to surface.
+        # Runs inside the fence, between the old leader's demote and the grant
+        # (transfer_lvs_leadership's before_grant).
+        def _examine_and_validate():
+            ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
+            # #4: raid/lvstore probes were computed pre-block (see above the block
+            # section) — they read snode's own fresh SPDK only, and
+            # force_to_non_leader does not affect bdev/lvstore presence.
+            _fenced("bdev_distrib_force_to_non_leader", lvs_jm_vuid)
+            if raid_already and lvstore_already:
                 logger.info(
-                    "Raid %s present but lvstore %s did not surface on %s; "
-                    "dropping raid for clean re-examine",
+                    "Raid %s and lvstore %s already present on %s; skipping examine",
                     lvs_raid, lvs_name, snode.get_id())
-                try:
-                    _fenced("bdev_raid_delete", lvs_raid)
-                except Exception as e:
-                    logger.warning(
-                        "bdev_raid_delete(%s) raised: %s — proceeding to "
-                        "_create_bdev_stack which is idempotent", lvs_raid, e)
-                stack = lvs_node.lvstore_stack if is_takeover else None
-                if is_takeover:
-                    ret, err = _create_bdev_stack(snode, stack, primary_node=lvs_node)
-                else:
-                    ret, err = _create_bdev_stack(snode, [])
-                if not ret:
-                    logger.error(
-                        "Failed to rebuild bdev stack on %s after raid drop: %s",
-                        snode.get_id(), err)
-                    # Fall through; bdev_examine below will surface what we have.
-            elif raid_already and not lvstore_already:
-                # Normal restart: the raid was freshly built this pass in step 1
-                # and has never been examined, so the first-time bdev_examine below
-                # surfaces the lvstore. Dropping+recreating it here would be pure
-                # churn inside the (minimized) port-block window — the duplicate
-                # bdev_raid_create observed 2026-06-12 (LVS_5199).
-                logger.info(
-                    "Raid %s freshly built this pass on %s; examining without drop",
-                    lvs_raid, snode.get_id())
+            else:
+                if raid_already and not lvstore_already and raid_preexisted:
+                    # Raid pre-existed this pass and the lvstore module never surfaced
+                    # it on this SPDK process (a prior activation pass examined the
+                    # raid and the lvstore-side examine failed/was incomplete).
+                    # SPDK rejects re-examine of an already-examined bdev with
+                    # "Duplicate bdev name for manual examine: <raid>", so calling
+                    # bdev_examine again is a no-op that leaves the lvstore
+                    # missing forever and burns the activation retry loop.
+                    #
+                    # Drop the raid so the underlying distribs are reusable, then
+                    # re-create it via _create_bdev_stack (which is itself
+                    # idempotent — it skips bdevs already present and only creates
+                    # what's missing). The fresh bdev_examine below now runs
+                    # against a newly-registered raid and the lvstore module gets
+                    # a real chance to surface.
+                    logger.info(
+                        "Raid %s present but lvstore %s did not surface on %s; "
+                        "dropping raid for clean re-examine",
+                        lvs_raid, lvs_name, snode.get_id())
+                    try:
+                        _fenced("bdev_raid_delete", lvs_raid)
+                    except Exception as e:
+                        logger.warning(
+                            "bdev_raid_delete(%s) raised: %s — proceeding to "
+                            "_create_bdev_stack which is idempotent", lvs_raid, e)
+                    stack = lvs_node.lvstore_stack if is_takeover else None
+                    if is_takeover:
+                        ret, err = _create_bdev_stack(snode, stack, primary_node=lvs_node)
+                    else:
+                        ret, err = _create_bdev_stack(snode, [])
+                    if not ret:
+                        logger.error(
+                            "Failed to rebuild bdev stack on %s after raid drop: %s",
+                            snode.get_id(), err)
+                        # Fall through; bdev_examine below will surface what we have.
+                elif raid_already and not lvstore_already:
+                    # Normal restart: the raid was freshly built this pass in step 1
+                    # and has never been examined, so the first-time bdev_examine below
+                    # surfaces the lvstore. Dropping+recreating it here would be pure
+                    # churn inside the (minimized) port-block window — the duplicate
+                    # bdev_raid_create observed 2026-06-12 (LVS_5199).
+                    logger.info(
+                        "Raid %s freshly built this pass on %s; examining without drop",
+                        lvs_raid, snode.get_id())
 
-            # Examine is required whenever the lvstore isn't surfaced — whether
-            # the raid was freshly created by _create_bdev_stack (normal restart
-            # path) or pre-existing with stale state (activation retry). The
-            # previous "raid_already → skip examine" shortcut broke the normal
-            # restart path: _create_bdev_stack leaves the raid in place but does
-            # not examine it, so the lvstore never surfaces and the subsequent
-            # get_lvstore validation fails every time.
-            _fenced("bdev_examine", lvs_raid)
+                # Examine is required whenever the lvstore isn't surfaced — whether
+                # the raid was freshly created by _create_bdev_stack (normal restart
+                # path) or pre-existing with stale state (activation retry). The
+                # previous "raid_already → skip examine" shortcut broke the normal
+                # restart path: _create_bdev_stack leaves the raid in place but does
+                # not examine it, so the lvstore never surfaces and the subsequent
+                # get_lvstore validation fails every time.
+                _fenced("bdev_examine", lvs_raid)
 
-            ### 6- wait for examine
-            _fenced("bdev_wait_for_examine",
-                    budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC)
+                ### 6- wait for examine
+                _fenced("bdev_wait_for_examine",
+                        budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC)
 
-        # Validate lvstore recovery
-        ret = _fenced("get_lvstore", lvs_name)
-        if not ret:
-            logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
-            if activation_mode:
-                # In activation we can't safely patch partial on-disk state.
-                # Tell the caller to restart this node before continuing.
-                raise LVSRestartRequiredError(
-                    snode.get_id(), lvs_name,
-                    detail=f"raid={lvs_raid} present but lvstore did not recover"
-                    if raid_already else "examine did not produce lvstore")
-            if not force:
-                _abort_restart_and_unblock("Failed to recover lvstore")
+            # Validate lvstore recovery
+            ret = _fenced("get_lvstore", lvs_name)
+            if not ret:
+                logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
+                if activation_mode:
+                    # In activation we can't safely patch partial on-disk state.
+                    # Tell the caller to restart this node before continuing.
+                    raise LVSRestartRequiredError(
+                        snode.get_id(), lvs_name,
+                        detail=f"raid={lvs_raid} present but lvstore did not recover"
+                        if raid_already else "examine did not produce lvstore")
+                if not force:
+                    _abort_restart_and_unblock("Failed to recover lvstore")
 
         # Validate all bdev recovery — DEFERRED to after the port unblock
         # (2026-07-22, user decision): the per-lvol probes cost 60-230ms of
@@ -14931,195 +17007,26 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     if not force:
                         _abort_restart_and_unblock("Failed to recover lvstore")
 
-        ### 7- take leadership
-        # Derive the kernel-side role from snode's topology relative to lvs_node.
-        # On takeover snode is acting as leader, but its kernel role must still
-        # reflect topology so the peer view of the original primary stays
-        # coherent. Hardcoding role="primary" caused the LVS_9060 follow-on
-        # incident (2026-04-25 11:28:50 run): when the original primary later
-        # rejoins, peers disagree on who the primary is and a writer conflict
-        # follows.
-        if snode.get_id() == lvs_node.get_id():
-            snode_lvs_role = "primary"
-        elif snode.get_id() == lvs_node.secondary_node_id:
-            snode_lvs_role = "secondary"
-        elif snode.get_id() == lvs_node.tertiary_node_id:
-            snode_lvs_role = "tertiary"
+        ### 3..8b- fenced hand-off: block the peers, demote the current leader,
+        ### examine, take leadership, hublvol + peer connects (moved into
+        ### transfer_lvs_leadership, shared with the sync-replication promote).
+        deferred_tertiary_paths: list = []
+        if activation_mode:
+            # No peer operations: examine and take leadership only.
+            _examine_and_validate()
+            _grant_lvs_leadership(fence, force=force)
         else:
-            _abort_restart_and_unblock(
-                f"snode {snode.get_id()} is not a registered peer of "
-                f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
-        ret = _fenced(
-            "bdev_lvol_set_lvs_opts",
-            lvs_name,
-            groupid=lvs_jm_vuid,
-            subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
-            hublvol_port=lvs_node.get_hublvol_port(lvs_name),
-            role=snode_lvs_role,
-        )
-        # Journal replay and blobstore re-level happen inside this call, so it
-        # gets its own budget (see FENCE_SET_LEADER_TIMEOUT_SEC) -- the 0.5s
-        # norm is sized for calls that only schedule work.
-        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True,
-                      budget=constants.FENCE_SET_LEADER_TIMEOUT_SEC)
-        leader_restored = False
-        for _ in range(10):
-            # 10 x 0.2s of sleep plus 10 RPCs is a large slice of the fence
-            # budget on its own; give up the fence rather than the deadline.
-            _check_fence_deadline("leader-restore poll")
-            try:
-                ret = _fenced("get_lvstore", lvs_name)
-                if ret and ret.get("lvs leadership"):
-                    leader_restored = True
-                    break
-            except Exception:
-                pass
-            time.sleep(0.2)
-        if not leader_restored:
-            logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
-            if not force:
-                _abort_restart_and_unblock(f"Failed to restore leadership for {lvs_name}")
-
-        if not activation_mode:
-            ### 8- create hublvol and expose via subsystem with listeners
-            if sec_nodes:
-                if is_takeover:
-                    try:
-                        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-                        snode.adopt_hublvol(lvs_node, cluster.nqn)
-                        logger.info("Adopted hublvol on new leader %s for %s", snode.get_id(), lvs_name)
-                    except Exception as e:
-                        logger.error("Error adopting hublvol on new leader: %s", e)
-                        _abort_restart_and_unblock(f"adopt_hublvol on new leader failed: {e}")
-                else:
-                    try:
-                        if not snode.recreate_hublvol():
-                            _abort_restart_and_unblock(
-                                f"recreate_hublvol returned False on {snode.get_id()}")
-                    except RPCException as e:
-                        logger.error("Error creating hublvol: %s", e)
-                        _abort_restart_and_unblock(f"recreate_hublvol raised: {e}")
-                    try:
-                        # defer_db_write: the full-object node write (~150ms FDB
-                        # round-trip caught in-window by the [NODE-WRITE]
-                        # tripwire) is persisted atomically post-unblock below.
-                        snode.create_transfer_hublvol(defer_db_write=True)
-                        _deferred_node_persist["needed"] = True
-                    except RPCException as e:
-                        logger.error("Error creating transfer hublvol: %s", e)
-
-            ### 8b- connect peers to hublvol WITHIN port-blocked window
-            # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
-            # BEFORE we unblock its port.  Otherwise new IO can arrive and trigger
-            # spdk_lvs_trigger_leadership_switch, re-promoting the old leader and
-            # causing a writer conflict.
-            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-
-            # Identify the topological secondary owner (sec_1) of this LVS by
-            # looking at lvs_node, NOT by sec_nodes ordering. The previous
-            # index-based code (sec_nodes[0]) routed sec_1 work to whichever
-            # peer happened to be first after disconnected_peers filtering —
-            # which on the LVS_9060 takeover (2026-04-25 11:28:50) wasn't even
-            # the right LVS, since create_secondary_hublvol read the lvstore
-            # name off snode.lvstore (snode's own primary, not the LVS being
-            # taken over).
-            sec1_id = lvs_node.secondary_node_id
-            sec1_node = next((s for s in sec_nodes if s.get_id() == sec1_id), None)
-            sec1_online = bool(sec1_node and sec1_node.get_id() not in disconnected_peers)
-
-            # Create the sec_1 hublvol only if sec_1 is a peer (not snode itself)
-            # and it's online. When snode IS the topological sec_1 (secondary
-            # owner taking leadership), there is no separate node to expose
-            # the secondary hublvol on — the leader's primary hublvol on snode
-            # is the only path until the original primary returns.
-            if sec1_online and sec1_node is not None:
-                try:
-                    sec1_node.create_secondary_hublvol(lvs_node, cluster.nqn)
-                except Exception as e:
-                    logger.error("Error creating secondary hublvol on sec_1: %s", e)
-                    _abort_restart_and_unblock(
-                        f"create_secondary_hublvol on {sec1_node.get_id()} raised: {e}")
-
-            # Track tertiary→secondary failover-path attaches to run AFTER the
-            # peer port unblock — keeping the in-freeze attach single-path with
-            # a 0.2 s RPC budget and pushing the second-path INTER_ATTACH_SLEEP
-            # outside the IO-impact window. ``deferred_tertiary_paths`` holds
-            # ``(tert_node, primary_node, sec1_node)`` tuples to apply later.
-            deferred_tertiary_paths = []
-
-            for sec_node in sec_nodes:
-                if sec_node.get_id() in disconnected_peers:
-                    continue
-                # Role and failover are determined by topology, not by index.
-                # An index-based assignment (sec_nodes[0] -> 'secondary',
-                # rest -> 'tertiary') breaks when the original primary is
-                # filtered out via disconnected_peers and shifts the
-                # remaining peers up one slot.
-                if sec_node.get_id() == lvs_node.secondary_node_id:
-                    sec_role = "secondary"
-                elif sec_node.get_id() == lvs_node.tertiary_node_id:
-                    sec_role = "tertiary"
-                    # Defer the tertiary→secondary path; in-freeze attach is
-                    # single-path against the (returning) primary only.
-                    if sec1_online:
-                        deferred_tertiary_paths.append((sec_node, snode, sec1_node))
-                else:
-                    logger.warning(
-                        "Skipping hublvol connect for %s: not a registered "
-                        "peer of %s (lvs_node=%s)",
-                        sec_node.get_id(), lvs_name, lvs_node.get_id())
-                    continue
-                try:
-                    # Single-path attach against ``snode`` (the leader). The
-                    # secondary failover for tertiary is appended in a
-                    # post-unblock pass via ``add_hublvol_failover_path``.
-                    #
-                    # Pass lvs_node=lvs_node so LVS metadata (lvstore name,
-                    # jm_vuid, port, hublvol NQN/bdev) comes from the
-                    # configured primary of the LVS being taken over, *not*
-                    # from snode — when this is a takeover (lvs_primary set,
-                    # configured primary offline), snode.hublvol points at
-                    # snode's OWN primary-LVS, which is the wrong LVS for
-                    # this connection. Without it, the call sets up the
-                    # wrong LVS on the peer, the LVS being taken over is
-                    # never wired up, and the subsequent peer-port unblock
-                    # opens the tertiary path to a still-unconfigured LVS —
-                    # any client IO arriving on the still-open existing
-                    # connection triggers spdk_lvs_trigger_leadership_switch
-                    # on the peer and produces a dual-leader writer
-                    # conflict. (incident 2026-05-21 05:38:14 k8s_native_
-                    # resilient_failover-20260520-231822, LVS_270 takeover
-                    # by worker-4: tertiary worker-1 was wired up as
-                    # tertiary of LVS_9915 instead of LVS_270, port 4432
-                    # was unblocked, worker-1 re-promoted on next client
-                    # write, writer conflict on worker-4.)
-                    ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
-                                                     rpc_timeout=0.2, lvs_node=lvs_node,
-                                                     coordinator_lock=_hub_locks.get(sec_node.get_id()))
-                except Exception as e:
-                    logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
-                    _abort_restart_and_unblock(
-                        f"connect_to_hublvol on {sec_node.get_id()} raised: {e}")
-                if not ok:
-                    _abort_restart_and_unblock(
-                        f"connect_to_hublvol returned False on {sec_node.get_id()} ({sec_role})")
-
-                ### 8c- unblock this peer's port only after its hublvol is connected
-                if sec_node in blocked_peers:
-                    _unblock_peer_port(sec_node)
-
-            # Every peer port is unblocked — end of the client-visible outage
-            # span. Release the window gate BEFORE the lvol-attach pass below
-            # so the next recreate's block window can start while lvols attach.
-            _release_block_gate()
-            _flush_port_events()
-            _persist_deferred_node_fields()
+            deferred_tertiary_paths = transfer_lvs_leadership(
+                current_leader, snode, sec_nodes, lvs_node=lvs_node, fence=fence,
+                disconnected_peers=disconnected_peers, before_grant=_examine_and_validate,
+                reload_metadata=False, force=force)
 
         _deferred_lvol_verify()
 
-        ### 9- add lvols to subsystems
+        ### 9- add lvols to subsystems (on a sync cluster by the site rule; a
+        # takeover leader is the optimized path of its site)
         _register_lvols_on_node(lvol_list, snode, lvol_ana_state,
-                                lvs_label=lvs_name)
+                                lvs_label=lvs_name, promoted=is_takeover)
 
         # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
         _release_block_gate()
@@ -15143,22 +17050,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         # INTER_ATTACH_SLEEP_SEC (3 s) cost lives here, OUTSIDE the IO-impact
         # window — it doesn't sit inside the leader-port-block freeze any more.
         if not activation_mode and deferred_tertiary_paths:
-            for tert_node, primary_node, sec1_failover in deferred_tertiary_paths:
-                if sec1_failover is None:
-                    # Only appended when ``sec1_online`` was True (meaning
-                    # ``sec1_node`` was non-None at the time), so this branch
-                    # should be unreachable in practice — guard for mypy.
-                    continue
-                try:
-                    if tert_node.add_hublvol_failover_path(primary_node, sec1_failover):
-                        logger.info("Added deferred secondary %s hublvol path on tertiary %s for %s",
-                                    sec1_failover.get_id(), tert_node.get_id(), lvs_name)
-                    else:
-                        logger.warning("Failed to add deferred secondary %s hublvol path on tertiary %s for %s",
-                                       sec1_failover.get_id(), tert_node.get_id(), lvs_name)
-                except Exception as e:
-                    logger.error("Error adding deferred hublvol failover path on tertiary %s: %s",
-                                 tert_node.get_id(), e)
+            _add_deferred_tertiary_paths(deferred_tertiary_paths, lvs_name,
+                                         lvs_node=lvs_node if is_takeover else None)
 
         if not activation_mode:
             ### 11- demote old leader's subsystems to non_optimized (async)
@@ -15173,11 +17066,18 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # 22:23:27, 15 refusals on c8a7e64d; 3,000 in the whole run).
             # Only a listener that is really missing is created, and then
             # directly as non_optimized.
+            # Sync replication: the site rule's state per volume group instead
+            # (a peer of a demoted site stays inaccessible).
+            sync_node = _sync_site(snode)
             for sec_node in sec_nodes:
                 if sec_node.get_id() in disconnected_peers:
                     continue
                 try:
-                    demote_old_leader_listeners(sec_node, lvol_list)
+                    if sync_node:
+                        for lvol in lvol_list:
+                            _set_lvol_ana_on_node(lvol, sec_node, "non_optimized")
+                    else:
+                        demote_old_leader_listeners(sec_node, lvol_list)
                     logger.info("Demoted subsystems to non_optimized on old leader %s", sec_node.get_id())
                 except Exception as e:
                     logger.warning("Failed to demote subsystems on %s: %s", sec_node.get_id(), e)
@@ -15191,6 +17091,10 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         _set_restart_phase(snode, lvs_name, "", db_controller)
 
         _set_lvstore_status_atomic(lvs_node.get_id(), "ready", db_controller)
+        if remote_takeover:
+            # snode holds a real instance now, and leads: the mark's readers
+            # must not take it for absent.
+            _clear_remote_instance_pending(lvs_node.get_id(), snode.get_id(), db_controller)
 
         # The leader's JC context for this LVS is new (SPDK restarted, or the
         # takeover created it) and starts with compression suspended. Nothing
@@ -15207,20 +17111,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
         return True
     finally:
-        # Idempotent; the in-flow release above is the normal path.
-        _release_block_gate()
-        # An unbounded fence is bad; a fence budget leaking onto this thread's
-        # later work would be worse. Every exit path clears it.
-        rpc_budget.clear_budget()
-        try:
-            _defer_gate_event.set()
-            hublvol_reconnect.clear_defer_gate()
-        except Exception:
-            pass
+        # Idempotent; the in-flow release above is the normal path. Releases
+        # the window gate and clears the fence RPC budget on every exit path.
+        fence.close()
 
 
 
-def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
+def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state, *, promoted=False):
     """Publish one lvol's listener on ``snode``.
 
     Split out of add_lvol_thread so the batch registration can run it
@@ -15235,6 +17132,11 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
     nsid=1 at 15:50:25.929, nsid=2 at .936, listener at .26.144, nsid=3 at
     .26.982 -- 838ms reachable-but-incomplete, and fio took EREMOTEIO on the
     clone at nsid 3.
+
+    Sync replication: a listener is created ``inaccessible`` and the volume's
+    own ANA group then gets the site rule's state - also when the listener was
+    already there; creating it sets the groups of every namespace present
+    (apply_sync_ana_groups).
 
     Returns ``(True, None)`` or ``(False, reason)``.
     """
@@ -15261,31 +17163,42 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
             logger.warning(msg)
             return False, msg
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            tr = iface.trtype
-        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-            tr = "TCP"
-        else:
-            continue
-        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.listen_address, listener_port):
-            logger.info("Listener %s %s:%s already on %s, skipping",
-                        tr, iface.ip4_address, listener_port, lvol.nqn)
-            continue
-        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
-        # listeners_create raises on an RPC error; this guards only the
-        # (unlikely) case of a falsy-but-non-error SPDK response, so a
-        # listener this subsystem does not have is never mistaken for one
-        # it does.
-        if not rpc_client.listeners_create(
-                lvol.nqn, tr, iface.listen_address, listener_port, ana_state=lvol_ana_state):
-            msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "
-                   f"for {lvol.nqn} on {snode.get_id()}")
-            logger.error(msg)
-            return False, msg
+    sync = bool(_sync_site(snode))
+    created = False
+    try:
+        for tr, ip in _lvol_listener_nics(lvol, snode):
+            if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, ip, listener_port):
+                logger.info("Listener %s %s:%s already on %s, skipping",
+                            tr, ip, listener_port, lvol.nqn)
+                continue
+            logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, ip, tr)
+            # listeners_create raises on an RPC error; this guards only the
+            # (unlikely) case of a falsy-but-non-error SPDK response, so a
+            # listener this subsystem does not have is never mistaken for one
+            # it does.
+            if not rpc_client.listeners_create(
+                    lvol.nqn, tr, ip, listener_port,
+                    ana_state="inaccessible" if sync else lvol_ana_state):
+                msg = (f"Failed to add listener {tr} {ip}:{listener_port} "
+                       f"for {lvol.nqn} on {snode.get_id()}")
+                logger.error(msg)
+                if sync and created:
+                    queue_sync_ana_retry(snode, subsystem_volumes(lvol))
+                return False, msg
+            created = True
+    except RPCException:
+        # Sync: a listener created above holds every group at inaccessible.
+        if sync and created:
+            queue_sync_ana_retry(snode, subsystem_volumes(lvol))
+        raise
+    if sync:
+        # A failed group is queued for a durable retry by the helper.
+        return apply_sync_ana_groups(rpc_client, lvol, snode, listener_port, lvol_ana_state,
+                                     promoted=promoted, all_namespaces=created)
     return True, None
 
-def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_listener=False):
+def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_listener=False,
+                    *, promoted=False):
     db_controller = DBController()
 
     # Refuse to (re)register an lvol that is being torn down: the delete
@@ -15384,7 +17297,8 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_
         return False, msg
 
     if not defer_listener:
-        ok, msg = _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state)
+        ok, msg = _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state,
+                                         promoted=promoted)
         if not ok:
             return False, msg
 
@@ -15469,7 +17383,12 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:
-        min_cntlid = lvol_controller.lvol_min_cntlid(secondary_index + 1)
+        # Sync replication: the window of the node's own position in
+        # lvol.nodes - the index handed in is clamped at 0 for the owner, a
+        # non-leader when its LVS is led from the other site.
+        path_index = (lvol_controller._lvol_path_index(lvol, sec_node) if _sync_site(sec_node)
+                      else secondary_index + 1)
+        min_cntlid = lvol_controller.lvol_min_cntlid(path_index)
         allow_any = not bool(lvol.allowed_hosts)
         logger.warning(
             "Repairing missing subsystem %s on non-leader %s (lvol %s)",
@@ -15505,6 +17424,164 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
 
+class SiteJournalPlacementError(RuntimeError):
+    """A sync-replication node's journal cannot get its copies on one of the
+    two sites: too few online JMs on distinct hosts there."""
+
+
+class _JMCandidate(NamedTuple):
+    ip: str
+    fd: int
+    label: int
+    site: str
+
+
+def _ha_jm_candidates(current_node: StorageNode, nodes, attachable_only=False):
+    """The online JMs of the nodes other than ``current_node``, by JM id, and
+    how many other nodes' journals already use each (least-used first).
+
+    ``attachable_only``: only JMs whose owner can be attached right now
+    (_JM_OWNER_ATTACHABLE_STATUSES) -- a forced shutdown leaves an offline
+    node's JM status ONLINE, and a sync journal must not count such a copy.
+    """
+    candidates: dict[str, _JMCandidate] = {}
+    for node in nodes:
+        if node.get_id() == current_node.get_id():  # pass
+            continue
+        if attachable_only and node.status not in _JM_OWNER_ATTACHABLE_STATUSES:
+            continue
+
+        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
+            candidates[node.jm_device.get_id()] = _JMCandidate(
+                node.mgmt_ip, node.failure_domain, node.physical_label, node.site)
+
+    jm_count = dict.fromkeys(candidates, 0)
+    for node in nodes:
+        if node.get_id() == current_node.get_id():  # pass
+            continue
+        if not node.jm_ids:
+            continue
+        for rem_jm_id in node.jm_ids:
+            if rem_jm_id in jm_count:
+                jm_count[rem_jm_id] += 1
+
+    # Least-used JMs first (load balancing); ties broken in the greedy pick.
+    return candidates, dict(sorted(jm_count.items(), key=lambda x: x[1]))
+
+
+def _pick_ha_jms(candidates, jm_count, total_jms, target, taken, fd_enabled, local_fd, node_id):
+    """Greedy pick of ``target`` JMs out of ``candidates`` for a journal of
+    ``total_jms`` copies (the selection rules are listed in get_sorted_ha_jms).
+
+    ``taken``: ``(mgmt_ip, failure_domain, physical_label)`` of the copies the
+    journal already holds within this pool (the node's own JM, surviving
+    members); they count toward host, label and domain usage. ``local_fd``:
+    the domain of the node's own JM when that JM is in this pool, else -1.
+    """
+    pool = [(jm_id, cnt) for jm_id, cnt in jm_count.items() if jm_id in candidates]
+
+    # Per-domain cap so that losing any single domain keeps >= 2 journals.
+    # Distinct domains across the candidate JMs plus the copies already taken.
+    all_fds = {c.fd for c in candidates.values() if c.fd >= 0}
+    all_fds.update(fd for _, fd, _ in taken if fd >= 0)
+    num_fds = len(all_fds)
+    if fd_enabled and num_fds > 1:
+        even_cap = math.ceil(total_jms / num_fds)   # spread as evenly as possible
+        quorum_cap = total_jms - 2                   # keep >= 2 after losing one domain
+        per_fd_cap = max(1, min(even_cap, quorum_cap))
+    else:
+        per_fd_cap = total_jms  # no domain constraint
+
+    selected: list[str] = []
+    used_ips = set()
+    used_labels = set()
+    fd_count: dict[int, int] = {}
+    for ip, fd, label in taken:
+        used_ips.add(ip)
+        if label > 0:
+            used_labels.add(label)
+        if fd >= 0:
+            fd_count[fd] = fd_count.get(fd, 0) + 1  # the local JM occupies its domain
+
+    def _pick_same_fd_as_local(enforce_label):
+        # One-shot reservation (not a loop): take the least-used JM in the
+        # local node's own domain, if the cap leaves room for a second
+        # member there and nothing has claimed that reservation yet.
+        if (local_fd < 0 or per_fd_cap < 2
+                or len(selected) >= target
+                or fd_count.get(local_fd, 0) >= 2):
+            return
+        best = None
+        for jm_id, cnt in pool:
+            if not jm_id or jm_id in selected:
+                continue
+            ip = candidates[jm_id].ip
+            if ip in used_ips:                            # host-disjoint (hard)
+                continue
+            if candidates[jm_id].fd != local_fd:
+                continue
+            label = candidates[jm_id].label
+            if enforce_label and label > 0 and label in used_labels:
+                continue
+            if best is None or cnt < best[0]:
+                best = (cnt, jm_id, ip, label)
+        if best is None:
+            return
+        _, jm_id, ip, label = best
+        selected.append(jm_id)
+        used_ips.add(ip)
+        fd_count[local_fd] = fd_count.get(local_fd, 0) + 1
+        if label > 0:
+            used_labels.add(label)
+
+    def _pick(enforce_fd_cap, enforce_label):
+        # Greedy: repeatedly take the eligible JM that lands in the currently
+        # emptiest domain (maximizes spread), breaking ties by least usage.
+        while len(selected) < target:
+            best = None
+            for jm_id, cnt in pool:
+                if not jm_id or jm_id in selected:
+                    continue
+                ip = candidates[jm_id].ip
+                if ip in used_ips:                       # host-disjoint (hard)
+                    continue
+                fd = candidates[jm_id].fd
+                label = candidates[jm_id].label
+                if fd_enabled and enforce_fd_cap and fd >= 0 and fd_count.get(fd, 0) >= per_fd_cap:
+                    continue
+                if enforce_label and label > 0 and label in used_labels:
+                    continue
+                score = (fd_count.get(fd, 0) if fd >= 0 else 0, cnt)
+                if best is None or score < best[0]:
+                    best = (score, jm_id, ip, fd, label)
+            if best is None:
+                return
+            _, jm_id, ip, fd, label = best
+            selected.append(jm_id)
+            used_ips.add(ip)
+            if fd >= 0:
+                fd_count[fd] = fd_count.get(fd, 0) + 1
+            if label > 0:
+                used_labels.add(label)
+
+    if fd_enabled:
+        _pick_same_fd_as_local(enforce_label=True)
+        _pick_same_fd_as_local(enforce_label=False)
+        _pick(enforce_fd_cap=True, enforce_label=True)
+        _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
+        if len(selected) < target:
+            logger.warning(
+                "Could only place %d/%d HA journal copies within the failure-"
+                "domain quorum cap for node %s; relaxing to host-disjoint "
+                "placement for the remaining copies.", len(selected), target,
+                node_id)
+            _pick(enforce_fd_cap=False, enforce_label=False)  # last resort
+    else:
+        _pick(enforce_fd_cap=False, enforce_label=True)       # still honor labels
+        _pick(enforce_fd_cap=False, enforce_label=False)
+    return selected[:target]
+
+
 def get_sorted_ha_jms(current_node: StorageNode):
     """Select the remote HA journal members for ``current_node``.
 
@@ -15533,147 +17610,106 @@ def get_sorted_ha_jms(current_node: StorageNode):
 
     Best-effort means each constraint is relaxed in turn only when it cannot be
     satisfied, rather than failing placement.
+
+    Sync replication: the journal holds ``ha_jm_count // 2`` copies on each
+    site. The rules above apply to each site on its own (failure domains are
+    balanced inside the site): ``per_site - 1`` JMs of the node's own site,
+    then ``per_site`` of the other site, in that order.
+
+    Raises:
+        SiteJournalPlacementError: sync replication, and a site cannot supply
+            its copies.
     """
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
-    jm_count = {}
-    jm_dev_to_mgmt_ip = {}
-    jm_dev_to_fd = {}
-    jm_dev_to_label = {}
-
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() == current_node.get_id():  # pass
-            continue
-
-        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
-            jm_count[node.jm_device.get_id()] = 0
-            jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
-            jm_dev_to_fd[node.jm_device.get_id()] = node.failure_domain  # int, -1 if unset
-            jm_dev_to_label[node.jm_device.get_id()] = node.physical_label
-
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() == current_node.get_id():  # pass
-            continue
-        if not node.jm_ids:
-            continue
-        for rem_jm_id in node.jm_ids:
-            if rem_jm_id in jm_count:
-                jm_count[rem_jm_id] += 1
-
-    # Least-used JMs first (load balancing); ties broken in the greedy pick.
-    jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
-    total_jms = current_node.ha_jm_count
-    target = total_jms - 1
+    nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    candidates, jm_count = _ha_jm_candidates(current_node, nodes,
+                                             attachable_only=cluster.sync_replication)
     fd_enabled = cluster.enable_failure_domain
+    local = (current_node.mgmt_ip, current_node.failure_domain, current_node.physical_label)
+    node_id = current_node.get_id()
 
-    # Per-domain cap so that losing any single domain keeps >= 2 journals.
-    # Distinct domains across the candidate JMs plus the current node's own.
-    all_fds = {fd for fd in jm_dev_to_fd.values() if fd >= 0}
-    if current_node.failure_domain >= 0:
-        all_fds.add(current_node.failure_domain)
-    num_fds = len(all_fds)
-    if fd_enabled and num_fds > 1:
-        even_cap = math.ceil(total_jms / num_fds)   # spread as evenly as possible
-        quorum_cap = total_jms - 2                   # keep >= 2 after losing one domain
-        per_fd_cap = max(1, min(even_cap, quorum_cap))
-    else:
-        per_fd_cap = total_jms  # no domain constraint
+    if not cluster.sync_replication:
+        total_jms = current_node.ha_jm_count
+        return _pick_ha_jms(candidates, jm_count, total_jms, total_jms - 1, [local],
+                            fd_enabled, current_node.failure_domain, node_id)
 
-    selected: list[str] = []
-    used_ips = {current_node.mgmt_ip}
-    used_labels = {current_node.physical_label} if current_node.physical_label > 0 else set()
-    fd_count = {}
-    if current_node.failure_domain >= 0:
-        fd_count[current_node.failure_domain] = 1  # the local JM occupies its domain
-
-    def _pick_same_fd_as_local(enforce_label):
-        # One-shot reservation (not a loop): take the least-used JM in the
-        # local node's own domain, if the cap leaves room for a second
-        # member there and nothing has claimed that reservation yet.
-        if (current_node.failure_domain < 0 or per_fd_cap < 2
-                or len(selected) >= target
-                or fd_count.get(current_node.failure_domain, 0) >= 2):
-            return
-        best = None
-        for jm_id, cnt in jm_count.items():
-            if not jm_id or jm_id in selected:
-                continue
-            ip = jm_dev_to_mgmt_ip[jm_id]
-            if ip in used_ips:                            # host-disjoint (hard)
-                continue
-            if jm_dev_to_fd.get(jm_id, -1) != current_node.failure_domain:
-                continue
-            label = jm_dev_to_label.get(jm_id, 0)
-            if enforce_label and label > 0 and label in used_labels:
-                continue
-            if best is None or cnt < best[0]:
-                best = (cnt, jm_id, ip, label)
-        if best is None:
-            return
-        _, jm_id, ip, label = best
-        selected.append(jm_id)
-        used_ips.add(ip)
-        fd_count[current_node.failure_domain] = fd_count.get(current_node.failure_domain, 0) + 1
-        if label > 0:
-            used_labels.add(label)
-
-    def _pick(enforce_fd_cap, enforce_label):
-        # Greedy: repeatedly take the eligible JM that lands in the currently
-        # emptiest domain (maximizes spread), breaking ties by least usage.
-        while len(selected) < target:
-            best = None
-            for jm_id, cnt in jm_count.items():
-                if not jm_id or jm_id in selected:
-                    continue
-                ip = jm_dev_to_mgmt_ip[jm_id]
-                if ip in used_ips:                       # host-disjoint (hard)
-                    continue
-                fd = jm_dev_to_fd.get(jm_id, -1)
-                label = jm_dev_to_label.get(jm_id, 0)
-                if fd_enabled and enforce_fd_cap and fd >= 0 and fd_count.get(fd, 0) >= per_fd_cap:
-                    continue
-                if enforce_label and label > 0 and label in used_labels:
-                    continue
-                score = (fd_count.get(fd, 0) if fd >= 0 else 0, cnt)
-                if best is None or score < best[0]:
-                    best = (score, jm_id, ip, fd, label)
-            if best is None:
-                return
-            _, jm_id, ip, fd, label = best
-            selected.append(jm_id)
-            used_ips.add(ip)
-            if fd >= 0:
-                fd_count[fd] = fd_count.get(fd, 0) + 1
-            if label > 0:
-                used_labels.add(label)
-
-    if fd_enabled:
-        _pick_same_fd_as_local(enforce_label=True)
-        _pick_same_fd_as_local(enforce_label=False)
-        _pick(enforce_fd_cap=True, enforce_label=True)
-        _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
-        if len(selected) < target:
-            logger.warning(
-                "Could only place %d/%d HA journal copies within the failure-"
-                "domain quorum cap for node %s; relaxing to host-disjoint "
-                "placement for the remaining copies.", len(selected), target,
-                current_node.get_id())
-            _pick(enforce_fd_cap=False, enforce_label=False)  # last resort
-    else:
-        _pick(enforce_fd_cap=False, enforce_label=True)       # still honor labels
-        _pick(enforce_fd_cap=False, enforce_label=False)
-    return selected[:target]
+    per_site = current_node.ha_jm_count // 2
+    own_site = {k: c for k, c in candidates.items() if c.site == current_node.site}
+    other_site = {k: c for k, c in candidates.items() if c.site != current_node.site}
+    selected_own = _pick_ha_jms(own_site, jm_count, per_site, per_site - 1, [local],
+                                fd_enabled, current_node.failure_domain, node_id)
+    selected_other = _pick_ha_jms(other_site, jm_count, per_site, per_site, [],
+                                  fd_enabled, -1, node_id)
+    if len(selected_own) < per_site - 1 or len(selected_other) < per_site:
+        other_sites = sorted({n.site for n in nodes if n.site and n.site != current_node.site})
+        raise SiteJournalPlacementError(
+            f"node {node_id}: a sync-replication journal needs {per_site} JM copies per site on "
+            f"distinct hosts of attachable nodes; site {current_node.site!r} offers "
+            f"{len(selected_own) + 1} (incl. the node's own JM), site "
+            f"{', '.join(repr(site) for site in other_sites) or '(none)'} {len(selected_other)}")
+    return selected_own + selected_other
 
 
-def get_node_jm_names(current_node: StorageNode, remote_node=None):
-    jm_list = []
+def _pick_site_replacement_jm(primary: StorageNode, removed_jm_id, removed_site, nodes, fd_enabled):
+    """Sync replication: the JM that takes over the removed JM's slot in
+    ``primary``'s journal, or None.
+
+    Only a JM of ``removed_site`` qualifies -- JC keeps the slot's position,
+    so the replacement must keep its locality too -- and never one the journal
+    already holds. The journal's surviving copies on that site (and the
+    primary's own JM when it is there) seed the host / domain / label usage,
+    so the pick stays host-disjoint from them and balances the site's domains.
+    """
+    candidates, jm_count = _ha_jm_candidates(primary, nodes, attachable_only=True)
+    members = set(primary.jm_ids) - {removed_jm_id}
+    pool = {k: c for k, c in candidates.items()
+            if c.site == removed_site and k != removed_jm_id and k not in members}
+    taken = [(n.mgmt_ip, n.failure_domain, n.physical_label) for n in nodes
+             if n.site == removed_site and n.jm_device and n.jm_device.get_id() in members]
+    local_fd = -1
+    if primary.site == removed_site:
+        taken.append((primary.mgmt_ip, primary.failure_domain, primary.physical_label))
+        local_fd = primary.failure_domain
+    picked = _pick_ha_jms(pool, jm_count, primary.ha_jm_count // 2, 1, taken,
+                          fd_enabled, local_fd, primary.get_id())
+    return picked[0] if picked else None
+
+
+class JMNames(NamedTuple):
+    """The journal names a distrib is created with (``jm_names``)."""
+    names: list[str]
+    #: Sync replication: how many of ``names`` are on the site of the node
+    #: running the distrib (``jm_n_local`` of bdev_distrib_create); JC's name
+    #: sort puts exactly those first. None outside sync replication.
+    n_local: int | None
+
+
+def get_node_jm_names(current_node: StorageNode, remote_node=None) -> JMNames:
+    """The journal of ``current_node``'s LVS, named as the node that runs the
+    distrib sees it: ``remote_node`` (a node hosting that LVS) or
+    ``current_node`` itself. Its own JM keeps its plain name, every other one
+    is reached through a remote bdev (remote_jm_controller_name).
+
+    Outside sync replication at most ``ha_jm_count`` names. On a
+    sync-replication cluster -- recognised by the node's site, which exists
+    only there -- the full list, with ``n_local``.
+    """
+    builder = remote_node or current_node
+    sync = bool(builder.site)
+    db_controller = DBController()
+
+    def _name(owner_id, owner_site, jm_bdev):
+        if owner_id == builder.get_id():
+            return jm_bdev
+        return remote_jm_controller_name(builder.site, owner_site, jm_bdev) + "n1"
+
+    jm_list = []   # (name, owner site)
     if current_node.jm_device:
-        if remote_node:
-            jm_list.append(f"remote_{current_node.jm_device.jm_bdev}n1")
-        else:
-            jm_list.append(current_node.jm_device.jm_bdev)
+        jm_list.append((_name(current_node.get_id(), current_node.site, current_node.jm_device.jm_bdev),
+                        current_node.site))
     else:
-        jm_list.append("JM_LOCAL")
+        jm_list.append(("JM_LOCAL", current_node.site))
 
     if current_node.enable_ha_jm:
         for jm_id in current_node.jm_ids:
@@ -15681,14 +17717,1042 @@ def get_node_jm_names(current_node: StorageNode, remote_node=None):
                 continue
 
             if remote_node:
-                if remote_node.jm_device.get_id() == jm_id:
-                    jm_list.append(remote_node.jm_device.jm_bdev)
+                if remote_node.jm_device and remote_node.jm_device.get_id() == jm_id:
+                    jm_list.append((remote_node.jm_device.jm_bdev, remote_node.site))
                     continue
 
-            jm_dev = DBController().get_jm_device_by_id(jm_id)
-            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            owner_site = db_controller.get_storage_node_by_id(jm_dev.node_id).site if sync else ""
+            jm_list.append((_name(jm_dev.node_id, owner_site, jm_dev.jm_bdev), owner_site))
 
-    return jm_list[:current_node.ha_jm_count]
+    if not sync:
+        return JMNames([name for name, _ in jm_list][:current_node.ha_jm_count], None)
+    return JMNames([name for name, _ in jm_list],
+                   sum(1 for _, site in jm_list if site == builder.site))
+
+
+def _same_site_nodes(cluster, anchor: StorageNode, nodes) -> list[StorageNode]:
+    """The nodes that may hold a LOCAL role (secondary / tertiary) of
+    ``anchor``'s LVS, or share a role graph with it.
+
+    On a sync-replication cluster the local roles of an LVS stay on its home
+    site -- the other site holds its remote triplet instead -- so only the
+    nodes of ``anchor``'s site qualify. Every node on any other cluster.
+    """
+    if not cluster.sync_replication:
+        return list(nodes)
+    return [n for n in nodes if n.site == anchor.site]
+
+
+def remote_triplet_refs(node: StorageNode) -> tuple[str, str, str]:
+    """``node``'s remote-triplet refs, in ``role_planner.REMOTE_ROLES`` order."""
+    return (node.remote_primary_node_id, node.remote_secondary_node_id,
+            node.remote_tertiary_node_id)
+
+
+def _set_remote_triplet_refs(node: StorageNode, triplet) -> None:
+    """Point ``node``'s remote triplet at ``triplet``. A member new to it is
+    recorded as pending (its instance of the LVS is not built yet), a member
+    that leaves it is dropped from the pending list."""
+    old = remote_triplet_refs(node)
+    (node.remote_primary_node_id, node.remote_secondary_node_id,
+     node.remote_tertiary_node_id) = triplet
+    pending = [m for m in node.remote_instances_pending if m in triplet]
+    pending += [m for m in triplet if m and m not in old and m not in pending]
+    node.remote_instances_pending = pending
+
+
+def _clear_remote_instance_pending(owner_id, member_id, db_controller) -> None:
+    """Record that ``member_id`` holds its instance of ``owner_id``'s LVS."""
+    try:
+        owner = db_controller.get_storage_node_by_id(owner_id)
+    except KeyError:
+        return
+    if member_id not in owner.remote_instances_pending:
+        return
+    db_controller.atomic_update(owner, lambda n: setattr(
+        n, "remote_instances_pending", [m for m in n.remote_instances_pending if m != member_id]))
+
+
+def lvs_triplet_of(owner: StorageNode, node_id: str) -> tuple[str, str, str]:
+    """The triplet of ``owner``'s LVS that ``node_id`` belongs to, as
+    ``(primary, secondary, tertiary)`` ids: the remote triplet when the node is
+    one of its refs, else the home triplet (owner, secondary, tertiary).
+
+    A triplet lies on one site (local roles never leave the home site, the
+    remote triplet is all on the other one), so these are the node's position
+    and its same-site peers.
+    """
+    remote = remote_triplet_refs(owner)
+    if node_id and node_id in remote:
+        return remote
+    return (owner.get_id(), owner.secondary_node_id, owner.tertiary_node_id)
+
+
+LVS_MOVING_PREFIX = constants.LVS_MOVING_PREFIX
+
+
+def lvs_moving_value(site: str) -> str:
+    return f"{LVS_MOVING_PREFIX}{site}"
+
+
+class LvsActiveTriplet(NamedTuple):
+    """The members of an LVS that may lead it (lvs_active_triplet)."""
+    #: Leader-lookup candidates, primary first. Both triplets while a move is
+    #: in flight, the source one first.
+    node_ids: tuple[str, ...]
+    #: The site a move in flight goes to, "" otherwise.
+    moving_to: str = ""
+
+    @property
+    def grants_allowed(self) -> bool:
+        """No leadership may be granted while a move is in flight - not by
+        the move either: it and its reconciler hand off without a grant
+        (move_lvs_leadership)."""
+        return not self.moving_to
+
+
+def _member_ids(*triplets) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(nid for triplet in triplets for nid in triplet if nid))
+
+
+def lvs_active_triplet(owner: StorageNode) -> LvsActiveTriplet:
+    """The triplet of ``owner``'s LVS that leads it: the home triplet while
+    ``lvs_active_site`` is empty or the owner's own site, the remote triplet
+    when it names the other site. While it is ``moving:<site>`` the real leader
+    may be on either side, so both triplets are returned for the lookup, and no
+    leadership may be granted (LvsActiveTriplet.grants_allowed). Outside sync
+    replication the field is always empty: the home triplet."""
+    home = (owner.get_id(), owner.secondary_node_id, owner.tertiary_node_id)
+    remote = remote_triplet_refs(owner)
+    site = owner.lvs_active_site
+    if site.startswith(LVS_MOVING_PREFIX):
+        target = site[len(LVS_MOVING_PREFIX):]
+        source_first = (remote, home) if target == owner.site else (home, remote)
+        return LvsActiveTriplet(_member_ids(*source_first), moving_to=target)
+    if not site or site == owner.site:
+        return LvsActiveTriplet(_member_ids(home))
+    return LvsActiveTriplet(_member_ids(remote))
+
+
+def lvs_led_from_home(owner: StorageNode) -> bool:
+    """Whether ``owner``'s LVS is led from its home triplet (no move in flight).
+    Always true outside sync replication."""
+    return not owner.lvs_active_site or owner.lvs_active_site == owner.site
+
+
+def lvs_instance_role(owner: StorageNode, node_id: str, *, leading: bool) -> str:
+    """Kernel role (``bdev_lvol_set_lvs_opts(role=)``) of ``node_id``'s
+    instance of ``owner``'s LVS, by its position in its triplet (lvs_triplet_of).
+
+    - The leader (``leading``): its position, "primary" / "secondary" /
+      "tertiary" (an acting leader in the secondary slot keeps "secondary", as
+      in a takeover). Also the taker of a hand-off without a grant, which leads
+      from its first IO - by the very rule below.
+    - A non-leader, in either triplet: "tertiary" for the tertiary slot, else
+      "secondary". Never "primary": SPDK makes a PRIMARY-role non-leader take
+      the leadership on the first IO it sees (spdk_lvs_check_active_process)
+      and refuses bdev_lvol_connect_hublvol on it ("nonsecondary node").
+
+    A non-leader whose hublvol is not connected also takes the leadership on
+    IO whatever its role, so the inactive site is kept leaderless by the ANA
+    fence (no IO reaches it), not by the role.
+
+    One non-leader does keep "primary": the taker of a hand-off without a
+    grant that did not settle on it - the move's probe after the hand-off
+    found another member leading or one of the other site silent, its marker
+    write lost, or the hand-off aborted after the role stamp
+    (_move_lvs_leadership_locked). Nothing restamps it before the next
+    hand-off of the LVS or its own restart. What keeps IO from it meanwhile
+    is, again, not the role: the marker stays ``moving:*`` (both sites
+    closed) until the reconciler settles it; settled on the other site, the
+    taker's site is the passive one (ANA); and the reconciler does not settle
+    on the move's target site while a member other than its primary leads
+    there (_reconcile_lvs_move_locked).
+    """
+    primary, _, tertiary = lvs_triplet_of(owner, node_id)
+    if tertiary and node_id == tertiary:
+        return "tertiary"
+    if leading and node_id == primary:
+        return "primary"
+    return "secondary"
+
+
+class ActivePosition(enum.Enum):
+    """Where a member of an LVS stands relative to the triplet that leads it
+    (active_position). A position, not a kernel role: the role of an instance
+    also depends on whether it leads (lvs_instance_role)."""
+    PRIMARY = enum.auto()
+    SECONDARY = enum.auto()
+    TERTIARY = enum.auto()
+    #: Member of the other, passive triplet.
+    INACTIVE = enum.auto()
+    #: The leadership is being moved (``moving:<site>``): neither triplet is
+    #: the active one, whatever the member.
+    MOVING = enum.auto()
+
+
+_TRIPLET_POSITIONS = (ActivePosition.PRIMARY, ActivePosition.SECONDARY, ActivePosition.TERTIARY)
+
+
+def active_position(owner: StorageNode, node_id: str) -> ActivePosition:
+    """The position of ``node_id`` in the ACTIVE triplet of ``owner``'s LVS
+    (lvs_active_triplet): its slot when its own triplet (lvs_triplet_of) is
+    the active one, INACTIVE when the other one is, MOVING while a move is in
+    flight. Outside sync replication the home triplet is always the active
+    one. Reads only ``owner``'s fields, so it answers for the copy it is given.
+
+    Raises:
+        ValueError: ``node_id`` is in neither triplet of the LVS.
+    """
+    triplet = lvs_triplet_of(owner, node_id)
+    # lvs_triplet_of answers the home triplet for a stranger, and an empty
+    # slot (FTT1) must not make "" a member.
+    if not node_id or node_id not in triplet:
+        raise ValueError(f"{node_id!r} is not a member of LVS {owner.lvstore} ({owner.get_id()})")
+    active = lvs_active_triplet(owner)
+    if active.moving_to:
+        return ActivePosition.MOVING
+    if node_id not in active.node_ids:
+        return ActivePosition.INACTIVE
+    return _TRIPLET_POSITIONS[triplet.index(node_id)]
+
+
+def lvs_hublvol_expected(owner: StorageNode, node_id: str) -> bool:
+    """Whether the instance of ``owner``'s LVS on ``node_id`` is expected to
+    expose or connect to the LVS's hublvol now. The leader and its triplet's
+    secondary expose it; the other members connect to it.
+    False only for a member of the PASSIVE triplet (active_position
+    INACTIVE): it holds a non-leader instance with no hublvol, because a
+    hublvol never connects nodes on two sites. True for the active triplet,
+    for both triplets while a move is in flight, for every member outside
+    sync replication, and for a node in neither triplet, such as a relocation
+    target that the owner does not list in either triplet yet."""
+    try:
+        return active_position(owner, node_id) is not ActivePosition.INACTIVE
+    except ValueError:
+        return True
+
+
+def active_triplet_ids(owner: StorageNode) -> tuple[str, str, str]:
+    """Return the node ids of the ACTIVE triplet of ``owner``'s LVS
+    (lvs_active_triplet) as ``(primary, secondary, tertiary)``. An empty slot
+    is "". FTT1 has no tertiary. This reads nothing from the database.
+
+    Raises:
+        ValueError: the LVS is being moved, so no triplet is active.
+    """
+    active = lvs_active_triplet(owner)
+    if active.moving_to:
+        raise ValueError(
+            f"LVS {owner.lvstore}: no active triplet while it is being moved to {active.moving_to}")
+    # node_ids drops the empty slots; the triplet of its first member keeps them.
+    return lvs_triplet_of(owner, active.node_ids[0]) if active.node_ids else ("", "", "")
+
+
+def active_triplet_nodes(
+        owner: StorageNode, db_controller) -> tuple[StorageNode | None, StorageNode | None, StorageNode | None]:
+    """Return the nodes of the ACTIVE triplet of ``owner``'s LVS
+    (active_triplet_ids) as ``(primary, secondary, tertiary)``, read from the
+    database. An empty slot is None. FTT1 has no tertiary. ``owner`` itself
+    is not read again.
+
+    Raises:
+        ValueError: the LVS is being moved, so no triplet is active.
+        KeyError: a slot names a node that does not exist.
+    """
+    primary, secondary, tertiary = (
+        db_controller.get_storage_node_by_id(node_id) if node_id else None
+        for node_id in active_triplet_ids(owner))
+    return primary, secondary, tertiary
+
+
+def lvs_active_site_of(owner: StorageNode) -> str:
+    """The site ``owner``'s LVS is led from - or, while a move is in flight,
+    will be led from once it completes. Sync replication only."""
+    return owner.lvs_active_site.removeprefix(LVS_MOVING_PREFIX) or owner.site
+
+
+def _sync_site(node) -> str:
+    """``node``'s site, "" outside sync replication. Sites exist only on a
+    sync-replication cluster, so a non-empty one is the cheap sync test (no DB
+    read). Callers and tests pass duck-typed node stand-ins: a non-string
+    ``site`` counts as none."""
+    site = getattr(node, "site", "")
+    return site if isinstance(site, str) else ""
+
+
+class SyncAnaContext(NamedTuple):
+    """What the ANA rule of a sync-replication volume reads besides the volume
+    and the node: the cluster (``lost_site``), the LVS owner (active site,
+    triplets) and the status of the ACTIVE triplet's primary (a down one,
+    _active_primary_down, makes its secondary the optimized path). Read once
+    per batch by callers that publish many volumes."""
+    cluster: Cluster
+    owner: StorageNode
+    active_primary_status: str = ""
+
+
+def _active_primary_status(owner: StorageNode, db) -> str:
+    """The status of the primary of ``owner``'s active triplet ("" while a
+    move is in flight, without a second member, or when the node is gone)."""
+    pair = _active_pair(owner)
+    if pair is None:
+        return ""
+    if pair[0] == owner.get_id():
+        return owner.status
+    try:
+        return db.get_storage_node_by_id(pair[0]).status
+    except KeyError:
+        return ""
+
+
+def sync_ana_context(lvol: LVol, db_controller=None) -> SyncAnaContext:
+    db = db_controller or DBController()
+    owner = db.get_storage_node_by_id(lvol.node_id)
+    return SyncAnaContext(db.get_cluster_by_id(owner.cluster_id), owner,
+                          _active_primary_status(owner, db))
+
+
+def lvol_site_open(lvol: LVol, site: str, ctx: SyncAnaContext) -> bool:
+    """Whether ``lvol`` may be served from ``site``: it is the volume's active
+    site, not demoted there, not the lost site, the LVS is led from it, and
+    no leadership move is in flight. Every other site is fenced
+    (``inaccessible``).
+
+    "The LVS is led from it" is redundant with sync_active_site while the two
+    agree, and fails closed when they do not: a site whose instances are
+    non-leaders without a hublvol to the leader would take the leadership on
+    the first IO."""
+    owner = ctx.owner
+    lvs_site = owner.lvs_active_site
+    if lvs_site.startswith(LVS_MOVING_PREFIX):
+        return False
+    return bool(site
+                and site == (lvol.sync_active_site or owner.site)
+                and site == (lvs_site or owner.site)
+                and site not in lvol.sync_demoted_sites
+                and site != ctx.cluster.lost_site)
+
+
+def lvol_ana_state(lvol: LVol, node, state: str, *, promoted: bool = False,
+                   ctx: SyncAnaContext | None = None) -> str:
+    """The ANA state of ``lvol``'s path on ``node``.
+
+    ``state`` is what the caller sets outside sync replication; it is returned
+    unchanged there (no DB read), and a caller's ``inaccessible`` always wins
+    (activation keeps every path closed until its Pass 4). On a sync cluster
+    the site rule decides whatever the caller passed: a closed site
+    (lvol_site_open) is ``inaccessible``; on the open site the primary of the
+    node's triplet is ``optimized`` - or the node the caller ``promoted`` (the
+    in-site failover target, a takeover leader, the leader a volume is
+    created on), or the active triplet's secondary while that triplet's
+    primary is down (_active_primary_down: OFFLINE or shut down by a removal;
+    the in-site failover state, the predicate of promote_active_secondary_ana:
+    every later writer - the lvol monitor's repair, a retried registration -
+    keeps it optimized; not while the primary is RESTARTING, where its
+    failback wins) - and every other member ``non_optimized``.
+    """
+    site = _sync_site(node)
+    if state == "inaccessible" or not site:
+        return state
+    ctx = ctx or sync_ana_context(lvol)
+    if not lvol_site_open(lvol, site, ctx):
+        return "inaccessible"
+    node_id = node.get_id()
+    if promoted or lvs_triplet_of(ctx.owner, node_id)[0] == node_id:
+        return "optimized"
+    if _active_primary_down(ctx.active_primary_status):
+        pair = _active_pair(ctx.owner)
+        if pair is not None and pair[1] == node_id:
+            return "optimized"
+    return "non_optimized"
+
+
+def _lvol_listener_nics(lvol: LVol, node) -> list[tuple[str, str]]:
+    """``(trtype, address)`` of every listener ``node`` publishes for ``lvol``: the
+    address the listener binds (IFace.listen_address), not the one clients connect to."""
+    out = []
+    for iface in node.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            out.append((iface.trtype, iface.listen_address))
+        elif iface.ip4_address and lvol.fabric == "tcp" and node.active_tcp:
+            out.append(("TCP", iface.listen_address))
+    return out
+
+
+def live_listener_nics(rpc_client, lvol: LVol, node, port) -> list[tuple[str, str]]:
+    """The ``(trtype, ip)`` of ``lvol``'s listeners on ``node`` that exist
+    right now (a subset of _lvol_listener_nics). Unlike
+    _rpc_subsystem_has_listener an RPC error propagates: "cannot tell" must
+    not read as "absent"."""
+    subsystem = rpc_client.subsystem_get(lvol.nqn)
+    live = {(str(la.get("trtype", "")).upper(), la.get("traddr"), str(la.get("trsvcid")))
+            for la in (subsystem or {}).get("listen_addresses") or []}
+    return [(tr, ip) for tr, ip in _lvol_listener_nics(lvol, node)
+            if (tr.upper(), ip, str(port)) in live]
+
+
+def follower_redirect_ok(rpc_client, lvs_name) -> bool | None:
+    """Whether the instance of ``lvs_name`` behind ``rpc_client`` may serve IO
+    as a non-leader: its hublvol redirect to the leader is connected and in
+    use (``connect_state`` and ``lvs_redirect`` of get_lvstore; a
+    failed redirect makes its IO take the leadership over). None when it
+    cannot be told - the RPC fails, no lvstore, a field is missing or not a
+    bool (a PRIMARY-role instance reports none), or the instance leads (a
+    leader has no redirect to judge) - and the caller changes nothing, as for
+    any unknown of the site rule."""
+    try:
+        info = rpc_client.get_lvstore(lvs_name)
+    except RPCException as e:
+        logger.warning("Redirect state of %s not readable: %s", lvs_name, e)
+        return None
+    if not isinstance(info, dict):
+        return None
+    leading = info.get("lvs leadership")
+    if not isinstance(leading, bool):
+        return None
+    if leading:
+        # A leader has no redirect to judge.
+        logger.info("Redirect of %s not judged: the instance leads", lvs_name)
+        return None
+    connected, redirect = info.get("connect_state"), info.get("lvs_redirect")
+    if not isinstance(connected, bool) or not isinstance(redirect, bool):
+        return None
+    return connected and redirect
+
+
+def _unwired_follower(rpc_client, lvol: LVol, node, state: str, memo: dict) -> bool:
+    """Whether the ``state`` the site rule gives ``lvol``'s path on ``node``
+    is a follower's ``non_optimized`` while its redirect to the leader is
+    known to be broken (follower_redirect_ok False, read once per ``memo``):
+    such a path is published ``inaccessible`` instead."""
+    if state != "non_optimized":
+        return False
+    if "ok" not in memo:
+        memo["ok"] = follower_redirect_ok(rpc_client, lvol.lvs_name)
+    if memo["ok"] is False:
+        logger.warning("ANA: %s ns %s on %s kept inaccessible - no hublvol redirect to the leader of %s",
+                       lvol.nqn, lvol.ns_id, node.get_id(), lvol.lvs_name)
+        return True
+    return False
+
+
+def lvol_ana_drift(rpc_client, lvol: LVol, node, ctx: SyncAnaContext | None = None) -> str | None:
+    """Sync replication: why the ANA state that ``lvol``'s listeners on
+    ``node`` report disagrees with the site rule (lvol_ana_state), or None.
+
+    The lvol monitor's presence check (listener + namespace) cannot see a
+    group left at a listener's ``inaccessible`` default - after a listener
+    creation whose answer was lost, or any other drift - so it asks this too
+    and repairs on a mismatch. Only accessibility is compared: on the open
+    site a listener must report the volume's group ``optimized`` or
+    ``non_optimized`` (which of the two is the in-site failover's business),
+    on a closed site ``inaccessible`` - and so must a follower whose hublvol
+    redirect to the leader is known broken (follower_redirect_ok). What
+    cannot be told - no listener list, no ANA states, the group not reported,
+    the redirect state - is no drift. Outside sync replication always None
+    (no RPC).
+    """
+    if not _sync_site(node) or not lvol.ns_id:
+        return None
+    ctx = ctx or sync_ana_context(lvol)
+    expected = lvol_ana_state(lvol, node, "non_optimized", ctx=ctx)
+    # A follower without its redirect to the leader must not be open either
+    # (fail-closed; unknown changes nothing).
+    expected_open = expected != "inaccessible" and not _unwired_follower(rpc_client, lvol, node, expected, {})
+    port = str(node.get_lvol_subsys_port(lvol.lvs_name))
+    for listener in rpc_client.listeners_list(lvol.nqn) or []:
+        address = listener.get("address") or {}
+        if str(address.get("trsvcid")) != port:
+            continue
+        state = next((g.get("ana_state") for g in listener.get("ana_states") or []
+                      if g.get("ana_group") == lvol.ns_id), None)
+        if state is None or (state != "inaccessible") == expected_open:
+            continue
+        return (f"listener {address.get('traddr')}:{port} reports {state} for ns {lvol.ns_id}, "
+                f"the site rule wants it {'open' if expected_open else 'inaccessible'}")
+    return None
+
+
+def subsystem_volumes(lvol: LVol) -> list[LVol]:
+    """``lvol`` first, then every other volume of its subsystem (they all
+    belong to the same owner)."""
+    return [lvol] + [lv for lv in DBController().get_lvols_by_node_id(lvol.node_id)
+                     if lv.nqn == lvol.nqn and lv.get_id() != lvol.get_id()]
+
+
+def queue_sync_ana_retry(node, volumes) -> None:
+    """Hand ``volumes``' paths on ``node`` to the durable sync-op
+    registration (deduplicated per volume and node): it publishes each again
+    - on an existing listener, its own ANA group - until it is right. Used
+    wherever a sync listener may exist with a group left at its
+    ``inaccessible`` default, which the lvol monitor's presence check
+    (listener + namespace) cannot see."""
+    for volume in volumes:
+        tasks_controller.add_lvol_sync_op_task(
+            node.cluster_id, node.get_id(), volume.get_id(), "register",
+            secondary_index=lvol_controller._lvol_secondary_index(volume, node))
+
+
+def apply_sync_ana_groups(rpc_client, lvol: LVol, node, port, state: str, *, ns_id=None,
+                          promoted: bool = False, all_namespaces: bool = False,
+                          nics: list[tuple[str, str]] | None = None) -> tuple[bool, str | None]:
+    """Set the ANA group state of ``lvol``'s namespace on every listener of
+    ``node`` (sync replication, where a listener is created ``inaccessible``
+    and never carries a volume's state: a subsystem can hold namespaces of
+    volumes with different site states). ``ns_id`` is the namespace id when
+    ``lvol.ns_id`` is not persisted yet (a fresh create).
+
+    With ``all_namespaces`` (the caller has just CREATED a listener) every
+    namespace the subsystem holds NOW gets its own volume's state, read after
+    the listener exists: a namespace attached before it - a concurrent join,
+    or the other members of a subsystem whose listener a repair recreates -
+    never sees it otherwise. A joiner attaching after the listener exists sets
+    its own group (this call without ``all_namespaces``, on the listeners it
+    saw: ``nics``, default every listener of the node). A namespace with no
+    volume record stays ``inaccessible``.
+
+    Everything - the members, their site fields, the rule's context and every
+    group RPC - runs under the LVS's site-rule lock (sync_site_rule_locks), so
+    a promote / demote never interleaves with it; a lock not acquired in time
+    is handled like a failed group.
+
+    A group whose RPC fails stays at the listener default, and the lvol
+    monitor's presence check (listener + namespace) cannot tell: every volume
+    whose group failed - this one or another member of the subsystem - is
+    handed to the durable sync-op registration, which publishes it again (on
+    an existing listener: its own group) until it is set.
+
+    Returns ``(True, None)`` or ``(False, reason)``.
+    """
+    try:
+        with sync_site_rule_locks(node.cluster_id, [lvol.lvs_name]):
+            return _apply_sync_ana_groups_locked(rpc_client, lvol, node, port, state, ns_id=ns_id,
+                                                 promoted=promoted, all_namespaces=all_namespaces,
+                                                 nics=nics)
+    except PreconditionError as e:
+        queue_sync_ana_retry(node, [lvol])
+        return False, (f"ANA of {lvol.nqn} on {node.get_id()} not set: {e} "
+                       f"(re-registration queued)")
+
+
+def _apply_sync_ana_groups_locked(rpc_client, lvol: LVol, node, port, state: str, *, ns_id,
+                                  promoted: bool, all_namespaces: bool,
+                                  nics: list[tuple[str, str]] | None) -> tuple[bool, str | None]:
+    db = DBController()
+    fresh, ctx = _fresh_site_rule_inputs(lvol, db)
+    own_nsid = ns_id or lvol.ns_id
+    groups: dict[int, str] = {}
+    volumes: dict[int, LVol] = {}
+    if own_nsid:
+        groups[int(own_nsid)] = ("inaccessible" if fresh is None
+                                 else lvol_ana_state(fresh, node, state, promoted=promoted, ctx=ctx))
+        volumes[int(own_nsid)] = lvol
+    if all_namespaces or not own_nsid:
+        members = subsystem_volumes(lvol)
+        try:
+            subsystem = rpc_client.subsystem_get(lvol.nqn) or {}
+        except RPCException as e:
+            # Which namespaces the listener serves is unknown: every volume
+            # of the subsystem is retried.
+            queue_sync_ana_retry(node, members)
+            return False, (f"Cannot read the namespaces of {lvol.nqn} on {node.get_id()}: {e} "
+                           f"(re-registration queued)")
+        for ns in subsystem.get("namespaces") or []:
+            nsid = ns.get("nsid")
+            if not nsid or nsid in groups:
+                continue
+            member = next((m for m in members if rpc_client_module.namespace_matches(
+                ns, dev_name=m.top_bdev, uuid=m.get_ns_uuid())), None)
+            if member is None:
+                continue
+            # subsystem_volumes read the other members fresh, inside the lock.
+            source = fresh if member is lvol else member
+            groups[nsid] = ("inaccessible" if source is None
+                            else lvol_ana_state(source, node, state,
+                                                promoted=promoted and member is lvol, ctx=ctx))
+            volumes[nsid] = member
+    # A follower's path opens only with its redirect to the leader in place;
+    # otherwise it stays closed and is handed to the durable retry.
+    memo: dict = {}
+    unwired = [nsid for nsid, group_state in groups.items()
+               if _unwired_follower(rpc_client, lvol, node, group_state, memo)]
+    for nsid in unwired:
+        groups[nsid] = "inaccessible"
+    failed = []
+    for nsid, group_state in sorted(groups.items()):
+        for trtype, ip in (nics if nics is not None else _lvol_listener_nics(lvol, node)):
+            try:
+                done = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, ip, port, trtype=trtype, ana=group_state, anagrpid=nsid)
+            except RPCException as e:
+                logger.error("ANA RPC for %s ns %s on %s raised: %s", lvol.nqn, nsid, node.get_id(), e)
+                done = False
+            if not done:
+                logger.error("Failed to set ANA %s for %s ns %s on %s (%s)",
+                             group_state, lvol.nqn, nsid, node.get_id(), ip)
+                failed.append(nsid)
+                break
+            logger.info("ANA: %s ns %s on %s (%s) -> %s", lvol.nqn, nsid, node.get_id(), ip,
+                        group_state)
+    queue_sync_ana_retry(node, [volumes[nsid] for nsid in sorted({*failed, *unwired})])
+    if not any(volumes[nsid] is lvol for nsid in failed):
+        # Only other members failed: this volume's own path is right.
+        return True, None
+    return False, (f"Failed to set the ANA state of {lvol.nqn} ns {failed} on {node.get_id()} "
+                   f"(re-registration queued)")
+
+
+#: Key prefix of the per-LVS site-rule lock (sync_site_rule_locks) in the
+#: shared lvstore lock table.
+_SITE_RULE_LOCK_PREFIX = "__sync_ana__"
+
+_site_rule_locks_held = threading.local()
+
+
+@contextlib.contextmanager
+def sync_site_rule_locks(cluster_id, lvs_names, *, timeout=None):
+    """Hold the site-rule lock of every LVS in ``lvs_names`` (sync
+    replication), acquired in sorted order.
+
+    It serializes the two sides of the ANA site rule of an LVS's volumes:
+    every writer that applies the rule (_set_lvol_ana_on_node,
+    apply_sync_ana_groups) reads the rule's inputs AND sends its RPCs inside
+    it, and every change of those inputs that must not interleave with a
+    writer - a demote's fence and record, a promote's ``moving:`` marker and
+    its opening - runs inside it too. Without it a writer that read the state
+    before the change could send the old (open) state after it.
+
+    Durable (snapshot_controller.lvstore_op_lock: FDB, heartbeat, stale
+    holder reclaimed) and re-entrant per thread: a holder that calls a writer
+    of the same LVS does not wait for itself. Callers taking several take them
+    in one call; nobody takes a second one later (lock order).
+
+    Raises PreconditionError when a lock is not acquired within ``timeout``
+    seconds (default LVSTORE_MUTATION_LOCK_WAIT_SEC).
+    """
+    held = getattr(_site_rule_locks_held, "keys", None)
+    if held is None:
+        held = _site_rule_locks_held.keys = set()
+    with contextlib.ExitStack() as stack:
+        for lvs_name in sorted(set(lvs_names)):
+            key = (cluster_id, lvs_name)
+            if key in held:
+                continue
+            stack.enter_context(snapshot_controller.lvstore_op_lock(
+                cluster_id, f"{_SITE_RULE_LOCK_PREFIX}{lvs_name}", timeout=timeout))
+            held.add(key)
+            stack.callback(held.discard, key)
+        yield
+
+
+def _fresh_site_rule_inputs(lvol: LVol, db=None) -> tuple[LVol | None, SyncAnaContext]:
+    """What the site rule of ``lvol`` reads, fresh from the DB: a copy of
+    ``lvol`` carrying its stored site fields (``sync_active_site``,
+    ``sync_demoted_sites``) - None when the record is gone or being deleted
+    (its paths stay closed while the namespace is torn down) -, and the
+    context (cluster, owner). Read under the site-rule lock by its writers."""
+    db = db or DBController()
+    ctx = sync_ana_context(lvol, db)
+    try:
+        stored = db.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return None, ctx
+    if stored.status in (LVol.STATUS_DELETED, LVol.STATUS_IN_DELETION):
+        return None, ctx
+    fresh = copy.copy(lvol)
+    fresh.sync_active_site = stored.sync_active_site
+    fresh.sync_demoted_sites = list(stored.sync_demoted_sites)
+    return fresh, ctx
+
+
+def _lvs_member_ids(owner: StorageNode) -> tuple[str, ...]:
+    """Every instance of ``owner``'s LVS: home then remote triplet."""
+    return _member_ids((owner.get_id(), owner.secondary_node_id, owner.tertiary_node_id),
+                       remote_triplet_refs(owner))
+
+
+def _invalidate_leader_caches(cluster_id, lvs_name) -> None:
+    from simplyblock_core.utils.ttl_cache import leader_cache, no_leader_cache
+    leader_cache.invalidate((cluster_id, lvs_name))
+    no_leader_cache.invalidate((cluster_id, lvs_name))
+
+
+def set_lvs_active_site(owner_id: str, value: str, *, expect: str | None = None) -> bool:
+    """Write ``lvs_active_site`` on the owner (field-scoped). With ``expect``
+    it is a compare-and-set: nothing is written unless the current value is
+    ``expect``. Returns whether it was written."""
+    db = DBController()
+    owner = db.get_storage_node_by_id(owner_id)
+    wrote = {"ok": False}
+
+    def _mutate(n):
+        wrote["ok"] = False    # atomic_update may replay this on a conflict
+        if expect is not None and n.lvs_active_site != expect:
+            return False
+        n.lvs_active_site = value
+        wrote["ok"] = True
+        return True
+
+    if db.atomic_update(owner, _mutate) is None:
+        return False
+    if wrote["ok"]:
+        _invalidate_leader_caches(owner.cluster_id, owner.lvstore)
+    return wrote["ok"]
+
+
+class LVSLeadershipElsewhereError(RuntimeError):
+    """A leader rebuild of a sync LVS was refused (_refuse_leader_rebuild): the
+    node is not a member of the triplet that leads it, the leadership is
+    being moved, or the node is on the lost site."""
+
+
+class LVSMoveChangedError(RuntimeError):
+    """A leadership move found the LVS in another state than the one it was
+    started for (its ``moving:`` marker or its leader changed)."""
+
+
+#: Key prefix of the per-LVS grant lock, so it never collides with an lvs_name
+#: in the shared lvstore lock table.
+_GRANT_LOCK_PREFIX = "__grant__"
+
+
+def _grant_lock_name(lvs_name: str) -> str:
+    return f"{_GRANT_LOCK_PREFIX}{lvs_name}"
+
+
+@contextlib.contextmanager
+def _lvs_grant_lock(cluster_id, lvs_name, *, timeout):
+    """Durable per-LVS lock held around every leadership grant of a sync LVS
+    that is not the promote's own transaction - leaderless recovery, the forced
+    signal change, a leader rebuild (recreate_lvstore) - and around the move
+    itself, which hands off without a grant.
+    The promote's marker transaction (DBController.begin_sync_promote_moves)
+    checks it, so a grant either sees the ``moving:`` marker (it re-reads the
+    owner after acquiring) or makes that transaction refuse. Raises PreconditionError when not acquired
+    within ``timeout`` seconds (0 = one attempt)."""
+    with snapshot_controller.lvstore_op_lock(cluster_id, _grant_lock_name(lvs_name), timeout=timeout):
+        yield
+
+
+class _LeaderCandidates(NamedTuple):
+    nodes: list
+    grants_allowed: bool
+    #: Sync replication: the owner id and the active triplet's primary (the
+    #: preferred taker of a recovery grant). None outside it.
+    owner_id: str | None = None
+    taker_id: str | None = None
+
+
+def _lvs_owner(all_nodes, lvs_name, db_controller):
+    """The owner of ``lvs_name``, fresh from the DB, or None."""
+    owner = next((n for n in all_nodes if n.lvstore == lvs_name), None)
+    if owner is not None:
+        try:
+            return db_controller.get_storage_node_by_id(owner.get_id())
+        except KeyError:
+            return None
+    cluster_id = next((n.cluster_id for n in all_nodes if n.cluster_id), "")
+    if not cluster_id:
+        return None
+    return next((n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+                 if n.lvstore == lvs_name), None)
+
+
+def _lvs_leader_candidates(all_nodes, lvs_name) -> _LeaderCandidates:
+    """The nodes a leader lookup of ``lvs_name`` may probe and may grant to,
+    given the caller's member list ``all_nodes``.
+
+    Outside sync replication (no node has a site - sites exist only there) the
+    caller's list unchanged, without a DB read. On a sync cluster the owner's
+    ACTIVE triplet (lvs_active_triplet), whatever the caller passed: the home
+    triplet, the remote one, or both while a move is in flight (no grants
+    then). A move nobody owns any more (abandoned promote) is reconciled first
+    (reconcile_lvs_move), so every lookup settles it."""
+    if not any(getattr(n, "site", "") for n in all_nodes):
+        return _LeaderCandidates(list(all_nodes), True)
+    db = DBController()
+    owner = _lvs_owner(all_nodes, lvs_name, db)
+    if owner is None:
+        logger.warning("LVS %s: owner not found - leader lookup without grants", lvs_name)
+        return _LeaderCandidates(list(all_nodes), False)
+    active = lvs_active_triplet(owner)
+    if active.moving_to:
+        if reconcile_lvs_move(owner.get_id()) is not None:
+            owner = db.get_storage_node_by_id(owner.get_id())
+            active = lvs_active_triplet(owner)
+    by_id = {n.get_id(): n for n in all_nodes}
+    nodes = []
+    for node_id in active.node_ids:
+        node = by_id.get(node_id)
+        if node is None:
+            try:
+                node = db.get_storage_node_by_id(node_id)
+            except KeyError:
+                logger.warning("LVS %s: member %s not found", lvs_name, node_id)
+                continue
+        nodes.append(node)
+    taker_id = active.node_ids[0] if active.grants_allowed and active.node_ids else None
+    return _LeaderCandidates(nodes, active.grants_allowed, owner.get_id(), taker_id)
+
+
+def _hublvol_same_site(cluster, node: StorageNode, target: StorageNode) -> bool:
+    """Whether ``node`` may wire a hublvol path to ``target``: always outside
+    sync replication, only within a site on it (no cross-site IO redirect)."""
+    return not cluster.sync_replication or node.site == target.site
+
+
+def _non_leader_hub_ok(cluster, snode: StorageNode, leader_node: StorageNode, owner: StorageNode) -> bool:
+    """Whether a non-leader rebuild of ``owner``'s LVS on ``snode`` wires a
+    hublvol to ``leader_node``: only when ``snode``'s instance takes part in
+    the hublvol at all (lvs_hublvol_expected - never on the passive triplet)
+    and ``leader_node`` is on the same site as ``snode`` (_hublvol_same_site;
+    the site condition applies only on a sync-replication cluster)."""
+    return (lvs_hublvol_expected(owner, snode.get_id())
+            and _hublvol_same_site(cluster, snode, leader_node))
+
+
+def non_leader_rebuild_candidates(owner: StorageNode, node_id: str) -> list[str]:
+    """Ids of the nodes ``node_id`` may stand behind while it rebuilds a
+    non-leader instance of ``owner``'s LVS (_rebuild_anchor) - the ones that
+    may lead it or come to lead it - in preference order: its active triplet,
+    primary first (lvs_active_triplet; both triplets, the source one first,
+    while a move is in flight), never ``node_id`` itself."""
+    return [nid for nid in lvs_active_triplet(owner).node_ids if nid != node_id]
+
+
+class LVSLeaderUnknownError(RuntimeError):
+    """A non-leader rebuild cannot tell behind whom to stand (_rebuild_anchor):
+    a connected member of the leading triplet did not answer the leadership
+    probe - never read as "does not lead" -, or more than one reports the
+    leadership. Quiescing one node could leave another one writing during the
+    examine; the rebuild is retried. "Nobody leads", with every connected
+    member answering, is NOT this error: it is the normal state of an LVS
+    waiting for its first IO."""
+
+
+def _rebuild_anchor(owner: StorageNode, snode: StorageNode, db_controller) -> StorageNode:
+    """The node a non-leader rebuild of ``owner``'s LVS on ``snode`` stands
+    behind: the one quiesced (port-blocked) around the examine and, when it
+    is on ``snode``'s site, the hublvol target. One of
+    non_leader_rebuild_candidates, by the first rule that applies:
+
+    1. a connected candidate did not answer the leadership probe (an RPC
+       error or an empty answer, _lvs_leadership_verdict) ->
+       LVSLeaderUnknownError;
+    2. exactly one candidate reports the leadership -> that one (connected
+       is not leading: an in-site takeover leaves the primary up and
+       non-leader); more than one -> LVSLeaderUnknownError;
+    3. every connected candidate answered "not leading" (an LVS waiting for
+       its first IO) -> the first connected candidate: the active primary,
+       or its secondary when the primary is disconnected;
+    4. no candidate is connected: nothing can be writing -> the first
+       candidate, and the rebuild skips the quiesce (no quorum there).
+
+    Raises:
+        LVSLeaderUnknownError: rules 1 and 2.
+    """
+    try:
+        owner = db_controller.get_storage_node_by_id(owner.get_id())
+    except KeyError:
+        pass
+    candidates = []
+    for node_id in non_leader_rebuild_candidates(owner, snode.get_id()):
+        try:
+            candidates.append(db_controller.get_storage_node_by_id(node_id))
+        except KeyError:
+            logger.warning("LVS %s: member %s not found", owner.lvstore, node_id)
+
+    def _triplet_peers(c):
+        # While a move is in flight the candidates span both triplets; a
+        # member's quorum voters are the candidates of its own triplet.
+        triplet = lvs_triplet_of(owner, c.get_id())
+        return [n.get_id() for n in candidates if n is not c and n.get_id() in triplet]
+
+    connected = {c.get_id(): c for c in candidates if not _check_peer_disconnected(
+        c, lvs_peer_ids=_triplet_peers(c))}
+    if not connected:
+        return candidates[0] if candidates else owner
+    verdict = _lvs_leadership_verdict(owner.lvstore, connected)
+    if verdict.silent:
+        raise LVSLeaderUnknownError(
+            f"LVS {owner.lvstore}: connected members {verdict.silent} did not answer the "
+            f"leadership probe")
+    if len(verdict.leading) > 1:
+        raise LVSLeaderUnknownError(
+            f"LVS {owner.lvstore}: more than one member reports the leadership: {verdict.leading}")
+    if verdict.leading:
+        return connected[verdict.leading[0]]
+    anchor = next(iter(connected.values()))
+    logger.info("LVS %s: no member reports the leadership - the non-leader rebuild on %s "
+                "stands behind %s", owner.lvstore, snode.get_id(), anchor.get_id())
+    return anchor
+
+
+def remote_instance_owners(node: StorageNode, db_controller=None) -> list[StorageNode]:
+    """The owners, with an lvstore, whose remote triplet names ``node``,
+    oldest first. Empty outside sync replication (no site)."""
+    if not node.site:
+        return []
+    db = db_controller or DBController()
+    nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
+    by_id = {n.get_id(): n for n in nodes}
+    owners = [by_id[owner_id] for owner_id in owners_with_remote_role_on(node.get_id(), nodes)]
+    return sorted((o for o in owners if o.lvstore), key=lambda o: o.create_dt)
+
+
+def hosted_lvs_owners(node: StorageNode, db_controller=None) -> list[StorageNode]:
+    """The owners whose LVS runs on ``node`` as a non-leader instance: the ones
+    it hosts as secondary / tertiary, then, on a sync-replication cluster, the
+    ones whose remote triplet names it (each group oldest first)."""
+    db = db_controller or DBController()
+    owners = list(db.get_primary_storage_nodes_by_secondary_node_id(node.get_id()))
+    local_ids = {o.get_id() for o in owners}
+    return owners + [o for o in remote_instance_owners(node, db) if o.get_id() not in local_ids]
+
+
+def _site_node(node: StorageNode) -> role_planner.SiteNode:
+    return role_planner.SiteNode(node.get_id(), node.mgmt_ip, node.failure_domain,
+                                 node.physical_label)
+
+
+def plan_remote_triplets(cluster, nodes, owner_ids, *, exclude_ids=(), local_layout=None):
+    """The remote triplet each owner in ``owner_ids`` should have. No writes.
+
+    Sync-replication clusters only. An owner keeps every current ref that
+    names a non-removed node on the other site outside ``exclude_ids`` --
+    whatever that node's status: an outage never moves a remote role. Every
+    other slot is picked by ``role_planner.pick_remote_triplet`` from the
+    ONLINE nodes of the other site (dedicated secondary nodes excluded),
+    balanced against the remote roles all other owners already hold. Owners
+    are processed in the given order; an owner that is removed or excluded is
+    skipped.
+
+    The result is then checked against the JC-context cap over the whole
+    cluster: every owner's local roles (``local_layout``, owner ->
+    ``(secondary, tertiary)``, overrides the DB pointers -- e.g. the layout an
+    expansion plan will end in) plus every remote triplet.
+
+    Returns ``{owner_id: (remote_primary, remote_secondary, remote_tertiary)}``.
+    Raises role_planner.RemoteTripletPlacementError.
+    """
+    exclude = set(exclude_ids)
+    live = [n for n in nodes
+            if n.status != StorageNode.STATUS_REMOVED and n.get_id() not in exclude]
+    by_id = {n.get_id(): n for n in live}
+    owners = [by_id[oid] for oid in dict.fromkeys(owner_ids) if oid in by_id]
+    owner_set = {o.get_id() for o in owners}
+
+    load: dict[str, list[int]] = {}
+    for node in live:
+        if node.get_id() in owner_set:
+            continue
+        for slot, ref in enumerate(remote_triplet_refs(node)):
+            if ref in by_id:
+                load.setdefault(ref, [0, 0, 0])[slot] += 1
+
+    result = {}
+    for owner in owners:
+        other_site = [n for n in live
+                      if n.site and n.site != owner.site and not n.is_secondary_node]
+        other_by_id = {n.get_id(): n for n in other_site}
+        keep = tuple(_site_node(other_by_id[ref]) if ref in other_by_id else None
+                     for ref in remote_triplet_refs(owner))
+        candidates = [_site_node(n) for n in other_site if n.status == StorageNode.STATUS_ONLINE]
+        try:
+            result[owner.get_id()] = role_planner.pick_remote_triplet(
+                candidates, load, keep=keep, fd_on=bool(cluster.enable_failure_domain))
+        except role_planner.RemoteTripletPlacementError as e:
+            raise role_planner.RemoteTripletPlacementError(
+                f"remote triplet of node {owner.get_id()} (site {owner.site}): {e}") from e
+
+    instances = {}
+    local_layout = local_layout or {}
+    for node in live:
+        node_id = node.get_id()
+        is_owner = (node_id in local_layout or node_id in result or bool(node.lvstore)
+                    or bool(node.secondary_node_id))
+        if not is_owner:
+            continue
+        local = local_layout.get(node_id, (node.secondary_node_id, node.tertiary_node_id))
+        remote = result.get(node_id, remote_triplet_refs(node))
+        instances[node_id] = [*local, *remote]
+    violation = role_planner.jc_context_violation(role_planner.jc_contexts_per_node(instances))
+    if violation:
+        raise role_planner.RemoteTripletPlacementError(violation)
+    return result
+
+
+def assign_remote_triplets(cluster, owner_ids, *, exclude_ids=(), local_layout=None,
+                           db_controller=None) -> dict[str, tuple[str, str, str]]:
+    """Select and persist the remote triplets of ``owner_ids`` (see
+    plan_remote_triplets). Idempotent: an owner whose triplet is unchanged
+    is not written. A no-op on a non-sync cluster.
+
+    The volumes of every planned owner then list the planned triplet in
+    ``lvol.nodes`` (reconcile_lvol_remote_members) - also for an owner whose
+    refs were already right, so a retry after a crash between the two writes
+    repairs them.
+
+    Returns the triplets that were written. Raises
+    role_planner.RemoteTripletPlacementError before writing anything.
+    """
+    if not cluster.sync_replication:
+        return {}
+    db = db_controller or DBController()
+    nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+    plan = plan_remote_triplets(cluster, nodes, owner_ids, exclude_ids=exclude_ids,
+                                local_layout=local_layout)
+    by_id = {n.get_id(): n for n in nodes}
+    written = {}
+    for owner_id, triplet in plan.items():
+        if remote_triplet_refs(by_id[owner_id]) == triplet:
+            continue
+        db.atomic_update(by_id[owner_id], lambda n, t=triplet: _set_remote_triplet_refs(n, t))
+        logger.info("Remote triplet of node %s (site %s): primary %s, secondary %s, tertiary %s",
+                    owner_id, by_id[owner_id].site, *triplet)
+        written[owner_id] = triplet
+    for owner_id, triplet in plan.items():
+        reconcile_lvol_remote_members(by_id[owner_id], triplet, by_id, db)
+    return written
+
+
+def lvol_remote_members(nodes, owner: StorageNode, triplet, by_id) -> list[str]:
+    """``nodes`` (an lvol's path list) with its remote part replaced by
+    ``triplet``: the entries on the owner's site keep their order (local
+    relocations own them), every other-site entry is dropped, the triplet
+    follows in ref order. An id without a node record is kept - never drop
+    what cannot be classified."""
+    home = [n for n in nodes if n not in by_id or by_id[n].site == owner.site]
+    return home + [m for m in triplet if m and m not in home]
+
+
+def reconcile_lvol_remote_members(owner: StorageNode, triplet, by_id, db) -> None:
+    """Point ``lvol.nodes`` of every HA volume of ``owner`` at its remote
+    ``triplet`` (lvol_remote_members), one field-scoped write per volume that
+    differs. Keeps the path positions - and so each path's cntlid window -
+    stable: home p/s/t first, then remote p/s/t."""
+    for lvol in db.get_lvols_by_node_id(owner.get_id()):
+        if lvol.ha_type != "ha" or lvol.nodes == lvol_remote_members(lvol.nodes, owner, triplet, by_id):
+            continue
+
+        def _mutate(lv):
+            wanted = lvol_remote_members(lv.nodes, owner, triplet, by_id)
+            if lv.nodes == wanted:
+                return False
+            lv.nodes = wanted
+            return True
+
+        db.atomic_update(lvol, _mutate)
+        logger.info("lvol %s of %s: paths now %s", lvol.get_id(), owner.get_id(), triplet)
+
+
+def owners_with_remote_role_on(node_id, nodes) -> list[str]:
+    """Ids of the non-removed owners whose remote triplet names ``node_id``."""
+    return [n.get_id() for n in nodes
+            if n.status != StorageNode.STATUS_REMOVED and n.get_id() != node_id
+            and node_id in remote_triplet_refs(n)]
 
 
 def get_secondary_nodes(current_node: StorageNode, exclude_ids=None, removed_node=None):
@@ -15696,7 +18760,8 @@ def get_secondary_nodes(current_node: StorageNode, exclude_ids=None, removed_nod
         exclude_ids = []
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, current_node, db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id))
     # Group by failure domain (stable sort, preserves DB order within each
     # domain) before scanning candidates. The "first valid candidate after my
     # own position" logic below skips same-domain nodes as forbidden, so on an
@@ -15791,10 +18856,13 @@ def splice_stranded_secondary(stranded_node) -> bool:
     own anti-affinity tiering.
     """
     db_controller = DBController()
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    cluster = db_controller.get_cluster_by_id(stranded_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, stranded_node, db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id))
     # Deterministic tie-breaking among equally domain-scored edges -- see
     # get_secondary_nodes for why this sort matters.
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
+    site_ids = {n.get_id() for n in all_nodes}
     edges = [n for n in all_nodes if n.secondary_node_id and n.get_id() != stranded_node.get_id()]
 
     def _host_disjoint(p, x):
@@ -15808,6 +18876,8 @@ def splice_stranded_secondary(stranded_node) -> bool:
     best = None
     best_score = -1
     for p in edges:
+        if p.secondary_node_id not in site_ids:
+            continue
         x = db_controller.get_storage_node_by_id(p.secondary_node_id)
         if not x or x.get_id() == stranded_node.get_id() or not _host_disjoint(p, x):
             continue
@@ -15866,7 +18936,8 @@ def get_secondary_nodes_2(current_node: StorageNode, exclude_ids=None, exclude_m
         forbidden_ips.update(exclude_mgmt_ips)
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, current_node, db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id))
     # See get_secondary_nodes for why this sort matters: it removes the
     # pairing algorithm's sensitivity to arbitrary/interleaved node order.
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
@@ -15953,7 +19024,9 @@ def splice_stranded_tertiary(stranded_node) -> bool:
     not just against each other.
     """
     db_controller = DBController()
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    cluster = db_controller.get_cluster_by_id(stranded_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, stranded_node, db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id))
     # Deterministic tie-breaking among equally domain-scored edges -- see
     # get_secondary_nodes for why this sort matters.
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
@@ -16014,6 +19087,37 @@ def splice_stranded_tertiary(stranded_node) -> bool:
     x.write_to_db()
 
     return True
+
+
+def lvstore_stack_entry(cluster, lvs_name, bdev_name, cluster_sz):
+    """The lvstore's entry in a node's lvstore_stack.
+
+    Its params are what a restart replays to RPCClient.create_lvstore, so the
+    cluster's creation-time choices (the metadata journal) are recorded here
+    rather than read from the cluster again.
+    """
+    return {
+        "type": "bdev_lvstore",
+        "name": lvs_name,
+        "params": {
+            "name": lvs_name,
+            "bdev_name": bdev_name,
+            "cluster_sz": cluster_sz,
+            "clear_method": "none",
+            "num_md_pages_per_cluster_ratio": 1,
+            "md_journal": bool(cluster.md_journal),
+        }
+    }
+
+
+def lvstore_create_params(params):
+    """The create_lvstore arguments a stored lvstore_stack entry replays to.
+
+    An entry written before the metadata journal existed has no md_journal
+    key. Its lvstore was created without the journal, so the replay states
+    off rather than leaving the choice to the data plane.
+    """
+    return {"md_journal": False, **params}
 
 
 def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
@@ -16123,19 +19227,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         )
 
     lvs_name = f"LVS_{jm_vuid}"
-    lvstore_stack.append(
-        {
-            "type": "bdev_lvstore",
-            "name": lvs_name,
-            "params": {
-                "name": lvs_name,
-                "bdev_name": raid_device,
-                "cluster_sz": cluster_sz,
-                "clear_method": "none",
-                "num_md_pages_per_cluster_ratio": 1,
-            }
-        }
-    )
+    lvstore_stack.append(lvstore_stack_entry(cluster, lvs_name, raid_device, cluster_sz))
 
     snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack
@@ -16268,6 +19360,24 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
                     logger.error("Error establishing hublvol: %s", e)
                     # return False
 
+    # Sync replication: the LVS also runs on its remote triplet on the other
+    # site, a non-leader instance on each member and no hublvol (the leader is
+    # on this site). Built last: the hublvol steps above write this node's
+    # record from the in-memory copy, which would bring back the pending marks
+    # these builds clear. A member that is not online keeps its mark; its
+    # restart builds the instance.
+    for member_id in remote_triplet_refs(snode):
+        if not member_id:
+            continue
+        member = db_controller.get_storage_node_by_id(member_id)
+        if member.status != StorageNode.STATUS_ONLINE:
+            logger.warning(f"Remote-triplet member {member_id} of {lvs_name} is {member.status}; "
+                           f"its instance is built when it restarts")
+            continue
+        if not recreate_lvstore_on_non_leader(member, snode, snode, activation_mode=True):
+            logger.error(f"Failed to create the remote instance of {lvs_name} on node {member_id}")
+            return False
+
     storage_events.node_ports_changed(snode)
     return True
 
@@ -16277,6 +19387,10 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
 # giving the control plane time to reconcile a peer that went offline mid-restart
 # so the rebuilt cluster map no longer references its devices as online.
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
+
+
+class _DistribMapPushError(RuntimeError):
+    """The cluster-map push to a freshly created distrib failed (retried once)."""
 
 #: Bound on waiting for a node's distrib pipeline to empty before its
 #: leadership is changed. Applied to the acting leader (### 4) and to every
@@ -16317,7 +19431,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     # key (distinct keys -> GIL-safe), the main loop reads after join.
     distr_results: dict = {}
 
-    def _create_distr(snode: StorageNode, name, params):
+    def _create_distr(snode: StorageNode, name, params, home_site):
         # If a peer node goes offline at the exact moment a distrib is
         # (re)created, the cluster map can be briefly stale -- it still flags
         # that peer's devices as online -- and bdev_distrib_create (or the
@@ -16327,28 +19441,39 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
         # current DB view each call) before giving up. A failure that survives
         # the retry is recorded so the caller aborts the restart -- the standard
         # unrecoverable-error path -- instead of completing on a broken distrib.
-        for attempt in range(2):
-            if attempt > 0:
-                # Give the control plane a moment to reconcile the departed
-                # node, then clear any half-created distrib before retrying.
-                time.sleep(_DISTR_RECREATE_RETRY_DELAY_SEC)
-                try:
-                    rpc_client.bdev_distrib_delete(name)
-                except Exception:
-                    pass
+        def _attempt():
+            rpc_client.bdev_distrib_create(**params)
+            if not distr_controller.send_cluster_map_to_distr(snode, name, home_site=home_site):
+                raise _DistribMapPushError(f"failed to send cluster map to distrib {name}")
+
+        log_retry = before_sleep_log(logger, logging.WARNING)
+
+        def _before_retry(retry_state):
+            # Clear the half-created distrib; the wait that follows gives the
+            # control plane a moment to reconcile the departed node.
+            log_retry(retry_state)
             try:
-                rpc_client.bdev_distrib_create(**params)
-                if distr_controller.send_cluster_map_to_distr(snode, name):
-                    distr_results[name] = True
-                    return
-                logger.error(
-                    "Failed to send cluster map to distrib %s (attempt %d/2)",
-                    name, attempt + 1)
-            except Exception as e:
-                logger.error(
-                    "Failed to create bdev distrib %s (attempt %d/2): %s",
-                    name, attempt + 1, e)
-        distr_results[name] = False
+                rpc_client.bdev_distrib_delete(name)
+            except RPCException as e:
+                logger.warning("Failed to delete distrib %s before its retry: %s", name, e)
+
+        try:
+            Retrying(
+                stop=stop_after_attempt(2),
+                wait=wait_fixed(_DISTR_RECREATE_RETRY_DELAY_SEC),
+                retry=retry_if_exception_type((RPCException, _DistribMapPushError)),
+                before_sleep=_before_retry,
+            )(_attempt)
+            distr_results[name] = True
+        except RetryError as e:
+            logger.error("Failed to create bdev distrib %s after 2 attempts: %s",
+                         name, e.last_attempt.exception())
+        except DistribHomeSiteError as e:
+            logger.error("Failed to create bdev distrib %s: %s", name, e)
+        finally:
+            # Recorded on every exit, an unexpected exception included: a
+            # distrib without a result would not count as failed below.
+            distr_results.setdefault(name, False)
 
     def _distr_failures():
         return [n for n, ok in distr_results.items() if not ok]
@@ -16362,6 +19487,9 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
         stack = snode.lvstore_stack
     else:
         stack = lvstore_stack
+    # Sync replication: the site of the LVS owner, whose nodes form the
+    # primary zone of every distrib of this stack.
+    home_site = primary_node.site if primary_node else snode.site
 
     def _rollback():
         if created_bdevs:
@@ -16393,9 +19521,22 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
 
         elif type == "bdev_distr":
             if primary_node:
-                params['jm_names'] = get_node_jm_names(primary_node, remote_node=snode)
+                jm_names = get_node_jm_names(primary_node, remote_node=snode)
             else:
-                params['jm_names'] = get_node_jm_names(snode)
+                jm_names = get_node_jm_names(snode)
+            params['jm_names'] = jm_names.names
+            if cluster.sync_replication:
+                # A journal whose copies are all on one site (no HA
+                # journaling, or no other-site member) would open as a legacy
+                # all-local journal and lose acknowledged writes with the site.
+                if not (jm_names.n_local and 0 < jm_names.n_local < len(jm_names.names)):
+                    if created_bdevs:
+                        _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+                    return False, (f"{name}: the journal is not site-aware on a sync-replication "
+                                   f"cluster (jm_n_local={jm_names.n_local}, "
+                                   f"jm_names={jm_names.names})")
+                params['synchronous_replication_mode'] = 1
+                params['jm_n_local'] = jm_names.n_local
 
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
@@ -16407,13 +19548,13 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             # write-protection generation; replay it under whichever key the
             # cluster is on now, never the one that happens to be stored.
             apply_write_protection_mode(params, cluster.write_protection_v2)
-            t = threading.Thread(target=_create_distr, args=(snode, name, params,))
+            t = threading.Thread(target=_create_distr, args=(snode, name, params, home_site))
             thread_list.append(t)
             t.start()
             ret = True
 
         elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
-                ret = _create_or_none(rpc_client.create_lvstore, name, **params)
+                ret = _create_or_none(rpc_client.create_lvstore, name, **lvstore_create_params(params))
 
         elif type == "bdev_ptnonexcl":
             ret = _create_or_none(rpc_client.bdev_PT_NoExcl_create, name, **params)
@@ -16546,8 +19687,7 @@ def recreate_lvstore_on_sec(snode: StorageNode):
     trade-off.
     """
     db_controller = DBController()
-    primaries = db_controller.get_primary_storage_nodes_by_secondary_node_id(
-        snode.get_id())
+    primaries = hosted_lvs_owners(snode, db_controller)
     if not primaries:
         logger.info(
             f"recreate_lvstore_on_sec: no primaries point at "
@@ -16557,8 +19697,12 @@ def recreate_lvstore_on_sec(snode: StorageNode):
     overall_ok = True
     for primary in primaries:
         try:
+            # Sync replication: the member of the active triplet the rebuild
+            # stands behind (_rebuild_anchor), for a local and a remote-triplet
+            # instance alike.
+            leader = _leader_for_non_leader_rebuild(primary, snode, db_controller)
             ok = recreate_lvstore_on_non_leader(
-                snode, leader_node=primary, primary_node=primary)
+                snode, leader_node=leader, primary_node=primary)
         except Exception as e:
             logger.exception(
                 f"recreate_lvstore_on_sec: recreate failed for "
