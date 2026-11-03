@@ -25,6 +25,7 @@ from utils.common_utils import sleep_n_sec
 from utils.k8s_utils import K8sUtils
 from utils.pnfs_utils import (
     PnfsEvidenceError,
+    PnfsProbeError,
     assert_devices_moved,
     assert_layouts_taken,
     nvme_ns_counters,
@@ -551,6 +552,12 @@ class PnfsDeviceProofK8s(_PnfsBase):
                 assert_devices_moved(before.get(ip), after.get(ip),
                                      logger=self.logger, context=f"on {ip}")
                 moved_nodes.append(ip)
+            except PnfsProbeError:
+                # Subclass of PnfsEvidenceError, so it has to be caught
+                # first or a node we could not read becomes a node that
+                # did no IO -- the harness failure reported as a product
+                # one, which is the single worst outcome for this test.
+                raise
             except PnfsEvidenceError:
                 flat.append(ip)
         if not moved_nodes:
