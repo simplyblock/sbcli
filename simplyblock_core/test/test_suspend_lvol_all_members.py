@@ -18,7 +18,7 @@ from simplyblock_core.models.storage_node import StorageNode
 
 def _node(nid, status=StorageNode.STATUS_ONLINE, sec=None, ter=None):
     n = SimpleNamespace(
-        status=status, secondary_node_id=sec, tertiary_node_id=ter,
+        status=status, secondary_node_id=sec, tertiary_node_id=ter, cluster_id="CL",
         data_nics=[SimpleNamespace(ip4_address=f"10.0.0.{len(nid)}", trtype="TCP",
                                    listen_address=f"10.0.0.{len(nid)}")])
     n.get_id = lambda nid=nid: nid
@@ -36,7 +36,7 @@ def lvs():
     db = MagicMock()
     db.get_lvol_by_id.return_value = lvol
     db.get_storage_node_by_id.side_effect = lambda nid: nodes[nid]
-    with patch.object(lc, "DBController", return_value=db):
+    with patch.object(lc, "DBController", return_value=db),             patch.object(lc, "reject_on_sync_replication", lambda *a, **k: None):
         yield nodes
 
 
