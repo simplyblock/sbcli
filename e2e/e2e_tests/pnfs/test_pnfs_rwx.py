@@ -29,6 +29,7 @@ from utils.pnfs_utils import (
     PnfsProbeError,
     assert_devices_moved,
     assert_layouts_taken,
+    export_fsid,
     nfsexport_status,
     nvme_ns_counters,
 )
@@ -1006,19 +1007,18 @@ class PnfsFsidUniquenessK8s(_PnfsBase):
         names = [f"pnfs-b08-{i:02d}" for i in range(self.CLAIMS)]
         self._make_rwx_claims(names)
 
-        exports = nfsexport_status(self.k8s_utils) or []
+        # Joined on volumeRef, the only link an NFSExport carries back to
+        # a claim. See nfsexport_status.
         mine = {}
-        for item in exports:
-            n = (item.get("metadata") or {}).get("name") or ""
-            spec = item.get("spec") or {}
-            status = item.get("status") or {}
-            claim = (spec.get("claimRef") or {}).get("name") or ""
-            match = next((c for c in names if c == claim or c in n), None)
-            if not match:
+        for claim in names:
+            item = nfsexport_status(self.k8s_utils, pvc_name=claim)
+            if item is None:
                 continue
-            fsid = (status.get("fsid") or spec.get("fsid")
-                    or status.get("Fsid") or "")
-            mine[match] = (n, str(fsid))
+            mine[claim] = (
+                (item.get("metadata") or {}).get("name") or "",
+                export_fsid(item),
+                ((item.get("spec") or {}).get("exportPath") or ""),
+            )
 
         missing = [c for c in names if c not in mine]
         if missing:
@@ -1026,24 +1026,31 @@ class PnfsFsidUniquenessK8s(_PnfsBase):
                 f"{len(missing)} of {self.CLAIMS} bound claims have no "
                 f"NFSExport (B-08): {missing[:5]}")
 
-        blank = [c for c, (_n, f) in mine.items() if not f]
+        blank = [c for c, (_n, f, _p) in mine.items() if not f]
         if blank:
             raise PnfsProbeError(
-                f"the NFSExport records carry no fsid field, so this says "
-                f"nothing about uniqueness. Fix the probe, not the product: "
-                f"{len(blank)} of {self.CLAIMS} blank, e.g. {blank[:3]}")
+                f"could not read a volume id out of volumeRef for "
+                f"{len(blank)} of {self.CLAIMS} exports, so this says "
+                f"nothing about uniqueness. Fix the probe: {blank[:3]}")
 
-        seen = {}
-        for claim, (_n, fsid) in sorted(mine.items()):
-            seen.setdefault(fsid, []).append(claim)
-        dupes = {f: c for f, c in seen.items() if len(c) > 1}
+        by_fsid, by_path = {}, {}
+        for claim, (_n, fsid, path) in sorted(mine.items()):
+            by_fsid.setdefault(fsid, []).append(claim)
+            by_path.setdefault(path, []).append(claim)
+        dupes = {f: c for f, c in by_fsid.items() if len(c) > 1}
         if dupes:
             raise PnfsEvidenceError(
                 f"two or more exports share an fsid on one metadata server "
                 f"(B-08), which can hand a client the wrong filesystem: "
                 f"{dupes}")
-        self.logger.info("[B-08] PASS: %d claims, %d distinct fsids",
-                         len(mine), len(seen))
+        path_dupes = {p: c for p, c in by_path.items() if len(c) > 1}
+        if path_dupes:
+            raise PnfsEvidenceError(
+                f"two or more exports share a server-side path (B-08): "
+                f"{path_dupes}")
+        self.logger.info(
+            "[B-08] PASS: %d claims, %d distinct fsids, %d distinct export "
+            "paths", len(mine), len(by_fsid), len(by_path))
 
 
 # ── B-09 ─────────────────────────────────────────────────────────────────
@@ -1365,9 +1372,13 @@ class PnfsTwoNamespacesK8s(_PnfsBase):
                 f"default={a is not None}, {self.OTHER_NS}={b is not None}")
 
         def ident(item):
-            spec, status = item.get("spec") or {}, item.get("status") or {}
-            return (str(status.get("path") or spec.get("path") or ""),
-                    str(status.get("fsid") or spec.get("fsid") or ""),
+            # exportPath and volumeRef are the two fields an NFSExport
+            # actually has here. The CRD says exportPath "carries the
+            # namespace, because a PVC name is unique only within one",
+            # which is precisely the claim this case tests.
+            spec = item.get("spec") or {}
+            return (str(spec.get("exportPath") or ""),
+                    export_fsid(item),
                     (item.get("metadata") or {}).get("name") or "")
 
         ia, ib = ident(a), ident(b)

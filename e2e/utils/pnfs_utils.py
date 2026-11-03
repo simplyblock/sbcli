@@ -322,12 +322,41 @@ def assert_devices_moved(before, after, logger=None, context=""):
 
 # ── control-plane objects ────────────────────────────────────────────────
 
+def pvc_volume_ref(k8s, pvc_name, namespace=None):
+    """The ``<cluster>:<pool>:<lvol>`` handle the PVC's PV carries.
+
+    This is the same string an NFSExport holds in ``spec.volumeRef``, so it
+    is how a claim is joined to its export.
+    """
+    ns = namespace or k8s.namespace
+    pv, _err = k8s._exec_kubectl(
+        f"kubectl get pvc {pvc_name} -n {ns} "
+        f"-o jsonpath='{{.spec.volumeName}}' 2>/dev/null || true",
+        supress_logs=True)
+    pv = (pv or "").strip().strip("'")
+    if not pv:
+        return ""
+    handle, _err = k8s._exec_kubectl(
+        f"kubectl get pv {pv} "
+        f"-o jsonpath='{{.spec.csi.volumeHandle}}' 2>/dev/null || true",
+        supress_logs=True)
+    return (handle or "").strip().strip("'")
+
+
 def nfsexport_status(k8s, pvc_name=None, namespace=None):
     """Return the NFSExport CRs, optionally the one backing *pvc_name*.
 
-    Used by B-11 (delete means the export is gone) and B-16 (with no
-    metadata server the export reports ``NoMetadataServer`` rather than
-    silently provisioning).
+    The join is ``spec.volumeRef``, which the CRD defines as
+    ``<cluster-uuid>:<pool>:<lvol-uuid>`` -- byte for byte the PV's
+    ``spec.csi.volumeHandle``. There is no claimRef on an NFSExport and its
+    own name is ``nfsexp-<lvol-uuid>``, so neither carries the claim's name.
+
+    This used to look for the PVC name inside a ``spec.claimRef.name`` that
+    does not exist and inside the CR's name, which is a uuid. It therefore
+    returned None for every claim that had a perfectly good export, and
+    B-11 failed run 41614043254 with "no NFSExport exists for the bound
+    claim pnfs-b11" against a claim that fio had just written to through
+    that very export.
     """
     ns = namespace or k8s.namespace
     out, _err = k8s._exec_kubectl(
@@ -338,13 +367,29 @@ def nfsexport_status(k8s, pvc_name=None, namespace=None):
         return [] if pvc_name is None else None
     if pvc_name is None:
         return items
+
+    ref = pvc_volume_ref(k8s, pvc_name, namespace=ns)
     for it in items:
-        spec = it.get("spec") or {}
-        if pvc_name in (spec.get("claimRef", {}) or {}).get("name", ""):
+        vr = ((it.get("spec") or {}).get("volumeRef") or "")
+        if ref and vr == ref:
             return it
-        if pvc_name in (it.get("metadata", {}).get("name") or ""):
-            return it
+    # A deleted claim has no PV to resolve, which is exactly B-11's second
+    # look: nothing to join on means nothing claims it, so say so rather
+    # than falling back to a substring match that would never hit anyway.
     return None
+
+
+def export_fsid(export):
+    """The export's fsid, which the CRD does not store as a field.
+
+    nfsexport_types.go: "the NFS fsid [is] the volume's own id, so [it is]
+    read from here rather than stored beside it, where they could disagree
+    with it." So the fsid is the lvol uuid, the last component of
+    ``spec.volumeRef``. Reading a ``status.fsid`` returns nothing, which is
+    not the same as two exports sharing one.
+    """
+    vr = ((export or {}).get("spec") or {}).get("volumeRef") or ""
+    return vr.rsplit(":", 1)[-1] if ":" in vr else ""
 
 
 def nvme_resv_report(k8s, node_ip, device):
