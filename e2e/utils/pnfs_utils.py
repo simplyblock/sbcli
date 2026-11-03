@@ -31,10 +31,28 @@ import time
 #: proxying data through it, which is plain NFS wearing a pNFS mount option.
 DATA_OPS = ("READ", "WRITE")
 
-#: The layout types the kernel spells in the ``pnfs=`` field. We only ever
-#: expect ``flexfiles``, but matching the set makes a surprise readable
-#: instead of a KeyError.
-KNOWN_LAYOUT_TYPES = ("flexfiles", "filelayout", "blocklayout", "scsilayout")
+#: The layout types the kernel spells in the ``pnfs=`` field.
+#:
+#: These are the ``pnfs_layoutdriver_type.name`` strings the NFS client
+#: prints, not the driver's module name. This list used to hold
+#:     ("flexfiles", "filelayout", "blocklayout", "scsilayout")
+#: which is the module spelling, and the kernel emits none of them -- so
+#: the B-03 check could not pass for any layout type, including the one it
+#: was written for. Run 41572279257 is where that surfaced: six pods all
+#: reported ``pnfs=LAYOUT_SCSI`` with LAYOUTGET=4098 and zero server-side
+#: READ/WRITE, which is a layout being taken and used, and the assertion
+#: called it "unexpected layout type".
+#:
+#: Upstream: fs/nfs/filelayout/filelayout.c, fs/nfs/flexfilelayout/
+#: flexfilelayout.c and fs/nfs/blocklayout/blocklayout.c (which registers
+#: both the block and the SCSI driver). These must move together with the
+#: kernel the lab's nodes run.
+KNOWN_LAYOUT_TYPES = (
+    "LAYOUT_NFSV4_1_FILES",
+    "LAYOUT_FLEX_FILES",
+    "LAYOUT_BLOCK_VOLUME",
+    "LAYOUT_SCSI",
+)
 
 
 class PnfsEvidenceError(AssertionError):
@@ -234,26 +252,54 @@ def nvme_ns_counters(k8s, node_ip):
         "echo \"== $d\"; nvme smart-log \"$d\" -o json 2>/dev/null "
         "|| echo '{}'; done",
         check=False)
-    counters, cur = {}, None
+    # nvme-cli pretty-prints -o json, so a device's object spans many lines
+    # and the first of them is a bare "{". This used to call json.loads on
+    # each line that started with one, which is always that bare brace and
+    # always a ValueError, so the dict came back empty for every node and
+    # B-04 failed with "not one storage node's NVMe counters moved" on a
+    # cluster that was moving plenty. Accumulate to the closing brace
+    # instead. Run 41572279257.
+    counters, cur, buf, depth = {}, None, [], 0
     for line in (out or "").splitlines():
-        if line.startswith("== "):
+        if depth == 0 and line.startswith("== "):
             cur = line[3:].strip()
+            buf = []
             continue
-        if cur and line.strip().startswith("{"):
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
+        if cur is None:
+            continue
+        stripped = line.strip()
+        if depth == 0 and not stripped.startswith("{"):
+            continue
+        buf.append(line)
+        depth += line.count("{") - line.count("}")
+        if depth > 0:
+            continue
+        try:
+            d = json.loads("\n".join(buf))
+        except ValueError:
+            d = None
+        if isinstance(d, dict) and (
+                "data_units_read" in d or "data_units_written" in d):
             counters[cur] = {
                 "read": int(d.get("data_units_read", 0)),
                 "write": int(d.get("data_units_written", 0)),
             }
-            cur = None
+        cur, buf = None, []
     return counters
 
 
 def assert_devices_moved(before, after, logger=None, context=""):
-    """B-04. At least one namespace on this node did IO between the samples."""
+    """B-04. At least one namespace on this node did IO between the samples.
+
+    A node we could not read counters from is a probe failure, not a flat
+    device, and the two must not arrive as the same exception: one says fix
+    the harness, the other says the data never reached the cluster.
+    """
+    if not before or not after:
+        raise PnfsProbeError(
+            f"no NVMe namespace counters could be read {context} "
+            f"(before={len(before or {})}, after={len(after or {})}), so "
+            f"this says nothing about where the data went. Fix the probe.")
     moved = {}
     for dev, aft in (after or {}).items():
         bef = (before or {}).get(dev)
