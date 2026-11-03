@@ -823,10 +823,29 @@ ALL_TESTS = [
     MigrationConcurrencyCurve,
     ReplicationCycleTimeBySize,
     ReplicationDemoteDowntimeBySize,
+    # get_monitoring_tests has returned these two since it was written, but
+    # neither was ever listed here, so `--testname TestLvolOutageLoadTest`
+    # reported "not found" while `--testname monitoring` ran it. Found by
+    # tests/unit/test_e2e_registry.py, which exists because the same slip
+    # cost run 41604777129.
+    TestLvolOutageLoadTest,
+    TestParallelLvolSnapshotCloneAPI,
     PnfsSharedWriteVerifyK8s,
     PnfsLayoutProofK8s,
     PnfsCrossClientReadK8s,
     PnfsDeviceProofK8s,
+    PnfsCloseToOpenK8s,
+    PnfsByteRangeLockK8s,
+    PnfsMetadataStormK8s,
+    PnfsOnlineResizeK8s,
+    PnfsSnapshotRestoreK8s,
+    PnfsDeleteLeakGateK8s,
+    PnfsFsidUniquenessK8s,
+    PnfsScaleThirtyPodsK8s,
+    PnfsMixedRwxRwoK8s,
+    PnfsTwoNamespacesK8s,
+    PnfsClaimCeilingK8s,
+    PnfsNoMetadataServerK8s,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
