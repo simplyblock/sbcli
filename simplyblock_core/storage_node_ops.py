@@ -4096,7 +4096,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
     # Sync-replication site: validated before anything on the host changes
     # (the vcpu resize and hugepage reservation below can reboot it).
     site = validate_node_site(_cluster, site)
-    _site_ip_iface = utils.get_mgmt_ip(node_info, iface_name)
+    _site_ip_iface = utils.get_mgmt_ip(node_info, iface_name, networks, pod_network)
     _check_host_site(db_controller, cluster_id, _site_ip_iface[0] if _site_ip_iface else None, site)
 
     # Resize this host's core layout to the cluster's vcpu_count once, before

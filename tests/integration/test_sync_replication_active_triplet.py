@@ -372,8 +372,8 @@ class TestLookupWithoutRecovery:
         assert ops.find_leader_with_failover(_home(db, a), "LVS_1", recover=False) == (None, [])
         for node in (*a, *b):
             rpcs[node.get_id()].bdev_lvol_set_lvs_signal.assert_not_called()
-        # nor does the default lookup: b0 cannot be proven non-leader, so it
-        # may still lead and nobody else is made leader
+        # nor does the default lookup: it goes through the guarded leaderless
+        # recovery, which grants nothing while no taker's journal is ready
         assert ops.find_leader_with_failover(_home(db, a), "LVS_1") == (None, [])
         for node in (*a, *b):
             rpcs[node.get_id()].bdev_lvol_set_lvs_signal.assert_not_called()

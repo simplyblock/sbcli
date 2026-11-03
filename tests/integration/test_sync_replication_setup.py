@@ -438,6 +438,26 @@ class TestAddNodeSite:
         assert [n.get_id() for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())] == [
             existing.get_id()]
 
+    @pytest.mark.parametrize("network", [
+        {"pod_network": True},
+        {"networks": [{"name": "fabric", "namespace": "infra", "interface": "data0",
+                       "ips": ["10.10.10.101/24"]}]},
+    ])
+    def test_another_sites_host_is_refused_off_the_host_network(self, db, network):
+        # Off the host network the agent sees only the pod's interfaces and
+        # reports the host's address as host_ip.
+        cluster = _seed_cluster(db, spdk_vcpu_count=4)
+        existing = _seed_node(db, cluster, "site-b", host=HOST_IP)
+        node_info = _node_info(host_ip="10.42.1.5")
+        node_info["host_ip"] = HOST_IP
+        with _AddNodeWorld(node_info) as world, \
+                pytest.raises(storage_node_ops.NodeSiteError, match="already belongs to site 'site-b'"):
+            _add_node(cluster, "site-a", **network)
+        world.mocks["apply_cluster_vcpu_count"].assert_not_called()
+        world.api.spdk_process_start.assert_not_called()
+        assert [n.get_id() for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())] == [
+            existing.get_id()]
+
 
 def test_an_invalid_site_ends_the_node_add_task(db):
     cluster = _seed_cluster(db, spdk_vcpu_count=4)
