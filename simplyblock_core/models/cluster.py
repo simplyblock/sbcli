@@ -373,7 +373,7 @@ class Cluster(BaseModel):
     # a metadata-only page copy (no data copy), merged back when the snapshot
     # is deleted. Frozen at cluster create time: create_lvstore sets it on every
     # distrib stack entry, so restarts re-create the distribs the same way.
-    page_copy: bool = False
+    page_copy: bool = True
     # Device guarantees 4K write atomicity despite a <4K logical block size
     # (e.g. AWS NVMe, which is 512B but atomic at 4K). When set, alceml creation
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
