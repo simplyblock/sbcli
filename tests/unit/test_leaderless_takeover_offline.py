@@ -48,11 +48,12 @@ class TestLeaderlessTakeover(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.db = db
+        self.sync = MagicMock(return_value="")
+        self.two = MagicMock(return_value=False)
+        self.find = MagicMock(return_value=(self.b, []))
         self.ops = patch.multiple(
-            storage_node_ops,
-            _sync_site=MagicMock(return_value=""),
-            _cluster_two_node_arbitrated=MagicMock(return_value=False),
-            find_leader_with_failover=MagicMock(return_value=(self.b, [])))
+            storage_node_ops, _sync_site=self.sync,
+            _cluster_two_node_arbitrated=self.two, find_leader_with_failover=self.find)
         self.ops.start()
         self.addCleanup(self.ops.stop)
         p = patch.object(mon.tasks_controller, "get_active_node_restart_task",
@@ -62,20 +63,20 @@ class TestLeaderlessTakeover(unittest.TestCase):
 
     def _calls(self):
         return [(c.args[1], [m.get_id() for m in c.args[0]])
-                for c in storage_node_ops.find_leader_with_failover.call_args_list]
+                for c in self.find.call_args_list]
 
     def test_every_lvstore_of_the_offline_member_gets_a_leader_lookup(self):
         mon._take_over_leaderless_lvstores(self.a)
         self.assertEqual(sorted(self._calls()),
                          [("LVS_2", ["A", "B", "C"]), ("LVS_3", ["B", "C", "A"])])
-        for c in storage_node_ops.find_leader_with_failover.call_args_list:
+        for c in self.find.call_args_list:
             # recovery is allowed here: the proof (#1592) guards the grant
             self.assertNotIn("recover", c.kwargs)
 
     def test_rate_limited_per_lvstore(self):
         mon._take_over_leaderless_lvstores(self.a)
         mon._take_over_leaderless_lvstores(self.a)
-        self.assertEqual(storage_node_ops.find_leader_with_failover.call_count, 2)
+        self.assertEqual(self.find.call_count, 2)
 
     def test_not_while_the_restart_flow_runs(self):
         with patch.object(mon.tasks_controller, "get_active_node_restart_task",
@@ -83,34 +84,34 @@ class TestLeaderlessTakeover(unittest.TestCase):
             self.db.get_task_by_id.return_value = SimpleNamespace(
                 status=JobSchedule.STATUS_RUNNING)
             mon._take_over_leaderless_lvstores(self.a)
-        storage_node_ops.find_leader_with_failover.assert_not_called()
+        self.find.assert_not_called()
 
     def test_a_queued_restart_does_not_block(self):
         with patch.object(mon.tasks_controller, "get_active_node_restart_task",
                           return_value="T1"):
             self.db.get_task_by_id.return_value = SimpleNamespace(status=JobSchedule.STATUS_NEW)
             mon._take_over_leaderless_lvstores(self.a)
-        self.assertEqual(storage_node_ops.find_leader_with_failover.call_count, 2)
+        self.assertEqual(self.find.call_count, 2)
 
     def test_not_on_sync_replication_clusters(self):
-        storage_node_ops._sync_site.return_value = "site-a"
+        self.sync.return_value = "site-a"
         mon._take_over_leaderless_lvstores(self.a)
-        storage_node_ops.find_leader_with_failover.assert_not_called()
+        self.find.assert_not_called()
 
     def test_not_on_two_node_arbitrated_clusters(self):
-        storage_node_ops._cluster_two_node_arbitrated.return_value = True
+        self.two.return_value = True
         mon._take_over_leaderless_lvstores(self.a)
-        storage_node_ops.find_leader_with_failover.assert_not_called()
+        self.find.assert_not_called()
 
     def test_skipped_when_no_member_is_online(self):
         self.b.status = self.c.status = StorageNode.STATUS_OFFLINE
         mon._take_over_leaderless_lvstores(self.a)
-        storage_node_ops.find_leader_with_failover.assert_not_called()
+        self.find.assert_not_called()
 
     def test_a_failing_lookup_does_not_stop_the_others(self):
-        storage_node_ops.find_leader_with_failover.side_effect = [RuntimeError("x"), (None, [])]
+        self.find.side_effect = [RuntimeError("x"), (None, [])]
         mon._take_over_leaderless_lvstores(self.a)
-        self.assertEqual(storage_node_ops.find_leader_with_failover.call_count, 2)
+        self.assertEqual(self.find.call_count, 2)
 
 
 class TestLandingCreateWithPrimaryDown(unittest.TestCase):

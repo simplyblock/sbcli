@@ -21,7 +21,7 @@ from simplyblock_core.services import snapshot_replication as sr
 
 class _Task:
     def __init__(self):
-        self.function_params = {"replicate_to_source": False, "snapshot_id": "S1"}
+        self.function_params: dict = {"replicate_to_source": False, "snapshot_id": "S1"}
         self.node_id = "N_HOST"
         self.cluster_id = "CL"
         self.status = JobSchedule.STATUS_NEW
