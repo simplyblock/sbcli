@@ -20,6 +20,7 @@ db = db_controller.DBController()
 
 def task_runner(task):
     snode = mig.require_node(task)
+    mig.place_on_role_node(task, snode)
     mig.require_active_cluster(task)
 
     if not mig.migration_started(task):

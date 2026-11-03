@@ -202,6 +202,28 @@ def _health_family(level: str, labelnames: Sequence[str], entries: Iterable[tupl
     return family
 
 
+def _tick_rate_family(entries: Iterable[tuple[list[str], dict]]) -> Metric:
+    """The SPDK tick rate each device's latency counters are measured in.
+
+    `*_latency_ticks_total` is in SPDK ticks, and the tick rate is the node's
+    TSC frequency, so a latency in seconds is
+    `rate(latency_ticks) / rate(operations) / tick_rate_hertz` and only that
+    is comparable across nodes. A record written before the collector stored
+    the rate carries 0; that is "unknown", not a frequency, so the series is
+    omitted rather than published -- dividing by it would yield +Inf.
+    """
+    family = GaugeMetricFamily(
+        f'{NAMESPACE}_device_tick_rate_hertz',
+        'SPDK tick rate of the node measuring this device; divides *_latency_ticks_total into seconds',
+        labels=_DEVICE_LABELS,
+    )
+    for labelvalues, record in entries:
+        tick_rate = record.get('tick_rate')
+        if tick_rate:
+            family.add_metric(labelvalues, tick_rate)
+    return family
+
+
 def _replication_families(entries: Iterable[tuple[list[str], dict]]) -> Iterator[Metric]:
     """Replication health per volume (design §11): lag, backlog, last-cycle
     size/duration, RPO compliance, and degraded state.
@@ -435,6 +457,7 @@ class SimplyblockCollector(Collector):
         yield from _cpu_families(cpu_entries)
 
         yield from _stat_families('device', _DEVICE_LABELS, device_stats)
+        yield _tick_rate_family(device_stats)
         yield _status_family('device', _DEVICE_LABELS, device_objects)
         yield _health_family('device', _DEVICE_LABELS, device_objects)
 

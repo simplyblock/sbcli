@@ -54,7 +54,11 @@ from simplyblock_core.controllers.migration_bdev_ops import (
     delete_bdev_blocking as _delete_bdev_blocking,
 )
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.exceptions import (
+    MigrationConflictError,
+    PreconditionError,
+    reject_on_sync_replication,
+)
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -335,7 +339,7 @@ def _cleanup_created(migration):
                     if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
                         try:
                             sec_rpc.listeners_del(nqn, nic.trtype.lower(),
-                                                  nic.ip4_address, sec_port)
+                                                  nic.listen_address, sec_port)
                         except Exception:
                             pass
                 logger.info(
@@ -355,7 +359,7 @@ def _cleanup_created(migration):
             if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
                 try:
                     tgt_rpc.listeners_del(nqn, nic.trtype.lower(),
-                                          nic.ip4_address, tgt_port)
+                                          nic.listen_address, tgt_port)
                 except Exception:
                     pass
         logger.info(
@@ -1264,6 +1268,10 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
     except KeyError:
         raise ValueError(f"Target node {target_node_id} not found")
 
+    # Before anything is created: a migration rebuilds lvol.nodes and its
+    # paths for one triplet, without the site rule.
+    reject_on_sync_replication(db.get_cluster_by_id(tgt_node.cluster_id), "Volume migration")
+
     if not tgt_node.lvstore:
         raise ValueError(f"Target node {target_node_id} has no lvstore")
     _refuse_restarting_target_replicas(tgt_node, lvol)
@@ -1577,7 +1585,7 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
                 if not nic.ip4_address or nic.trtype.lower() != lvol.fabric:
                     continue
                 try:
-                    _rpc.listeners_create(nqn, nic.trtype.lower(), nic.ip4_address,
+                    _rpc.listeners_create(nqn, nic.trtype.lower(), nic.listen_address,
                                           _port, ana_state="inaccessible")
                     logger.info(
                         f"create_migration: inaccessible listener on overlap node "
@@ -1618,12 +1626,12 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
             for nic in _node.data_nics:
                 if not nic.ip4_address or nic.trtype.lower() != lvol.fabric:
                     continue
-                _listener_key = (nic.trtype.lower(), nic.ip4_address, str(_port))
+                _listener_key = (nic.trtype.lower(), nic.listen_address, str(_port))
                 if _listener_key in _existing_listeners:
                     continue
                 try:
                     _ret_listener = _rpc.listeners_create(
-                        nqn, nic.trtype.lower(), nic.ip4_address,
+                        nqn, nic.trtype.lower(), nic.listen_address,
                         _port, ana_state="inaccessible")
                     if not _ret_listener:
                         logger.warning(
@@ -1762,6 +1770,8 @@ def create_batch_migration(lvol_id, target_node_id,
         tgt_node = db_inst.get_storage_node_by_id(target_node_id)
     except KeyError:
         raise ValueError(f"Target node {target_node_id} not found")
+
+    reject_on_sync_replication(db_inst.get_cluster_by_id(tgt_node.cluster_id), "Volume migration")
 
     members = _get_shared_subsystem_members(lvol, tgt_node.cluster_id)
     if not members:

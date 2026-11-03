@@ -246,7 +246,8 @@ def test_finish_waits_while_target_leadership_is_unsettled():
     with patch.object(sr, "db", db), \
             patch.object(sr, "_stable_target_leader", return_value=(None, "leadership moving")), \
             patch.object(sr, "_resolve_chain_target") as chain:
-        assert sr.process_snap_replicate_finish(task, MagicMock()) is False
+        # Pending, not failed: no retry backoff while the target has no leader.
+        assert sr.process_snap_replicate_finish(task, MagicMock()) == sr.FINISH_PENDING
     chain.assert_not_called()
 
 
@@ -266,7 +267,7 @@ def test_start_never_transfers_without_a_settled_target_leader():
             patch.object(sr, "_stable_target_leader",
                          return_value=(None, "2 members of LVS_9 report leadership")), \
             patch.object(sr, "_leaders_of", return_value=[MagicMock(), MagicMock()]), \
-            patch.object(sr, "_recover_target_leader") as recover:
+            patch("simplyblock_core.storage_node_ops.find_leader_with_failover") as recover:
         sr.process_snap_replicate_start(task, snap)
     recover.assert_not_called()
     src.rpc_client().bdev_lvol_transfer.assert_not_called()
@@ -275,23 +276,27 @@ def test_start_never_transfers_without_a_settled_target_leader():
     assert "target leadership not established" in task.function_result
 
 
-def test_a_leaderless_target_runs_the_recovery_then_requires_it_settled():
+def test_a_leaderless_target_is_waited_out_never_recovered_by_replication():
+    """Replication only connects to an existing leader; it never claims,
+    grants or forces leadership (bf8 2026-11-02: a recovery run from the
+    replication path during a forced shutdown left LVS_10 with two leaders)."""
     task = _task(source_node_id="P", remote_lvol_id="R", replicate_to_source=False)
     task.status = JobSchedule.STATUS_SUSPENDED
     src = _node("P")
     db = MagicMock()
     db.get_lvol_by_id.return_value = _remote()
-    stable = MagicMock(side_effect=[(None, "0 members"), (None, "leadership of LVS_9 is moving")])
     with patch.object(sr, "db", db), \
             patch.object(sr, "_lvs_transfer_hold", return_value=None), \
             patch.object(sr, "_select_source_node", return_value=(src, "primary P")), \
             patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_stable_target_leader", stable), \
+            patch.object(sr, "_stable_target_leader", return_value=(None, "0 members")), \
             patch.object(sr, "_leaders_of", return_value=[]), \
-            patch.object(sr, "_recover_target_leader", return_value=MagicMock()) as recover:
+            patch("simplyblock_core.storage_node_ops.find_leader_with_failover") as recover, \
+            patch("simplyblock_core.storage_node_ops._recover_leaderless_lvs") as grant:
         sr.process_snap_replicate_start(task, _snapshot())
-    recover.assert_called_once()
-    assert stable.call_count == 2
+    recover.assert_not_called()
+    grant.assert_not_called()
     src.rpc_client().bdev_lvol_transfer.assert_not_called()
-    assert "moving" in task.function_result
+    assert task.status == JobSchedule.STATUS_SUSPENDED
+    assert "target leadership not established" in task.function_result
 

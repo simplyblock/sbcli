@@ -1,10 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import Request
-from pydantic import BaseModel, SecretStr, field_serializer
+from pydantic import AwareDatetime, BaseModel, Field, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.controllers.backup.manifest import (
@@ -12,6 +12,14 @@ from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     GroupBackupExport,
     GroupBackupManifest,
+)
+from simplyblock_core.controllers.health_controller import NodeReachability
+from simplyblock_core.controllers.sync_replication_controller import (
+    ROLE_PRIMARY,
+    STATE_HEALTHY,
+    GroupSyncStatus,
+    SiteRecord,
+    VolumeSyncStatus,
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
@@ -108,6 +116,13 @@ ReplicationHealthState = Literal[
     "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
 ]
 
+#: Sync replication: the role of a volume / group on the site it is queried
+#: from - ``primary`` where it is served.
+SyncReplicationRole = Literal["primary", "secondary"]
+
+#: Sync replication: the cluster-wide state, the worst over every LVS.
+SyncReplicationState = Literal["healthy", "degraded", "resyncing"]
+
 # Every value of JobSchedule's FN_* constants: the /tasks endpoints serialize a
 # task of any type the scheduler can persist, so an omission here is not a
 # narrower API -- it is a 500 (pydantic literal_error) the moment such a task
@@ -139,6 +154,9 @@ TaskFunctionName = Literal[
     "cluster_expand",
     "replication_final",
     "fdb_backup",
+    "sync_promote",
+    "sync_resync",
+    "sync_site_fence",
 ]
 
 
@@ -190,10 +208,21 @@ class ClusterDTO(BaseModel):
     device_mode: str
     inline_checksum: bool
     atomic_4k: bool
+    page_copy: bool = False
+    md_journal: bool = False
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
     backup_enabled: bool
+    # Sync replication: whether the cluster spans two sites, and the site the
+    # storage-node monitor records as out ("" = both in service) with how far
+    # its drain or fence got. Read by the operators of a stretched cluster.
+    sync_replication: bool = False
+    lost_site: str = ""
+    lost_site_state: str = ""
+    # The site whose operator leads the stretched cluster ("" = unset); a
+    # follower's adoption checks the role it was handed against it.
+    leader_site: str = ""
     capacity: CapacityStatDTO
     snode_api_service: str
     spdk_proxy_service: str
@@ -230,10 +259,16 @@ class ClusterDTO(BaseModel):
             device_mode=model.device_mode,
             inline_checksum=model.inline_checksum,
             atomic_4k=model.atomic_4k,
+            page_copy=model.page_copy,
+            md_journal=model.md_journal,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
             backup_enabled=bool(model.backup_config),
+            sync_replication=model.sync_replication,
+            lost_site=model.lost_site,
+            lost_site_state=model.lost_site_state,
+            leader_site=model.leader_site,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -304,6 +339,9 @@ class DeviceDTO(BaseModel):
     nvmf_nqn: str = ""
     nvmf_port: int = 0
     capacity: CapacityStatDTO
+    # The last DeviceHealthAssessmentDTO recorded for the device, verbatim;
+    # None until one has been reported.
+    health_assessment: dict | None = None
 
     @staticmethod
     def from_model(model: NVMeDevice, storage_node_id: str, stat_obj: StatsObject | None = None):
@@ -331,6 +369,7 @@ class DeviceDTO(BaseModel):
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
+            health_assessment=getattr(model, 'health_assessment', None) or None,
         )
 
 
@@ -464,6 +503,8 @@ class StorageNodeDTO(BaseModel):
     device_count: int
     online_device_count: int
     failure_domain: int
+    # Sync replication: the site the node was added to ("" off a sync cluster).
+    site: str = ""
     capacity: CapacityStatDTO
 
     @staticmethod
@@ -495,6 +536,7 @@ class StorageNodeDTO(BaseModel):
             device_count=len(model.nvme_devices),
             online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
             failure_domain=model.failure_domain,
+            site=model.site,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -1057,6 +1099,135 @@ class ReplicationStatusDTO(BaseModel):
             resyncing=bool(info.get('resyncing', False)),
         )
 
+    @staticmethod
+    def from_sync_status(status: VolumeSyncStatus) -> 'ReplicationStatusDTO':
+        """A sync-replication volume's status in the async DTO (the
+        csi-addons adapter's existing read)."""
+        return ReplicationStatusDTO(**_sync_health(status))
+
+
+class SyncReplicationStatusDTO(BaseModel):
+    """The sync-replication status of a volume or consistency group seen from
+    one site (``GET .../replication/sync-status?site=``).
+
+    Everything but ``role`` is cluster-wide (the worst over every LVS), so
+    every volume and group answers the same: csi-addons' GetReplicationStatus
+    (``state``, ``last_replicated_at``, ``lag_seconds``, ``bytes_behind``,
+    ``diverged``) and GetSecondaryReadiness (``peer_ready = completed and not
+    degraded and not resyncing``).
+    """
+    site: str
+    role: SyncReplicationRole
+    state: SyncReplicationState
+    #: Now while healthy; else the last known in-sync time (null: not known).
+    last_replicated_at: datetime | None = None
+    lag_seconds: util.OptionalUnsigned = None
+    #: Upper bound: unsynced pages x page size.
+    bytes_behind: util.Unsigned = 0
+    diverged: bool
+    #: Every distrib replicates in mode ``full``.
+    completed: bool
+    degraded: bool
+    resyncing: bool
+    peer_ready: bool
+
+    @staticmethod
+    def from_status(status: VolumeSyncStatus | GroupSyncStatus) -> 'SyncReplicationStatusDTO':
+        cluster = status.cluster
+        return SyncReplicationStatusDTO(
+            site=status.site,
+            role=cast(SyncReplicationRole, status.role),
+            state=cast(SyncReplicationState, cluster.state),
+            last_replicated_at=cluster.last_replicated_at,
+            lag_seconds=cluster.lag_seconds,
+            bytes_behind=cluster.bytes_behind,
+            diverged=cluster.diverged,
+            completed=cluster.completed,
+            degraded=cluster.degraded,
+            resyncing=cluster.resyncing,
+            peer_ready=cluster.peer_ready,
+        )
+
+
+class SyncPromoteResultDTO(BaseModel):
+    """A completed sync-replication promote of one volume: its connection
+    entries on the promoted site (that site's triplet only)."""
+    lvol_id: UUID
+    connection_strings: list[NvmeConnectEntry]
+
+    @staticmethod
+    def from_result(connection_strings: dict) -> list['SyncPromoteResultDTO']:
+        return [SyncPromoteResultDTO(lvol_id=UUID(lvol_id), connection_strings=entries)
+                for lvol_id, entries in connection_strings.items()]
+
+
+class SiteNodeDTO(BaseModel):
+    """A node of a site, as the site record lists it. ``id`` is the storage
+    node's id (``StorageNodeDTO.id``)."""
+    id: str
+    status: StorageNodeStatus
+    mgmt_ip: str
+
+
+class SiteRecordDTO(BaseModel):
+    """What the control plane records about one site of a sync-replication
+    cluster (``GET /clusters/{id}/sites/{site}/status``, and the 200 answers
+    of ``fence`` / ``unfence``): ``lost`` when the cluster records it as its
+    lost site, ``state`` that record's ``lost_site_state`` (``draining`` /
+    ``down`` written by the storage-node monitor, ``fencing`` / ``done``
+    by a fence), the latest site-level fence task, the site's nodes."""
+    site: str
+    lost: bool
+    state: Literal["", "draining", "down", "fencing", "done"]
+    fence_task_id: UUID | None = None
+    nodes: list[SiteNodeDTO]
+
+    @staticmethod
+    def from_record(record: SiteRecord) -> 'SiteRecordDTO':
+        return SiteRecordDTO(
+            site=record.site,
+            lost=record.lost,
+            state=cast(Literal["", "draining", "down", "fencing", "done"], record.state),
+            fence_task_id=UUID(record.fence_task_id) if record.fence_task_id else None,
+            nodes=[SiteNodeDTO(id=n.node_id, status=cast(StorageNodeStatus, n.status), mgmt_ip=n.mgmt_ip)
+                   for n in record.nodes],
+        )
+
+
+class SiteFenceTaskDTO(BaseModel):
+    """A site fence in progress (the 202 answer of ``fence``): the fence task,
+    also readable at ``/clusters/{id}/tasks/{task_id}/``."""
+    task_id: UUID
+
+
+class NodeReachabilityDTO(BaseModel):
+    """One node's answer to the storage-node monitor's management-address
+    probe, run once on demand (``GET /clusters/{id}/reachability``)."""
+    id: str
+    mgmt_ip: str
+    site: str
+    reachable: bool
+
+    @staticmethod
+    def from_model(model: NodeReachability) -> 'NodeReachabilityDTO':
+        return NodeReachabilityDTO(id=model.node_id, mgmt_ip=model.mgmt_ip, site=model.site,
+                                   reachable=model.reachable)
+
+
+def _sync_health(status: VolumeSyncStatus | GroupSyncStatus) -> dict:
+    """The async replication-status fields filled from a sync status: role
+    ``source`` where served, state ``in_sync`` only while healthy (a catch-up
+    in progress is ``degraded`` with ``resyncing`` set)."""
+    cluster = status.cluster
+    return {
+        'role': 'source' if status.role == ROLE_PRIMARY else 'secondary',
+        'state': 'in_sync' if cluster.state == STATE_HEALTHY else 'degraded',
+        'last_replicated_at': cluster.last_replicated_at,
+        'lag_seconds': cluster.lag_seconds,
+        'outstanding_bytes': cluster.bytes_behind,
+        'resyncing': cluster.resyncing,
+    }
+
 
 class ConsistencyGroupReplicationIntentDTO(BaseModel):
     """Request body to enable or disable group replication (design §14.4).
@@ -1122,6 +1293,11 @@ class ConsistencyGroupReplicationStatusDTO(BaseModel):
             outstanding_bytes=info.get('outstanding_bytes', 0),
             resyncing=bool(info.get('resyncing', False)),
         )
+
+    @staticmethod
+    def from_sync_status(status: GroupSyncStatus) -> 'ConsistencyGroupReplicationStatusDTO':
+        return ConsistencyGroupReplicationStatusDTO(
+            member_count=status.member_count, **_sync_health(status))
 
 
 class ReplicatedSnapshotDTO(BaseModel):
@@ -1244,56 +1420,91 @@ class BatchMigrationDTO(BaseModel):
 
 
 class DeviceHealthInfoDTO(BaseModel):
-    id: UUID
-    model_number: str
-    serial_number: str
-    firmware_revision: str
-    traddr: str
-    critical_warning: int
-    temperature_celsius: int
-    available_spare_percentage: int
-    available_spare_threshold_percentage: int
-    percentage_used: int
-    data_units_read: int
-    data_units_written: int
-    host_read_commands: int
-    host_write_commands: int
-    controller_busy_time: int
-    power_cycles: int
-    power_on_hours: int
-    unsafe_shutdowns: int
-    media_errors: int
-    num_err_log_entries: int
-    warning_temperature_time_minutes: int
-    critical_composite_temperature_time_minutes: int
+    """A device's health log, in SPDK's field names whatever it was read with.
 
+    Every metric is optional: an AIO device read through smartctl reports a
+    different subset than an NVMe controller does, and a device with no
+    health log at all (a virtio disk, a host without smartctl) is
+    ``supported=false`` with every metric null -- a 200, not an error.
+    """
+    id: UUID
+    supported: bool = True
+    # "spdk" | "nvme-cli" | "smartctl" | "" (unsupported)
+    source: str = ""
+    model_number: str | None = None
+    serial_number: str | None = None
+    firmware_revision: str | None = None
+    traddr: str | None = None
+    critical_warning: int | None = None
+    temperature_celsius: int | None = None
+    available_spare_percentage: int | None = None
+    available_spare_threshold_percentage: int | None = None
+    percentage_used: int | None = None
+    data_units_read: int | None = None
+    data_units_written: int | None = None
+    host_read_commands: int | None = None
+    host_write_commands: int | None = None
+    controller_busy_time: int | None = None
+    power_cycles: int | None = None
+    power_on_hours: int | None = None
+    unsafe_shutdowns: int | None = None
+    media_errors: int | None = None
+    num_err_log_entries: int | None = None
+    warning_temperature_time_minutes: int | None = None
+    critical_composite_temperature_time_minutes: int | None = None
+    # smartctl's overall smart_status.passed (ATA/SCSI). None for NVMe, whose
+    # verdict is critical_warning.
+    smart_passed: bool | None = None
+    # ATA attributes 5 (Reallocated_Sector_Ct) and 197 (Current_Pending_Sector)
+    reallocated_sectors: int | None = None
+    pending_sectors: int | None = None
 
     @staticmethod
     def from_model(model: NVMeDevice, health_info: dict):
+        fields = DeviceHealthInfoDTO.model_fields.keys() - {'id'}
         return DeviceHealthInfoDTO(
             id=UUID(model.get_id()),
-            model_number=health_info["model_number"],
-            serial_number=health_info["serial_number"],
-            firmware_revision=health_info["firmware_revision"],
-            traddr=health_info["traddr"],
-            critical_warning=health_info["critical_warning"],
-            temperature_celsius=health_info["temperature_celsius"],
-            available_spare_percentage=health_info["available_spare_percentage"],
-            available_spare_threshold_percentage=health_info["available_spare_threshold_percentage"],
-            percentage_used=health_info["percentage_used"],
-            data_units_read=health_info["data_units_read"],
-            data_units_written=health_info["data_units_written"],
-            host_read_commands=health_info["host_read_commands"],
-            host_write_commands=health_info["host_write_commands"],
-            controller_busy_time=health_info["controller_busy_time"],
-            power_cycles=health_info["power_cycles"],
-            power_on_hours=health_info["power_on_hours"],
-            unsafe_shutdowns=health_info["unsafe_shutdowns"],
-            media_errors=health_info["media_errors"],
-            num_err_log_entries=health_info["num_err_log_entries"],
-            warning_temperature_time_minutes=health_info["warning_temperature_time_minutes"],
-            critical_composite_temperature_time_minutes=health_info["critical_composite_temperature_time_minutes"],
+            **{name: health_info[name] for name in fields if health_info.get(name) is not None},
         )
+
+
+PerformanceVerdict = Literal["ok", "slow", "unknown"]
+SmartVerdict = Literal["ok", "warning", "failing", "unsupported", "unknown"]
+_NonNegative = Annotated[float | None, Field(ge=0)]
+
+
+class DevicePerformanceAssessmentDTO(BaseModel):
+    verdict: PerformanceVerdict
+    reason: str = ""
+    since: AwareDatetime | None = None
+    latency_us: _NonNegative = None
+    fleet_latency_us: _NonNegative = None
+    latency_ratio: _NonNegative = None
+    iops_per_tib: _NonNegative = None
+    fleet_iops_per_tib: _NonNegative = None
+    iops_ratio: _NonNegative = None
+
+
+class DeviceSmartAssessmentDTO(BaseModel):
+    verdict: SmartVerdict
+    reason: str = ""
+    checked_at: AwareDatetime | None = None
+
+
+class DeviceHealthAssessmentDTO(BaseModel):
+    """A device health verdict computed outside the control plane.
+
+    The Kubernetes operator judges each device's performance against the
+    fleet and its SMART log, and records the result here; the control plane
+    stores it on the device and raises ``device_slow`` / ``device_unhealthy``
+    from it while it is fresh (``reported_at`` + ``valid_seconds``). ``None``
+    for ``performance`` or ``smart`` means that half was not assessed.
+    """
+    reporter: str = ""
+    reported_at: AwareDatetime
+    valid_seconds: Annotated[int, Field(gt=0)] = 900
+    performance: DevicePerformanceAssessmentDTO | None = None
+    smart: DeviceSmartAssessmentDTO | None = None
 
 
 class AlertDTO(BaseModel):

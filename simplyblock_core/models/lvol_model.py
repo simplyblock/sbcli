@@ -106,6 +106,21 @@ class LVol(BaseModel):
     # sync delete — a repeat walks the replica blob tree again and errors on
     # every entry the first pass cleaned.
     sync_deleted_nodes: list[str] = default_factory(list)
+    # Sync replication: the site this volume is served from (set at creation
+    # to the LVS's active site) and the sites it has been demoted on. Empty /
+    # [] on non-sync clusters.
+    sync_active_site: str = ""
+    sync_demoted_sites: list[str] = default_factory(list)
+    # Sync replication: True from the volume's creation until connect_lvol
+    # first hands out its paths - a volume no consumer can have attached yet.
+    # False by default: a record that never set it counts as served.
+    sync_never_connected: bool = False
+    # Sync replication: the latest failed promote of this volume per target
+    # site not yet reported to a caller, ``{site: {"task_id", "reason"}}``.
+    # Written with the task's DONE (DBController.finish_sync_promote_task),
+    # removed by the first promote of this volume to that site
+    # (consume_sync_promote_failure) or by a later successful one.
+    sync_promote_failures: dict = default_factory(dict)
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""

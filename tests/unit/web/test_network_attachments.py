@@ -74,10 +74,55 @@ def _params(**extra):
                       cluster_id="c1", **extra)
 
 
-def test_a_field_an_older_operator_still_sends_is_ignored():
+def test_the_device_resource_is_not_part_of_the_annotation():
     body = _params(networks=[{"name": "fabric", "interface": "data0", "resource": "intel.com/sriov_netdevice"}])
 
     assert "resource" not in network_attachments.annotation(body.networks)
+    assert body.networks[0].resource == "intel.com/sriov_netdevice"
+
+
+def test_a_field_a_newer_operator_sends_is_ignored():
+    """An operator ahead of this control plane may describe an attachment with a field
+    this release does not know. The attachment is accepted on the fields it does, and
+    the unknown one reaches neither the annotation nor the pod."""
+    body = _params(networks=[{"name": "fabric", "interface": "data0", "ips": ["10.10.10.5/24"],
+                              "offload": "rdma"}])
+
+    assert body.networks[0].name == "fabric"
+    assert "offload" not in network_attachments.annotation(body.networks)
+    assert network_attachments.device_resources(body.networks) == {}
+
+
+def test_each_attachment_with_a_device_resource_requests_one():
+    vf = NetworkAttachment(name="vf-a", interface="data0", resource="intel.com/sriov_storage")
+    vf2 = NetworkAttachment(name="vf-b", interface="data1", resource="intel.com/sriov_storage")
+    other = NetworkAttachment(name="mlx", interface="data2", resource="nvidia.com/mlnx_sriov")
+
+    assert network_attachments.device_resources([MGMT, vf, vf2, other]) == {
+        "intel.com/sriov_storage": 2, "nvidia.com/mlnx_sriov": 1}
+    assert network_attachments.device_resources([MGMT, DATA]) == {}
+
+
+def test_the_spdk_container_requests_the_device_a_plugin_hands_out():
+    """An SR-IOV VF pool's device plugin allocates a VF only to a pod that requests
+    its resource; Multus then attaches that VF. Requests equal limits, as Kubernetes
+    requires of an extended resource; the QoS class is unchanged."""
+    vf = NetworkAttachment(name="vf", namespace="infra", interface="data0", ips=["10.10.10.101/24"],
+                           resource="intel.com/sriov_storage")
+    pod = _render(NETWORKS=network_attachments.annotation([vf]),
+                  DEVICE_RESOURCES=network_attachments.device_resources([vf]))
+    resources = _spdk(pod)["resources"]
+
+    assert resources["limits"]["intel.com/sriov_storage"] == 1
+    assert resources["requests"]["intel.com/sriov_storage"] == 1
+    proxy = next(c for c in pod["spec"]["containers"] if c["name"] == "spdk-proxy-container")
+    assert "intel.com/sriov_storage" not in (proxy.get("resources") or {}).get("limits", {})
+
+
+def test_a_pod_without_device_resources_requests_none():
+    pod = _render(NETWORKS=network_attachments.annotation([DATA]), DEVICE_RESOURCES={})
+
+    assert set(_spdk(pod)["resources"]["limits"]) == {"hugepages-2Mi", "cpu"}
 
 
 @pytest.mark.parametrize("attachment", [
@@ -86,6 +131,8 @@ def test_a_field_an_older_operator_still_sends_is_ignored():
     {"name": "fabric", "namespace": "in fra", "interface": "data0"},
     {"name": "fabric", "interface": "data0", "ips": ['10.0.0.5"\n  - injected: yes']},
     {"name": "fabric", "interface": "data0", "ips": ["not-an-address"]},
+    {"name": "fabric", "interface": "data0", "resource": "sriov_netdevice"},
+    {"name": "fabric", "interface": "data0", "resource": "intel.com/vf: 99"},
 ])
 def test_an_attachment_the_kernel_or_kubernetes_would_refuse_is_rejected(attachment):
     with pytest.raises(ValidationError):
@@ -146,12 +193,12 @@ def test_the_wait_ends_before_the_node_client_gives_up_and_retries():
     assert network_attachments.REPORT_TIMEOUT_SEC < SNodeClient.__init__.__defaults__[0]
 
 
-def test_a_pod_with_networks_binds_its_proxy_to_the_management_address():
+def test_a_pod_with_a_management_network_binds_its_proxy_to_its_own_address():
     pod = _render(NETWORKS=network_attachments.annotation([MGMT, DATA]),
                   SERVER_IP=network_attachments.server_ip([MGMT, DATA]))
 
     env = {e["name"]: e for c in pod["spec"]["containers"] if c["name"] == "spdk-proxy-container" for e in c["env"]}
-    assert env["SERVER_IP"]["value"] == "10.0.0.5"
+    assert env["SERVER_IP"]["value"] == network_attachments.POD_IP_REFERENCE
 
 
 def test_a_pod_without_a_management_network_binds_its_proxy_to_its_own_address():

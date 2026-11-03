@@ -120,6 +120,44 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
     return None
 
 
+#: Bound of the clone-ancestry walk in _descendant_destination_lvol: a cycle
+#: guard, as in the other chain walks, not a limit on how often a volume moves.
+_ANCESTRY_MAX_HOPS = 256
+
+
+def _descendant_destination_lvol(snapshot):
+    """The live volume with a replication destination whose clone ancestry
+    holds *snapshot*, or None.
+
+    A landing copy belongs to its REP_* receiving volume, which has no
+    destination of its own. When the volume cloned from such copies replicates
+    on (the return trip of a migration), its chain ancestors are sent first,
+    and a task for one of them that carries no dest_lvol_id resolved its
+    destination from the receiving volume and was dropped -- after which the
+    descendant waited on the ancestor until it gave up (bf6 2026-10-29 round
+    5: vol-5 stalled ~15 minutes, snapshots piling up meanwhile)."""
+    target = snapshot.get_id()
+    try:
+        lvols = db.get_lvols(snapshot.cluster_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Cannot list volumes to find the descendant of %s: %s",
+                       target, e)
+        return None
+    for lvol in lvols:
+        if not lvol.replication_node_id or not lvol.cloned_from_snap:
+            continue
+        snap_id, hops = lvol.cloned_from_snap, 0
+        while snap_id and hops < _ANCESTRY_MAX_HOPS:
+            if snap_id == target:
+                return lvol
+            try:
+                snap_id = db.get_snapshot_by_id(snap_id).prev_snap_uuid
+            except KeyError:
+                break
+            hops += 1
+    return None
+
+
 def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
     """The deepest chain ancestor of *snapshot* that must replicate FIRST.
 
@@ -172,14 +210,19 @@ def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
         rec = by_bdev.get(cur)
         if rec is None:
             return ("blocked", None,
-                    f"chain blob {cur} has no snapshot record; its data cannot "
-                    f"be replicated and the copy would have holes")
+                    (f"chain blob {cur} has no snapshot record; its data cannot "
+                    f"be replicated and the copy would have holes"))
         if getattr(rec, attr, ""):
             # Everything below this point already exists on the remote side.
             return ("pending", deepest, "") if deepest else ("ok", None, "")
         if rec.status == SnapShot.STATUS_IN_DELETION:
             return ("blocked", rec,
                     f"chain ancestor {rec.get_id()} is mid-deletion")
+        if rec.status == SnapShot.STATUS_IN_CREATION:
+            # Not yet a snapshot: its create is in progress, or its process
+            # died and reap_snapshot_intents will roll it back.
+            return ("blocked", rec,
+                    f"chain ancestor {rec.get_id()} is still being created")
         if deepest is None and _transfer_completed(rec, replicate_to_source):
             # The direct base has arrived and only its merge and convert on
             # the remote side remain; the finish chains onto its copy once it
@@ -426,7 +469,8 @@ def _backoff_seconds(retry):
                constants.REPL_RETRY_BACKOFF_MAX_SEC)
 
 
-def _suspend_for_retry(task, msg, backoff=False, count=True, level=logging.WARNING):
+def _suspend_for_retry(task, msg, backoff=False, count=True, level=logging.WARNING,
+                       backoff_step=None):
     """Suspend *task* for another attempt, and say why.
 
     Every retry is logged: several of these paths used to count a retry
@@ -452,7 +496,8 @@ def _suspend_for_retry(task, msg, backoff=False, count=True, level=logging.WARNI
     if count:
         task.retry += 1
     if backoff:
-        task.function_params["not_before"] = int(time.time()) + _backoff_seconds(task.retry)
+        step = task.retry if backoff_step is None else backoff_step
+        task.function_params["not_before"] = int(time.time()) + _backoff_seconds(step)
     task.write_to_db()
 
 
@@ -613,8 +658,15 @@ def process_snap_replicate_start(task, snapshot):
         snode, snapshot, replicate_to_source)
     if verdict == "pending":
         from simplyblock_core.controllers import tasks_controller
-        dest_lvol_id = (task.function_params.get("dest_lvol_id")
-                        or snapshot.lvol.get_id())
+        dest_lvol_id = task.function_params.get("dest_lvol_id")
+        if not dest_lvol_id:
+            # A snapshot of a receiving volume has no destination of its own:
+            # its ancestors travel for the live volume cloned from it.
+            if snapshot.lvol.replication_node_id:
+                dest_lvol_id = snapshot.lvol.get_id()
+            else:
+                descendant = _descendant_destination_lvol(snapshot)
+                dest_lvol_id = descendant.get_id() if descendant else snapshot.lvol.get_id()
         tasks_controller.add_snapshot_replication_task(
             snapshot.cluster_id, task.node_id, ancestor.get_id(),
             replicate_to_source=replicate_to_source, dest_lvol_id=dest_lvol_id)
@@ -627,12 +679,14 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
     if verdict == "blocked":
+        # Back off: a blocked chain (a blob without a snapshot record, an
+        # ancestor mid-deletion) does not heal in a minute, and the chain walk
+        # costs seconds of the serial runner every pass. Retried at runner
+        # speed it took ~19 % of the runner on bf8 (2026-11-02) and held every
+        # other volume's migration above the cutover gate.
         msg = f"replication chain of {snapshot.get_id()} is incomplete: {why}; retrying"
-        logger.error(msg)
         task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        _suspend_for_retry(task, msg, backoff=True, level=logging.ERROR)
         return
 
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
@@ -689,6 +743,13 @@ def process_snap_replicate_start(task, snapshot):
                     dest_lvol = db.get_lvol_by_id(task.function_params["dest_lvol_id"])
                 except KeyError:
                     pass
+            if not dest_lvol.replication_node_id:
+                # Queued without the hint (a task for the same snapshot that
+                # already existed keeps its own params): find the descendant.
+                descendant = _descendant_destination_lvol(snapshot)
+                if descendant is not None:
+                    dest_lvol = descendant
+                    task.function_params["dest_lvol_id"] = descendant.get_id()
             if not dest_lvol.replication_node_id:
                 msg = (f"LVol {snapshot.lvol.get_id()} has no replication destination; "
                        f"dropping replication task for snapshot {snapshot.get_id()}")
@@ -804,16 +865,12 @@ def process_snap_replicate_start(task, snapshot):
     # outage, and a move in progress must not get the transfer (see
     # _stable_target_leader). Checked before every transfer, so a move in the
     # idle window between two runs is followed too.
+    # Replication only ever connects to an EXISTING, settled leader; it never
+    # claims, grants or forces leadership on the target (bf8 2026-11-02: a
+    # recovery run from here, during a forced shutdown of the target primary,
+    # left LVS_10 with two leaders and corrupted metadata). A leaderless
+    # target is waited out: the transfer stays suspended and the RPO grows.
     remote_lv_node, lead_why = _stable_target_leader(remote_lv)
-    if remote_lv_node is None and not _leaders_of(remote_lv):
-        # Leadership does not come back on its own: SPDK drops it on a
-        # failed write and the control plane grants it only on restart,
-        # activation or its leaderless-LVS recovery -- which nothing ran
-        # while this task waited (2026-10-02, LVS_1 on site A leaderless
-        # for 20 minutes, every convert refused). Run that recovery now, then
-        # require the recovered leadership to be settled like any other.
-        if _recover_target_leader(remote_lv) is not None:
-            remote_lv_node, lead_why = _stable_target_leader(remote_lv)
     if remote_lv_node is None:
         # Waiting, not failing: the target's leadership is not this transfer's
         # fault, and counting it let a leaderless window kill the task.
@@ -1058,30 +1115,6 @@ def _receiving_leader_node(remote_lv):
     return _lvs_leader_among(remote_lv.nodes, remote_lv.node_id, remote_lv.lvs_name)
 
 
-def _recover_target_leader(remote_lv):
-    """The control plane's leaderless-LVS recovery for the target lvstore;
-    the node that leads afterwards, or None."""
-    from simplyblock_core import storage_node_ops
-    nodes = []
-    for node_id in (getattr(remote_lv, "nodes", None) or [remote_lv.node_id]):
-        try:
-            nodes.append(db.get_storage_node_by_id(node_id))
-        except KeyError:
-            continue
-    try:
-        leader = storage_node_ops.find_leader_with_failover(nodes, remote_lv.lvs_name)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Leaderless-LVS recovery of %s failed: %s", remote_lv.lvs_name, e)
-        return None
-    if isinstance(leader, tuple):
-        leader = leader[0]
-    if not leader:
-        return None
-    logger.info("Leadership of %s recovered on %s for the transfer", remote_lv.lvs_name,
-                leader.get_id())
-    return _receiving_leader_node(remote_lv)
-
-
 def _secondary_lacks_bdev(node, bdev_name):
     """True when *node* has no bdev *bdev_name* (the add_clone's -19)."""
     try:
@@ -1320,11 +1353,17 @@ def _restart_elsewhere(task, msg):
     task has switched nodes more than REPL_MAX_NODE_SWITCHES times, so a
     flapping node cannot keep a task alive for ever.
     """
-    task.function_params["node_switches"] = int(task.function_params.get("node_switches") or 0) + 1
+    switches = int(task.function_params.get("node_switches") or 0) + 1
+    task.function_params["node_switches"] = switches
     task.function_params.pop("offset", None)
+    # The delay follows the node switches, not task.retry: retry also counts
+    # waits that are no failure (a chain ancestor replicating first), and on
+    # bf8 (2026-11-01) four of those turned a target primary crash into a
+    # 240 s delay -- longer than the crashed node took to come back, so the
+    # transfer was never repeated on the new leader during the outage.
     _suspend_for_retry(task, f"{msg}; restarting the transfer on the next "
                              f"available member", backoff=True,
-                       count=_switches_exhausted(task))
+                       count=_switches_exhausted(task), backoff_step=switches - 1)
 
 
 def _switches_exhausted(task):
@@ -1477,7 +1516,46 @@ def _retention_schedule_for(source_lvol):
         return []
 
 
-def _prune_internal_snapshots(source_lvol):
+def _cutover_holds_retention(source_lvol):
+    """True while *source_lvol*'s cutover endgame is in progress.
+
+    The endgame converges by taking snapshot after snapshot (shrink rounds)
+    until the remaining delta fits the freeze. Pruning between those rounds
+    deletes the predecessor of every new copy, and a delete is a merge that
+    physically moves data on both clusters (copy-on-write: ultra #222 / spdk
+    #86) -- load competing with the convergence and the freeze themselves. So
+    nothing of the volume is pruned from its first shrink snapshot until the
+    cutover task ends; prune_after_cutover then keeps one.
+    """
+    try:
+        cluster_id = db.get_storage_node_by_id(source_lvol.node_id).cluster_id
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception:                                     # noqa: BLE001
+        return False
+    for task in tasks:
+        if task.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        params = task.function_params or {}
+        if params.get("lvol_id") == source_lvol.get_id() and (
+                params.get("shrink_snap_id") or params.get("cutover_lvs")):
+            return True
+    return False
+
+
+def prune_after_cutover(source_lvol):
+    """After a completed cutover: keep only the newest replicated snapshot pair.
+
+    The endgame's snapshots were held while it ran (_cutover_holds_retention);
+    once IO serves from the target none of them is a delta base any more, so
+    all but the newest go, on both sides. The newest target copy is what the
+    cut-over volume is cloned from, and its source counterpart stays with it.
+    """
+    _prune_internal_snapshots(source_lvol, after_cutover=True)
+
+
+def _prune_internal_snapshots(source_lvol, after_cutover=False):
     """Retention for replication-driven internal snapshots.
 
     Internal snapshots are transient checkpoints taken at a fixed interval
@@ -1492,6 +1570,11 @@ def _prune_internal_snapshots(source_lvol):
     snapshot are pruned, so the newest internal snapshot — which serves as the
     base for the next delta transfer — always remains.
     """
+    if not after_cutover and _cutover_holds_retention(source_lvol):
+        logger.info("Holding retention for lvol %s: its cutover endgame is in "
+                    "progress; pruned once the cutover completes",
+                    source_lvol.get_id())
+        return
     replicated_internal = [
         s for s in db.get_snapshots_by_node_id(source_lvol.node_id)
         if s.lvol.get_id() == source_lvol.get_id()
@@ -1499,14 +1582,15 @@ def _prune_internal_snapshots(source_lvol):
         and s.status == SnapShot.STATUS_ONLINE
         and s.target_replicated_snap_uuid
     ]
-    keep = _keep_replicated_for(source_lvol)
+    # After a cutover there is no next delta to chain: one pair is enough.
+    keep = 1 if after_cutover else _keep_replicated_for(source_lvol)
     replicated_internal.sort(key=lambda s: s.created_at)
 
     # A retention SCHEDULE, when the policy defines one, decides which older
     # snapshots survive; without it retention stays the flat "newest N".
     # Either way the newest `keep` are protected, because deleting a snapshot
     # swap-merges its segments into the successor chained to it.
-    schedule = _retention_schedule_for(source_lvol)
+    schedule = [] if after_cutover else _retention_schedule_for(source_lvol)
     # Say which retention is in force, every time it prunes. Soak run
     # 20260827_224741 ended with 2 snapshots at consecutive cadence ticks after
     # 124 minutes under `5m:15m,7m:30m,10m:1h` -- which is exactly what the FLAT
@@ -1710,7 +1794,13 @@ def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
             "resolved (%s); refusing to finalize an unchained snapshot",
             prev_snap.get_id(), remote_copy_uuid, e)
         return None, None, False
-    if _snap_obj.lvol.node_id != remote_snode.get_id():
+    # Any member of the copy's lvstore can chain onto it: the bdev is the
+    # lvstore's, the same on primary, secondary and tertiary. Comparing with
+    # the node the copy was created on refused every chain while the target
+    # primary was down and its secondary led (bf8 2026-11-02, R4 tgt-mid):
+    # each cycle fell back to a full transfer and then failed to finish.
+    members = list(getattr(_snap_obj.lvol, "nodes", None) or [_snap_obj.lvol.node_id])
+    if remote_snode.get_id() not in members:
         logger.error(
             "Predecessor remote copy %s lives on node %s but the new snapshot "
             "is on %s; cannot chain across lvstores",
@@ -2032,7 +2122,14 @@ def _merge_landing(task, remote_lv, remote_snode):
         # forever instead of being transferred again (bed 2026-10-26).
         st = rpc.bdev_lvol_merge_base_stat(remote_lv.top_bdev) or {}
         if st.get("state") not in ("running", "done") and st.get("rc") != _SPDK_ESTALE:
-            st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev)
+            # The merge is part of the replication: it runs in the
+            # replication class like the transfer's source reads, not in
+            # Default beside client IO and the journal (bf10 2026-11-02: a
+            # target merging 5-8 GB per cycle in Default had its journal
+            # heartbeats time out and its lvstore demoted).
+            merge_class = (constants.QOS_REPLICATION_WIRE_CLASS
+                           if _replication_class_on(remote_snode.cluster_id) else None)
+            st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev, priority_class=merge_class)
         deadline = time.time() + constants.REPL_MERGE_INLINE_WAIT_SEC
         while (st or {}).get("state") == "running" and time.time() < deadline:
             time.sleep(constants.REPL_MERGE_POLL_SEC)
@@ -2083,10 +2180,19 @@ def process_snap_replicate_finish(task, snapshot):
     # resending.
     remote_snode, lead_why = _stable_target_leader(remote_lv)
     if remote_snode is None:
+        # Pending, not failed: the target is down (both members of its
+        # lvstore, or a leadership move in progress), and that is not the
+        # transfer's fault. Returned as a failure it took the retry backoff,
+        # which doubles per attempt: on bf8 (2026-11-02, round 6, both target
+        # members down 10 min) the attempts were 80, 74, 127, 244 and 501 s
+        # apart, so the finish resumed 7 min after the target was back. The
+        # check is cheap (one get_lvstore per member); every pass repeats it.
         logger.warning("Replication task %s: not finishing %s yet -- target "
                        "leadership not established (%s)", task.uuid,
                        snapshot.get_id(), lead_why)
-        return False
+        task.function_params["pending_why"] = (
+            f"waiting for the target lvstore to have a leader ({lead_why})")
+        return FINISH_PENDING
     if task.function_params.get("target_node_id") not in (None, remote_snode.get_id()):
         logger.warning("Replication task %s: target leadership moved %s -> %s "
                        "after the transfer; finishing on the new leader",

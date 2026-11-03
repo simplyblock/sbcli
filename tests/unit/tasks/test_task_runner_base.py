@@ -838,7 +838,7 @@ def test_a_checkpoint_survives_every_outcome_of_every_runner(monkeypatch, spec, 
 
     runner = trb.TaskRunner(dataclasses.replace(
         spec, handler=handler, is_eligible=lambda *_: True,
-        on_finish=None, on_failure=None, on_cycle=None))
+        on_finish=None, finish=None, on_failure=None, on_cycle=None))
     runner._process(task, MagicMock(), [])
 
     assert store.row().function_params["progress_marker"] is True

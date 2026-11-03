@@ -1,5 +1,6 @@
 import base64
 import builtins
+import contextlib
 import copy
 import json
 import os
@@ -15,6 +16,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
+import fdb
 import requests
 import yaml
 from docker.errors import DockerException
@@ -33,15 +35,24 @@ from simplyblock_core import (
     utils,
 )
 from simplyblock_core.controllers import (
+    activation_gate,
     cluster_events,
     device_controller,
     pool_controller,
     qos_controller,
+    storage_events,
     tasks_controller,
     tcp_ports_events,
 )
 from simplyblock_core.controllers.backup import device as backup_device
+from simplyblock_core.controllers.cluster_expansion.planner import (
+    RemoteTripletPlacementError,
+)
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import (
+    SyncReplicationSiteError,
+    reject_on_sync_replication,
+)
 from simplyblock_core.models import indices
 from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
@@ -64,7 +75,6 @@ from simplyblock_core.models.stats import (
 )
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils import pull_docker_image_with_retry
 
@@ -338,6 +348,39 @@ def _validated_device_mode(device_mode) -> str:
     return mode
 
 
+def _validate_sync_replication(sync_replication, ha_type, is_single_node) -> None:
+    """Sync replication runs a full HA triplet per LVS on each of two sites.
+
+    Raises:
+        ValueError: sync replication was asked for on a non-HA or single-node cluster.
+    """
+    if not sync_replication:
+        return
+    if ha_type != "ha":
+        raise ValueError("sync replication requires ha_type='ha'")
+    if is_single_node:
+        raise ValueError("sync replication cannot be used on a single-node cluster")
+
+
+def _validate_leader_site(sync_replication, leader_site) -> None:
+    """The leader site of a stretched cluster (Cluster.leader_site) exists
+    only on a sync-replication cluster. No node exists at create, so the site
+    is not checked against node sites here (sync_replication_controller.
+    check_leader_site does that when it is moved).
+
+    Raises:
+        SyncReplicationSiteError: a leader site was given without sync replication.
+    """
+    if leader_site and not sync_replication:
+        raise SyncReplicationSiteError(
+            "leader_site is only allowed together with sync_replication")
+def _validate_integrity_flags(inline_checksum, atomic_4k):
+    """atomic_4k only lifts the data plane's 4K gate on fallback-mode
+    checksums, so without inline_checksum it is a setting that does nothing."""
+    if atomic_4k and not inline_checksum:
+        raise ValueError("atomic_4k requires inline_checksum")
+
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -354,9 +397,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    inline_checksum=False,
                    atomic_4k=False,
                    cluster_vip=None,
+                   sync_replication=False,
+                   page_copy=False,
+                   md_journal=True,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
+    _validate_integrity_flags(inline_checksum, atomic_4k)
+
+    _validate_sync_replication(sync_replication, ha_type, is_single_node)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -501,6 +550,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.sync_replication = bool(sync_replication)
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
@@ -512,6 +562,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.page_copy = bool(page_copy)
+    cluster.md_journal = bool(md_journal)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -625,6 +677,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                sync_replication=False,
+                leader_site="",
+                page_copy=False,
+                md_journal=True,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -658,6 +714,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
+        sync_replication=sync_replication,
+        leader_site=leader_site,
+        page_copy=page_copy,
+        md_journal=md_journal,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
@@ -691,11 +751,16 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                sync_replication=False,
+                leader_site="",
+                page_copy=False,
+                md_journal=True,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
 ) -> str:
+    _validate_integrity_flags(inline_checksum, atomic_4k)
 
     clusters = db_controller.get_clusters()
     if name and clusters:
@@ -705,6 +770,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
 
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
+
+    _validate_sync_replication(sync_replication, ha_type, is_single_node)
+    _validate_leader_site(sync_replication, leader_site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -741,6 +809,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.sync_replication = bool(sync_replication)
+    cluster.leader_site = leader_site or ""
     cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:
@@ -827,6 +897,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.page_copy = bool(page_copy)
+    cluster.md_journal = bool(md_journal)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -858,7 +930,34 @@ def set_name(cl_id, name) -> Cluster:
     return cluster
 
 
-def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
+def check_two_node_arbitration(cluster, enabled) -> None:
+    """Raise SyncReplicationUnsupportedError when ``enabled`` would switch
+    two-node arbitration on for a sync-replication cluster.
+
+    Arbitration is a two-member data-plane mode; a sync-replication cluster
+    runs six instances per LVS and has no HA state for the flag's port guards
+    to read, so the flag would keep fenced ports blocked. Switching it off is
+    always allowed.
+    """
+    if enabled:
+        reject_on_sync_replication(cluster, "Two-node arbitration")
+
+
+def set_two_node_arbitration(cl_id, enabled: bool) -> None:
+    """Switch two-node arbitration (docs/design/two-node-arbitration.md) on
+    or off; refused on a sync-replication cluster (check_two_node_arbitration),
+    judged on the record the transaction writes."""
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    check_two_node_arbitration(cluster, enabled)
+
+    def mutate(fresh):
+        check_two_node_arbitration(fresh, enabled)
+        fresh.two_node_arbitration = enabled
+
+    db_controller.atomic_update(cluster, mutate)
+
+
+def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10, checkpoint=None):
     """Block until every ONLINE primary node holds a connected remote-device
     record for every ONLINE device of every OTHER online node, or raise.
 
@@ -873,6 +972,9 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
     flows finish attaching, so waiting here is both sufficient and
     bounded; on timeout the error names the exact missing links instead
     of a distrib read error.
+
+    ``checkpoint`` (optional) is called between two repair rounds; whatever
+    it raises ends the wait (the site activation's token check).
     """
     deadline = time.time() + timeout_sec
     prev_missing = None
@@ -1015,6 +1117,8 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
             stalled_rounds += 1
         prev_missing = len(missing)
         time.sleep(poll_sec)
+        if checkpoint is not None:
+            checkpoint()
 
 
 def set_object_ops(cl_id, stopped) -> bool:
@@ -1117,18 +1221,48 @@ def _record_activated_nodes(cl_id) -> None:
         logger.warning(f"Could not record the activated node set: {e}")
 
 
-def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+#: Seconds between two heartbeat stamps of a running activation.
+ACTIVATION_HEARTBEAT_INTERVAL_SEC = 60
+
+
+def cluster_activate(cl_id, force=False, force_lvstore_create=False, site="") -> None:
     """Wrapper around the activation body that keeps ``activation_heartbeat``
     fresh for its whole duration. The storage_node_monitor watchdog uses a
     stale heartbeat to tell a DEAD activation (driver process/container gone)
     from a merely long one: without it, a wedged IN_ACTIVATION sat for the
     full node-scaled budget — 42 minutes on a 32-node cluster — before the
     revert (incident 2026-07-13, monitor container replaced mid-activation).
+
+    With ``site`` (sync replication): the site activation of that recorded
+    site, main's activation narrowed to it (_cluster_activate). It runs only
+    once begin_site_activation hands it the activation flag's token
+    (ValueError otherwise), stamps ``site_activation_heartbeat`` under that
+    token whatever the cluster status - which stays the stored one, never
+    IN_ACTIVATION - and clears its own token at the end, whatever the outcome.
+    It never creates an lvstore: ``force_lvstore_create`` is refused with it.
     """
+    from simplyblock_core.controllers import sync_replication_controller as src
+    site_activation = None
+    if site and force_lvstore_create:
+        raise ValueError(f"Failed to activate site {site}: a site activation rebuilds the existing "
+                         f"lvstores, force_lvstore_create does not apply")
+    if site:
+        token = src.begin_site_activation(cl_id, site)
+        if not token:
+            raise ValueError(f"Failed to activate site {site}: it is not recorded ready to return, "
+                             f"or a site activation already runs")
+        site_activation = activation_gate.SiteActivation(site, token)
     stop_beat = threading.Event()
 
     def _beat():
-        while not stop_beat.wait(60):
+        while not stop_beat.wait(ACTIVATION_HEARTBEAT_INTERVAL_SEC):
+            if site_activation is not None:
+                try:
+                    src.stamp_site_activation(cl_id, site_activation.token)
+                except (KeyError, fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+                    # A missed beat only means the watchdog waits for the next one.
+                    logger.warning("Site activation heartbeat of cluster %s failed: %s", cl_id, e)
+                continue
             try:
                 fresh = db_controller.get_cluster_by_id(cl_id)
                 if fresh.status != Cluster.STATUS_IN_ACTIVATION:
@@ -1146,12 +1280,78 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     beat_thread.start()
     try:
         _cluster_activate_impl(
-            cl_id, force=force, force_lvstore_create=force_lvstore_create)
+            cl_id, force=force, force_lvstore_create=force_lvstore_create,
+            site_activation=site_activation)
     finally:
         stop_beat.set()
+        if site_activation is not None:
+            src.end_site_activation(cl_id, site_activation.token)
 
 
-def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> None:
+def _activation_open_node_ana(node_id) -> None:
+    """Activation Pass 4 for the LVS owned by ``node_id``: optimized on its
+    primary, non_optimized on its secondary / tertiary - on a
+    sync-replication cluster every member of both triplets, each under the
+    site rule (storage_node_ops.lvol_ana_state)."""
+    snode = db_controller.get_storage_node_by_id(node_id)
+    node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(node_id)
+                  if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
+    if not node_lvols:
+        return
+    # Sync replication: every path, the remote triplet's too, follows the
+    # site rule (a volume demoted on, or not active on, a site stays fenced
+    # there), read under the LVS's site-rule lock by the setter.
+    sync = bool(storage_node_ops._sync_site(snode))
+    # primary path -> optimized (an offline owner of a remote-led LVS has none)
+    for lv in node_lvols if snode.status == StorageNode.STATUS_ONLINE else []:
+        try:
+            storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
+        except Exception as e:
+            logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
+                         node_id, lv.nqn, e)
+    # secondary/tertiary paths -> non_optimized
+    peer_ids = [snode.secondary_node_id, snode.tertiary_node_id]
+    if sync:
+        peer_ids += storage_node_ops.remote_triplet_refs(snode)
+    for sec_id in peer_ids:
+        if not sec_id:
+            continue
+        sec_node = db_controller.get_storage_node_by_id(sec_id)
+        if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+            continue
+        for lv in node_lvols:
+            try:
+                storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized")
+            except Exception as e:
+                logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
+                             sec_node.get_id(), lv.nqn, e)
+
+
+def _restore_lvstore_statuses(statuses) -> None:
+    """Give each node of ``statuses`` (id -> lvstore_status) its value back
+    where it differs (field-scoped)."""
+    for node_id, value in statuses.items():
+        node = db_controller.get_storage_node_by_id(node_id)
+        if node.lvstore_status != value:
+            db_controller.atomic_update(node, lambda n, v=value: setattr(n, "lvstore_status", v))
+
+
+def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False, site_activation=None) -> None:
+    if site_activation is not None:
+        # A site activation never writes the cluster status: nothing to revert.
+        # The owners it holds (``held_status``, filled as Pass 1 begins) get
+        # their lvstore_status back on any exit but its success (which gave it
+        # back after Pass 2), once its workers are joined.
+        held_status: dict[str, str] = {}
+        succeeded = False
+        try:
+            _cluster_activate(cl_id, force=force, force_lvstore_create=force_lvstore_create,
+                              site_activation=site_activation, held_status=held_status)
+            succeeded = True
+        finally:
+            if not succeeded:
+                _restore_lvstore_statuses(held_status)
+        return
     cluster = db_controller.get_cluster_by_id(cl_id)
     prev_status = cluster.status
     if prev_status == Cluster.STATUS_IN_ACTIVATION:
@@ -1198,14 +1398,160 @@ def activation_minimum_devices(cluster, single_node_cluster) -> int:
     return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
 
 
-def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+#: Sites of a sync-replication cluster: one simplyblock cluster spans exactly two.
+SYNC_SITE_COUNT = 2
+#: Distinct hosts a site needs for a host-disjoint primary/secondary/tertiary triplet.
+SYNC_MIN_HOSTS_PER_SITE = 3
+
+
+def _sync_configured_nodes(nodes) -> builtins.list[StorageNode]:
+    """The node records that make up the configured site layout."""
+    return [n for n in nodes
+            if n.status != StorageNode.STATUS_REMOVED and not n.is_secondary_node]
+
+
+def sync_topology_violation(cluster, nodes) -> str | None:
+    """What is wrong with the CONFIGURED site layout of a sync cluster, or None.
+
+    Judged over every non-removed primary node record, whatever its status: an
+    offline node on a third site is as much a misconfiguration as an online
+    one. Every node needs a site, the nodes span exactly two sites, and a host
+    never spans two sites. Always None on a non-sync cluster.
+    """
+    if not cluster.sync_replication:
+        return None
+    configured = _sync_configured_nodes(nodes)
+    unsited = sorted(n.get_id() for n in configured if not n.site)
+    if unsited:
+        return f"node(s) without a site: {', '.join(unsited)}"
+    sites = sorted({n.site for n in configured})
+    if len(sites) != SYNC_SITE_COUNT:
+        return (f"a sync-replication cluster spans exactly {SYNC_SITE_COUNT} sites, "
+                f"the nodes are on {len(sites)}: {sites}")
+    host_site: dict[str, str] = {}
+    for node in configured:
+        if host_site.setdefault(node.mgmt_ip, node.site) != node.site:
+            return (f"host {node.mgmt_ip} spans sites {host_site[node.mgmt_ip]} and {node.site}; "
+                    f"a host must sit entirely on one site")
+    return None
+
+
+def sync_role_site_violations(cluster, nodes) -> builtins.list[str]:
+    """Local role pointers of a sync cluster that cross a site.
+
+    The secondary / tertiary of an LVS live on its home site (the other site
+    holds its remote triplet). A pointer across sites is not a state an
+    activation can repair -- moving a replica is a relocation -- so it is
+    reported, one entry per pointer. Always empty on a non-sync cluster.
+    """
+    if not cluster.sync_replication:
+        return []
+    by_id = {n.get_id(): n for n in nodes}
+    problems = []
+    for owner in _sync_configured_nodes(nodes):
+        for role, holder_id in (("secondary", owner.secondary_node_id),
+                                ("tertiary", owner.tertiary_node_id)):
+            holder = by_id.get(holder_id) if holder_id else None
+            if holder is not None and holder.site != owner.site:
+                problems.append(f"{role} of node {owner.get_id()} (site {owner.site}) is "
+                                f"node {holder_id} on site {holder.site}")
+    return problems
+
+
+def sync_capacity_violation(cluster, nodes, online_nodes) -> str | None:
+    """Whether each configured site has enough ONLINE nodes to build its LVS stacks.
+
+    Each site holds a full zone of every LVS (``ndcs + npcs`` nodes for a
+    stripe), a full host-disjoint triplet (``SYNC_MIN_HOSTS_PER_SITE``
+    hosts) and its half of every node's journal, one copy per host: as many
+    hosts as the largest per-site journal share (``ha_jm_count // 2``) of any
+    node, since every node places that many copies on both sites. The sites
+    come from the configured records (``nodes``), so a site with no online
+    node at all is reported rather than overlooked. Always None on a non-sync
+    cluster.
+    """
+    if not cluster.sync_replication:
+        return None
+    sites = {n.site for n in _sync_configured_nodes(nodes) if n.site}
+    min_nodes = cluster.distr_ndcs + cluster.distr_npcs
+    min_hosts = max(SYNC_MIN_HOSTS_PER_SITE,
+                    storage_node_ops.get_required_ha_jm_count(cluster) // 2,
+                    max((n.ha_jm_count // 2 for n in online_nodes), default=0))
+    problems = []
+    for site in sorted(sites):
+        on_site = [n for n in online_nodes if n.site == site]
+        hosts = {n.mgmt_ip for n in on_site}
+        if len(on_site) < min_nodes or len(hosts) < min_hosts:
+            problems.append(
+                f"site {site} has {len(on_site)} online node(s) on {len(hosts)} host(s), "
+                f"needs {min_nodes} node(s) on {min_hosts} host(s)")
+    return "; ".join(problems) or None
+
+
+def _rebuild_next_to_serving_leader(snode, owner) -> bool:
+    """Site activation, Pass 2: rebuild ``owner``'s LVS on ``snode``, a node of
+    the activating site, as a non-leader next to the leader that serves it
+    from the other site, or next to its triplets while it is being moved -
+    main's restart path, not the activation path: a remote-triplet instance
+    by _rebuild_remote_instance, a local role (an LVS homed on the site, led
+    from the other one or being moved) behind the node _rebuild_anchor names,
+    with the LVS port released on its peers when that rebuild does not
+    succeed, as the restart's own callers release it."""
+    if snode.get_id() in storage_node_ops.remote_triplet_refs(owner):
+        return storage_node_ops._rebuild_remote_instance(snode, owner)
+    anchor = storage_node_ops._rebuild_anchor(owner, snode, db_controller)
+    ok = False
+    try:
+        ok = storage_node_ops.recreate_lvstore_on_non_leader(snode, anchor, owner, activation_mode=False)
+        return ok
+    finally:
+        if not ok:
+            storage_node_ops._release_lvs_subsys_port_on_peers(owner, snode.get_id(), db_controller)
+
+
+def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activation=None,
+                      held_status=None) -> None:
+    """Activate the cluster: build every LVS (Pass 1 leaders, Pass 2
+    non-leaders, Pass 3 hublvols), open its paths (Pass 4) and set it ACTIVE.
+
+    With ``site_activation`` (activation_gate.SiteActivation; sync
+    replication) it is the activation of that recorded site while the other
+    one serves: only the LVS led from the site get their leader (Pass 1) and
+    hublvols (Pass 3); Pass 2 runs on the site's nodes only - the activation
+    path behind a leader of the site, main's restart path next to a leader
+    that serves from the other site and for an LVS being moved
+    (_rebuild_next_to_serving_leader, one at a time). No cluster status,
+    role, label or capacity is written; an owner on the other site whose LVS
+    is led from the site serves meanwhile: it is put in ``held_status`` with
+    its lvstore_status as Pass 1 begins, and gets that back after Pass 1 and
+    after each Pass 2 rebuild of its LVS - the caller (_cluster_activate_impl)
+    gives it back on a failure. Before each pass, each LVS of
+    Pass 1 and Pass 2 and each step after Pass 3 it checks it still holds the
+    activation flag under a serving status (SiteActivationCancelled
+    otherwise). It ends by sync_replication_controller.record_site_return
+    (the catch-up queued, the record cleared), Pass 4 for the LVS led from the
+    site, and the site's return event.
+    """
+    from simplyblock_core.controllers import sync_replication_controller as src
     cluster = db_controller.get_cluster_by_id(cl_id)
     storage_node_ops._remember_cluster_arbitration(cluster)
+    site = site_activation.site if site_activation is not None else ""
+
+    def _checkpoint() -> None:
+        if site_activation is not None:
+            src.site_activation_owned(cl_id, site_activation.token)
+
+    _checkpoint()
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")
         if not force:
             raise ValueError("Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
+
+    if site_activation is None:
+        blocked_by = activation_gate.site_activation_blocks(cluster)
+        if blocked_by:
+            raise ValueError(f"Failed to activate cluster: {blocked_by}")
 
     # Growth by re-activation is not a supported path. Once a cluster has been
     # activated its node set is fixed; nodes added afterwards are integrated by
@@ -1233,8 +1579,20 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     ols_status = cluster.status
     if ols_status == Cluster.STATUS_IN_ACTIVATION:
         ols_status = Cluster.STATUS_UNREADY
-    else:
+    elif site_activation is None:
         set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
+
+    if held_status is None:
+        held_status = {}
+
+    def _restore_held_status() -> None:
+        _restore_lvstore_statuses(held_status)
+
+    def _revert() -> None:
+        # The undo of a failed activation: the cluster status it had. A site
+        # activation writes no cluster status.
+        if site_activation is None:
+            set_cluster_status(cl_id, ols_status)
 
     # First-time activation runs while no primary LVS is serving fabric I/O
     # yet, so the recreate paths run with activation_mode=True (peer LVS /
@@ -1250,7 +1608,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # and add only a firewall-only port-block on the live leader around the
     # non-leader recreate in Pass 2. Port-block is benign on peers whose
     # service isn't listening, so it's safe even against not-fully-built peers.
-    is_fresh_activation = (ols_status == Cluster.STATUS_UNREADY)
+    is_fresh_activation = site_activation is None and ols_status == Cluster.STATUS_UNREADY
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
@@ -1274,16 +1632,42 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
 
     minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
     if dev_count < minimum_devices:
-        set_cluster_status(cl_id, ols_status)
+        _revert()
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+
+    # Sync replication: the configured two-site layout is enforced on every
+    # activation (force included) -- a third site or an unsited node is never
+    # a state to recover into. The online capacity per site is only enforced on
+    # a fresh activation: a re-activation after a site loss sees one site.
+    topology_violation = sync_topology_violation(cluster, snodes)
+    if topology_violation:
+        _revert()
+        raise ValueError(f"Failed to activate cluster: {topology_violation}")
+    cross_site_roles = sync_role_site_violations(cluster, snodes)
+    if cross_site_roles:
+        _revert()
+        raise ValueError("Failed to activate cluster: local roles must stay on the home site: "
+                         + "; ".join(cross_site_roles))
+    # A site activation brings back one site next to one that serves: no capacity check.
+    capacity_violation = (sync_capacity_violation(cluster, snodes, online_nodes)
+                          if site_activation is None else None)
+    if capacity_violation:
+        if is_fresh_activation:
+            _revert()
+            raise ValueError(f"Failed to activate cluster: {capacity_violation}")
+        logger.warning("Re-activating a sync-replication cluster with reduced site capacity: %s",
+                       capacity_violation)
 
     # The distribs created below span every online device — require the full
     # cross-node connectivity mesh before building on top of it (see
     # _wait_for_full_device_connectivity for the incident this prevents).
     try:
-        _wait_for_full_device_connectivity(cl_id)
+        if site_activation is None:
+            _wait_for_full_device_connectivity(cl_id)
+        else:
+            _wait_for_full_device_connectivity(cl_id, checkpoint=_checkpoint)
     except ValueError:
-        set_cluster_status(cl_id, ols_status)
+        _revert()
         raise
 
     # Failure-domain coverage check (best-effort: warn, don't block). A 2-FD
@@ -1321,7 +1705,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             )
 
             def _fd_fail(msg: str) -> None:
-                set_cluster_status(cl_id, ols_status)
+                _revert()
                 raise ValueError(f"Failed to activate cluster: {msg}")
 
             hosts: dict[str, builtins.list] = {}
@@ -1336,40 +1720,51 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                              f"{host_fd[node.mgmt_ip]} and {node.failure_domain}; "
                              f"a host must sit entirely in one domain")
 
-            fd_host_counts = Counter(host_fd.values())
-            # See fd_activation_domain_count_violation's docstring: npcs+2
-            # domains, not just the bare rotation-correctness minimum, so a
-            # later single add/remove has a spare candidate instead of
-            # stranding another node's secondary/tertiary with none at all.
-            # This also subsumes the plain "at least two domains" floor.
-            domain_count_violation = fd_planner.fd_activation_domain_count_violation(
-                cluster.distr_npcs, len(fd_host_counts))
-            if domain_count_violation:
-                _fd_fail(domain_count_violation)
-            if len(set(fd_host_counts.values())) != 1:
-                _fd_fail(
-                    f"failure domains must hold an EQUAL number of hosts at "
-                    f"activation; current split: "
-                    f"{ {fd: fd_host_counts[fd] for fd in sorted(fd_host_counts)} }. "
-                    f"Add or remove hosts to balance the domains, then activate.")
-            if cluster.ha_type == "ha":
-                host_order = fd_planner.fd_interleaved_host_order(
-                    [(ip, host_fd[ip]) for ip in hosts])
-                topology = [[n.get_id() for n in hosts[ip]] for ip in host_order]
-                try:
-                    fd_desired_layout = fd_planner.rotation_layout(
-                        topology, cluster.max_fault_tolerance)
-                except ValueError as e:
-                    _fd_fail(f"cannot build the failure-domain rotation: {e}")
-                violations = fd_planner.compute_fd_layout_violations(
-                    topology, cluster.max_fault_tolerance,
-                    {n.get_id(): n.failure_domain for n in online_nodes},
-                    layout=fd_desired_layout)
-                if violations:
-                    _fd_fail("failure-domain layout invariant violated: "
-                             + "; ".join(violations))
+            # Sync replication: local roles never cross a site, so the domain
+            # rules and the rotation hold per site (one group elsewhere).
+            site_of_host = {n.mgmt_ip: n.site if cluster.sync_replication else ""
+                            for n in online_nodes}
+            for site in sorted(set(site_of_host.values())):
+                def _on_site(msg: str, site=site) -> str:
+                    return f"site {site}: {msg}" if site else msg
 
-    for node in online_nodes:
+                site_hosts = [ip for ip in hosts if site_of_host[ip] == site]
+                fd_host_counts = Counter(host_fd[ip] for ip in site_hosts)
+                # See fd_activation_domain_count_violation's docstring: npcs+2
+                # domains, not just the bare rotation-correctness minimum, so a
+                # later single add/remove has a spare candidate instead of
+                # stranding another node's secondary/tertiary with none at all.
+                # This also subsumes the plain "at least two domains" floor.
+                domain_count_violation = fd_planner.fd_activation_domain_count_violation(
+                    cluster.distr_npcs, len(fd_host_counts))
+                if domain_count_violation:
+                    _fd_fail(_on_site(domain_count_violation))
+                if len(set(fd_host_counts.values())) != 1:
+                    _fd_fail(_on_site(
+                        f"failure domains must hold an EQUAL number of hosts at "
+                        f"activation; current split: "
+                        f"{ {fd: fd_host_counts[fd] for fd in sorted(fd_host_counts)} }. "
+                        f"Add or remove hosts to balance the domains, then activate."))
+                if cluster.ha_type == "ha":
+                    host_order = fd_planner.fd_interleaved_host_order(
+                        [(ip, host_fd[ip]) for ip in site_hosts])
+                    topology = [[n.get_id() for n in hosts[ip]] for ip in host_order]
+                    try:
+                        site_layout = fd_planner.rotation_layout(
+                            topology, cluster.max_fault_tolerance)
+                    except ValueError as e:
+                        _fd_fail(_on_site(f"cannot build the failure-domain rotation: {e}"))
+                    violations = fd_planner.compute_fd_layout_violations(
+                        topology, cluster.max_fault_tolerance,
+                        {n.get_id(): n.failure_domain for n in online_nodes},
+                        layout=site_layout)
+                    if violations:
+                        _fd_fail(_on_site("failure-domain layout invariant violated: "
+                                          + "; ".join(violations)))
+                    fd_desired_layout.update(site_layout)
+
+    # A site activation writes no physical label: the layout stays the activated one.
+    for node in (online_nodes if site_activation is None else []):
         if cluster.is_single_node or len(online_nodes) <= 2:
             node.physical_label = 0
         else:
@@ -1417,7 +1812,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Fresh FD+HA activation bypasses this fallback via fd_desired_layout,
     # but reactivation and non-HA/non-fresh paths still rely on it.
     snodes = sorted(snodes, key=lambda n: n.failure_domain)
-    if cluster.ha_type == "ha" and not single_node_cluster:
+    # A site activation assigns no role: every LVS keeps its triplets.
+    if cluster.ha_type == "ha" and not single_node_cluster and site_activation is None:
         for snode in snodes:
             # Do not assign secondary to removed node
             if snode.status == StorageNode.STATUS_REMOVED:
@@ -1448,7 +1844,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     # excludes this node, and there isn't even one existing
                     # pairing left to splice it into (only possible this early
                     # in the pass, before 2+ pairings exist).
-                    set_cluster_status(cl_id, ols_status)
+                    _revert()
                     raise ValueError("Failed to activate cluster, No enough secondary nodes")
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_sec.append(snode.secondary_node_id)
@@ -1479,10 +1875,22 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     # get_secondary_nodes_2()'s greedy walk closed a cycle that
                     # excludes this node, and there isn't even one existing
                     # tertiary pairing left to splice it into.
-                    set_cluster_status(cl_id, ols_status)
+                    _revert()
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
+
+        # Sync replication: every LVS also gets its remote triplet on the other
+        # site. Refs a re-activation finds are kept; missing ones are picked.
+        if cluster.sync_replication:
+            owner_ids = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)
+                         if n.status != StorageNode.STATUS_REMOVED and not n.is_secondary_node
+                         and n.secondary_node_id]
+            try:
+                storage_node_ops.assign_remote_triplets(cluster, owner_ids)
+            except RemoteTripletPlacementError as e:
+                _revert()
+                raise ValueError(f"Failed to activate cluster: {e}") from e
 
     # Pass 1: bring up the primary LVS on every online primary node.
     #
@@ -1498,20 +1906,55 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # at n=32, the dominant cost of a fresh activation (2026-07-13 audit).
     # Port allocation inside create_lvstore is separately serialized by
     # storage_node_ops._lvstore_port_alloc_lock.
+    _checkpoint()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    snode_status = {n.get_id(): n.status for n in snodes}
+    node_site = {n.get_id(): n.site for n in snodes}
+    # Site activation: the nodes of its site it builds on, those ONLINE now.
+    site_ids = {n.get_id() for n in snodes if site and n.site == site
+                and n.status == StorageNode.STATUS_ONLINE}
+
+    def _pass1_builder_id(owner) -> str:
+        """The node Pass 1 builds ``owner``'s LVS leader on
+        (storage_node_ops.activation_leader_builder_id). On a site activation
+        none ("") for an LVS being moved: its instances on the site come back
+        as non-leaders next to the triplet that serves it, by main's restart
+        path, as _recreate_all_lvstores_serial rebuilds it at a restart."""
+        if (site_activation is not None
+                and owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX)):
+            return ""
+        return storage_node_ops.activation_leader_builder_id(owner)
+
+    def _led_from_site(owner) -> bool:
+        return node_site.get(_pass1_builder_id(owner)) == site
+
+    if site_activation is not None:
+        held_status.update({n.get_id(): n.lvstore_status for n in snodes
+                            if n.lvstore and not n.is_secondary_node and n.site != site
+                            and _led_from_site(n)})
     pass1_recreate_ids: builtins.list[str] = []
     pass1_create_ids: builtins.list[str] = []
+    # Owner -> the node that builds its LVS leader (the owner itself, or on a
+    # sync-replication cluster the primary of its remote triplet when the LVS
+    # is led from there: storage_node_ops.activation_leader_builder_id).
+    pass1_builders: dict[str, str] = {}
     for snode in snodes:
         if snode.is_secondary_node:  # pass
             continue
-        if snode.status != StorageNode.STATUS_ONLINE:
+        if snode.status == StorageNode.STATUS_REMOVED:
             continue
         # Re-read node fresh before lvstore creation to avoid writing stale fields
         # (previous create_lvstore calls may have modified this node as a secondary)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if snode.lvstore and force_lvstore_create is False:
+            builder_id = _pass1_builder_id(snode)
+            if snode_status.get(builder_id) != StorageNode.STATUS_ONLINE:
+                continue
+            if site_activation is not None and builder_id not in site_ids:
+                continue        # led from the other site: its leader serves
             pass1_recreate_ids.append(snode.get_id())
-        else:
+            pass1_builders[snode.get_id()] = builder_id
+        elif snode.status == StorageNode.STATUS_ONLINE and site_activation is None:
             pass1_create_ids.append(snode.get_id())
 
     def _set_lvstore_status(node_id, value) -> None:
@@ -1523,65 +1966,121 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         db_controller.atomic_update(
             node, lambda n, v=value: setattr(n, "lvstore_status", v))
 
+    def _fail_site_owner(owner_id) -> None:
+        # Site activation: an owner on the site ends failed after its own
+        # failure, whatever the exit; a held owner is restored instead.
+        if site_activation is not None and owner_id not in held_status:
+            _set_lvstore_status(owner_id, "failed")
+
     def _finish_pass1_node(node_id, ret) -> None:
+        if node_id in held_status:
+            # Site activation: the owner serves on the other site; its status
+            # is restored, never set here.
+            if not ret:
+                logger.error(f"Failed to restore the leader of the lvstore of node {node_id}")
+                _revert()
+                raise ValueError("Failed to activate cluster")
+            return
         if ret:
             _set_lvstore_status(node_id, "ready")
 
-            # Create S3 bdev for backup support (only if backup is configured)
+            # Create S3 bdev for backup support (only if backup is configured;
+            # a remote-led LVS's owner may be offline)
             if cluster.backup_config:
                 snode = db_controller.get_storage_node_by_id(node_id)
-                backup_device.create_s3_bdev(snode, cluster.get_backup_config())
+                if snode.status == StorageNode.STATUS_ONLINE:
+                    backup_device.create_s3_bdev(snode, cluster.get_backup_config())
 
         else:
             _set_lvstore_status(node_id, "failed")
             logger.error(f"Failed to restore lvstore on node {node_id}")
-            set_cluster_status(cl_id, ols_status)
+            _revert()
             raise ValueError("Failed to activate cluster")
 
-    def _recreate_primary_lvs(node_id):
-        snode = db_controller.get_storage_node_by_id(node_id)
-        logger.warning(f"Node {node_id} already has lvstore {snode.lvstore}")
-        return storage_node_ops.recreate_lvstore(snode, activation_mode=True)
+    site_kwargs = {"site_activation": site_activation} if site_activation is not None else {}
+
+    def _recreate_primary_lvs(owner_id):
+        snode = db_controller.get_storage_node_by_id(owner_id)
+        builder_id = pass1_builders[owner_id]
+        if builder_id == owner_id:
+            logger.warning(f"Node {owner_id} already has lvstore {snode.lvstore}")
+            return storage_node_ops.recreate_lvstore(snode, activation_mode=True, **site_kwargs)
+        # Sync replication: led from its remote triplet - the leader is built
+        # on that triplet's primary, every other instance (the owner included)
+        # comes back non-leader in Pass 2.
+        builder = db_controller.get_storage_node_by_id(builder_id)
+        logger.warning("LVS %s is led from site %s: leader rebuilt on %s", snode.lvstore,
+                       builder.site, builder_id)
+        return storage_node_ops.recreate_lvstore(builder, lvs_primary=snode, activation_mode=True,
+                                                 **site_kwargs)
+
+    # One worker per builder node: the leader rebuilds one SPDK hosts (its
+    # own LVS, and the remote-led LVS whose active primary it is) run one
+    # after the other; different nodes stay parallel.
+    pass1_groups: dict[str, builtins.list[str]] = {}
+    for owner_id in pass1_recreate_ids:
+        pass1_groups.setdefault(pass1_builders[owner_id], []).append(owner_id)
+
+    def _recreate_builder_group(builder_id):
+        out: dict[str, t.Any] = {}
+        for owner_id in pass1_groups[builder_id]:
+            try:
+                _checkpoint()
+                out[owner_id] = (_recreate_primary_lvs(owner_id), None)
+            except Exception as e:
+                out[owner_id] = (None, e)
+                break
+        return out
 
     if pass1_recreate_ids:
         pass1_results: dict[str, t.Any] = {}
         pass1_errors: builtins.list[ValueError] = []
-        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_recreate_ids))
+        pass1_cancelled: builtins.list[Exception] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_groups))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1") as pool:
-            futures = {pool.submit(_recreate_primary_lvs, nid): nid for nid in pass1_recreate_ids}
-            for future in as_completed(futures):
-                node_id = futures[future]
-                try:
-                    pass1_results[node_id] = future.result()
-                except storage_node_ops.LVSRestartRequiredError as e:
-                    logger.error(e)
-                    pass1_errors.append(ValueError(
-                        f"Failed to activate cluster: node {e.node_id} holds "
-                        f"partial state for LVS {e.lvs_name} that examine could "
-                        f"not recover. Restart node {e.node_id} before activating."))
-                except Exception as e:
-                    logger.error(e)
-                    pass1_errors.append(ValueError("Failed to activate cluster"))
+            group_futures = [pool.submit(_recreate_builder_group, bid) for bid in pass1_groups]
+            for group_future in as_completed(group_futures):
+                for owner_id, (result, error) in group_future.result().items():
+                    if error is None:
+                        pass1_results[owner_id] = result
+                    elif isinstance(error, src.SiteActivationCancelled):
+                        pass1_cancelled.append(error)
+                    elif isinstance(error, storage_node_ops.LVSRestartRequiredError):
+                        logger.error(error)
+                        _fail_site_owner(owner_id)
+                        pass1_errors.append(ValueError(
+                            f"Failed to activate cluster: node {error.node_id} holds "
+                            f"partial state for LVS {error.lvs_name} that examine could "
+                            f"not recover. Restart node {error.node_id} before activating."))
+                    else:
+                        logger.error(error)
+                        _fail_site_owner(owner_id)
+                        pass1_errors.append(ValueError("Failed to activate cluster"))
+        if pass1_cancelled:
+            _revert()
+            raise pass1_cancelled[0]
         if pass1_errors:
-            set_cluster_status(cl_id, ols_status)
+            _revert()
             raise pass1_errors[0]
         for node_id in pass1_recreate_ids:
             _finish_pass1_node(node_id, pass1_results.get(node_id))
+        _restore_held_status()
 
     if pass1_create_ids:
         # Lock set per create = the records create_lvstore writes: the node
-        # itself plus its secondary/tertiary. Locks are acquired in sorted-id
-        # order so two creates with intersecting sets serialize deadlock-free
-        # while disjoint pairs run concurrently.
+        # itself plus its secondary/tertiary (and on a sync cluster the members
+        # of its remote triplet). Locks are acquired in sorted-id order so two
+        # creates with intersecting sets serialize deadlock-free while disjoint
+        # pairs run concurrently.
         pass1_create_lock_ids: dict[str, builtins.list[str]] = {}
         pass1_create_locks: dict[str, threading.Lock] = {}
         for nid in pass1_create_ids:
             n = db_controller.get_storage_node_by_id(nid)
             touched = {nid}
-            if n.secondary_node_id:
-                touched.add(n.secondary_node_id)
-            if n.tertiary_node_id:
-                touched.add(n.tertiary_node_id)
+            for peer_id in (n.secondary_node_id, n.tertiary_node_id,
+                            *storage_node_ops.remote_triplet_refs(n)):
+                if peer_id:
+                    touched.add(peer_id)
             pass1_create_lock_ids[nid] = sorted(touched)
             for lid in pass1_create_lock_ids[nid]:
                 pass1_create_locks.setdefault(lid, threading.Lock())
@@ -1612,7 +2111,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     logger.error(e)
                     create_errors.append(ValueError("Failed to activate cluster"))
         if create_errors:
-            set_cluster_status(cl_id, ols_status)
+            _revert()
             raise create_errors[0]
         for node_id in pass1_create_ids:
             _finish_pass1_node(node_id, create_results.get(node_id))
@@ -1621,13 +2120,34 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
     # 6 nodes) every node is both a primary AND a secondary/tertiary — the old
     # is_secondary_node filter only matched dedicated secondary-only nodes,
-    # skipping the ring participants entirely.
+    # skipping the ring participants entirely. On a sync-replication cluster
+    # that includes the remote-triplet instances.
+    _checkpoint()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+
+    def _pass2_owners(snode) -> builtins.list[StorageNode]:
+        """The LVS ``snode`` rebuilds as a non-leader: the ones it hosts as a
+        secondary / tertiary / remote-triplet member, and - sync replication -
+        its own when that is led from its remote triplet (or, on a site
+        activation, being moved); never one whose leader Pass 1 built on
+        ``snode`` itself."""
+        owners = storage_node_ops.hosted_lvs_owners(snode, db_controller)
+        if snode.lvstore and not snode.is_secondary_node and _pass1_builder_id(snode) != snode.get_id():
+            owners = [snode, *owners]
+        return [o for o in owners if _pass1_builder_id(o) != snode.get_id()]
+
     pass2_ids: builtins.list[str] = []
+    # Site activation: the nodes of its site Pass 2 runs on - ONLINE now and
+    # when Pass 1 took its node set; the record is cleared only for them.
+    built_ids: builtins.set[str] = builtins.set()
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
-        if db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
+        if site_activation is not None:
+            if snode.get_id() not in site_ids:
+                continue
+            built_ids.add(snode.get_id())
+        if _pass2_owners(snode):
             pass2_ids.append(snode.get_id())
 
     # Workers fan out per non-leader node, but work on the SAME primary must
@@ -1637,16 +2157,40 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Pre-created per-primary locks serialize exactly that, nothing more.
     pass2_primary_locks: dict[str, threading.Lock] = {}
     for node_id in pass2_ids:
-        for p in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+        for p in _pass2_owners(db_controller.get_storage_node_by_id(node_id)):
             pass2_primary_locks.setdefault(p.get_id(), threading.Lock())
+
+    # Site activation: the rebuilds next to a leader that serves from the other
+    # site run one at a time (each one port-blocks that leader).
+    serving_leader_lock = threading.Lock()
+    pass2_failed: builtins.set[str] = builtins.set()
+
+    @contextlib.contextmanager
+    def _held_owner_window(owner_id):
+        # Site activation: an owner that serves from the other site carries
+        # the in_creation marker of one Pass 2 rebuild only - the storage-node
+        # monitor skips an in_creation node.
+        try:
+            yield
+        finally:
+            if owner_id in held_status:
+                _restore_lvstore_statuses({owner_id: held_status[owner_id]})
 
     def _recreate_non_leader_lvs(node_id) -> bool:
         snode = db_controller.get_storage_node_by_id(node_id)
-        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+        primary_nodes = _pass2_owners(snode)
         logger.info(f"recreating secondary/tertiary LVS on node {node_id}")
         ret = True
         for primary_node in primary_nodes:
-            with pass2_primary_locks[primary_node.get_id()]:
+            _checkpoint()
+            if site_activation is not None and not _led_from_site(primary_node):
+                with serving_leader_lock:
+                    _checkpoint()
+                    if not _rebuild_next_to_serving_leader(snode, primary_node):
+                        ret = False
+                continue
+            with pass2_primary_locks[primary_node.get_id()], _held_owner_window(primary_node.get_id()):
+                _checkpoint()
                 # Re-read under the lock: a peer worker (the other non-leader of
                 # this primary) may have written lvstore_status meanwhile.
                 # Atomic: a full-object write here races the primary's OWN
@@ -1668,25 +2212,29 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 # examine. We deliberately do NOT switch the helper out of
                 # activation_mode here: that would enable peer leader/distrib/
                 # lvstore/hublvol RPCs which presume the peer's full stack is up.
+                # The leader Pass 1 built: the owner, or the active remote
+                # primary of a remote-led LVS (sync replication).
+                leader_node = db_controller.get_storage_node_by_id(
+                    storage_node_ops.activation_leader_builder_id(primary_node))
                 leader_blocked = False
                 leader_port = None
-                if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
+                if not is_fresh_activation and leader_node.status == StorageNode.STATUS_ONLINE:
                     try:
-                        leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                        primary_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_port)
-                        tcp_ports_events.port_deny(primary_node, leader_port)
+                        leader_port = leader_node.get_lvol_subsys_port(primary_node.lvstore)
+                        leader_node.rpc_client(timeout=3, retry=1).nvmf_port_block(leader_port)
+                        tcp_ports_events.port_deny(leader_node, leader_port)
                         leader_blocked = True
                         time.sleep(0.5)
                     except Exception as e:
                         logger.warning(
                             "Re-activation: port-block on leader %s for %s failed: %s — "
                             "proceeding without block (secondary examine may race live leader writes)",
-                            primary_node.get_id(), primary_node.lvstore, e)
+                            leader_node.get_id(), primary_node.lvstore, e)
 
                 try:
                     try:
                         r = storage_node_ops.recreate_lvstore_on_non_leader(
-                            snode, primary_node, primary_node, activation_mode=True)
+                            snode, leader_node, primary_node, activation_mode=True)
                     except storage_node_ops.LVSRestartRequiredError as e:
                         logger.error(e)
                         raise ValueError(
@@ -1696,15 +2244,15 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 finally:
                     if leader_blocked:
                         try:
-                            primary_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_port)
-                            tcp_ports_events.port_allowed(primary_node, leader_port)
+                            leader_node.rpc_client(timeout=3, retry=1).nvmf_port_unblock(leader_port)
+                            tcp_ports_events.port_allowed(leader_node, leader_port)
                         except Exception as ue:
                             logger.error(
                                 "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
-                                primary_node.get_id(), leader_port, ue)
+                                leader_node.get_id(), leader_port, ue)
                             try:
                                 tasks_controller.add_port_allow_task(
-                                    primary_node.cluster_id, primary_node.get_id(), leader_port)
+                                    leader_node.cluster_id, leader_node.get_id(), leader_port)
                             except Exception as se:
                                 logger.error("Failed to schedule port_allow fallback: %s", se)
             if not r:
@@ -1718,30 +2266,75 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             raise ValueError("Failed to activate cluster")
         return True
 
+    def _recreate_site_non_leader_lvs(node_id) -> bool:
+        """Site activation: a node whose own Pass 2 fails ends failed, whatever
+        the exit; a cancellation is no failure of the node."""
+        failed = True
+        try:
+            _recreate_non_leader_lvs(node_id)
+            failed = False
+            return True
+        except src.SiteActivationCancelled:
+            failed = False
+            raise
+        finally:
+            if failed:
+                pass2_failed.add(node_id)
+                _set_lvstore_status(node_id, "failed")
+
     if pass2_ids:
         pass2_errors: builtins.list[ValueError] = []
+        pass2_cancelled: builtins.list[Exception] = []
+        pass2_worker = _recreate_non_leader_lvs if site_activation is None else _recreate_site_non_leader_lvs
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass2_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p2") as pool:
-            futures = {pool.submit(_recreate_non_leader_lvs, nid): nid for nid in pass2_ids}
+            futures = {pool.submit(pass2_worker, nid): nid for nid in pass2_ids}
             for future in as_completed(futures):
                 try:
                     future.result()
+                except src.SiteActivationCancelled as e:
+                    pass2_cancelled.append(e)
                 except ValueError as e:
                     pass2_errors.append(e)
                 except Exception as e:
                     logger.error(e)
                     pass2_errors.append(ValueError("Failed to activate cluster"))
+        # A later rebuild writes its owner ``ready`` (the non-leader rebuild's
+        # own status write): a node that failed its own Pass 2 stays failed.
+        for node_id in pass2_failed:
+            _set_lvstore_status(node_id, "failed")
+        # Site activation: every rebuild window of Pass 2 is closed. An owner
+        # a peer's worker marked ``in_creation`` after the owner's own worker
+        # had ended (only that one resets it) gets its outcome.
+        for node_id in built_ids - pass2_failed:
+            if db_controller.get_storage_node_by_id(node_id).lvstore_status == "in_creation":
+                _set_lvstore_status(node_id, "ready")
+        if pass2_cancelled:
+            _revert()
+            raise pass2_cancelled[0]
         if pass2_errors:
-            set_cluster_status(cl_id, ols_status)
+            _revert()
             raise pass2_errors[0]
+    _restore_held_status()
 
     # --- Pass 3: Create hublvols and cross-connections ---
     # All lvstores (primary + secondary/tertiary) are now up. Safe to create
     # hublvols and connect peers. This mirrors the logic in create_lvstore()
     # lines 5350-5379 and must tolerate offline nodes (FTT=1 or FTT=2).
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    _checkpoint()
     pass3_ids = [n.get_id() for n in snodes
-                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE
+                 and storage_node_ops.activation_leader_builder_id(n) == n.get_id()]
+    if site_activation is not None:
+        # Site activation: only the LVS led from its site (Pass 1's key).
+        pass3_ids = [owner_id for owner_id, builder_id in pass1_builders.items()
+                     if builder_id == owner_id]
+    # Sync replication: an LVS led from its remote triplet gets its hublvol on
+    # that triplet's primary (the leader Pass 1 built), whatever the owner's
+    # own status.
+    pass3_remote_ids = [owner_id for owner_id, builder_id in pass1_builders.items()
+                        if builder_id != owner_id]
 
     # Workers fan out per primary, but a node may serve as secondary/tertiary
     # for several primaries: hublvol create/connect mutates DB state on both
@@ -1817,40 +2410,125 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             for lock in reversed(held):
                 lock.release()
 
-    if pass3_ids:
-        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass3_ids))
+    # Sync replication: what Pass 3 could not wire for a remote-led LVS. Unlike
+    # the home-led wiring below it fails the activation: nothing repairs the
+    # redirect of a remote follower later, and the site rule would open its
+    # paths (Pass 4, then the lvol monitor's ANA self-heal) without one.
+    pass3_remote_failures: builtins.list[str] = []
+
+    def _wire_remote_led_hublvols(owner_id) -> None:
+        """Pass 3 for an LVS led from its remote triplet: the hublvol on the
+        leader (adopted: the LVS metadata is the owner's), the secondary
+        hublvol on the triplet's secondary, and the triplet's secondary /
+        tertiary connected to it. The home triplet gets none (a hublvol never
+        crosses a site). A failed adoption or a follower connect that does
+        not succeed is recorded in ``pass3_remote_failures``, which fails the
+        activation."""
+        owner = db_controller.get_storage_node_by_id(owner_id)
+        leader_id, sec_id, tert_id = storage_node_ops.remote_triplet_refs(owner)
+        held: builtins.list[threading.Lock] = []
+        try:
+            for nid in sorted({n for n in (leader_id, sec_id, tert_id) if n}):
+                lock = pass3_node_locks.setdefault(nid, threading.Lock())
+                lock.acquire()
+                held.append(lock)
+            leader = db_controller.get_storage_node_by_id(leader_id)
+            try:
+                leader.adopt_hublvol(owner, cluster.nqn)
+            except Exception as e:
+                logger.error("Error adopting hublvol of %s on %s: %s", owner.lvstore, leader_id, e)
+                pass3_remote_failures.append(f"{owner.lvstore}: hublvol on {leader_id}: {e}")
+                return
+            sec1 = db_controller.get_storage_node_by_id(sec_id) if sec_id else None
+            sec1_online = bool(sec1 and sec1.status == StorageNode.STATUS_ONLINE)
+            if sec1_online and sec1 is not None:
+                try:
+                    sec1.create_secondary_hublvol(owner, cluster.nqn)
+                except Exception as e:
+                    logger.error("Error creating secondary hublvol of %s on %s: %s",
+                                 owner.lvstore, sec_id, e)
+            for peer_id, role in ((sec_id, "secondary"), (tert_id, "tertiary")):
+                if not peer_id:
+                    continue
+                peer = db_controller.get_storage_node_by_id(peer_id)
+                if peer.status != StorageNode.STATUS_ONLINE:
+                    continue
+                failover = sec1 if role == "tertiary" and sec1_online else None
+                try:
+                    time.sleep(0.2)
+                    connected = peer.connect_to_hublvol(leader, failover_node=failover, role=role,
+                                                        lvs_node=owner)
+                except Exception as e:
+                    logger.error("Error connecting %s to hublvol of %s on %s: %s", peer_id,
+                                 owner.lvstore, leader_id, e)
+                    connected = False
+                if not connected:
+                    pass3_remote_failures.append(f"{owner.lvstore}: {peer_id} not connected to "
+                                                 f"the hublvol on {leader_id}")
+        finally:
+            for lock in reversed(held):
+                lock.release()
+
+    pass3_work = [(_wire_hublvols, nid) for nid in pass3_ids] + \
+        [(_wire_remote_led_hublvols, oid) for oid in pass3_remote_ids]
+    if pass3_work:
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass3_work))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p3") as pool:
-            for future in as_completed({pool.submit(_wire_hublvols, nid) for nid in pass3_ids}):
+            pass3_futures = {pool.submit(fn, nid): (fn, nid) for fn, nid in pass3_work}
+            for future in as_completed(pass3_futures):
                 try:
                     future.result()
                 except Exception as e:
                     # Same tolerance as the sequential loop: hublvol wiring
-                    # errors are logged, not fatal to activation.
+                    # errors are logged, not fatal to activation - except for
+                    # a remote-led LVS (pass3_remote_failures).
                     logger.error("Pass 3 hublvol wiring worker failed: %s", e)
+                    fn, nid = pass3_futures[future]
+                    if fn is _wire_remote_led_hublvols:
+                        pass3_remote_failures.append(f"{nid}: {e}")
+    if pass3_remote_failures:
+        logger.error("Pass 3: remote-led LVS not wired: %s", pass3_remote_failures)
+        _revert()
+        raise ValueError(f"Failed to activate cluster: {pass3_remote_failures[0]}")
 
     # Class ids are not renumbered here: volumes store them, and classes can
     # be added and removed on an active cluster (qos_controller.set_config),
     # so a re-activation must not move them. Weights are sent always: the
     # replication service class has a share even without user classes.
-    logger.info("Setting Alcemls QOS weights")
-    qos_controller.push_qos_weights(cl_id)
+    # (A site activation leaves the QoS alone: the restart of each of its
+    # nodes set the weights there.)
+    if site_activation is None:
+        logger.info("Setting Alcemls QOS weights")
+        qos_controller.push_qos_weights(cl_id)
 
-    # Start JC compression on each node
-    # (release-upgrade guard: held until `cluster upgrade-complete`, remove
-    # with the jc_compression_upgrade plugin)
-    if ols_status == Cluster.STATUS_UNREADY and not jc_compression_upgrade.resume_is_held(cluster):
-        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-            if node.status == StorageNode.STATUS_ONLINE:
-                if not node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False):
-                    logger.info("Failed to resume JC compression adding task...")
-                    tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
+    # Start JC compression on each node -- on every activation, not only the
+    # first one: re-activating a suspended cluster restarts SPDK on its nodes,
+    # and a fresh JC context starts with compression suspended. The release-
+    # upgrade hold is applied inside storage_node_ops.resume_jc_compression.
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        if node.status == StorageNode.STATUS_ONLINE:
+            storage_node_ops.resume_jc_compression(node, node.jm_vuid)
 
-    if not cluster.cluster_max_size:
+    if not cluster.cluster_max_size and site_activation is None:
         cluster = db_controller.get_cluster_by_id(cl_id)
         cluster.cluster_max_size = max_size
         cluster.cluster_max_devices = dev_count
         cluster.cluster_max_nodes = len(online_nodes)
         cluster.write_to_db(db_controller.kv_store)
+
+    if site_activation is not None:
+        # Site activation, before its paths open: the JM mesh repaired best
+        # effort (a re-activation: warn only), then the record cleared.
+        if cluster.ha_type == "ha" and not single_node_cluster:
+            jm_problems = storage_node_ops.verify_jm_mesh_coverage(cl_id, repair=True)
+            if jm_problems:
+                logger.warning("JM mesh coverage incomplete on the activation of site %s: %s",
+                               site, "; ".join(jm_problems))
+        _checkpoint()
+        record_problems = src.record_site_return(cl_id, site, site_activation.token, built_ids)
+        if record_problems:
+            raise ValueError(f"Failed to activate site {site}: " + "; ".join(record_problems))
+        _checkpoint()
 
     # --- Pass 4: open client IO only now, with correct ANA ---
     # Pass 1/2 created every client-facing listener INACCESSIBLE so no client IO
@@ -1861,46 +2539,31 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # we set the cluster ACTIVE — so clients never resume IO against a primary
     # whose redirect to its peers isn't established (which is what produced the
     # mid-activation writer-conflict / EIO).
-    def _set_node_ana(node_id) -> None:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(node_id)
-                      if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
-        if not node_lvols:
-            return
-        # primary path -> optimized
-        for lv in node_lvols:
-            try:
-                storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
-            except Exception as e:
-                logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
-                             node_id, lv.nqn, e)
-        # secondary/tertiary paths -> non_optimized
-        for sec_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-            if not sec_id:
-                continue
-            sec_node = db_controller.get_storage_node_by_id(sec_id)
-            if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
-                continue
-            for lv in node_lvols:
-                try:
-                    storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized")
-                except Exception as e:
-                    logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
-                                 sec_node.get_id(), lv.nqn, e)
-
     # ANA flips are RPC-only (no DB writes) so the per-primary workers need no
     # locks; different primaries touch different subsystems even when they
     # share a secondary node.
+    # Sync replication: a remote-led LVS whose owner is offline is opened too
+    # (its active triplet is up); every path follows the site rule.
     pass4_ids = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)
-                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+                 if not n.is_secondary_node and (n.status == StorageNode.STATUS_ONLINE
+                                                  or n.get_id() in pass3_remote_ids)]
+    if site_activation is not None:
+        # Site activation: the owners of the LVS led from its site (Pass 1's
+        # key); the ANA site rule opens the site now that its record is gone.
+        pass4_ids = builtins.list(pass1_builders)
     if pass4_ids:
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass4_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p4") as pool:
-            for future in as_completed({pool.submit(_set_node_ana, nid) for nid in pass4_ids}):
+            for future in as_completed({pool.submit(_activation_open_node_ana, nid) for nid in pass4_ids}):
                 try:
                     future.result()
                 except Exception as e:
                     logger.error("Pass 4 ANA worker failed: %s", e)
+
+    if site_activation is not None:
+        storage_events.sync_site_returned(db_controller.get_cluster_by_id(cl_id), site)
+        logger.info("Site %s activated", site)
+        return
 
     # The cluster is now active and about to serve IO. During node-add the
     # storage MCP was created wide (= parallel-add count) so the first-time
@@ -1926,7 +2589,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         jm_problems = storage_node_ops.verify_jm_mesh_coverage(cl_id, repair=True)
         if jm_problems:
             if is_fresh_activation:
-                set_cluster_status(cl_id, ols_status)
+                _revert()
                 raise ValueError(
                     "Failed to activate cluster: JM mesh coverage incomplete "
                     "(journal quorum would silently run degraded): "
@@ -1946,6 +2609,9 @@ def cluster_expand(cl_id) -> None:
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_IN_EXPANSION,
                               Cluster.STATUS_READONLY, Cluster.STATUS_DEGRADED]:
         raise ValueError(f"Cluster status is not expected: {cluster.status}")
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if site_activation:
+        raise ValueError(f"Failed to expand cluster: {site_activation}")
 
     ols_status = cluster.status
     set_cluster_status(cl_id, Cluster.STATUS_IN_EXPANSION)
@@ -1999,6 +2665,14 @@ def cluster_expand(cl_id) -> None:
             sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
             sec_node_2.lvstore_stack_tertiary = snode.get_id()
             sec_node_2.write_to_db()
+
+        if cluster.ha_type == "ha" and cluster.sync_replication:
+            try:
+                storage_node_ops.assign_remote_triplets(cluster, [snode.get_id()])
+            except RemoteTripletPlacementError as e:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(f"Failed to expand cluster: {e}") from e
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
 
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
@@ -2954,10 +3628,10 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
     update = ["sudo", "docker", "service", "update", "--force"]
     if enabled:
         if not settings['plugin']['preinstalled']:
-            update += ["--env-add", f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
-                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}"]
-        update += ["--mount-add", f"type=bind,src={datasource_path},"
-                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly"]
+            update += ["--env-add", (f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
+                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}")]
+        update += ["--mount-add", (f"type=bind,src={datasource_path},"
+                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly")]
 
     logger.info("Restarting Grafana...")
     subprocess.check_call(update + [constants.MONITORING_GRAFANA_SERVICE])
@@ -3143,6 +3817,20 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
                 command=["simplyblock-task-runner", "tasks-runner-jc-comp"],
+                service_image=service_image)
+
+        if "app_TasksRunnerSyncResync" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerSyncResync",
+                command=["simplyblock-task-runner", "tasks-runner-sync-resync"],
+                service_image=service_image)
+
+        if "app_TasksRunnerSyncPromote" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerSyncPromote",
+                command=["simplyblock-task-runner", "tasks-runner-sync-promote"],
                 service_image=service_image)
 
         if "app_BackupService" not in service_names:
@@ -3672,6 +4360,9 @@ def set_(cl_id, attr, value) -> bool:
     else:
         value = cluster.get_attrs_map()[attr]['type'](value)
         logger.info(f"Setting {attr} to {value}")
+        if attr == "two_node_arbitration":
+            set_two_node_arbitration(cl_id, value)
+            return True
         setattr(cluster, attr, value)
         cluster.write_to_db()
     return True

@@ -57,6 +57,9 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     # dedicated-secondary-node / physical-label branches.
     n.is_secondary_node = is_secondary_node
     n.physical_label = physical_label
+    # A truthy child mock here would make every port change publish Service
+    # ports; these nodes are on the host network and have no Service.
+    n.pod_network = False
     # Same hazard: left as a child mock this reads truthy, and the removal
     # would skip phase 3b believing a drain had already reallocated the
     # replicas. A node that no drain has touched has it False.
@@ -76,6 +79,11 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     n.lvstore_stack_secondary = stack_secondary
     n.lvstore_stack_tertiary = stack_tertiary
     n.failure_domain = failure_domain
+    # Non-sync-replication defaults (no site, no remote triplet).
+    n.site = ""
+    n.remote_primary_node_id = ""
+    n.remote_secondary_node_id = ""
+    n.remote_tertiary_node_id = ""
     n.mgmt_ip = mgmt_ip or unique_ip(node_id)
     n.write_to_db = MagicMock()
     n.rpc_client = MagicMock(return_value=MagicMock())
@@ -1158,6 +1166,7 @@ class TestRecreateOnNonLeaderReconnectsRegardlessOfActivationMode(unittest.TestC
 
     def test_soft_reconnect_prelude_runs_with_activation_mode_false(self):
         snode = MagicMock(spec=StorageNode)
+        snode.pod_network = False  # on the host network: no Service ports to publish
         snode.get_id = MagicMock(return_value="snode-1")
         snode.lvstore = ""
         snode.lvstore_stack_secondary = ""
@@ -1169,6 +1178,8 @@ class TestRecreateOnNonLeaderReconnectsRegardlessOfActivationMode(unittest.TestC
         db = MagicMock()
         db.get_storage_node_by_id = MagicMock(return_value=snode)
         db.get_lvols_by_node_id = MagicMock(return_value=[])
+        # The prelude writes its fields through atomic_update: apply them.
+        db.atomic_update = MagicMock(side_effect=lambda node, fn: fn(node))
 
         primary_node = MagicMock()
         primary_node.get_id = MagicMock(return_value="primary-1")
@@ -3018,12 +3029,15 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
         owner_node.get_id = MagicMock(return_value="owner-node")
         owner_node.status = StorageNode.STATUS_ONLINE
         owner_node.jm_device = jm_dev
+        owner_node.site = ""
 
         this_node = MagicMock(spec=StorageNode)
         this_node.get_id = MagicMock(return_value=this_node_id)
         this_node.jm_ids = []
+        this_node.lvstore_stack = []
         this_node.lvstore_stack_secondary = ""
         this_node.lvstore_stack_tertiary = ""
+        this_node.site = ""
         this_node.remote_jm_devices = []
         rpc_client = MagicMock()
         this_node.rpc_client = MagicMock(return_value=rpc_client)
@@ -3123,12 +3137,15 @@ class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
         owner_node.get_id = MagicMock(return_value="owner-node")
         owner_node.status = StorageNode.STATUS_ONLINE
         owner_node.jm_device = jm_dev
+        owner_node.site = ""
 
         this_node = MagicMock(spec=StorageNode)
         this_node.get_id = MagicMock(return_value=this_node_id)
         this_node.jm_ids = []
+        this_node.lvstore_stack = []
         this_node.lvstore_stack_secondary = ""
         this_node.lvstore_stack_tertiary = ""
+        this_node.site = ""
         this_node.remote_jm_devices = []
         rpc_client = MagicMock()
         this_node.rpc_client = MagicMock(return_value=rpc_client)
@@ -3991,7 +4008,8 @@ class TestAFailedBuildReleasesWhatItOpened(unittest.TestCase):
         snode.rpc_client = MagicMock(return_value=rpc)
         db = FakeDB(cl, [snode] + ([primary] if primary else []))
         with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "get_node_jm_names", return_value=["jm_H"]), \
+             patch.object(storage_node_ops, "get_node_jm_names",
+                          return_value=storage_node_ops.JMNames(["jm_H"], None)), \
              patch.object(storage_node_ops.distr_controller, "send_cluster_map_to_distr",
                           return_value=True), \
              patch.object(storage_node_ops, "_release_jm_contexts_of_deleted_vuid") as rel:

@@ -7,6 +7,7 @@ b) Listeners: a new one is created in its intended ANA state; an existing
    nvmf_subsystem_listener_set_ana_state (ensure_listener,
    demote_old_leader_listeners, publish_lvol_listeners).
 """
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -101,7 +102,7 @@ class EnsureListenerTest(unittest.TestCase):
 
 
 def _node(node_id, ips=("10.0.0.2",), port=4428, rpc=None):
-    nics = [SimpleNamespace(ip4_address=ip, trtype="TCP") for ip in ips]
+    nics = [SimpleNamespace(ip4_address=ip, listen_address=ip, trtype="TCP") for ip in ips]
     node = MagicMock()
     node.get_id.return_value = node_id
     node.data_nics = nics
@@ -171,12 +172,43 @@ class PublishLvolListenersTest(unittest.TestCase):
 
 class PresumedActingLeaderTest(unittest.TestCase):
 
-    def _lvs(self, owner="prim", sec="sec", ter="ter"):
+    def _lvs(self, owner="prim", sec="sec", ter="ter", remote=("", "", "")):
         lvs = MagicMock()
         lvs.get_id.return_value = owner
         lvs.secondary_node_id = sec
         lvs.tertiary_node_id = ter
+        (lvs.remote_primary_node_id, lvs.remote_secondary_node_id,
+         lvs.remote_tertiary_node_id) = remote
         return lvs
+
+    def test_sync_remote_primary_presumes_its_triplets_secondary(self):
+        # The active remote primary rebuilding the leader: the peer that took
+        # over is the remote triplet's secondary, not the owner's home one.
+        snode = _node("rprim")
+        rsec, rter = _node("rsec"), _node("rter")
+        lvs = self._lvs(remote=("rprim", "rsec", "rter"))
+        got = storage_node_ops._presumed_acting_leader(lvs, [rsec, rter], set(), snode)
+        self.assertIs(got, rsec)
+
+    def test_sync_remote_primary_presumes_the_tertiary_when_the_secondary_is_out(self):
+        snode = _node("rprim")
+        rsec, rter = _node("rsec"), _node("rter")
+        lvs = self._lvs(remote=("rprim", "rsec", "rter"))
+        got = storage_node_ops._presumed_acting_leader(lvs, [rsec, rter], {"rsec"}, snode)
+        self.assertIs(got, rter)
+
+    def test_sync_remote_secondary_is_not_a_rebuilding_primary(self):
+        snode = _node("rsec")
+        rter = _node("rter")
+        lvs = self._lvs(remote=("rprim", "rsec", "rter"))
+        self.assertIsNone(storage_node_ops._presumed_acting_leader(lvs, [rter], set(), snode))
+
+    def test_sync_owner_keeps_its_home_peers(self):
+        snode = _node("prim")
+        sec, rsec = _node("sec"), _node("rsec")
+        lvs = self._lvs(remote=("rprim", "rsec", "rter"))
+        got = storage_node_ops._presumed_acting_leader(lvs, [rsec, sec], set(), snode)
+        self.assertIs(got, sec)
 
     def test_secondary_is_presumed_when_connected(self):
         snode = _node("prim")
@@ -213,25 +245,38 @@ class RecreateUsesPresumedLeaderTest(unittest.TestCase):
     before anything that depends on current_leader (compression check,
     replication wait, port fence, quiesce)."""
 
-    def _src(self):
+    def _src(self, fn=None):
         import inspect
         import re
-        src = inspect.getsource(storage_node_ops._recreate_lvstore_impl)
+        src = inspect.getsource(fn or storage_node_ops._recreate_lvstore_impl)
         return re.sub('""".*?"""', "", src, flags=re.DOTALL)
 
     def test_fallback_follows_the_probe_and_precedes_the_quiesce(self):
+        # The fence and the quiesce live in _fence_and_demote_leader, which
+        # transfer_lvs_leadership runs before its before_grant (the examine).
         src = self._src()
         i_probe = src.index('lvs.get("lvs leadership")')
         i_fallback = src.index("_presumed_acting_leader(")
         i_compression = src.index("_jc_compression_status_with_retry(current_leader, lvs_jm_vuid)")
-        i_fence = src.index(
-            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
-        i_disable = src.index(".jc_disable_replication(lvs_jm_vuid)")
-        i_examine = src.index('_fenced("bdev_distrib_force_to_non_leader"')
+        i_transfer = src.index("transfer_lvs_leadership(")
         self.assertLess(i_probe, i_fallback)
         self.assertLess(i_fallback, i_compression)
-        self.assertLess(i_fallback, i_fence)
-        self.assertLess(i_disable, i_examine)
+        self.assertLess(i_fallback, i_transfer)
+        self.assertIn("before_grant=_examine_and_validate", src[i_transfer:])
+        examine = src[src.index("def _examine_and_validate("):]
+        self.assertIn('_fenced("bdev_distrib_force_to_non_leader"', examine)
+
+        fence = self._src(storage_node_ops._fence_and_demote_leader)
+        i_block = fence.index("blocked_peers.append(sec_node)")
+        i_disable = fence.index(".jc_disable_replication(lvs_jm_vuid)")
+        self.assertLess(i_block, i_disable)
+
+        # both branches (the caller's fence, a fence of its own) demote first
+        transfer = self._src(storage_node_ops.transfer_lvs_leadership)
+        demotes = [m.start() for m in re.finditer(r"_fence_and_demote_leader\(", transfer)]
+        self.assertEqual(len(demotes), 2)
+        for i_demote in demotes:
+            self.assertLess(i_demote, transfer.index("before_grant()", i_demote))
 
     def test_fallback_only_when_the_probe_found_no_leader(self):
         src = self._src()

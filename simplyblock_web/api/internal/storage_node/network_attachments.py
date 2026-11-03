@@ -1,6 +1,6 @@
 """The networks an SPDK pod attaches to, as the operator states them, and what
 the pod spec needs for them: the annotation Multus reads. A pod with none stays on
-the host network."""
+the host network, unless it serves on the pod network itself (``pod_network``)."""
 
 import json
 
@@ -12,7 +12,7 @@ from tenacity import (
     wait_fixed,
 )
 
-from simplyblock_core.storage_network import MANAGEMENT_INTERFACE, NetworkAttachment
+from simplyblock_core.storage_network import NetworkAttachment
 
 NETWORK_STATUS = "k8s.v1.cni.cncf.io/network-status"
 #: What Kubernetes expands to the pod's own address in a container env value.
@@ -23,31 +23,43 @@ POLL_INTERVAL_SEC = 2
 
 
 def annotation(attachments: list[NetworkAttachment]) -> str:
-    """The value of the networks annotation, or "" when there are no attachments."""
+    """The value of the networks annotation, or "" when there are no attachments. The
+    device resource is the pod's request, not part of a network selection element."""
     if not attachments:
         return ""
-    return json.dumps([a.model_dump() for a in attachments])
+    return json.dumps([a.model_dump(exclude={"resource"}) for a in attachments])
 
 
-def server_ip(attachments: list[NetworkAttachment]) -> str:
-    """The address the SPDK proxy binds. The management network's, when there is one,
-    and otherwise the pod's own, which only the pod knows and Kubernetes expands from
-    POD_IP. "" when the pod has no attachments and the control plane's own value stands."""
-    if not attachments:
-        return ""
+def device_resources(attachments: list[NetworkAttachment]) -> dict[str, int]:
+    """The device-plugin resources the SPDK container requests, one per attachment
+    whose device a plugin hands out. Without the request the plugin allocates no
+    device and Multus has none to attach."""
+    resources: dict[str, int] = {}
     for a in attachments:
-        if a.interface == MANAGEMENT_INTERFACE and a.ips:
-            return a.ips[0].split("/")[0]
-    return POD_IP_REFERENCE
+        if a.resource:
+            resources[a.resource] = resources.get(a.resource, 0) + 1
+    return dict(sorted(resources.items()))
+
+
+def server_ip(attachments: list[NetworkAttachment], pod_network: bool = False) -> str:
+    """The address the SPDK proxy binds: the pod's own, which only the pod knows and
+    Kubernetes expands from POD_IP, and which the pod's Service name resolves to. "" when
+    the pod is on the host network and the control plane's own value stands."""
+    return POD_IP_REFERENCE if attachments or pod_network else ""
 
 
 def report(pod, attachments: list[NetworkAttachment]) -> dict | None:
     """What the SPDK pod holds, for the control plane: its own address and the declared
     interfaces Multus attached, from the pod's network-status. None until the pod is
     running and holds every declared interface, because the annotation is written once
-    when the attach finishes and a partial report would record the wrong addresses."""
+    when the attach finishes and a partial report would record the wrong addresses.
+
+    A pod with no attachments serves on the pod network: its own address is the whole
+    report, and it is ready as soon as the pod runs."""
     if pod.status.phase != "Running" or not pod.status.pod_ip:
         return None
+    if not attachments:
+        return {"pod_ip": pod.status.pod_ip, "interfaces": []}
     raw = (pod.metadata.annotations or {}).get(NETWORK_STATUS)
     if not raw:
         return None
@@ -82,6 +94,8 @@ def wait_for_report(read_pod, attachments: list[NetworkAttachment],
             stop=stop_after_delay(timeout), wait=wait_fixed(POLL_INTERVAL_SEC),
         )(attempt)
     except RetryError as e:
+        if not attachments:
+            raise TimeoutError(f"the SPDK pod was not running with an address within {timeout:.0f}s") from e
         raise TimeoutError(
             "the SPDK pod did not hold interface(s) "
             + ", ".join(a.interface for a in attachments) + f" within {timeout:.0f}s") from e

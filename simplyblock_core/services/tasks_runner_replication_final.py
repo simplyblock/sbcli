@@ -163,6 +163,7 @@ def _record_cutover_done(task):
     set_result(task, "cutover done")
 
     _stop_source_replication(task)
+    _prune_endgame_snapshots(task)
     _delete_source_if_requested(task)
     _reconstitute_group(rep)
     _release_lvs_claim(task)
@@ -193,6 +194,29 @@ def _stop_source_replication(task):
                      f"cutover: {e}")
 
 
+def _prune_endgame_snapshots(task):
+    """Release the snapshots the endgame held: all but the newest pair go.
+
+    Retention is held for the whole endgame (snapshot_replication.
+    _cutover_holds_retention), so the shrink rounds' snapshots are still there,
+    on both clusters: each one's landing copy is a layer under the volume that
+    now serves IO on the target. Pruning deletes source and copy together, so
+    it runs while the source still exists, before --delete-source retires what
+    is left of the source's lineage (which no longer reaches the copies). bf6
+    2026-10-29: skipped for --delete-source, every migrated volume sat on 13-15
+    landing copies, past the page-copy chain limit.
+    """
+    try:
+        from simplyblock_core.services import snapshot_replication
+        src_lvol = db.get_lvol_by_id(task.function_params.get("lvol_id"))
+        snapshot_replication.prune_after_cutover(src_lvol)
+    except KeyError:
+        pass          # source already gone
+    except Exception as e:
+        logger.error(f"Could not prune the endgame snapshots after the "
+                     f"cutover: {e}")
+
+
 def _delete_source_if_requested(task):
     """Optional migration semantics: the source volume has served its purpose
     once the client runs on the target, so `replication-commit --delete-source`
@@ -215,6 +239,17 @@ def _delete_source_if_requested(task):
         # loudly but does not un-succeed the task.
         logger.error(f"Source volume {src_lvol_id} could not be "
                      f"deleted after the cutover: {e}")
+        return
+
+    # The volume is going; the replication snapshots its data sat on are not
+    # deleted with it and retention never runs for it again. Hand them to the
+    # snapshot monitor, which deletes each one once nothing depends on it.
+    try:
+        from simplyblock_core.controllers import replication_snapshot_retire
+        replication_snapshot_retire.retire_source_lineage(db, src_lvol)
+    except Exception as e:
+        logger.error(f"Replication snapshots of source volume {src_lvol_id} "
+                     f"could not be retired after the cutover: {e}")
 
 
 def _reconstitute_group(rep):
@@ -350,9 +385,14 @@ def _swap_failback_lvol_uuid(rep, failback_source_id):
     # Explicitly re-enable replication on the restored volume.  The original
     # source had do_replicate cleared during failover; failback means it is the
     # active source again and should resume its cadence.
-    new_lvol.do_replicate = True
-    new_lvol.replication_interval_min = failback_src_interval
-    new_lvol.replication_policy_id = failback_src_policy_id
+    # A migration that returns a volume to a cluster it came from (A -> B -> A)
+    # takes this path too, for the UUID swap, but has no pairing to resume: the
+    # failback source follows the B -> A migration policy, and copying it here
+    # made the volume on A replicate toward its own cluster.
+    if rep.mode != "migration":
+        new_lvol.do_replicate = True
+        new_lvol.replication_interval_min = failback_src_interval
+        new_lvol.replication_policy_id = failback_src_policy_id
 
     # Move the clone to the original source UUID and clear the record at its
     # old UUID in one transaction: that record holds the volume's unique

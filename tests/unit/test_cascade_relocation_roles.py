@@ -111,6 +111,7 @@ class TestTheBuildUsesTheNamedRole(unittest.TestCase):
             pass
 
         snode = MagicMock(spec=StorageNode)
+        snode.pod_network = False  # a host-network node publishes no Service ports
         snode.get_id = MagicMock(return_value="wzkz2")
         snode.cluster_id = "cluster-1"
         snode.rpc_client = MagicMock(return_value=MagicMock())
@@ -118,6 +119,8 @@ class TestTheBuildUsesTheNamedRole(unittest.TestCase):
         db = MagicMock()
         db.get_storage_node_by_id = MagicMock(return_value=snode)
         db.get_lvols_by_node_id = MagicMock(return_value=[])
+        # A real (non-sync) Cluster: a MagicMock one reads as sync-replication.
+        db.get_cluster_by_id = MagicMock(return_value=_cluster())
 
         with patch.object(sno, "DBController", return_value=db), \
              patch.object(sno, "_connect_to_remote_devs", return_value=[]), \

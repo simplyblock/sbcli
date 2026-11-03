@@ -499,9 +499,9 @@ def main():
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
         # --dev enables developer-mode-only (private) args like --enable-hang-device.
-        f"sudo /usr/local/bin/sbctl -d --dev cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
+        (f"sudo /usr/local/bin/sbctl -d --dev cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
         " --enable-hang-device"
-        " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
+        " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2")
         # Swarm stack deploy inside cluster create pulls the full CP image set;
         # observed >10 min on cold registry pulls (2026-07-10, two deploys died
         # on the default 600 s channel timeout at "Deploying swarm stack").

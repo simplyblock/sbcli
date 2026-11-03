@@ -48,6 +48,8 @@ def _wait_for_cluster_recovery(task, reason):
 
 def task_runner(task):
     snode = mig.require_node(task)
+    mig.place_on_role_node(task, snode)
+    mig.defer_for_sync_resync(task)
 
     # Ahead of the online gate, which REMOVED also fails: a removed node never
     # comes back, so deferring on it would keep the task alive forever.
@@ -82,9 +84,22 @@ def task_runner(task):
     # Only start migration on a node that is the leader for its primary LVS.
     # Migration IO triggers auto-leader promotion in the data plane, so
     # starting migration on a non-leader causes a split-brain write conflict.
-    if not snode.is_secondary_node and not lvol_controller.is_node_leader(snode, snode.lvstore):
-        raise TaskRetry(f"Node {snode.get_id()} is not the leader for {snode.lvstore}, "
-                        f"deferring migration")
+    if "lvs_owner" not in task.function_params:
+        if not snode.is_secondary_node and not lvol_controller.is_node_leader(snode, snode.lvstore):
+            raise TaskRetry(f"Node {snode.get_id()} is not the leader for {snode.lvstore}, "
+                            f"deferring migration")
+    elif not mig.migration_started(task):
+        # Sync replication: the task's node can be the primary of the remote
+        # triplet. That node has its own LVS in ``snode.lvstore``. The distrib
+        # of this task belongs to the owner's LVS, so check the leadership of
+        # the LVS named in the task.
+        lvs_name = task.function_params["lvs_name"]
+        if not snode.is_secondary_node and not lvol_controller.is_node_leader(snode, lvs_name):
+            raise TaskRetry(f"Node {snode.get_id()} is not the leader for {lvs_name}, "
+                            f"deferring migration")
+    # A started sync-replication migration is polled on its node, even when
+    # that node does not lead the LVS. A promote can move the LVS to another
+    # node, but the running migration continues until it ends.
 
     if not mig.migration_started(task):
         # Recorded alongside the start, in the same commit, so a later poll can
@@ -92,7 +107,8 @@ def task_runner(task):
         started = mig.start_migration(task, lambda: rpc_client.distr_migration_expansion_start(
             task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
             job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-            relaxed_mode=mig.migration_relaxed(snode.cluster_id)),
+            relaxed_mode=mig.migration_relaxed(snode.cluster_id),
+            keep_placed=bool(getattr(db.get_cluster_by_id(snode.cluster_id), "page_copy", False))),
             migration_devices=_online_device_count(task.cluster_id))
         if started is None:
             raise TaskAbort("canceled while starting migration")
@@ -105,7 +121,9 @@ def task_runner(task):
 
 
 def _is_eligible(task, cluster):
-    """One migration at a time per node and distr.
+    """Only one migration of a distr runs at a time on a node. For a
+    sync-replication task, only one runs at a time on all nodes together
+    (tasks_controller.mig_scope_node).
 
     Beyond the shared sibling rule, a device migration also waits behind a
     SUSPENDED new-device migration for the same distr: that one is mid-flight
@@ -116,6 +134,7 @@ def _is_eligible(task, cluster):
         return True
 
     distr_name = task.function_params.get("distr_name")
+    scope_node = tasks_controller.mig_scope_node(task.node_id, task.function_params)
     for sibling in db.get_job_tasks(task.cluster_id):
         if sibling.function_name not in [JobSchedule.FN_FAILED_DEV_MIG,
                                          JobSchedule.FN_DEV_MIG,
@@ -126,7 +145,7 @@ def _is_eligible(task, cluster):
             # forever, since the only way out of this scan is the start marker
             # it has not written yet.
             continue
-        if sibling.node_id != task.node_id or sibling.canceled:
+        if (scope_node is not None and sibling.node_id != scope_node) or sibling.canceled:
             continue
         if sibling.function_params.get("distr_name") != distr_name:
             continue
@@ -184,7 +203,7 @@ def _roll_up(master_task, tasks):
 
 def resume_jc_compression(task):
     """A finished migration frees the node for JC compression again."""
-    if tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id):
+    if tasks_controller.get_jc_comp_blocking_node_tasks(task.cluster_id, task.node_id):
         return
 
     # Release-upgrade guard (remove with the jc_compression_upgrade plugin):

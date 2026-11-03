@@ -816,13 +816,17 @@ class RPCClient:
     def reset_device(self, device_name):
         return self._request("bdev_nvme_reset_controller", name=device_name)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, md_journal,
+                       num_md_pages_per_cluster_ratio=1):
+        # md_journal has no default and is always sent: the cluster decides
+        # it, never the data plane's own default.
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+            "md_journal": bool(md_journal),
         }
         return self._request("bdev_lvol_create_lvstore", **params)
 
@@ -996,8 +1000,16 @@ class RPCClient:
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
-                            write_protection_v2=False):
+                            write_protection_v2=False, page_copy=False,
+                            synchronous_replication_mode=None, jm_n_local=None):
         """"
+            // Optional, sync replication only: 0 disabled, 1 full. Not sent when None.
+          "synchronous_replication_mode": 1
+
+            // Optional, sync replication only: the number of local JMs among jm_names
+            //  (the first N after JC's name sort). Not sent when None.
+          "jm_n_local": 3
+
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
             // Number of addresses in the list is exactly the number of nodes in HA group,
@@ -1046,6 +1058,12 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
+        if synchronous_replication_mode is not None:
+            params["synchronous_replication_mode"] = synchronous_replication_mode
+        if jm_n_local is not None:
+            params["jm_n_local"] = jm_n_local
+        if page_copy:
+            params["page_copy"] = True
         return self._request("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):
@@ -1180,11 +1198,25 @@ class RPCClient:
     def distr_get_cluster_map(self, name):
         return self._request("distr_dump_cluster_map", name=name)
 
-    def distr_add_nodes(self, params):
+    def distr_add_nodes(self, params, name=None):
+        """``name`` targets one distrib; without it every distrib of the node is updated."""
+        if name:
+            params = {**params, "name": name}
         return self._request("distr_add_nodes", **params)
 
-    def distr_add_devices(self, params):
+    def distr_add_devices(self, params, name=None):
+        """``name`` targets one distrib; without it every distrib of the node is updated."""
+        if name:
+            params = {**params, "name": name}
         return self._request("distr_add_devices", **params)
+
+    def distr_sync_replication_status(self, name=None):
+        """Sync-replication state of one distrib (``name``) or of every distrib of the node.
+
+        Returns the list of per-distrib elements; an unknown name yields [].
+        """
+        params = {"name": name} if name else {}
+        return self._request("distr_sync_replication_status", **params)
 
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
@@ -1471,6 +1503,22 @@ class RPCClient:
         """Re-read the backing device's size (device grow pickup)."""
         return self._request("bdev_aio_rescan", name=name)
 
+    def alceml_bdev_backend_resize_begin(self, name, request_timeout=None):
+        """Put an alceml bdev into its resize state: new I/O is held, pending
+        I/O drains, and the backing bdev is closed. Answers once the backing
+        bdev is closed, so the timeout covers the drain."""
+        return self._request("alceml_bdev_backend_resize_begin",
+                             request_timeout=request_timeout, name=name)
+
+    def alceml_bdev_backend_resize_end(self, name, b_fail=False, cntr_path="", request_timeout=None):
+        """Leave the resize state. With ``b_fail`` False, alceml reopens its
+        backing bdev (``cntr_path``, or its own when empty), takes its new
+        size, and releases the held I/O. With ``b_fail`` True, alceml fails
+        all held and future I/O until it is destroyed."""
+        return self._request("alceml_bdev_backend_resize_end",
+                             request_timeout=request_timeout,
+                             name=name, b_fail=b_fail, cntr_path=cntr_path)
+
     def bdev_set_qd_sampling_period(self, name, period_us):
         """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
         queue_depth/io_time — the hung-IO watchdog's signal for AIO base
@@ -1565,7 +1613,7 @@ class RPCClient:
         return self._request("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                        relaxed_mode=False):
+                                        relaxed_mode=False, keep_placed=False):
         params = {
             "name": name,
         }
@@ -1577,7 +1625,29 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        # Page copy distribs only (older data planes reject the parameter): a balancing migration keeps
+        # columns that page copies placed on another online device with anti-affinity kept.
+        if keep_placed:
+            params["keep_placed"] = True
         return self._request("distr_migration_expansion_start", **params)
+
+    def distr_migration_replica_sync_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE,
+                                           jobs=constants.MIG_PARALLEL_JOBS):
+        """Start the sync-replication catch-up of one distrib (migration type 3, stage "resync").
+
+        A refusal raises ``RPCRemoteError`` whose ``code`` is a positive errno (EBUSY, EAGAIN,
+        EALREADY, ...).
+        """
+        params = {
+            "name": name,
+        }
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
+        if job_size:
+            params["job_size"] = job_size
+        if jobs:
+            params["jobs"] = jobs
+        return self._request("distr_migration_replica_sync_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
         return self._request("bdev_raid_add_base_bdev",
@@ -1634,11 +1704,17 @@ class RPCClient:
         A single storage node can run more than one local JC instance
         against the SAME ``name_old`` bdev at once -- its own redundancy
         set, plus one instance per primary it hosts as secondary/tertiary
-        (each such role uses a distinct ``jm_vuid``, up to 3 total per
-        node). This call covers ALL of them in one shot:
+        and, on a sync-replication cluster, as a member of a remote triplet
+        (each such role uses a distinct ``jm_vuid``). This call covers ALL of
+        them in one shot -- never split it: a call that leaves out one of
+        them is rejected (-17).
 
-        ``replacements``: 1..3 dicts, each ``{"jm_vuid": int, "name_new":
-        str}`` -- ``jm_vuid`` identifies which local JC instance to patch
+        The new JM keeps the position, and so the site locality, of the old
+        one in each journal (``jm_n_local`` of bdev_distrib_create), so on a
+        sync-replication cluster ``name_new`` must be on ``name_old``'s site.
+
+        ``replacements``: 1..16 dicts (c_jc_nmax_replace_jm_pairs), each
+        ``{"jm_vuid": int, "name_new": str}`` -- ``jm_vuid`` identifies which local JC instance to patch
         (must currently use ``name_old``), ``name_new`` is the bdev to use
         instead (must already exist as a bdev; the caller connects it
         first). The SAME ``name_new`` may cover multiple ``jm_vuid``
@@ -1655,7 +1731,7 @@ class RPCClient:
             -13 name_old is not used by JC
             -14 this jm_vuid uses name_new already
             -15 the JM of name_old is being removed
-            -16 invalid number of replacements (0, or more than 3)
+            -16 invalid number of replacements (0, or more than 16)
             -17 the replacements do not cover all jm_vuids that use name_old
             -18 the same jm_vuid is given twice
             -19 unknown jm_vuid
@@ -2207,15 +2283,31 @@ class RPCClient:
                                name)
         return self._request("bdev_lvol_transfer", **params)
 
-    def bdev_lvol_merge_base(self, name):
+    def bdev_lvol_merge_base(self, name, priority_class=None):
         """After a partial transfer into the landing volume *name*: START
         filling every block the transfer did not write from the volume's base
         (its parent), before it is converted. Returns the job's state at once
         (``state`` none/running/done/failed, ``rc``, ``clusters``, ``ranges``,
         ``bytes``, ``ms``); idempotent. A failed job with ``rc`` ``-ESTALE``:
         the node no longer knows what arrived (it restarted), and the transfer
-        must be repeated into a fresh landing volume."""
-        return self._request("bdev_lvol_merge_base", lvol_name=name)
+        must be repeated into a fresh landing volume.
+
+        *priority_class* is the wire IO class of the merge's reads and writes
+        (the replication's, like the transfer's source reads); None leaves the
+        blobs' own classes. An SPDK older than the parameter refuses it as an
+        undecodable request: the merge is then started without it."""
+        if priority_class is None:
+            return self._request("bdev_lvol_merge_base", lvol_name=name)
+        try:
+            return self._request("bdev_lvol_merge_base", lvol_name=name,
+                                 priority_class=priority_class)
+        except RPCRemoteError as e:
+            if "decode" not in str(e):
+                raise
+            logger.warning("bdev_lvol_merge_base on %s:%s does not take priority_class "
+                           "(older SPDK): merging %s in the blobs' own classes",
+                           self.host, self.port, name)
+            return self._request("bdev_lvol_merge_base", lvol_name=name)
 
     def bdev_lvol_merge_base_stat(self, name):
         """State of the landing volume *name*'s merge job (see bdev_lvol_merge_base)."""

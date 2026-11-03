@@ -23,6 +23,7 @@ from simplyblock_core.controllers import (
     qos_controller,
     replication_policy_controller,
     snapshot_controller,
+    sync_replication_controller,
     tasks_controller,
 )
 from simplyblock_core.controllers.backup import controller as backup_controller
@@ -91,6 +92,41 @@ def _format_json(data, *, sort_keys: bool = False) -> str:
 
 def _format_result(data, *, json: bool) -> str:
     return _format_json(data) if json else utils.print_table(data, unwrap_secrets=True)
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _sync_status_fields(status) -> dict:
+    """The cluster-wide fields of a ``sync_replication_controller.ClusterSyncStatus``."""
+    return {
+        "state": status.state,
+        "completed": status.completed,
+        "degraded": status.degraded,
+        "resyncing": status.resyncing,
+        "peer_ready": status.peer_ready,
+        "diverged": status.diverged,
+        "last_replicated_at": _iso(status.last_replicated_at),
+        "lag_seconds": status.lag_seconds,
+        "bytes_behind": status.bytes_behind,
+    }
+
+
+def _sync_lvs_row(lvs) -> dict:
+    """One ``LvsSyncStatus`` as a row."""
+    return {
+        "lvs": lvs.lvs_name,
+        "owner": lvs.owner_id,
+        "state": lvs.state,
+        "worst_status": lvs.worst_status,
+        "mode_full": lvs.mode_full,
+        "bytes_behind": lvs.bytes_behind,
+        "remote_journal_in_sync": lvs.remote_journal_in_sync,
+        "last_replicated_at": _iso(lvs.last_replicated_at),
+        "answering": len(lvs.answering),
+        "gate_problems": "; ".join(lvs.gate_problems),
+    }
 
 
 def _format_timestamp(seconds) -> str:
@@ -165,11 +201,12 @@ class CLIWrapperBase:
         # max-subsys, the huge-page floor and the vCPU count are cluster-level
         # settings now, and this command runs on the host before it belongs to
         # any cluster, so it cannot read them. It therefore sizes the host for
-        # the product ceiling (MAX_SUBSYSTEMS_PER_NODE): any cluster value then
-        # fits, and add-node/restart push the cluster's actual numbers into the
-        # host config. Sizing for a smaller default instead would leave a node
-        # unable to honour a larger cluster setting.
-        max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+        # the product default (DEFAULT_SUBSYSTEMS_PER_NODE), which is what a
+        # cluster without --max-subsys runs with. A cluster that sets a larger
+        # value, up to MAX_SUBSYSTEMS_PER_NODE, gets it at add-node, which
+        # resizes the host config before it reserves the huge pages
+        # (reserve_cluster_hugepages); restart recomputes it the same way.
+        max_lvol = constants.DEFAULT_SUBSYSTEMS_PER_NODE
         max_size = 0
         number_of_devices = args.number_of_devices or 0
         sockets_to_use = [0]
@@ -209,6 +246,9 @@ class CLIWrapperBase:
                 "with each other, but not with --pci-allowed or --pci-blocked), or --lblk with "
                 "its --blk-* selectors."
             )
+        lblk_journal_device = getattr(args, 'lblk_journal_device', False)
+        if lblk_journal_device and not lblk:
+            self.parser.error("--lblk-journal-device requires --lblk")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -221,6 +261,7 @@ class CLIWrapperBase:
                 "names": [str(x) for x in blk_names.split(',')] if blk_names else None,
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
+                "journal_device": bool(lblk_journal_device),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
@@ -309,6 +350,7 @@ class CLIWrapperBase:
                 expansion=expansion,
                 failure_domain=failure_domain,
                 force_format=getattr(args, 'force_format', False),
+                site=getattr(args, 'site', None),
             )
         except Exception as e:
             print(e)
@@ -443,6 +485,20 @@ class CLIWrapperBase:
     def storage_node__restart_device(self, sub_command, args):
         return device_controller.restart_device(args.device_id, args.force)
 
+    def storage_node__resize_device(self, sub_command, args):
+        try:
+            result = device_controller.resize_device(args.device_id)
+        except ValueError as e:
+            print(e)
+            return False
+        if not result["resized"]:
+            return f"Device size unchanged: {utils.humanbytes(result['new_size'])}"
+        out = (f"Device grown from {utils.humanbytes(result['old_size'])} "
+               f"to {utils.humanbytes(result['new_size'])}")
+        if result["warning"]:
+            out += f"\nWarning: {result['warning']}"
+        return out
+
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
 
@@ -540,7 +596,9 @@ class CLIWrapperBase:
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
     def storage_node__get_device_health_info(self, sub_command, args):
-        return device_controller.get_device_health_info(args.device_id)
+        # The controller returns a dict (the v2 API serializes it through a
+        # DTO); rendering it for the terminal is the CLI's job.
+        return _format_json(device_controller.get_device_health_info(args.device_id))
 
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)
@@ -745,6 +803,27 @@ class CLIWrapperBase:
         cluster_ops.change_cluster_name(cluster_id, cluster_name)
         return True
 
+    def cluster__grow_devices(self, sub_command, args):
+        result = device_controller.grow_cluster_devices(
+            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
+        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+                 for r in result["devices"] if r["resized"]]
+        lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
+        rebalance = result.get("rebalance")
+        if rebalance and rebalance["started"]:
+            lines.append("The devices have grown unevenly: device weights set to the new sizes, "
+                         "cluster rebalancing started.")
+        elif rebalance and rebalance["weights_updated"]:
+            lines.append(f"The devices have grown unevenly: device weights set to the new sizes. "
+                         f"{rebalance['reason']}")
+        elif rebalance:
+            lines.append(f"Warning: the devices have grown unevenly. {rebalance['reason']}")
+        elif not result["uniform"]:
+            lines.append("Warning: the data devices of the cluster have grown unevenly; the added capacity is "
+                         "only fully usable once all of them have grown by the same factor, or after "
+                         "grow-devices without --no-rebalance has updated the weights.")
+        return "\n".join(lines) or "No device has grown"
+
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
         return True
@@ -895,6 +974,15 @@ class CLIWrapperBase:
             table += chr(10) + chr(10).join("WARNING: " + w for w in warnings)
         return table
 
+    def cluster__sync_status(self, sub_command, args):
+        status = sync_replication_controller.cluster_sync_status(args.cluster_id)
+        fields = _sync_status_fields(status)
+        lvs = [_sync_lvs_row(s) for s in status.lvs]
+        if args.json:
+            return _format_json({**fields, "lvs": lvs})
+        table = utils.print_table([{"key": key, "value": value} for key, value in fields.items()])
+        return table + "\n" + (utils.print_table(lvs) if lvs else "No lvstores")
+
     def volume__replication_policy_set(self, sub_command, args):
         return replication_policy_controller.attach_policy(args.volume_id, args.policy)
 
@@ -1007,6 +1095,8 @@ class CLIWrapperBase:
             kwargs['ctrl_loss_tmo'] = ctrl_loss_tmo
         if args.host_nqn:
             kwargs['host_nqn'] = args.host_nqn
+        if args.site:
+            kwargs['site'] = args.site
 
         data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
         if err:
@@ -1115,6 +1205,27 @@ class CLIWrapperBase:
 
     def volume__replication_trigger(self, sub_command, args):
         return lvol_controller.replication_trigger(args.lvol_id)
+
+    def volume__sync_promote(self, sub_command, args):
+        result = sync_replication_controller.sync_promote_lvol(args.volume_id, args.site, force=args.force)
+        if result.in_progress:
+            task = f" (task {result.task_id})" if result.task_id else ""
+            return (f"Promote of volume {args.volume_id} on site {args.site} in progress{task}; "
+                    f"run the command again for its result")
+        entries = (result.connection_strings or {}).get(args.volume_id, [])
+        return "\n".join(entry.connect for entry in entries)
+
+    def volume__sync_demote(self, sub_command, args):
+        if sync_replication_controller.sync_demote_lvol(args.volume_id, args.site):
+            return f"Volume {args.volume_id} demoted on site {args.site}"
+        return f"Volume {args.volume_id} is not served on site {args.site}; nothing to do"
+
+    def volume__sync_status(self, sub_command, args):
+        status = sync_replication_controller.volume_sync_status_by_id(args.volume_id, args.site)
+        data = {"site": status.site, "role": status.role, **_sync_status_fields(status.cluster)}
+        if args.json:
+            return _format_json(data)
+        return utils.print_table([{"key": key, "value": value} for key, value in data.items()])
 
     def volume__suspend(self, sub_command, args):
         return lvol_controller.suspend_lvol(args.lvol_id)
@@ -1840,6 +1951,7 @@ class CLIWrapperBase:
                 backup_config = json.load(f)
 
         atomic_4k = getattr(args, 'atomic_4k', False)
+        md_journal = getattr(args, 'md_journal', True)
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
@@ -1851,6 +1963,9 @@ class CLIWrapperBase:
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            sync_replication=getattr(args, 'sync_replication', False),
+            page_copy=getattr(args, 'page_copy', False),
+            md_journal=md_journal,
         )
 
     def cluster_create(self, args):
@@ -1893,6 +2008,7 @@ class CLIWrapperBase:
         enable_hang_device = getattr(args, "enable_hang_device", False)
         inline_checksum = getattr(args, 'inline_checksum', False)
         atomic_4k = getattr(args, 'atomic_4k', False)
+        md_journal = getattr(args, 'md_journal', True)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
         cluster_vip = getattr(args, 'cluster_vip', '')
@@ -1924,6 +2040,9 @@ class CLIWrapperBase:
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
             cluster_vip=cluster_vip,
+            sync_replication=getattr(args, 'sync_replication', False),
+            page_copy=getattr(args, 'page_copy', False),
+            md_journal=md_journal,
         )
 
     def query_yes_no(self, question, default="yes"):

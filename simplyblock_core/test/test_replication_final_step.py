@@ -6,6 +6,8 @@ from simplyblock_core.services import replication_final_step as rfs
 class _Nic:
     def __init__(self, ip, trtype="TCP"):
         self.ip4_address = ip
+        # Off the pod network a listener binds the address it is reached on.
+        self.listen_address = ip
         self.trtype = trtype
 
 

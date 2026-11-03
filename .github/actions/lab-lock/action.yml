@@ -24,6 +24,15 @@ inputs:
     description: Emergency bypass. Skips the lock operation and warns.
     required: false
     default: "false"
+  token:
+    description: >-
+      Token for asking the API whether a conflicting lock's run is still
+      alive. A lock owned by a run the API reports as completed is debris --
+      its release never ran -- and acquire clears it rather than waiting out
+      a grace nothing will use. Without a token no lock is ever taken over,
+      which is the old behaviour.
+    required: false
+    default: ${{ github.token }}
 
 runs:
   # A JavaScript action, not a composite one: only these get `post`, which is

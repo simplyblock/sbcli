@@ -109,6 +109,9 @@ class StorageNode(BaseNodeObject):
     host_nqn: str = ""
     host_secret: SecretStr = SecretStr("")
     hostname: str = ""
+    # The Kubernetes node the pod runs on; "" on a record that predates it, which the
+    # hostname (<node>_<rpc_port>) then stands in for.
+    k8s_node_name: str = ""
     hugepages: int = 0
     ib_devices: list[IFace] = default_factory(list)
     id_device_by_nqn: bool = False
@@ -138,7 +141,6 @@ class StorageNode(BaseNodeObject):
     memory: int = 0
     mgmt_ip: str = ""
     # SPDK RPC address of a pod on attached networks; mgmt_ip stays the worker's address.
-    spdk_ip: str = ""
     namespace: str = ""
     node_lvs: str = "lvs"
     num_partitions_per_dev: int = 1
@@ -228,6 +230,22 @@ class StorageNode(BaseNodeObject):
     # placement and emitted verbatim into the distrib cluster map for the data
     # plane.
     failure_domain: int = -1
+    # Sync-replication site of the node (operator-supplied at add-node).
+    # Mandatory on a cluster with sync_replication, empty everywhere else.
+    site: str = ""
+    # Sync replication: the remote triplet of the LVS this node owns (the
+    # primary of an LVS stores them, like secondary_node_id /
+    # tertiary_node_id for the home triplet). Empty on non-sync clusters.
+    remote_primary_node_id: str = ""
+    remote_secondary_node_id: str = ""
+    remote_tertiary_node_id: str = ""
+    # Sync replication, on the owner node of an LVS: the remote-triplet
+    # members whose instance of this LVS has not been built since the refs
+    # above named them. Written together with the refs, cleared by the build.
+    remote_instances_pending: list[str] = default_factory(list)
+    # Sync replication, on the owner node of an LVS: the site whose triplet
+    # currently leads the LVS. Empty means the home site (this node's site).
+    lvs_active_site: str = ""
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False
@@ -316,14 +334,45 @@ class StorageNode(BaseNodeObject):
         return super().from_dict(data)
 
     @property
+    def pod_network(self) -> bool:
+        """Whether the SPDK pod serves on the pod network itself, fronted by a Service,
+        with no attachment: its one data NIC is the CNI's interface."""
+        from simplyblock_core.storage_network import POD_NET_TYPE
+
+        return any(nic.net_type == POD_NET_TYPE for nic in self.data_nics)
+
+    @property
     def on_pod_network(self) -> bool:
-        """Whether the SPDK pod is attached to extra networks rather than on the host's."""
-        return bool(self.networks)
+        """Whether the SPDK pod is off the host network: attached to extra networks, or
+        serving on the pod network itself."""
+        return bool(self.networks) or self.pod_network
+
+    @property
+    def socket_bind_device(self) -> str | None:
+        """The device SPDK pins its sockets to with SO_BINDTODEVICE, or None for no pin.
+
+        A node with one data NIC on the host or an attached network keeps every socket
+        on it. On the pod network the one NIC is fronted by a Service whose traffic the
+        CNI delivers on the pod's interface, and a pin would refuse it, so none is set.
+        """
+        if len(self.data_nics) != 1 or self.pod_network:
+            return None
+        return self.data_nics[0].if_name
 
     @property
     def rpc_host(self) -> str:
-        """Where SPDK RPC is served: the pod's address when attached, else the worker's."""
-        return self.spdk_ip or self.mgmt_ip
+        """Where the control plane dials the SPDK proxy: a name for a pod, whose address
+        changes on every restart, and the worker's address for a pod on the host network.
+
+        Under TLS or on attached networks it is the node's name in the proxy's headless
+        Service, which resolves to the pod's primary address. On the pod network it is
+        the node's own Service, the one peers and clients hold the address of."""
+        if Settings().tls_connect != "disabled" or self.networks:
+            return self._k8s_service_host(self.spdk_proxy_service)
+        if self.pod_network:
+            from simplyblock_core.storage_network import service_name
+            return f"{service_name(self.rpc_port, self.cluster_id)}.{self.namespace}.svc"
+        return self.mgmt_ip
 
     def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
@@ -343,15 +392,12 @@ class StorageNode(BaseNodeObject):
             timeout, retry = budget
             kwargs.setdefault("timeout", timeout)
             kwargs.setdefault("retry", retry)
-        host = self.rpc_host
-        if Settings().tls_connect != "disabled":
-            host = self._k8s_service_host(self.spdk_proxy_service)
         return RPCClient(
-            host, self.rpc_port,
+            self.rpc_host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
     def _k8s_node_label(self) -> str:
-        return self.hostname.removesuffix(f"_{self.rpc_port}")
+        return self.k8s_node_name or self.hostname.removesuffix(f"_{self.rpc_port}")
 
     def _k8s_service_host(self, service: str) -> str:
         """The node's hostname in one of its cluster's headless Services.
@@ -426,7 +472,7 @@ class StorageNode(BaseNodeObject):
                 }
 
             for iface in self.data_nics:
-                ip = iface.ip4_address
+                ip = iface.listen_address
                 if self.active_rdma:
                     if iface.trtype != "RDMA":
                         logger.debug("Skipping non-RDMA iface %s (active_rdma=True)", ip)
@@ -525,7 +571,7 @@ class StorageNode(BaseNodeObject):
                 for la in (subsys.get("listen_addresses") or [])
             }
         for iface in self.data_nics:
-            ip = iface.ip4_address
+            ip = iface.listen_address
             if self.active_rdma:
                 if iface.trtype != "RDMA":
                     continue
@@ -981,9 +1027,14 @@ class StorageNode(BaseNodeObject):
 
         return True
 
-    def add_hublvol_failover_path(self, primary_node, failover_node):
+    def add_hublvol_failover_path(self, primary_node, failover_node, lvs_node=None):
         """Ensure this node's hublvol controller for primary_node's LVStore
         has both ``primary_node`` and ``failover_node`` paths attached.
+
+        ``lvs_node`` separates the LVS metadata source (lvstore name, NQN,
+        port) from the path target, as in connect_to_hublvol: pass it when
+        ``primary_node`` leads an LVS it does not own. Defaults to
+        ``primary_node``.
 
         Delegated to :class:`HublvolReconnectCoordinator` so attach / detach
         is serialized (FDB lock) and cooldown-gated across all callers. The
@@ -1006,7 +1057,7 @@ class StorageNode(BaseNodeObject):
         )
         coordinator = HublvolReconnectCoordinator(DBController())
         return coordinator.reconcile(
-            self, primary_node, [primary_node, failover_node],
+            self, lvs_node or primary_node, [primary_node, failover_node],
             role="failover_repair",
         )
 
