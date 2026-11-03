@@ -15,6 +15,11 @@ EVENT_OBJ_CREATED = "OBJ_CREATED"
 EVENT_OBJ_DELETED = "OBJ_DELETED"
 EVENT_CAPACITY = "CAPACITY"
 EVENT_LIMIT_REACHED = "LIMIT_REACHED"
+#: A distrib reported an IO it could not serve from the chunks it can reach.
+EVENT_DISTR_IO_ERROR = "DISTR_IO_ERROR"
+#: A client LVS port was reopened FENCE_RELEASE_BUDGET times in one window
+#: and SPDK fenced it again each time; the control plane stopped reopening it.
+EVENT_FENCE_LOOP = "FENCE_LOOP"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"

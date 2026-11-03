@@ -31,7 +31,7 @@ from simplyblock_core.utils import hublvol_reconnect
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller, \
-    migration_controller
+    migration_controller, port_release_budget
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
@@ -8562,6 +8562,9 @@ def _restart_storage_node_impl(
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
         logger.info("Cluster is not ready yet")
+        # A restart reopens this node's LVS ports by design; those releases
+        # must not count against the fence-release budget (review of #1580).
+        port_release_budget.forget_node(db_controller, snode)
         logger.info("Setting node status to Online")
         if not set_node_status(node_id, StorageNode.STATUS_ONLINE, caused_by="restart"):
             # FSM rejected the final flip — typically because a racing
@@ -8709,6 +8712,9 @@ def _restart_storage_node_impl(
             logger.info(f"Starting migration task for node {snode.get_id()}")
             tasks_controller.add_device_mig_task_for_node(snode.get_id())
 
+        # A restart reopens this node's LVS ports by design; those releases
+        # must not count against the fence-release budget (review of #1580).
+        port_release_budget.forget_node(db_controller, snode)
         logger.info("Setting node status to Online")
         if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart"):
             # See twin call site above (single-leader restart path) for
