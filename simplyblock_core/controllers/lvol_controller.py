@@ -757,6 +757,27 @@ def _fabric_error(db_controller, host_node, ha_type, fabric):
     return None
 
 
+def _lvstore_has_existing_leader(host_node):
+    """Whether a member of ``host_node``'s lvstore leads it right now (a lookup
+    without recovery: nothing is granted or forced)."""
+    from simplyblock_core.storage_node_ops import find_leader_with_failover
+    db_controller = DBController()
+    members = [host_node]
+    for sid in role_secondary_ids(host_node):
+        try:
+            members.append(db_controller.get_storage_node_by_id(sid))
+        except KeyError:
+            continue
+    if not any(m.status == StorageNode.STATUS_ONLINE for m in members):
+        return False
+    try:
+        leader, _ = find_leader_with_failover(members, host_node.lvstore, recover=False)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Leader lookup for %s failed: %s", host_node.lvstore, e)
+        return False
+    return leader is not None and leader.status == StorageNode.STATUS_ONLINE
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -990,7 +1011,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.warning("Number of active cluster devices are less than 8")
         # return False, "Number of active cluster devices are less than 8"
 
-    if host_node and host_node.status != StorageNode.STATUS_ONLINE:
+    if host_node and host_node.status != StorageNode.STATUS_ONLINE and not (
+            internal and ha_type == "ha" and _lvstore_has_existing_leader(host_node)):
+        # A replication landing volume (internal) may be created while the
+        # recorded primary is down, on the member that LEADS the lvstore now
+        # (bf11 2026-11-03: every landing on the shut-down target primary's
+        # lvstore failed "Error creating remote lvol" for 42 min). Only an
+        # existing leader counts: nothing is granted for this create.
         mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
         logger.error(mgs)
         return False, mgs
@@ -1313,7 +1340,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     pass
 
             # Step 1: Pre-check all non-leaders BEFORE executing on leader
-            primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
+            if host_node.status == StorageNode.STATUS_ONLINE:
+                primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
+            else:
+                # Landing create with the primary down (admitted above only
+                # with an existing leader): route to that leader, grant none.
+                primary_node, non_leaders = find_leader_with_failover(
+                    all_nodes, lvol.lvs_name, recover=False)
             if primary_node is None:
                 msg = "No leader available for lvol create"
                 logger.error(msg)
@@ -1366,7 +1399,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 return lvol_bdev
 
             success, actual_leader, result = execute_on_leader_with_failover(
-                all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node)
+                all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node,
+                recover=host_node.status == StorageNode.STATUS_ONLINE)
             if not success:
                 logger.error(f"Failed to create lvol on leader: {result}")
                 # If a leader attempt got far enough to create the blob, its

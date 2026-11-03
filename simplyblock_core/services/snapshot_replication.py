@@ -672,11 +672,16 @@ def process_snap_replicate_start(task, snapshot):
             replicate_to_source=replicate_to_source, dest_lvol_id=dest_lvol_id)
         msg = (f"waiting for chain ancestor {ancestor.get_id()} to replicate "
                f"first (a copy without it would have holes)")
-        logger.info(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        # Waiting is not a failure while the ancestor has a live task that can
+        # still deliver it: counting each pass spent the task's retries on its
+        # own prerequisite (bf11 2026-11-03: a round-trip volume reached retry
+        # 7 of 8 while its 10 GiB base copied, one pass from being dropped).
+        # Only a wait for an ancestor nothing is working on counts. A short
+        # fixed delay keeps the serial runner from re-walking the chain every
+        # pass meanwhile.
+        live = _live_replication_task(snapshot.cluster_id, ancestor.get_id())
+        _suspend_for_retry(task, msg, count=live is None, level=logging.INFO,
+                           backoff=True, backoff_step=0)
         return
     if verdict == "blocked":
         # Back off: a blocked chain (a blob without a snapshot record, an
@@ -854,7 +859,10 @@ def process_snap_replicate_start(task, snapshot):
             task.write_to_db()
         else:
             logger.error(err)
-            task.function_result = "Error creating remote lvol"
+            # Keep the cause: "Storage node is not online" (the target primary
+            # is down and no member leads its lvstore yet) reads very
+            # differently from a capacity refusal.
+            task.function_result = f"Error creating remote lvol: {err}"
             task.write_to_db()
             return
 
