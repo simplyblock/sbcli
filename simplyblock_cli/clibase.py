@@ -156,7 +156,8 @@ class CLIWrapperBase:
 
     def storage_node__deploy(self, sub_command, args):
         isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, isolate_cores)
+        return storage_ops.deploy(args.ifname, isolate_cores,
+                                  container_image_prefix=args.container_image_prefix)
 
     def storage_node__configure_upgrade(self, sub_command, args):
         storage_ops.upgrade_automated_deployment_config()
@@ -1968,6 +1969,7 @@ class CLIWrapperBase:
             atomic_4k=atomic_4k,
             cluster_vip=cluster_vip,
             page_copy=getattr(args, 'page_copy', False),
+            container_image_prefix=args.container_image_prefix,
         )
 
     def query_yes_no(self, question, default="yes"):
