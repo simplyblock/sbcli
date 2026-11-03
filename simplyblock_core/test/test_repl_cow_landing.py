@@ -17,7 +17,6 @@ import pytest
 from simplyblock_core.rpc_client import RPCClient, RPCRemoteError
 from simplyblock_core.services import snapshot_replication as sr
 
-
 # --------------------------------------------------------------------------
 # fakes
 # --------------------------------------------------------------------------
