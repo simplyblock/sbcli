@@ -278,6 +278,8 @@ _DRIVER_MIGRATED = {
     "tasks_runner_failed_migration.py",
     "tasks_runner_node_removal.py",
     "tasks_runner_port_allow.py",
+    "tasks_runner_sync_promote.py",
+    "tasks_runner_sync_resync.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the

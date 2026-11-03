@@ -54,6 +54,7 @@ def _run(backlog):
     db.get_lvols.return_value = [LVOL]
     db.get_replication_policies.return_value = []
     db.get_mini_snapshots.return_value = []
+    db.get_cluster_by_id.return_value = SimpleNamespace(sync_replication=False)
     with patch.object(sm, "db", db), \
             patch.object(sm.migration_turn, "waiting_lvol_ids", return_value=set()), \
             patch.object(sm, "_cadence_capacity_hold", return_value=None), \
