@@ -16,6 +16,7 @@ platform filter in ``e2e.py`` keys on that suffix, so ``--testname pnfs`` on
 a Docker cluster reports these as skipped instead of failing obscurely.
 """
 import os
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -28,6 +29,7 @@ from utils.pnfs_utils import (
     PnfsProbeError,
     assert_devices_moved,
     assert_layouts_taken,
+    nfsexport_status,
     nvme_ns_counters,
 )
 from utils.ssh_utils import RunnerK8sLog
@@ -56,6 +58,17 @@ class _PnfsBase(TestClusterBase):
         self.claim = None
         self.jobs = []
         self.workers = []
+        # Everything below is cleaned by teardown even when run() raised
+        # part-way. A Track B case that leaks a claim leaks an NFSExport and
+        # an lvol with it, and the next case in the group fails for a reason
+        # that has nothing to do with it (F-10).
+        self.extra_claims = []
+        self.shell_pods = []
+        self.extra_namespaces = []
+        #: Callables run in reverse order at teardown. B-16 mutates the
+        #: driver CR, and a mutation with no guaranteed undo on a shared
+        #: lab is how a cluster stays broken for everyone after one test.
+        self.undo_stack = []
 
     # ── setup, and the gate ──────────────────────────────────────────────
 
@@ -245,6 +258,102 @@ class _PnfsBase(TestClusterBase):
         self.logger.info("[pnfs] RWX claim %s bound", name)
         return name
 
+    def _make_rwx_claims(self, names):
+        """Create every claim first, then wait. Not one at a time.
+
+        Provisioning an RWX claim makes an lvol, an NFSExport and a mount on
+        the metadata server, which takes tens of seconds. B-08 and B-15 want
+        twenty and thirty of them, so serialising create-then-wait turns a
+        two-minute step into a twenty-minute one for no extra coverage.
+        """
+        for n in names:
+            self.k8s_utils.create_pvc(
+                name=n, size=self.CLAIM_SIZE, storage_class=self.sc_name,
+                access_modes=["ReadWriteMany"])
+            self.extra_claims.append(n)
+        for n in names:
+            self.k8s_utils.wait_pvc_bound(n, timeout=self.BIND_TIMEOUT)
+        self.logger.info("[pnfs] %d RWX claim(s) bound: %s",
+                         len(names), ", ".join(names))
+        return names
+
+    # ── a pod that stays up, for the cases fio cannot express ────────────
+    #
+    # fio writes bytes. B-05 needs fcntl byte-range locks, B-07 needs
+    # create/rename/unlink/mkdir, B-06 needs a write on one node to be read
+    # from another the moment it closes. None of those are a fio workload,
+    # so they run as Python in a pod that stays alive and is driven with
+    # kubectl exec.
+
+    #: UBI, not Docker Hub, and deliberately. An anonymous Docker Hub pull
+    #: has already cost this lab a run: the node could not pull the image,
+    #: the pod sat in ImagePullBackOff and it read as an operator bug. The
+    #: Red Hat registry needs no credential on an OpenShift node and ships
+    #: python3 with fcntl, which is the whole requirement here.
+    TOOLS_IMAGE = os.getenv(
+        "PNFS_TOOLS_IMAGE",
+        "registry.access.redhat.com/ubi9/python-311:latest")
+
+    def _start_shell_pods(self, base, count, claim=None, spread=True):
+        """*count* long-lived pods on the claim, one per node when *spread*."""
+        claim = claim or self.claim
+        names = []
+        for i in range(count):
+            name = f"{base}-{i}"
+            affinity = ""
+            if spread:
+                affinity = (
+                    "  affinity:\n"
+                    "    podAntiAffinity:\n"
+                    "      requiredDuringSchedulingIgnoredDuringExecution:\n"
+                    "      - labelSelector:\n"
+                    "          matchLabels:\n"
+                    f"            {self.k8s_utils.SHARED_CLAIM_LABEL}: "
+                    f"{claim}\n"
+                    "        topologyKey: kubernetes.io/hostname\n")
+            self.k8s_utils.apply_yaml(
+                "apiVersion: v1\n"
+                "kind: Pod\n"
+                "metadata:\n"
+                f"  name: {name}\n"
+                "  labels:\n"
+                f"    {self.k8s_utils.SHARED_CLAIM_LABEL}: {claim}\n"
+                "spec:\n"
+                f"{affinity}"
+                "  restartPolicy: Never\n"
+                "  containers:\n"
+                "  - name: tools\n"
+                f"    image: {self.TOOLS_IMAGE}\n"
+                '    command: ["sleep", "infinity"]\n'
+                "    volumeMounts:\n"
+                "    - name: vol\n"
+                f"      mountPath: {self.MOUNT}\n"
+                "  volumes:\n"
+                "  - name: vol\n"
+                "    persistentVolumeClaim:\n"
+                f"      claimName: {claim}\n")
+            names.append(name)
+            self.shell_pods.append(name)
+        self._wait_pods_running(names)
+        if spread:
+            self._assert_one_pod_per_node(names, f"({base})")
+        return names
+
+    def _py(self, pod, script, timeout=300):
+        """Run *script* with python3 in *pod* and return its stdout.
+
+        The script goes in on stdin rather than as ``-c``, so it can be
+        ordinary multi-line Python with no quoting games. Anything the
+        payload prints to stderr is a harness failure, not a product
+        verdict, so it is raised as PnfsProbeError.
+        """
+        heredoc = "cat <<'__PY__' | python3 -\n" + script + "\n__PY__"
+        out, err = self.k8s_utils.exec_in_pod(pod, heredoc, timeout=timeout)
+        if (err or "").strip():
+            raise PnfsProbeError(
+                f"{pod}: python payload failed: {err[-600:]}")
+        return (out or "").strip()
+
     def _pod_config(self, idx, rw="write", verify=True, size="256M",
                     runtime=None, filename=None):
         """One FIO config for one pod.
@@ -381,20 +490,47 @@ class _PnfsBase(TestClusterBase):
             super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
                              skip_k8s_cleanup=skip_k8s_cleanup)
             return
+
+        # Undo first and unconditionally. B-16 takes the metadata server away
+        # from the whole cluster; if that is not put back before anything
+        # else, every later case in the group fails at its own bring-up gate
+        # and the lab stays broken for whoever runs next.
+        for undo in reversed(self.undo_stack):
+            try:
+                undo()
+            except Exception as exc:                      # noqa: BLE001
+                self.logger.error("[pnfs] UNDO FAILED, cluster may be left "
+                                  "modified: %s", exc)
+        self.undo_stack = []
+
         for j in self.jobs:
             try:
                 self.k8s_utils.delete_resource("job", j)
             except Exception as exc:                      # noqa: BLE001
                 self.logger.warning("[pnfs] could not delete job %s: %s",
                                     j, exc)
-        if self.jobs:
-            self._wait_pods_gone()
-        if self.claim:
+        for pod in self.shell_pods:
             try:
-                self.k8s_utils.delete_pvc(self.claim)
+                self.k8s_utils.delete_resource("pod", pod)
+            except Exception as exc:                      # noqa: BLE001
+                self.logger.warning("[pnfs] could not delete pod %s: %s",
+                                    pod, exc)
+        if self.jobs or self.shell_pods:
+            self._wait_pods_gone()
+        for claim in [self.claim, *self.extra_claims]:
+            if not claim:
+                continue
+            try:
+                self.k8s_utils.delete_pvc(claim)
             except Exception as exc:                      # noqa: BLE001
                 self.logger.warning("[pnfs] could not delete claim %s: %s",
-                                    self.claim, exc)
+                                    claim, exc)
+        for ns in self.extra_namespaces:
+            try:
+                self.k8s_utils.delete_resource("namespace", ns, namespace=None)
+            except Exception as exc:                      # noqa: BLE001
+                self.logger.warning("[pnfs] could not delete namespace %s: %s",
+                                    ns, exc)
         super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
                          skip_k8s_cleanup=skip_k8s_cleanup)
 
@@ -569,3 +705,796 @@ class PnfsDeviceProofK8s(_PnfsBase):
             "[B-04] PASS: counters moved on %d/%d node(s)%s",
             len(moved_nodes), len(self.storage_nodes),
             f"; flat on {flat}" if flat else "")
+
+
+# ── B-05 ─────────────────────────────────────────────────────────────────
+
+class PnfsByteRangeLockK8s(_PnfsBase):
+    """B-05: six pods increment one counter under fcntl byte-range locks.
+
+    A shared filesystem that serves bytes correctly can still fail to
+    serialise. The counter is the assertion: every pod does ROUNDS
+    read-modify-writes of the same eight bytes under an exclusive
+    ``fcntl`` lock, so the only correct final value is pods x ROUNDS.
+    Any lost update means two pods held the range at once, which on pNFS
+    means the metadata server granted overlapping locks or a client
+    ignored one.
+
+    Deliberately NOT ``flock``: that locks the whole open file and is a
+    different kernel path. The specification and the upstream case are
+    about byte ranges.
+    """
+
+    ROUNDS = 40
+
+    WORKER = """
+import fcntl, os, struct, sys, time
+path = "{mount}/b05-counter.bin"
+fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+for _ in range({rounds}):
+    for attempt in range(600):
+        try:
+            fcntl.lockf(fd, fcntl.LOCK_EX, 8, 0, os.SEEK_SET)
+            break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        sys.stderr.write("could not take the lock in 30s")
+        raise SystemExit(1)
+    os.lseek(fd, 0, os.SEEK_SET)
+    raw = os.read(fd, 8)
+    val = struct.unpack("<Q", raw)[0] if len(raw) == 8 else 0
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, struct.pack("<Q", val + 1))
+    os.fsync(fd)
+    fcntl.lockf(fd, fcntl.LOCK_UN, 8, 0, os.SEEK_SET)
+os.close(fd)
+print("done")
+"""
+
+    READ = """
+import os, struct
+fd = os.open("{mount}/b05-counter.bin", os.O_RDONLY)
+print(struct.unpack("<Q", os.read(fd, 8))[0])
+"""
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim("pnfs-b05")
+        pods = self._start_shell_pods("pnfs-b05-lock", len(self.workers))
+
+        # Create and zero the counter once, before anyone contends for it.
+        self._py(pods[0], f'''
+import os, struct
+fd = os.open("{self.MOUNT}/b05-counter.bin", os.O_RDWR | os.O_CREAT, 0o644)
+os.write(fd, struct.pack("<Q", 0))
+os.fsync(fd); os.close(fd)
+print("zeroed")
+''')
+
+        # Start every pod before waiting on any of them, or they take the
+        # lock in sequence and the test proves nothing about contention.
+        errors, done = [], []
+
+        def drive(pod):
+            try:
+                self._py(pod, self.WORKER.format(mount=self.MOUNT,
+                                                 rounds=self.ROUNDS),
+                         timeout=self.JOB_TIMEOUT)
+                done.append(pod)
+            except Exception as exc:                      # noqa: BLE001
+                errors.append(f"{pod}: {exc}")
+
+        threads = [threading.Thread(target=drive, args=(p,)) for p in pods]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=self.JOB_TIMEOUT)
+        if errors:
+            raise PnfsEvidenceError(
+                "a locking worker failed:\n  " + "\n  ".join(errors))
+
+        final = int(self._py(pods[0], self.READ.format(mount=self.MOUNT)))
+        expected = len(pods) * self.ROUNDS
+        if final != expected:
+            raise PnfsEvidenceError(
+                f"byte-range locks did not serialise (B-05): the counter "
+                f"reads {final}, every one of {len(pods)} pods did "
+                f"{self.ROUNDS} locked increments so it must read "
+                f"{expected}. {expected - final} update(s) were lost, which "
+                f"means two clients held the same range at once.")
+        self.logger.info(
+            "[B-05] PASS: %d pods x %d locked increments = %d, no lost "
+            "update", len(pods), self.ROUNDS, final)
+
+
+# ── B-06 ─────────────────────────────────────────────────────────────────
+
+class PnfsCloseToOpenK8s(_PnfsBase):
+    """B-06: close on one node, open on another, and never see stale data.
+
+    NFS close-to-open says a reader that opens a file after the writer
+    closed it sees the writer's data. B-02 proves bulk data crosses the
+    wire; this proves the *coherence point* is right, including on a
+    rewrite, which is where an attribute cache goes wrong.
+    """
+
+    GENERATIONS = 3
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim("pnfs-b06")
+        if len(self.workers) < 2:
+            raise PnfsEvidenceError("B-06 needs two nodes")
+        writer, reader = self._start_shell_pods("pnfs-b06", 2)
+
+        path = f"{self.MOUNT}/b06-marker.txt"
+        for gen in range(1, self.GENERATIONS + 1):
+            payload = f"generation-{gen}-" + ("x" * 64 * gen)
+            self._py(writer, f'''
+import os
+fd = os.open("{path}", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+os.write(fd, {payload!r}.encode())
+os.fsync(fd)
+os.close(fd)
+print("wrote")
+''')
+            # No sleep on purpose. A sleep here would let an attribute cache
+            # expire and turn a coherence bug into a pass.
+            got = self._py(reader, f'''
+with open("{path}") as f:
+    print(f.read(), end="")
+''')
+            if got != payload:
+                raise PnfsEvidenceError(
+                    f"close-to-open broke at generation {gen} (B-06): the "
+                    f"reader on a different node saw "
+                    f"{got[:40]!r}... where the writer had just closed "
+                    f"{payload[:40]!r}.... A reader that opens after a close "
+                    f"must see that close.")
+            self.logger.info("[B-06] generation %d coherent across nodes",
+                             gen)
+        self.logger.info(
+            "[B-06] PASS: %d write-close/open-read generations, reader on a "
+            "different node than the writer, no stale read",
+            self.GENERATIONS)
+
+
+# ── B-07 ─────────────────────────────────────────────────────────────────
+
+class PnfsMetadataStormK8s(_PnfsBase):
+    """B-07: concurrent create, rename, unlink and mkdir from every node.
+
+    Everything else in Track B is a data path test. The metadata server is
+    a single kernel nfsd in a guest, and the namespace operations all land
+    on it at once. This is the only case that loads that side.
+    """
+
+    OPS = 120
+
+    WORKER = """
+import os, sys
+root = "{mount}/b07"
+mine = os.path.join(root, "w{idx}")
+os.makedirs(mine, exist_ok=True)
+made = 0
+for i in range({ops}):
+    f = os.path.join(mine, "f%d" % i)
+    with open(f, "w") as fh:
+        fh.write("x" * 128)
+    os.rename(f, f + ".renamed")
+    d = os.path.join(mine, "d%d" % i)
+    os.mkdir(d)
+    os.rmdir(d)
+    if i % 2 == 0:
+        os.unlink(f + ".renamed")
+    else:
+        made += 1
+# Also touch the shared directory every node writes into, which is where
+# a namespace race would actually show up.
+with open(os.path.join(root, "shared-w{idx}"), "w") as fh:
+    fh.write("ok")
+print(made)
+"""
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim("pnfs-b07")
+        pods = self._start_shell_pods("pnfs-b07", len(self.workers))
+        self._py(pods[0], f'''
+import os
+os.makedirs("{self.MOUNT}/b07", exist_ok=True)
+print("root made")
+''')
+
+        errors, survivors = [], {}
+
+        def drive(idx, pod):
+            try:
+                out = self._py(pod, self.WORKER.format(
+                    mount=self.MOUNT, idx=idx, ops=self.OPS),
+                    timeout=self.JOB_TIMEOUT)
+                survivors[pod] = int(out.splitlines()[-1])
+            except Exception as exc:                      # noqa: BLE001
+                errors.append(f"{pod}: {exc}")
+
+        threads = [threading.Thread(target=drive, args=(i, p))
+                   for i, p in enumerate(pods)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=self.JOB_TIMEOUT)
+        if errors:
+            raise PnfsEvidenceError(
+                "a metadata worker failed (B-07):\n  " + "\n  ".join(errors))
+
+        # Every pod kept the odd-numbered files. Count them from a different
+        # pod than the one that made them, so the listing crosses the wire.
+        listing = self._py(pods[-1], f'''
+import os
+root = "{self.MOUNT}/b07"
+for d in sorted(os.listdir(root)):
+    p = os.path.join(root, d)
+    if os.path.isdir(p):
+        print(d, len(os.listdir(p)))
+''')
+        counts = dict(line.split() for line in listing.splitlines())
+        bad = []
+        for i, pod in enumerate(pods):
+            want = survivors[pod]
+            got = int(counts.get(f"w{i}", -1))
+            if got != want:
+                bad.append(f"w{i}: directory holds {got}, worker kept {want}")
+        if bad:
+            raise PnfsEvidenceError(
+                "the namespace does not agree with what the workers did "
+                "(B-07):\n  " + "\n  ".join(bad))
+        self.logger.info(
+            "[B-07] PASS: %d pods x %d create/rename/mkdir/rmdir/unlink "
+            "cycles, namespace consistent when read from another node",
+            len(pods), self.OPS)
+
+
+# ── B-08 ─────────────────────────────────────────────────────────────────
+
+class PnfsFsidUniquenessK8s(_PnfsBase):
+    """B-08: many RWX claims on one metadata server, no duplicate fsid.
+
+    One nfsd exports all of them out of one kernel. Two exports sharing an
+    fsid is a silent cross-wiring: a client can be handed the wrong
+    filesystem for a handle. It cannot be seen from the data path, only
+    from the NFSExport records, which is why this is its own case.
+    """
+
+    CLAIMS = 20
+
+    def run(self):
+        self._make_storage_class()
+        names = [f"pnfs-b08-{i:02d}" for i in range(self.CLAIMS)]
+        self._make_rwx_claims(names)
+
+        exports = nfsexport_status(self.k8s_utils) or []
+        mine = {}
+        for item in exports:
+            n = (item.get("metadata") or {}).get("name") or ""
+            spec = item.get("spec") or {}
+            status = item.get("status") or {}
+            claim = (spec.get("claimRef") or {}).get("name") or ""
+            match = next((c for c in names if c == claim or c in n), None)
+            if not match:
+                continue
+            fsid = (status.get("fsid") or spec.get("fsid")
+                    or status.get("Fsid") or "")
+            mine[match] = (n, str(fsid))
+
+        missing = [c for c in names if c not in mine]
+        if missing:
+            raise PnfsEvidenceError(
+                f"{len(missing)} of {self.CLAIMS} bound claims have no "
+                f"NFSExport (B-08): {missing[:5]}")
+
+        blank = [c for c, (_n, f) in mine.items() if not f]
+        if blank:
+            raise PnfsProbeError(
+                f"the NFSExport records carry no fsid field, so this says "
+                f"nothing about uniqueness. Fix the probe, not the product: "
+                f"{len(blank)} of {self.CLAIMS} blank, e.g. {blank[:3]}")
+
+        seen = {}
+        for claim, (_n, fsid) in sorted(mine.items()):
+            seen.setdefault(fsid, []).append(claim)
+        dupes = {f: c for f, c in seen.items() if len(c) > 1}
+        if dupes:
+            raise PnfsEvidenceError(
+                f"two or more exports share an fsid on one metadata server "
+                f"(B-08), which can hand a client the wrong filesystem: "
+                f"{dupes}")
+        self.logger.info("[B-08] PASS: %d claims, %d distinct fsids",
+                         len(mine), len(seen))
+
+
+# ── B-09 ─────────────────────────────────────────────────────────────────
+
+class PnfsOnlineResizeK8s(_PnfsBase):
+    """B-09: grow the claim under load; every pod sees it, nothing stalls.
+
+    A shared filesystem grows once and every client has to notice. The
+    interesting failure is not the grow, it is a client left on the old
+    size, which then gets ENOSPC on a filesystem that has room.
+    """
+
+    START_SIZE = "20Gi"
+    GROWN_SIZE = "30Gi"
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim("pnfs-b09")
+        pods = self._start_shell_pods("pnfs-b09", len(self.workers))
+
+        before = self._statfs_everywhere(pods)
+        self.logger.info("[B-09] size before: %s", before)
+
+        self.k8s_utils.resize_pvc("pnfs-b09", self.GROWN_SIZE)
+
+        deadline = time.time() + 600
+        after = {}
+        while time.time() < deadline:
+            after = self._statfs_everywhere(pods)
+            if all(after[p] > before[p] for p in pods):
+                break
+            sleep_n_sec(10)
+
+        flat = [p for p in pods if after.get(p, 0) <= before[p]]
+        if flat:
+            raise PnfsEvidenceError(
+                f"the filesystem grew but {len(flat)} of {len(pods)} client "
+                f"(s) still report the old size (B-09): before={before}, "
+                f"after={after}. Those clients will hit ENOSPC on a "
+                f"filesystem with room.")
+
+        # And it is still writable from every node afterwards.
+        for i, pod in enumerate(pods):
+            self._py(pod, f'''
+with open("{self.MOUNT}/b09-after-{i}.dat", "wb") as f:
+    f.write(b"y" * 1048576)
+print("ok")
+''')
+        self.logger.info(
+            "[B-09] PASS: grown %s -> %s, all %d clients see it and still "
+            "write", self.START_SIZE, self.GROWN_SIZE, len(pods))
+
+    def _statfs_everywhere(self, pods):
+        out = {}
+        for pod in pods:
+            v = self._py(pod, f'''
+import os
+s = os.statvfs("{self.MOUNT}")
+print(s.f_blocks * s.f_frsize)
+''')
+            out[pod] = int(v)
+        return out
+
+
+# ── B-10 ─────────────────────────────────────────────────────────────────
+
+class PnfsSnapshotRestoreK8s(_PnfsBase):
+    """B-10: snapshot an RWX claim, restore to a block claim, read the marker.
+
+    Restoring a pNFS snapshot *into* another pNFS claim is refused by
+    design, so this asserts the refusal rather than treating it as a bug,
+    and proves the data is recoverable through the block path.
+    """
+
+    BLOCK_SC = "sb-pnfs-restore-sc"
+    MARKER = "b10-marker-f0f0f0"
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim("pnfs-b10")
+        pods = self._start_shell_pods("pnfs-b10", min(2, len(self.workers)))
+        self._py(pods[0], f'''
+import os
+with open("{self.MOUNT}/b10-marker.txt", "w") as f:
+    f.write("{self.MARKER}")
+    f.flush()
+    os.fsync(f.fileno())
+print("marker written")
+''')
+
+        self.k8s_utils.create_volume_snapshot_class()
+        self.k8s_utils.create_volume_snapshot("pnfs-b10-snap", "pnfs-b10")
+        self.logger.info("[B-10] snapshot taken under an open mount")
+
+        # A clone back into pNFS must be refused, not silently provisioned.
+        self.k8s_utils.create_clone_pvc(
+            "pnfs-b10-clone-pnfs", self.CLAIM_SIZE, self.sc_name,
+            "pnfs-b10-snap")
+        self.extra_claims.append("pnfs-b10-clone-pnfs")
+        refused = self._claim_stays_pending("pnfs-b10-clone-pnfs", 180)
+        if not refused:
+            raise PnfsEvidenceError(
+                "a clone of a pNFS snapshot back into a pNFS StorageClass "
+                "bound (B-10). The design refuses this; a silent bind means "
+                "two filesystems share one fsid lineage.")
+        self.logger.info("[B-10] clone into pNFS refused, as designed")
+
+        # Into a block XFS class it must work, and carry the marker.
+        pool = self.sbcli_utils.add_storage_pool(self.pool_name) \
+            or self.pool_name
+        self.k8s_utils.create_storage_class(
+            name=self.BLOCK_SC, cluster_id=self.cluster_id, pool_name=pool,
+            fs_type="xfs")
+        self.k8s_utils.create_clone_pvc(
+            "pnfs-b10-restore", self.CLAIM_SIZE, self.BLOCK_SC,
+            "pnfs-b10-snap")
+        self.extra_claims.append("pnfs-b10-restore")
+        self.k8s_utils.wait_pvc_bound("pnfs-b10-restore",
+                                      timeout=self.BIND_TIMEOUT)
+        reader = self._start_shell_pods(
+            "pnfs-b10-restored", 1, claim="pnfs-b10-restore", spread=False)[0]
+        got = self._py(reader, f'''
+with open("{self.MOUNT}/b10-marker.txt") as f:
+    print(f.read(), end="")
+''')
+        if got != self.MARKER:
+            raise PnfsEvidenceError(
+                f"the restored block claim does not carry the marker "
+                f"(B-10): read {got[:60]!r}, wrote {self.MARKER!r}")
+        self.logger.info(
+            "[B-10] PASS: snapshot under load, clone into pNFS refused, "
+            "restore into XFS carries the marker")
+
+    def _claim_stays_pending(self, name, seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            phase = (self.k8s_utils.get_pvc_status(name)
+                     or {}).get("phase", "")
+            if phase == "Bound":
+                return False
+            sleep_n_sec(10)
+        return True
+
+
+# ── B-11 ─────────────────────────────────────────────────────────────────
+
+class PnfsDeleteLeakGateK8s(_PnfsBase):
+    """B-11: deleting the claim takes the export and the lvol with it.
+
+    The leak gate. Everything else in Track B creates; this is the only
+    case that proves the cluster goes back to where it started, and a leak
+    here is what makes the *next* run fail for an unrelated-looking reason.
+    """
+
+    def run(self):
+        self._make_storage_class()
+        claim = self._make_rwx_claim("pnfs-b11")
+
+        pv = self.k8s_utils.get_pvc_volume_handle(claim)
+        if not pv:
+            raise PnfsProbeError(
+                "could not read the bound PV name for the claim, so a leak "
+                "check would be meaningless. Fix the probe.")
+        jobs = self._start_shared_load(
+            "pnfs-b11-fio", [self._pod_config(i, size="64M")
+                             for i in range(len(self.workers))])
+        self._await_jobs(jobs, "B-11 warm-up")
+
+        export = nfsexport_status(self.k8s_utils, pvc_name=claim)
+        if export is None:
+            raise PnfsEvidenceError(
+                f"no NFSExport exists for the bound claim {claim} (B-11), "
+                f"so the delete path cannot be judged")
+
+        for j in jobs:
+            self.k8s_utils.delete_resource("job", j)
+        self.jobs = []
+        self._wait_pods_gone()
+        self.k8s_utils.delete_pvc(claim)
+        self.claim = None
+
+        leaks, deadline = None, time.time() + 420
+        while time.time() < deadline:
+            leaks = []
+            if nfsexport_status(self.k8s_utils, pvc_name=claim) is not None:
+                leaks.append("the NFSExport still exists")
+            if pv in (self.k8s_utils.list_lvols() or {}):
+                leaks.append(f"the lvol named {pv} still exists")
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pv {pv} --no-headers --ignore-not-found",
+                supress_logs=True)
+            if (out or "").strip():
+                leaks.append(f"the PV {pv} still exists")
+            if not leaks:
+                break
+            sleep_n_sec(15)
+
+        if leaks:
+            raise PnfsEvidenceError(
+                "deleting the claim left state behind (B-11), which is what "
+                "makes the next run fail for an unrelated reason:\n  "
+                + "\n  ".join(leaks))
+        self.logger.info(
+            "[B-11] PASS: claim, NFSExport, PV and lvol %s all gone", pv)
+
+
+# ── B-12 ─────────────────────────────────────────────────────────────────
+
+class PnfsScaleThirtyPodsK8s(_PnfsBase):
+    """B-12: thirty pods on one claim, five deep on every node.
+
+    B-01 is one pod per node. This is the same claim oversubscribed, which
+    is where per-client state on the metadata server runs out rather than
+    where the data path does.
+    """
+
+    PODS = 30
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim("pnfs-b12")
+        configs = [self._pod_config(i, size="64M") for i in range(self.PODS)]
+        # required_spread would be unsatisfiable: thirty pods, six nodes.
+        jobs = self._start_shared_load("pnfs-b12-fio", configs,
+                                       required_spread=False)
+        pods = self._pods_of(jobs)
+        self._wait_pods_running(pods)
+        placement = {p: self._pod_node(p) for p in pods}
+        nodes = {n for n in placement.values() if n}
+        if len(nodes) < len(self.workers):
+            raise PnfsEvidenceError(
+                f"thirty pods landed on only {len(nodes)} of "
+                f"{len(self.workers)} nodes, so this is not the scale case: "
+                f"{sorted(nodes)}")
+        self._await_jobs(jobs, "B-12 scale")
+        self.logger.info(
+            "[B-12] PASS: %d pods across %d nodes on one claim, every "
+            "verify clean", self.PODS, len(nodes))
+
+
+# ── B-13 ─────────────────────────────────────────────────────────────────
+
+class PnfsMixedRwxRwoK8s(_PnfsBase):
+    """B-13: RWX and RWO from the same pool, under load, at the same time.
+
+    The regression gate for the existing product. pNFS adds a metadata
+    server and a second mount path to a cluster whose other volumes are
+    plain NVMe block; this proves the new thing does not disturb them.
+    """
+
+    BLOCK_SC = "sb-pnfs-block-sc"
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim("pnfs-b13")
+
+        pool = self.sbcli_utils.add_storage_pool(self.pool_name) \
+            or self.pool_name
+        self.k8s_utils.create_storage_class(
+            name=self.BLOCK_SC, cluster_id=self.cluster_id, pool_name=pool,
+            fs_type="xfs")
+        self.k8s_utils.create_pvc(name="pnfs-b13-rwo", size="10Gi",
+                                  storage_class=self.BLOCK_SC)
+        self.extra_claims.append("pnfs-b13-rwo")
+        self.k8s_utils.wait_pvc_bound("pnfs-b13-rwo",
+                                      timeout=self.BIND_TIMEOUT)
+
+        rwx_jobs = self._start_shared_load(
+            "pnfs-b13-rwx", [self._pod_config(i, size="128M")
+                             for i in range(len(self.workers))])
+        rwo_jobs = self._start_shared_load(
+            "pnfs-b13-rwo-fio", [self._pod_config(99, size="128M")],
+            required_spread=False)
+        # _start_shared_load records into self.jobs; keep both sets.
+        self.jobs = list(rwx_jobs) + list(rwo_jobs)
+
+        self._await_jobs(rwx_jobs, "B-13 RWX lane")
+        self._await_jobs(rwo_jobs, "B-13 RWO lane")
+        self.logger.info(
+            "[B-13] PASS: %d RWX pods and the RWO block claim both finished "
+            "clean while sharing the pool", len(rwx_jobs))
+
+
+# ── B-14 ─────────────────────────────────────────────────────────────────
+
+class PnfsTwoNamespacesK8s(_PnfsBase):
+    """B-14: the same claim name in two namespaces is two filesystems.
+
+    Export paths are derived from the claim, and a derivation that forgets
+    the namespace gives two tenants one filesystem. The failure is silent
+    and it is a data-exposure bug, not an availability one.
+    """
+
+    OTHER_NS = "pnfs-b14-second"
+    CLAIM = "pnfs-b14"
+
+    def run(self):
+        self._make_storage_class()
+        self._make_rwx_claim(self.CLAIM)
+
+        self.k8s_utils.apply_yaml_cluster_scoped(
+            f"apiVersion: v1\nkind: Namespace\nmetadata:\n"
+            f"  name: {self.OTHER_NS}\n")
+        self.extra_namespaces.append(self.OTHER_NS)
+        self.k8s_utils.create_pvc(
+            name=self.CLAIM, size=self.CLAIM_SIZE,
+            storage_class=self.sc_name, namespace=self.OTHER_NS,
+            access_modes=["ReadWriteMany"])
+        self.k8s_utils.wait_pvc_bound(self.CLAIM, timeout=self.BIND_TIMEOUT,
+                                      namespace=self.OTHER_NS)
+        self.logger.info("[B-14] the same claim name bound in both namespaces")
+
+        a = nfsexport_status(self.k8s_utils, pvc_name=self.CLAIM)
+        b = nfsexport_status(self.k8s_utils, pvc_name=self.CLAIM,
+                             namespace=self.OTHER_NS)
+        if a is None or b is None:
+            raise PnfsEvidenceError(
+                f"one of the two namespaces has no NFSExport (B-14): "
+                f"default={a is not None}, {self.OTHER_NS}={b is not None}")
+
+        def ident(item):
+            spec, status = item.get("spec") or {}, item.get("status") or {}
+            return (str(status.get("path") or spec.get("path") or ""),
+                    str(status.get("fsid") or spec.get("fsid") or ""),
+                    (item.get("metadata") or {}).get("name") or "")
+
+        ia, ib = ident(a), ident(b)
+        if ia == ib:
+            raise PnfsEvidenceError(
+                f"the two namespaces resolved to the same export (B-14): "
+                f"{ia}. Two tenants would be sharing one filesystem.")
+        if ia[0] and ia[0] == ib[0]:
+            raise PnfsEvidenceError(
+                f"the two namespaces share an export path (B-14): {ia[0]}")
+        if ia[1] and ia[1] == ib[1]:
+            raise PnfsEvidenceError(
+                f"the two namespaces share an fsid (B-14): {ia[1]}")
+        self.logger.info(
+            "[B-14] PASS: %r and %r are separate exports", ia, ib)
+
+    def teardown(self, delete_lvols=True, close_ssh=True,
+                 skip_k8s_cleanup=False):
+        # The claim in the second namespace is not in extra_claims, which
+        # the base only deletes from the default namespace.
+        if self.k8s_utils is not None:
+            try:
+                self.k8s_utils.delete_pvc(self.CLAIM, namespace=self.OTHER_NS)
+            except Exception as exc:                      # noqa: BLE001
+                self.logger.warning("[pnfs] second-namespace claim: %s", exc)
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
+                         skip_k8s_cleanup=skip_k8s_cleanup)
+
+
+# ── B-15 ─────────────────────────────────────────────────────────────────
+
+class PnfsClaimCeilingK8s(_PnfsBase):
+    """B-15: thirty claims on one metadata server, then one more.
+
+    A boundary case, and the answer is allowed to be either. What is not
+    allowed is the thirty-first binding and then not working, so the
+    assertion is that whatever happens is *consistent*: it binds and
+    serves, or it stays Pending and says why.
+    """
+
+    CLAIMS = 30
+
+    def run(self):
+        self._make_storage_class()
+        names = [f"pnfs-b15-{i:02d}" for i in range(self.CLAIMS)]
+        self._make_rwx_claims(names)
+        self.logger.info("[B-15] %d claims bound on one metadata server",
+                         self.CLAIMS)
+
+        extra = f"pnfs-b15-{self.CLAIMS:02d}"
+        self.k8s_utils.create_pvc(
+            name=extra, size=self.CLAIM_SIZE, storage_class=self.sc_name,
+            access_modes=["ReadWriteMany"])
+        self.extra_claims.append(extra)
+
+        bound, deadline = False, time.time() + 300
+        while time.time() < deadline:
+            if (self.k8s_utils.get_pvc_status(extra)
+                    or {}).get("phase") == "Bound":
+                bound = True
+                break
+            sleep_n_sec(10)
+
+        if bound:
+            pod = self._start_shell_pods("pnfs-b15-probe", 1, claim=extra,
+                                         spread=False)[0]
+            self._py(pod, f'''
+with open("{self.MOUNT}/b15.dat", "wb") as f:
+    f.write(b"z" * 1048576)
+print("ok")
+''')
+            self.logger.info(
+                "[B-15] PASS: claim %d bound and serves; no ceiling at %d",
+                self.CLAIMS + 1, self.CLAIMS + 1)
+            return
+
+        export = nfsexport_status(self.k8s_utils, pvc_name=extra)
+        reason = ""
+        if export:
+            status = export.get("status") or {}
+            reason = str(status.get("phase") or status.get("reason") or "")
+        if not reason:
+            raise PnfsEvidenceError(
+                f"claim {self.CLAIMS + 1} neither bound nor said why "
+                f"(B-15). A ceiling is acceptable; a silent one is not: the "
+                f"claim is Pending and its NFSExport reports {export!r}")
+        self.logger.info(
+            "[B-15] PASS: ceiling at %d claims, reported as %r rather than "
+            "silently", self.CLAIMS, reason)
+
+
+# ── B-16 ─────────────────────────────────────────────────────────────────
+
+class PnfsNoMetadataServerK8s(_PnfsBase):
+    """B-16: with no metadata server configured, say so; do not provision.
+
+    The negative case. It takes ``spec.pnfs.mds`` off the driver for the
+    length of the test, so it must run alone and it must put it back. The
+    undo is registered before the mutation and runs from teardown even if
+    run() raises, because a lab left with no metadata server fails every
+    pNFS case after it at the bring-up gate.
+    """
+
+    DRIVER = "simplyblock"
+    CLAIM = "pnfs-b16"
+
+    def run(self):
+        self._make_storage_class()
+
+        current, _ = self.k8s_utils._exec_kubectl(
+            f"kubectl get simplyblockdriver {self.DRIVER} "
+            f"-n {self.k8s_utils.namespace} "
+            f"-o jsonpath='{{.spec.pnfs}}'", supress_logs=True)
+        current = (current or "").strip().strip("'")
+        if not current or "mds" not in current:
+            raise PnfsProbeError(
+                f"spec.pnfs.mds is not set on driver {self.DRIVER} to begin "
+                f"with, so removing it proves nothing. Read: {current!r}")
+
+        def restore():
+            self.logger.info("[B-16] restoring spec.pnfs on the driver")
+            self.k8s_utils._exec_kubectl(
+                f"kubectl patch simplyblockdriver {self.DRIVER} "
+                f"-n {self.k8s_utils.namespace} --type=merge "
+                f"-p '{{\"spec\":{{\"pnfs\":{current}}}}}'")
+        self.undo_stack.append(restore)
+
+        self.k8s_utils._exec_kubectl(
+            f"kubectl patch simplyblockdriver {self.DRIVER} "
+            f"-n {self.k8s_utils.namespace} --type=json "
+            f"-p '[{{\"op\":\"remove\",\"path\":\"/spec/pnfs/mds\"}}]'")
+        self.logger.info("[B-16] spec.pnfs.mds removed")
+        sleep_n_sec(30)
+
+        self.k8s_utils.create_pvc(
+            name=self.CLAIM, size=self.CLAIM_SIZE,
+            storage_class=self.sc_name, access_modes=["ReadWriteMany"])
+        self.extra_claims.append(self.CLAIM)
+
+        deadline = time.time() + 240
+        while time.time() < deadline:
+            if (self.k8s_utils.get_pvc_status(self.CLAIM)
+                    or {}).get("phase") == "Bound":
+                raise PnfsEvidenceError(
+                    "the claim bound with no metadata server configured "
+                    "(B-16). It cannot be served, so a bind here is a "
+                    "promise the cluster cannot keep.")
+            sleep_n_sec(10)
+
+        export = nfsexport_status(self.k8s_utils, pvc_name=self.CLAIM)
+        said = ""
+        if export:
+            status = export.get("status") or {}
+            said = " ".join(str(status.get(k) or "")
+                            for k in ("phase", "reason", "message"))
+        if "NoMetadataServer" not in said:
+            raise PnfsEvidenceError(
+                f"the claim correctly stayed Pending, but nothing said why "
+                f"(B-16). Expected NoMetadataServer; the export reports "
+                f"{said!r}. A operator who cannot see the cause has to guess.")
+        self.logger.info(
+            "[B-16] PASS: claim stayed Pending and the export reported %r",
+            said.strip())

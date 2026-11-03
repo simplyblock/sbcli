@@ -117,10 +117,22 @@ from e2e_tests.migration.test_migration_topology import (
 from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
 from e2e_tests.pnfs.test_pnfs_rwx import (
+    PnfsByteRangeLockK8s,
+    PnfsClaimCeilingK8s,
+    PnfsCloseToOpenK8s,
     PnfsCrossClientReadK8s,
+    PnfsDeleteLeakGateK8s,
     PnfsDeviceProofK8s,
+    PnfsFsidUniquenessK8s,
     PnfsLayoutProofK8s,
+    PnfsMetadataStormK8s,
+    PnfsMixedRwxRwoK8s,
+    PnfsNoMetadataServerK8s,
+    PnfsOnlineResizeK8s,
+    PnfsScaleThirtyPodsK8s,
     PnfsSharedWriteVerifyK8s,
+    PnfsSnapshotRestoreK8s,
+    PnfsTwoNamespacesK8s,
 )
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
 from e2e_tests.replication.test_replication_consistency import (
@@ -1493,6 +1505,23 @@ def get_pnfs_tests():
         PnfsLayoutProofK8s,          # B-03  gates everything
         PnfsCrossClientReadK8s,      # B-02  the data crossed the wire
         PnfsDeviceProofK8s,          # B-04  and reached the devices
+        # Semantics, once the data path is proven.
+        PnfsCloseToOpenK8s,          # B-06  no stale read after a close
+        PnfsByteRangeLockK8s,        # B-05  fcntl ranges serialise
+        PnfsMetadataStormK8s,        # B-07  the namespace under contention
+        # Lifecycle.
+        PnfsOnlineResizeK8s,         # B-09  grow, every client sees it
+        PnfsSnapshotRestoreK8s,      # B-10  snapshot, refusal, restore
+        PnfsDeleteLeakGateK8s,       # B-11  and it all goes away again
+        # Scale and multi-tenancy.
+        PnfsFsidUniquenessK8s,       # B-08  20 claims, 20 fsids
+        PnfsScaleThirtyPodsK8s,      # B-12  30 pods on one claim
+        PnfsMixedRwxRwoK8s,          # B-13  RWX beside RWO
+        PnfsTwoNamespacesK8s,        # B-14  same name, two tenants
+        PnfsClaimCeilingK8s,         # B-15  30 claims, then one more
+        # Last, and alone: it takes the metadata server away from the
+        # whole cluster for the length of the case.
+        PnfsNoMetadataServerK8s,     # B-16  negative
     ]
 
 
