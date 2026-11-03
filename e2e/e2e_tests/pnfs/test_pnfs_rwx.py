@@ -1224,6 +1224,15 @@ class PnfsDeleteLeakGateK8s(_PnfsBase):
             raise PnfsEvidenceError(
                 f"no NFSExport exists for the bound claim {claim} (B-11), "
                 f"so the delete path cannot be judged")
+        # Remember what to look for BEFORE deleting, and look for it by
+        # volumeRef afterwards. Asking nfsexport_status for the claim again
+        # once the claim is gone resolves no PV, so it answers None whatever
+        # the cluster is holding -- the leak check would report "clean" for
+        # a leaked export, which is the one answer it must never give.
+        volume_ref = ((export.get("spec") or {}).get("volumeRef") or "")
+        export_name = (export.get("metadata") or {}).get("name") or ""
+        self.logger.info("[B-11] watching for leaks of %s (lvol %s, PV %s)",
+                         export_name, volume_ref, pv)
 
         for j in jobs:
             self.k8s_utils.delete_resource("job", j)
@@ -1235,9 +1244,15 @@ class PnfsDeleteLeakGateK8s(_PnfsBase):
         leaks, deadline = None, time.time() + 420
         while time.time() < deadline:
             leaks = []
-            if nfsexport_status(self.k8s_utils, pvc_name=claim) is not None:
-                leaks.append("the NFSExport still exists")
-            if pv in (self.k8s_utils.list_lvols() or {}):
+            still = [
+                e for e in (nfsexport_status(self.k8s_utils) or [])
+                if ((e.get("spec") or {}).get("volumeRef") or "") == volume_ref
+            ]
+            if still:
+                leaks.append(f"the NFSExport {export_name} still exists")
+            # list_lvols is on K8sSbcliUtils, reached as sbcli_utils, not on
+            # K8sUtils -- run 41619998831 died here on AttributeError.
+            if pv in (self.sbcli_utils.list_lvols() or {}):
                 leaks.append(f"the lvol named {pv} still exists")
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get pv {pv} --no-headers --ignore-not-found",
